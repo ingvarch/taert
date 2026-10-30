@@ -27,6 +27,7 @@ taert
 | `Space` | Select / Explore | Toggle focused item selection |
 | `A` / `N` | Select / Explore | Select all visible / clear selection |
 | `D` / `Backspace` / `Delete` | Explore Storage | Delete selected item(s) with confirmation dialog |
+| `⇧S` / `⇧N` / `⇧D` | Explore Storage | Sort by size / name / date created |
 | `↵` (Enter) | Select / Review | Review selection / Confirm cleanup |
 | `↵` / `→` | Explore Storage | Enter selected folder |
 | `←` | Explore Storage | Go up one directory level |

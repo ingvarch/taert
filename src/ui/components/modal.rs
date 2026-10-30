@@ -54,6 +54,18 @@ impl<'a> Modal<'a> {
         self
     }
 
+    fn max_width(area: Rect) -> usize {
+        (area.width.saturating_sub(8) as usize).clamp(36, 58)
+    }
+
+    /// Width and height a message fills in `area` without wrapping or losing the buttons.
+    pub fn message_size(area: Rect) -> (usize, usize) {
+        (
+            Self::max_width(area).saturating_sub(4),
+            (area.height as usize).saturating_sub(10),
+        )
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if area.width < 20 || area.height < 6 {
             return;
@@ -63,7 +75,7 @@ impl<'a> Modal<'a> {
         dim_backdrop(frame.buffer_mut(), area);
 
         // 2. Measure modal size
-        let max_w = (area.width.saturating_sub(8) as usize).clamp(36, 58);
+        let max_w = Self::max_width(area);
 
         let mut wrapped_lines: Vec<Line> = Vec::new();
         for line in &self.message {
