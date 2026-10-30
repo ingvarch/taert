@@ -1,4 +1,5 @@
 pub mod bytes;
+pub mod cache;
 pub mod catalog;
 pub mod cleaner;
 pub mod path_utils;

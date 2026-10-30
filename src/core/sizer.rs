@@ -2,15 +2,16 @@
 //! Uses macOS allocated block size (st_blocks * 512) for accurate APFS disk measurement.
 //! Dedupes hardlinks and avoids traversing symlinks or cloud/dataless files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use super::cache::StorageCache;
 use super::safety::{FileIdentity, Safety};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,11 +55,33 @@ impl DirSizer {
     pub fn measure_with_progress<F>(
         path: &Path,
         cancel: Option<&Arc<AtomicBool>>,
+        on_progress: F,
+    ) -> Measurement
+    where
+        F: FnMut(&Path, u64, usize),
+    {
+        Self::measure_with_progress_and_cache(path, cancel, None, on_progress)
+    }
+
+    pub fn measure_with_progress_and_cache<F>(
+        path: &Path,
+        cancel: Option<&Arc<AtomicBool>>,
+        cache: Option<&Arc<RwLock<StorageCache>>>,
         mut on_progress: F,
     ) -> Measurement
     where
         F: FnMut(&Path, u64, usize),
     {
+        if let Some(c) = cache
+            && let Some(cached_bytes) = c.read().unwrap().get_size(path)
+        {
+            return Measurement {
+                bytes: cached_bytes,
+                status: MeasurementStatus::Complete,
+                skipped_entries: 0,
+            };
+        }
+
         if Safety::has_symlink_component(path) {
             return Measurement {
                 bytes: 0,
@@ -99,6 +122,10 @@ impl DirSizer {
         let mut total_bytes: u64 = 0;
         let mut skipped = 0;
         let mut seen_hardlinks: HashSet<FileIdentity> = HashSet::new();
+        let mut dirs: HashSet<PathBuf> = HashSet::new();
+        dirs.insert(path.to_path_buf());
+        let mut direct_bytes: HashMap<PathBuf, u64> = HashMap::new();
+        let mut direct_files: HashMap<PathBuf, usize> = HashMap::new();
 
         let walker = jwalk::WalkDir::new(path)
             .skip_hidden(false)
@@ -121,16 +148,21 @@ impl DirSizer {
             });
 
         let mut files_count = 0;
+        let mut was_cancelled = false;
         for (idx, entry_res) in walker.into_iter().enumerate() {
             if let Some(c) = cancel
                 && c.load(Ordering::Relaxed)
             {
+                was_cancelled = true;
                 break;
             }
 
             match entry_res {
                 Ok(entry) => {
-                    if entry.file_type.is_file() {
+                    let entry_path = entry.path();
+                    if entry.file_type.is_dir() {
+                        dirs.insert(entry_path.clone());
+                    } else if entry.file_type.is_file() {
                         files_count += 1;
                         if let Ok(m) = entry.metadata() {
                             let identity = FileIdentity {
@@ -143,18 +175,29 @@ impl DirSizer {
                             }
                             let allocated = Self::allocated_size(&m);
                             total_bytes = total_bytes.saturating_add(allocated);
+
+                            if let Some(parent) = entry_path.parent() {
+                                *direct_bytes.entry(parent.to_path_buf()).or_default() += allocated;
+                                *direct_files.entry(parent.to_path_buf()).or_default() += 1;
+                            }
                         } else {
                             skipped += 1;
                         }
                     }
                     if idx % 30 == 0 {
-                        on_progress(&entry.path(), total_bytes, files_count);
+                        on_progress(&entry_path, total_bytes, files_count);
                     }
                 }
                 Err(_) => {
                     skipped += 1;
                 }
             }
+        }
+
+        if !was_cancelled && let Some(c) = cache {
+            c.write()
+                .unwrap()
+                .populate_from_dir_tree(path, dirs, direct_bytes, direct_files);
         }
 
         Measurement {

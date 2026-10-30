@@ -2,9 +2,9 @@
 //! Handles crossterm terminal initialization, event loop, and screen switching.
 
 use std::io::{self, stdout};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +30,7 @@ use super::workspace::{
     CleanSubcategory, MainMenuChoice, StartConfirmKind, WorkspaceState, WorkspaceView,
     render_workspace,
 };
+use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
@@ -69,6 +70,7 @@ pub struct App {
     pub removal_rx: Option<Receiver<RemovalMessage>>,
     pub removal_spinner: usize,
     pub help_open: bool,
+    pub storage_cache: Arc<RwLock<StorageCache>>,
 }
 
 impl App {
@@ -82,6 +84,7 @@ impl App {
             removal_rx: None,
             removal_spinner: 0,
             help_open: false,
+            storage_cache: Arc::new(RwLock::new(StorageCache::new())),
         }
     }
 
@@ -95,19 +98,26 @@ impl App {
             removal_rx: None,
             removal_spinner: 0,
             help_open: false,
+            storage_cache: Arc::new(RwLock::new(StorageCache::new())),
         }
     }
 
     pub fn with_analyze(path: std::path::PathBuf, ignore: IgnoreStore, config: Config) -> Self {
+        let storage_cache = Arc::new(RwLock::new(StorageCache::new()));
         Self {
             theme: Theme::new(),
-            screen: Screen::Analyze(AnalyzeState::new(path, ignore.clone())),
+            screen: Screen::Analyze(AnalyzeState::with_cache(
+                path,
+                ignore.clone(),
+                storage_cache.clone(),
+            )),
             ignore,
             config,
             should_quit: false,
             removal_rx: None,
             removal_spinner: 0,
             help_open: false,
+            storage_cache,
         }
     }
 
@@ -228,6 +238,7 @@ impl App {
                                 for group in &mut select.scan.groups {
                                     group.items.retain(|item| !item.selected);
                                 }
+                                self.storage_cache.write().unwrap().clear();
                                 select.overlay = ModalOverlay::Outcome(report);
                             } else if let Screen::Analyze(ref mut analyze) = self.screen {
                                 analyze.handle_removal_finished(&report);
@@ -550,6 +561,9 @@ impl App {
                     KeyCode::Enter | KeyCode::Right => {
                         state.enter_selected();
                     }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        state.refresh_current();
+                    }
                     KeyCode::Char('o') | KeyCode::Char('O') => {
                         state.reveal_in_finder();
                     }
@@ -685,6 +699,7 @@ impl App {
                 Hint::new("D / ⌫", "Delete selected"),
                 Hint::new("↵ / →", "Enter folder"),
                 Hint::new("←", "Up one level"),
+                Hint::new("R", "Refresh folder"),
                 Hint::new("O", "Reveal in Finder"),
                 Hint::new("q", "Quit explore"),
                 Hint::new("?", "Toggle help"),
@@ -839,7 +854,11 @@ impl App {
         match kind {
             StartConfirmKind::ExploreHome => {
                 let home = Safety::home_dir();
-                self.screen = Screen::Analyze(AnalyzeState::new(home, self.ignore.clone()));
+                self.screen = Screen::Analyze(AnalyzeState::with_cache(
+                    home,
+                    self.ignore.clone(),
+                    self.storage_cache.clone(),
+                ));
             }
             StartConfirmKind::ProjectCleanup(_) => {
                 let roots = ProjectFoldersStore::load_or_default().existing_roots();

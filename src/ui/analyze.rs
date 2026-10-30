@@ -10,9 +10,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -30,6 +30,7 @@ use super::components::progress::ProgressView;
 use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
+pub use crate::core::cache::{ChildItem, FolderSnapshot, StorageCache};
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
@@ -54,37 +55,6 @@ pub enum AnalyzeOverlay {
         spinner_idx: usize,
     },
     Outcome(RemovalReport),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChildItem {
-    pub name: String,
-    pub path: PathBuf,
-    pub size_bytes: u64,
-    pub is_dir: bool,
-    pub is_package: bool,
-    pub selected: bool,
-}
-
-impl ChildItem {
-    pub fn suffix(&self) -> &'static str {
-        if self.is_package {
-            ""
-        } else if self.is_dir {
-            "/"
-        } else {
-            ""
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FolderSnapshot {
-    pub path: PathBuf,
-    pub children: Vec<ChildItem>,
-    pub total_bytes: u64,
-    pub inaccessible_count: usize,
-    pub skipped_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -121,10 +91,19 @@ pub struct AnalyzeState {
     pub status_notice: Option<String>,
     pub started_at: Instant,
     pub overlay: AnalyzeOverlay,
+    pub cache: Arc<RwLock<StorageCache>>,
 }
 
 impl AnalyzeState {
     pub fn new(root: PathBuf, ignore: IgnoreStore) -> Self {
+        Self::with_cache(root, ignore, Arc::new(RwLock::new(StorageCache::new())))
+    }
+
+    pub fn with_cache(
+        root: PathBuf,
+        ignore: IgnoreStore,
+        cache: Arc<RwLock<StorageCache>>,
+    ) -> Self {
         let mut state = Self {
             root: root.clone(),
             levels: Vec::new(),
@@ -136,6 +115,7 @@ impl AnalyzeState {
             status_notice: None,
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
+            cache,
         };
         state.start_measuring(root);
         state
@@ -143,7 +123,8 @@ impl AnalyzeState {
 
     pub fn new_sync(root: PathBuf, ignore: IgnoreStore) -> Self {
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        let snapshot = Self::scan_folder(&root, &ignore, None, cancel_flag.clone());
+        let cache = Arc::new(RwLock::new(StorageCache::new()));
+        let snapshot = Self::scan_folder(&root, &ignore, None, cancel_flag.clone(), cache.clone());
         let initial_level = BrowserLevel {
             snapshot,
             selected: 0,
@@ -161,6 +142,7 @@ impl AnalyzeState {
             status_notice: None,
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
+            cache,
         }
     }
 
@@ -221,7 +203,7 @@ impl AnalyzeState {
         if report.removed_count == 0 {
             return;
         }
-        if let Some(level) = self.current_level_mut() {
+        let updated_snapshot = if let Some(level) = self.current_level_mut() {
             level.snapshot.children.retain(|child| child.path.exists());
             level.snapshot.total_bytes = level.snapshot.children.iter().map(|c| c.size_bytes).sum();
             if level.selected >= level.snapshot.children.len()
@@ -229,6 +211,14 @@ impl AnalyzeState {
             {
                 level.selected = level.snapshot.children.len() - 1;
             }
+            Some(level.snapshot.clone())
+        } else {
+            None
+        };
+        if let Some(snapshot) = updated_snapshot {
+            let mut cache = self.cache.write().unwrap();
+            cache.invalidate_prefix(&snapshot.path);
+            cache.put_snapshot(snapshot.path.clone(), snapshot);
         }
     }
 
@@ -245,6 +235,7 @@ impl AnalyzeState {
         ignore: &IgnoreStore,
         progress_tx: Option<mpsc::Sender<MeasureMessage>>,
         cancel: Arc<AtomicBool>,
+        cache: Arc<RwLock<StorageCache>>,
     ) -> FolderSnapshot {
         let mut children = Vec::new();
         let mut inaccessible = 0;
@@ -313,32 +304,52 @@ impl AnalyzeState {
                     || name.ends_with(".bundle"));
 
             let size = if is_dir && !is_package {
-                let tx_clone = progress_tx.clone();
-                let dir_buf = dir.to_path_buf();
-                let name_clone = name.clone();
-                let cancel_clone = cancel.clone();
-                let mut child_files = 0;
-                let meas = DirSizer::measure_with_progress(
-                    p,
-                    Some(&cancel_clone),
-                    |subpath, bytes, files| {
-                        child_files = files;
-                        if let Some(ref tx) = tx_clone {
-                            let _ = tx.send(MeasureMessage::Progress(MeasuringProgress {
-                                folder_path: dir_buf.clone(),
-                                position: idx + 1,
-                                total: total_count,
-                                current_name: name_clone.clone(),
-                                current_subpath: Some(subpath.display().to_string()),
-                                scanned_files: total_files_count + files,
-                                scanned_bytes: total_bytes_accum + bytes,
-                            }));
-                        }
-                    },
-                );
-                total_files_count += child_files;
-                total_bytes_accum += meas.bytes;
-                meas.bytes
+                let cached_size = cache.read().unwrap().get_size(p);
+                if let Some(s) = cached_size {
+                    total_bytes_accum += s;
+                    total_files_count += 1;
+                    if let Some(ref tx) = progress_tx {
+                        let _ = tx.send(MeasureMessage::Progress(MeasuringProgress {
+                            folder_path: dir.to_path_buf(),
+                            position: idx + 1,
+                            total: total_count,
+                            current_name: name.clone(),
+                            current_subpath: None,
+                            scanned_files: total_files_count,
+                            scanned_bytes: total_bytes_accum,
+                        }));
+                    }
+                    s
+                } else {
+                    let tx_clone = progress_tx.clone();
+                    let dir_buf = dir.to_path_buf();
+                    let name_clone = name.clone();
+                    let cancel_clone = cancel.clone();
+                    let cache_clone = cache.clone();
+                    let mut child_files = 0;
+                    let meas = DirSizer::measure_with_progress_and_cache(
+                        p,
+                        Some(&cancel_clone),
+                        Some(&cache_clone),
+                        |subpath, bytes, files| {
+                            child_files = files;
+                            if let Some(ref tx) = tx_clone {
+                                let _ = tx.send(MeasureMessage::Progress(MeasuringProgress {
+                                    folder_path: dir_buf.clone(),
+                                    position: idx + 1,
+                                    total: total_count,
+                                    current_name: name_clone.clone(),
+                                    current_subpath: Some(subpath.display().to_string()),
+                                    scanned_files: total_files_count + files,
+                                    scanned_bytes: total_bytes_accum + bytes,
+                                }));
+                            }
+                        },
+                    );
+                    total_files_count += child_files;
+                    total_bytes_accum += meas.bytes;
+                    meas.bytes
+                }
             } else {
                 let s = DirSizer::size_of(p);
                 total_files_count += 1;
@@ -369,13 +380,22 @@ impl AnalyzeState {
 
         let total_bytes = children.iter().map(|c| c.size_bytes).sum();
 
-        FolderSnapshot {
+        let snapshot = FolderSnapshot {
             path: dir.to_path_buf(),
             children,
             total_bytes,
             inaccessible_count: inaccessible,
             skipped_count: skipped,
+        };
+
+        if !cancel.load(Ordering::Relaxed) {
+            cache
+                .write()
+                .unwrap()
+                .put_snapshot(dir.to_path_buf(), snapshot.clone());
         }
+
+        snapshot
     }
 
     pub fn next(&mut self) {
@@ -433,7 +453,26 @@ impl AnalyzeState {
         };
 
         if child.is_dir && !child.is_package {
+            // Check if snapshot is cached for instant zero-latency transition
+            if let Some(snapshot) = self.cache.read().unwrap().get_snapshot(&child.path) {
+                self.levels.push(BrowserLevel {
+                    snapshot,
+                    selected: 0,
+                    offset: 0,
+                });
+                return;
+            }
+
             self.start_measuring(child.path);
+        }
+    }
+
+    pub fn refresh_current(&mut self) {
+        if let Some(level) = self.current_level() {
+            let path = level.snapshot.path.clone();
+            self.cache.write().unwrap().invalidate_prefix(&path);
+            self.levels.pop();
+            self.start_measuring(path);
         }
     }
 
@@ -456,14 +495,27 @@ impl AnalyzeState {
     }
 
     pub fn start_measuring(&mut self, path: PathBuf) {
+        // If snapshot is already cached, push directly without spawning a thread!
+        if let Some(snapshot) = self.cache.read().unwrap().get_snapshot(&path) {
+            self.levels.push(BrowserLevel {
+                snapshot,
+                selected: 0,
+                offset: 0,
+            });
+            self.measuring_rx = None;
+            self.current_progress = None;
+            return;
+        }
+
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flag = cancel.clone();
         let ignore = self.ignore.clone();
+        let cache = self.cache.clone();
 
         let path_clone = path.clone();
         thread::spawn(move || {
-            let snapshot = Self::scan_folder(&path_clone, &ignore, Some(tx.clone()), cancel);
+            let snapshot = Self::scan_folder(&path_clone, &ignore, Some(tx.clone()), cancel, cache);
             let _ = tx.send(MeasureMessage::Finished(snapshot));
         });
 
@@ -1020,6 +1072,7 @@ mod tests {
             status_notice: None,
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
+            cache: Arc::new(RwLock::new(StorageCache::new())),
         };
 
         terminal
@@ -1078,6 +1131,7 @@ mod tests {
             status_notice: None,
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
+            cache: Arc::new(RwLock::new(StorageCache::new())),
         };
 
         terminal
@@ -1134,6 +1188,7 @@ mod tests {
             status_notice: None,
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
+            cache: Arc::new(RwLock::new(StorageCache::new())),
         };
 
         // Initially nothing selected
@@ -1175,5 +1230,39 @@ mod tests {
         assert!(rendered.contains("Delete file1.bin?"));
         assert!(rendered.contains("Cancel"));
         assert!(rendered.contains("Delete"));
+    }
+
+    #[test]
+    fn test_drill_down_uses_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let sub = root.join("subfolder");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("nested.bin"), b"12345678").unwrap();
+
+        let mut state = AnalyzeState::new_sync(root.clone(), IgnoreStore::default());
+        assert_eq!(state.levels.len(), 1);
+
+        // Subfolder was traversed during initial scan; verify its size is in cache
+        let cached_size = state.cache.read().unwrap().get_size(&sub);
+        assert!(cached_size.is_some());
+
+        // Enter selected subfolder; background measuring will process it
+        state.enter_selected();
+        while state.measuring_rx.is_some() {
+            state.tick();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(state.levels.len(), 2);
+        assert_eq!(state.current_level().unwrap().snapshot.path, sub);
+
+        // Go up
+        assert!(state.go_up());
+        assert_eq!(state.levels.len(), 1);
+
+        // Enter again: now snapshot is cached in cache! enter_selected should be instant without measuring_rx
+        state.enter_selected();
+        assert_eq!(state.levels.len(), 2);
+        assert!(state.measuring_rx.is_none()); // Instant transition, no background thread needed!
     }
 }

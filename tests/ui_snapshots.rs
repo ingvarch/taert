@@ -186,6 +186,9 @@ fn snapshot_analyze() {
         status_notice: None,
         started_at: std::time::Instant::now(),
         overlay: taert::ui::analyze::AnalyzeOverlay::None,
+        cache: std::sync::Arc::new(std::sync::RwLock::new(
+            taert::core::cache::StorageCache::new(),
+        )),
     };
 
     for &(w, h, label) in SIZES {
