@@ -80,6 +80,76 @@ pub enum MeasureMessage {
     Finished(FolderSnapshot),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    Size,
+    Date,
+    Name,
+}
+
+impl SortOrder {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Size => Self::Date,
+            Self::Date => Self::Name,
+            Self::Name => Self::Size,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Size => "Size",
+            Self::Date => "Date",
+            Self::Name => "Name",
+        }
+    }
+
+    pub fn hint_label(&self) -> &'static str {
+        match self {
+            Self::Size => "Sort: Size",
+            Self::Date => "Sort: Date",
+            Self::Name => "Sort: Name",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Size => "size (largest first)",
+            Self::Date => "date created (newest first)",
+            Self::Name => "name (A–Z)",
+        }
+    }
+
+    pub fn sort_children(&self, children: &mut [ChildItem]) {
+        match self {
+            Self::Size => {
+                children.sort_by(|a, b| {
+                    b.size_bytes
+                        .cmp(&a.size_bytes)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+            }
+            Self::Date => {
+                children.sort_by(|a, b| {
+                    b.created
+                        .cmp(&a.created)
+                        .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+            }
+            Self::Name => {
+                children.sort_by(|a, b| {
+                    a.name
+                        .to_lowercase()
+                        .cmp(&b.name.to_lowercase())
+                        .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+                });
+            }
+        }
+    }
+}
+
 pub struct AnalyzeState {
     pub root: PathBuf,
     pub levels: Vec<BrowserLevel>,
@@ -92,6 +162,7 @@ pub struct AnalyzeState {
     pub started_at: Instant,
     pub overlay: AnalyzeOverlay,
     pub cache: Arc<RwLock<StorageCache>>,
+    pub sort_order: SortOrder,
 }
 
 impl AnalyzeState {
@@ -116,6 +187,7 @@ impl AnalyzeState {
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
             cache,
+            sort_order: SortOrder::default(),
         };
         state.start_measuring(root);
         state
@@ -124,7 +196,10 @@ impl AnalyzeState {
     pub fn new_sync(root: PathBuf, ignore: IgnoreStore) -> Self {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cache = Arc::new(RwLock::new(StorageCache::new()));
-        let snapshot = Self::scan_folder(&root, &ignore, None, cancel_flag.clone(), cache.clone());
+        let mut snapshot =
+            Self::scan_folder(&root, &ignore, None, cancel_flag.clone(), cache.clone());
+        let sort_order = SortOrder::default();
+        sort_order.sort_children(&mut snapshot.children);
         let initial_level = BrowserLevel {
             snapshot,
             selected: 0,
@@ -143,6 +218,7 @@ impl AnalyzeState {
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
             cache,
+            sort_order,
         }
     }
 
@@ -166,6 +242,25 @@ impl AnalyzeState {
         if let Some(level) = self.current_level_mut() {
             for child in &mut level.snapshot.children {
                 child.selected = false;
+            }
+        }
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort_order = self.sort_order.next();
+        let sort_order = self.sort_order;
+        self.status_notice = Some(format!("Sorted by {}", sort_order.description()));
+        if let Some(level) = self.current_level_mut() {
+            let selected_path = level
+                .snapshot
+                .children
+                .get(level.selected)
+                .map(|c| c.path.clone());
+            sort_order.sort_children(&mut level.snapshot.children);
+            if let Some(path) = selected_path
+                && let Some(new_idx) = level.snapshot.children.iter().position(|c| c.path == path)
+            {
+                level.selected = new_idx;
             }
         }
     }
@@ -361,6 +456,11 @@ impl AnalyzeState {
                 inaccessible += 1;
             }
 
+            let created = std::fs::symlink_metadata(p)
+                .or_else(|_| std::fs::metadata(p))
+                .ok()
+                .and_then(|m| m.created().or_else(|_| m.modified()).ok());
+
             children.push(ChildItem {
                 name,
                 path: p.clone(),
@@ -368,6 +468,7 @@ impl AnalyzeState {
                 is_dir,
                 is_package,
                 selected: false,
+                created,
             });
         }
 
@@ -454,7 +555,8 @@ impl AnalyzeState {
 
         if child.is_dir && !child.is_package {
             // Check if snapshot is cached for instant zero-latency transition
-            if let Some(snapshot) = self.cache.read().unwrap().get_snapshot(&child.path) {
+            if let Some(mut snapshot) = self.cache.read().unwrap().get_snapshot(&child.path) {
+                self.sort_order.sort_children(&mut snapshot.children);
                 self.levels.push(BrowserLevel {
                     snapshot,
                     selected: 0,
@@ -496,7 +598,8 @@ impl AnalyzeState {
 
     pub fn start_measuring(&mut self, path: PathBuf) {
         // If snapshot is already cached, push directly without spawning a thread!
-        if let Some(snapshot) = self.cache.read().unwrap().get_snapshot(&path) {
+        if let Some(mut snapshot) = self.cache.read().unwrap().get_snapshot(&path) {
+            self.sort_order.sort_children(&mut snapshot.children);
             self.levels.push(BrowserLevel {
                 snapshot,
                 selected: 0,
@@ -547,7 +650,8 @@ impl AnalyzeState {
                     MeasureMessage::Progress(prog) => {
                         self.current_progress = Some(prog);
                     }
-                    MeasureMessage::Finished(snapshot) => {
+                    MeasureMessage::Finished(mut snapshot) => {
+                        self.sort_order.sort_children(&mut snapshot.children);
                         self.levels.push(BrowserLevel {
                             snapshot,
                             selected: 0,
@@ -691,6 +795,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     let mut hints = vec![
         Hint::new("↑↓", "Move"),
         Hint::new("␣", "Select"),
+        Hint::new("s", state.sort_order.hint_label()),
         Hint::new("D", "Delete"),
     ];
     if can_open {
@@ -765,15 +870,16 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
             Span::styled(display_name, theme.body()),
         ];
 
-        let mut row = ListRow::new(title_spans)
+        let date_str = crate::core::date_utils::format_system_time_opt(child.created);
+
+        let row = ListRow::new(title_spans)
             .leading(Span::styled(bullet, bullet_style))
+            .meta(Span::styled(date_str, theme.footnote()))
             .detail(Span::styled(detail_str, size_style))
             .chevron(child.is_dir && !child.is_package)
+            .reserve_chevron(true)
+            .bar(fraction)
             .selected(is_selected);
-
-        if content_rect.width >= 100 {
-            row = row.bar(fraction);
-        }
 
         list_lines.push(row.render_line(content_rect.width as usize, theme));
     }
@@ -1077,6 +1183,7 @@ mod tests {
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
+            sort_order: SortOrder::default(),
         };
 
         terminal
@@ -1111,6 +1218,7 @@ mod tests {
                         is_dir: true,
                         is_package: false,
                         selected: false,
+                        created: None,
                     }],
                     total_bytes: 1024,
                     inaccessible_count: 0,
@@ -1136,6 +1244,7 @@ mod tests {
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
+            sort_order: SortOrder::default(),
         };
 
         terminal
@@ -1167,6 +1276,7 @@ mod tests {
                             is_dir: false,
                             is_package: false,
                             selected: false,
+                            created: None,
                         },
                         ChildItem {
                             name: "file2.bin".to_string(),
@@ -1175,6 +1285,7 @@ mod tests {
                             is_dir: false,
                             is_package: false,
                             selected: false,
+                            created: None,
                         },
                     ],
                     total_bytes: 3000,
@@ -1193,6 +1304,7 @@ mod tests {
             started_at: Instant::now(),
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
+            sort_order: SortOrder::default(),
         };
 
         // Initially nothing selected
@@ -1268,5 +1380,96 @@ mod tests {
         state.enter_selected();
         assert_eq!(state.levels.len(), 2);
         assert!(state.measuring_rx.is_none()); // Instant transition, no background thread needed!
+    }
+
+    #[test]
+    fn test_analyze_sort_order() {
+        let t1 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let t2 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        let t3 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(3_000_000);
+
+        let mut items = vec![
+            ChildItem {
+                name: "b_file.txt".to_string(),
+                path: PathBuf::from("/test/b_file.txt"),
+                size_bytes: 500,
+                is_dir: false,
+                is_package: false,
+                selected: false,
+                created: Some(t1),
+            },
+            ChildItem {
+                name: "a_file.txt".to_string(),
+                path: PathBuf::from("/test/a_file.txt"),
+                size_bytes: 2000,
+                is_dir: false,
+                is_package: false,
+                selected: false,
+                created: Some(t2),
+            },
+            ChildItem {
+                name: "c_file.txt".to_string(),
+                path: PathBuf::from("/test/c_file.txt"),
+                size_bytes: 100,
+                is_dir: false,
+                is_package: false,
+                selected: false,
+                created: Some(t3),
+            },
+        ];
+
+        // 1. Sort by Size (default: largest first)
+        SortOrder::Size.sort_children(&mut items);
+        assert_eq!(items[0].name, "a_file.txt");
+        assert_eq!(items[1].name, "b_file.txt");
+        assert_eq!(items[2].name, "c_file.txt");
+
+        // 2. Sort by Date (newest first)
+        SortOrder::Date.sort_children(&mut items);
+        assert_eq!(items[0].name, "c_file.txt"); // t3
+        assert_eq!(items[1].name, "a_file.txt"); // t2
+        assert_eq!(items[2].name, "b_file.txt"); // t1
+
+        // 3. Sort by Name (A-Z)
+        SortOrder::Name.sort_children(&mut items);
+        assert_eq!(items[0].name, "a_file.txt");
+        assert_eq!(items[1].name, "b_file.txt");
+        assert_eq!(items[2].name, "c_file.txt");
+
+        // Cycle sort
+        let mut state = AnalyzeState {
+            root: PathBuf::from("/test"),
+            levels: vec![BrowserLevel {
+                snapshot: FolderSnapshot {
+                    path: PathBuf::from("/test"),
+                    children: items,
+                    total_bytes: 2600,
+                    inaccessible_count: 0,
+                    skipped_count: 0,
+                },
+                selected: 0,
+                offset: 0,
+            }],
+            ignore: IgnoreStore::default(),
+            measuring_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_progress: None,
+            spinner_idx: 0,
+            status_notice: None,
+            started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
+            cache: Arc::new(RwLock::new(StorageCache::new())),
+            sort_order: SortOrder::Size,
+        };
+
+        assert_eq!(state.sort_order, SortOrder::Size);
+        state.cycle_sort();
+        assert_eq!(state.sort_order, SortOrder::Date);
+        assert!(state.status_notice.as_ref().unwrap().contains("date"));
+        state.cycle_sort();
+        assert_eq!(state.sort_order, SortOrder::Name);
+        assert!(state.status_notice.as_ref().unwrap().contains("name"));
+        state.cycle_sort();
+        assert_eq!(state.sort_order, SortOrder::Size);
     }
 }
