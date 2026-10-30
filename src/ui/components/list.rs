@@ -176,25 +176,43 @@ pub fn path_spans(path: &Path, max_len: usize, theme: &Theme) -> Vec<Span<'stati
     }
 }
 
+pub fn render_section_header_spans(
+    title: &str,
+    detail_spans: Vec<Span<'static>>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let title_upper = title.to_uppercase();
+    let title_span = Span::styled(format!("  {title_upper}"), theme.section_header());
+    if !detail_spans.is_empty() {
+        let left_w = title_upper.width() + 2;
+        let right_w: usize = detail_spans.iter().map(|s| s.content.width()).sum();
+        let pad = width.saturating_sub(left_w + right_w);
+        let mut spans = Vec::with_capacity(detail_spans.len() + 2);
+        spans.push(title_span);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.extend(detail_spans);
+        Line::from(spans)
+    } else {
+        Line::from(vec![title_span])
+    }
+}
+
 pub fn render_section_header(
     title: &str,
     detail: Option<&str>,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let title_upper = title.to_uppercase();
-    let title_span = Span::styled(format!("  {title_upper}"), theme.section_header());
     if let Some(d) = detail {
-        let left_w = title_upper.width() + 2;
-        let right_w = d.width();
-        let pad = width.saturating_sub(left_w + right_w);
-        Line::from(vec![
-            title_span,
-            Span::raw(" ".repeat(pad)),
-            Span::styled(d.to_string(), theme.footnote()),
-        ])
+        render_section_header_spans(
+            title,
+            vec![Span::styled(d.to_string(), theme.footnote())],
+            width,
+            theme,
+        )
     } else {
-        Line::from(vec![title_span])
+        render_section_header_spans(title, Vec::new(), width, theme)
     }
 }
 
@@ -229,5 +247,22 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert!(spans[0].content.ends_with('/'));
         assert_eq!(spans[1].content, "cache");
+    }
+
+    #[test]
+    fn test_section_header_spans() {
+        let theme = Theme::new();
+        let spans = vec![
+            Span::styled("3 items · ", theme.footnote()),
+            Span::styled("1.5 GB", theme.size(1_500_000_000)),
+        ];
+        let line = render_section_header_spans("Cargo", spans, 80, &theme);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("CARGO"));
+        assert!(rendered.contains("3 items · 1.5 GB"));
     }
 }

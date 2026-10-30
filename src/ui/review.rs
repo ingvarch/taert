@@ -7,7 +7,9 @@ use ratatui::widgets::Paragraph;
 
 use super::components::chrome::AppChrome;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ListRow, path_spans, render_section_header};
+use super::components::list::{
+    ListRow, path_spans, render_section_header, render_section_header_spans,
+};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::RemovalReport;
@@ -86,7 +88,7 @@ pub fn render_review(frame: &mut Frame, state: &ReviewState, theme: &Theme) {
     lines.push(Line::from(vec![
         Span::styled(format!("{count} items"), theme.warning()),
         Span::styled(" · ", theme.callout()),
-        Span::styled(format_bytes(total_bytes), theme.warning()),
+        Span::styled(format_bytes(total_bytes), theme.size(total_bytes)),
         Span::styled(" will be permanently deleted", theme.headline()),
     ]));
     lines.push(Line::from(""));
@@ -101,9 +103,12 @@ pub fn render_review(frame: &mut Frame, state: &ReviewState, theme: &Theme) {
         }
 
         let group_bytes: u64 = sel_in_group.iter().map(|it| it.size_bytes).sum();
-        flat_items.push(render_section_header(
+        flat_items.push(render_section_header_spans(
             &group.tool,
-            Some(&format_bytes(group_bytes)),
+            vec![Span::styled(
+                format_bytes(group_bytes),
+                theme.size(group_bytes),
+            )],
             content_rect.width as usize,
             theme,
         ));
