@@ -239,11 +239,12 @@ fn snapshot_preferences() {
 #[test]
 fn snapshot_path_list_editor() {
     let theme = Theme::new();
-    let mut ignore = IgnoreStore::default();
-    ignore.roots = vec![
-        "/Users/test/Documents/Secret".to_string(),
-        "/Users/test/Projects/keep-this".to_string(),
-    ];
+    let ignore = IgnoreStore {
+        roots: vec![
+            "/Users/test/Documents/Secret".to_string(),
+            "/Users/test/Projects/keep-this".to_string(),
+        ],
+    };
     let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore);
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));

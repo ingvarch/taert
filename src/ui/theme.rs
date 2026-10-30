@@ -180,16 +180,81 @@ impl Theme {
     }
 
     pub fn size(&self, bytes: u64) -> Style {
-        if bytes < 1_000_000_000 {
+        if self.env.depth == ColorDepth::NoColor {
+            if bytes >= 5_000_000_000 {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if bytes >= 1_000_000_000 {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }
+        } else if bytes < 100_000_000 {
             Style::default().fg(self.p.secondary)
-        } else if bytes < 10_000_000_000 {
+        } else if bytes < 1_000_000_000 {
+            Style::default().fg(self.p.label)
+        } else if bytes < 5_000_000_000 {
             Style::default()
-                .fg(self.p.label)
+                .fg(self.p.yellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(self.p.orange)
                 .add_modifier(Modifier::BOLD)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn color_theme() -> Theme {
+        Theme::with_env(UiEnv {
+            appearance: Appearance::Dark,
+            depth: ColorDepth::TrueColor,
+            ascii_glyphs: false,
+            reduce_motion: false,
+        })
+    }
+
+    #[test]
+    fn test_theme_size_thresholds() {
+        let theme = color_theme();
+        // < 100 MB: secondary
+        assert_eq!(
+            theme.size(50_000_000),
+            Style::default().fg(theme.p.secondary)
+        );
+        // 100 MB .. < 1 GB: label
+        assert_eq!(theme.size(500_000_000), Style::default().fg(theme.p.label));
+        // 1 GB .. < 5 GB: yellow bold
+        assert_eq!(
+            theme.size(2_500_000_000),
+            Style::default()
+                .fg(theme.p.yellow)
+                .add_modifier(Modifier::BOLD)
+        );
+        // >= 5 GB: orange bold
+        assert_eq!(
+            theme.size(10_000_000_000),
+            Style::default()
+                .fg(theme.p.orange)
+                .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn test_theme_size_nocolor() {
+        let theme = Theme::plain();
+        assert_eq!(theme.size(50_000_000), Style::default());
+        assert_eq!(theme.size(500_000_000), Style::default());
+        assert_eq!(
+            theme.size(2_500_000_000),
+            Style::default().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.size(10_000_000_000),
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        );
     }
 }

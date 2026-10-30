@@ -15,7 +15,7 @@ use super::components::chrome::AppChrome;
 use super::components::empty::EmptyState;
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ListRow, path_spans, render_section_header};
+use super::components::list::{ListRow, path_spans, render_section_header_spans};
 use super::components::modal::Modal;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
@@ -58,6 +58,7 @@ pub struct FlattenedRow {
     pub display_path: String,
     pub is_selected: bool,
     pub full_path: Option<PathBuf>,
+    pub item_count: usize,
 }
 
 impl SelectState {
@@ -134,6 +135,7 @@ impl SelectState {
                 is_selected: matching_items.iter().all(|(_, it)| it.selected)
                     && !matching_items.is_empty(),
                 full_path: None,
+                item_count: matching_items.len(),
             });
 
             // Group items
@@ -147,6 +149,7 @@ impl SelectState {
                     display_path: prettify_path(&item.path),
                     is_selected: item.selected,
                     full_path: Some(item.path.clone()),
+                    item_count: 0,
                 });
             }
         }
@@ -330,7 +333,10 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let right_status = Line::from(vec![
         Span::styled(format!("{selected_count}"), theme.headline()),
         Span::styled(format!(" of {total_count} selected  ·  "), theme.callout()),
-        Span::styled(format_bytes(total_selected_bytes), theme.headline()),
+        Span::styled(
+            format_bytes(total_selected_bytes),
+            theme.size(total_selected_bytes),
+        ),
     ]);
 
     let primary_action = if selected_count > 0 {
@@ -413,9 +419,14 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         let is_focused = idx == state.focused_index;
 
         if row.is_header {
-            list_lines.push(render_section_header(
+            let noun = if row.item_count == 1 { "item" } else { "items" };
+            let detail_spans = vec![
+                Span::styled(format!("{} {noun} · ", row.item_count), theme.footnote()),
+                Span::styled(format_bytes(row.size_bytes), theme.size(row.size_bytes)),
+            ];
+            list_lines.push(render_section_header_spans(
                 &row.group_name,
-                Some(&row.display_path),
+                detail_spans,
                 list_rect.width as usize,
                 theme,
             ));

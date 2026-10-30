@@ -655,15 +655,19 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
                 format!(" of {} selected  ·  ", level.snapshot.children.len()),
                 theme.callout(),
             ),
-            Span::styled(format_bytes(selected_bytes), theme.headline()),
+            Span::styled(format_bytes(selected_bytes), theme.size(selected_bytes)),
         ])
     } else {
-        let status_text = format!(
-            "{}  ·  {} items",
-            format_bytes(level.snapshot.total_bytes),
-            level.snapshot.children.len()
-        );
-        Line::from(vec![Span::styled(status_text, theme.callout())])
+        Line::from(vec![
+            Span::styled(
+                format_bytes(level.snapshot.total_bytes),
+                theme.size(level.snapshot.total_bytes),
+            ),
+            Span::styled(
+                format!("  ·  {} items", level.snapshot.children.len()),
+                theme.callout(),
+            ),
+        ])
     };
 
     let can_open = match level.snapshot.children.get(level.selected) {
