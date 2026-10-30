@@ -16,7 +16,9 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use super::analyze::{AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, render_analyze};
+use super::analyze::{
+    AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, SortOrder, render_analyze,
+};
 use super::path_list_editor::{
     PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
 };
@@ -176,8 +178,8 @@ impl App {
                 }
 
                 if self.help_open {
-                    let shortcuts = self.shortcuts_for_screen();
-                    super::components::help::HelpSheet::new(shortcuts).render(
+                    let sections = self.help_sections();
+                    super::components::help::HelpSheet::new(sections).render(
                         frame,
                         area,
                         &self.theme,
@@ -551,12 +553,11 @@ impl App {
                     KeyCode::End => state.move_to_end(),
                     KeyCode::Char(' ') => state.toggle_current(),
                     KeyCode::Char('a') | KeyCode::Char('A') => state.select_all(),
-                    KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
-                    KeyCode::Char('s') | KeyCode::Char('S') => state.cycle_sort(),
-                    KeyCode::Char('d')
-                    | KeyCode::Char('D')
-                    | KeyCode::Delete
-                    | KeyCode::Backspace => {
+                    KeyCode::Char('n') => state.select_none(),
+                    KeyCode::Char('S') => state.set_sort(SortOrder::Size),
+                    KeyCode::Char('N') => state.set_sort(SortOrder::Name),
+                    KeyCode::Char('D') => state.set_sort(SortOrder::Date),
+                    KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
                         state.open_delete_confirmation();
                     }
                     KeyCode::Enter | KeyCode::Right => {
@@ -663,67 +664,90 @@ impl App {
         }
     }
 
-    fn shortcuts_for_screen(&self) -> Vec<super::components::hints::Hint<'static>> {
+    fn help_sections(&self) -> Vec<super::components::help::HelpSection<'static>> {
+        use super::components::help::HelpSection;
         use super::components::hints::Hint;
+
+        let navigate = Hint::new("↑↓ / jk", "Navigate");
+        let scroll = Hint::new("↑↓ / jk", "Scroll");
+        let back = Hint::new("⎋ / q", "Back");
+        let general = |mut hints: Vec<Hint<'static>>| {
+            hints.push(Hint::new("?", "Toggle help"));
+            HelpSection::new("General", hints)
+        };
+
         match &self.screen {
             Screen::Workspace(_) => vec![
-                Hint::new("↑↓ / jk", "Navigate"),
-                Hint::new("↵", "Select"),
-                Hint::new("1-5", "Quick select"),
-                Hint::new("⎋ / q", "Quit"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new(
+                    "Menu",
+                    vec![Hint::new("↵", "Select"), Hint::new("1-5", "Quick select")],
+                ),
+                general(vec![navigate, Hint::new("⎋ / q", "Quit")]),
             ],
             Screen::Scanning(_, _, _) => vec![
-                Hint::new("⎋ / q", "Cancel scan"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
+                general(Vec::new()),
             ],
             Screen::Select(_) => vec![
-                Hint::new("↑↓ / jk", "Navigate"),
-                Hint::new("␣", "Toggle item"),
-                Hint::new("A", "Select all"),
-                Hint::new("N", "Select none"),
-                Hint::new("/", "Search"),
-                Hint::new("↵", "Review & clean"),
-                Hint::new("⎋ / q", "Back"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new(
+                    "Select items",
+                    vec![
+                        Hint::new("␣", "Toggle item"),
+                        Hint::new("A", "Select all"),
+                        Hint::new("N", "Select none"),
+                        Hint::new("/", "Search"),
+                        Hint::new("↵", "Review & clean"),
+                    ],
+                ),
+                general(vec![navigate, back]),
             ],
             Screen::Review(_) => vec![
-                Hint::new("↑↓ / jk", "Scroll"),
-                Hint::new("↵", "Confirm clean"),
-                Hint::new("⎋ / q", "Back"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new("Review", vec![Hint::new("↵", "Confirm clean")]),
+                general(vec![scroll, back]),
             ],
             Screen::Analyze(_) => vec![
-                Hint::new("↑↓ / jk", "Navigate"),
-                Hint::new("␣", "Toggle select"),
-                Hint::new("A / N", "Select all / none"),
-                Hint::new("S", "Cycle sort (Size/Date/Name)"),
-                Hint::new("D / ⌫", "Delete selected"),
-                Hint::new("↵ / →", "Enter folder"),
-                Hint::new("←", "Up one level"),
-                Hint::new("R", "Refresh folder"),
-                Hint::new("O", "Reveal in Finder"),
-                Hint::new("q", "Quit explore"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new(
+                    "Explore",
+                    vec![
+                        Hint::new("␣", "Toggle select"),
+                        Hint::new("A / N", "Select all / none"),
+                        Hint::new("↵ / →", "Enter folder"),
+                        Hint::new("←", "Up one level"),
+                        Hint::new("R", "Refresh folder"),
+                        Hint::new("O", "Reveal in Finder"),
+                        Hint::new("D / ⌫", "Delete selected"),
+                    ],
+                ),
+                HelpSection::new(
+                    "Sort by",
+                    vec![
+                        Hint::new("⇧S", "Size"),
+                        Hint::new("⇧N", "Name"),
+                        Hint::new("⇧D", "Date created"),
+                    ],
+                ),
+                general(vec![navigate, Hint::new("⎋ / q", "Quit explore")]),
             ],
-            Screen::SystemStatus(_) => vec![
-                Hint::new("↑↓ / jk", "Scroll"),
-                Hint::new("⎋ / q / ↵", "Back"),
-                Hint::new("?", "Toggle help"),
-            ],
+            Screen::SystemStatus(_) => vec![general(vec![scroll, Hint::new("⎋ / q / ↵", "Back")])],
             Screen::Preferences(_) => vec![
-                Hint::new("↑↓ / jk", "Navigate"),
-                Hint::new("←→", "Change threshold"),
-                Hint::new("↵", "Edit list"),
-                Hint::new("⎋ / q", "Back"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new(
+                    "Preferences",
+                    vec![
+                        Hint::new("←→", "Change threshold"),
+                        Hint::new("↵", "Edit list"),
+                    ],
+                ),
+                general(vec![navigate, back]),
             ],
             Screen::PathListEditor(_) => vec![
-                Hint::new("↑↓ / jk", "Navigate"),
-                Hint::new("A", "Add path"),
-                Hint::new("D / ⌫", "Remove path"),
-                Hint::new("⎋ / q", "Back"),
-                Hint::new("?", "Toggle help"),
+                HelpSection::new(
+                    "Path list",
+                    vec![
+                        Hint::new("A", "Add path"),
+                        Hint::new("D / ⌫", "Remove path"),
+                    ],
+                ),
+                general(vec![navigate, back]),
             ],
         }
     }
@@ -1004,5 +1028,97 @@ impl App {
         });
 
         self.screen = Screen::Scanning(ProgressState::new(initial_headline), fwd_rx, cancel_flag);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::analyze::SortOrder;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn analyze_app(dir: &Path) -> App {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+        app.screen = Screen::Analyze(AnalyzeState::new_sync(
+            dir.to_path_buf(),
+            IgnoreStore::default(),
+        ));
+        app
+    }
+
+    fn analyze(app: &App) -> &AnalyzeState {
+        match &app.screen {
+            Screen::Analyze(state) => state,
+            _ => panic!("expected the analyze screen"),
+        }
+    }
+
+    #[test]
+    fn help_for_explore_groups_the_sort_keys() {
+        let dir = tempdir().unwrap();
+        let app = analyze_app(dir.path());
+
+        let sections = app.help_sections();
+        let titles: Vec<_> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(titles, ["Explore", "Sort by", "General"]);
+
+        let keys: Vec<_> = sections[1].shortcuts.iter().map(|h| h.key).collect();
+        assert_eq!(keys, ["⇧S", "⇧N", "⇧D"]);
+    }
+
+    #[test]
+    fn shift_letters_pick_the_sort_order() {
+        let dir = tempdir().unwrap();
+        let mut app = analyze_app(dir.path());
+
+        app.handle_key(KeyCode::Char('N'));
+        assert_eq!(analyze(&app).sort_order, SortOrder::Name);
+        app.handle_key(KeyCode::Char('D'));
+        assert_eq!(analyze(&app).sort_order, SortOrder::Date);
+        app.handle_key(KeyCode::Char('S'));
+        assert_eq!(analyze(&app).sort_order, SortOrder::Size);
+    }
+
+    #[test]
+    fn plain_s_leaves_the_sort_order_alone() {
+        let dir = tempdir().unwrap();
+        let mut app = analyze_app(dir.path());
+
+        app.handle_key(KeyCode::Char('s'));
+        assert_eq!(analyze(&app).sort_order, SortOrder::Size);
+    }
+
+    #[test]
+    fn shift_d_never_opens_the_delete_confirmation() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+        let mut app = analyze_app(dir.path());
+
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('D'));
+        assert!(matches!(analyze(&app).overlay, AnalyzeOverlay::None));
+
+        app.handle_key(KeyCode::Char('d'));
+        assert!(matches!(
+            analyze(&app).overlay,
+            AnalyzeOverlay::ConfirmDelete { .. }
+        ));
+    }
+
+    #[test]
+    fn shift_n_keeps_the_selection_and_plain_n_clears_it() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+        let mut app = analyze_app(dir.path());
+        let selected =
+            |app: &App| analyze(app).current_level().unwrap().snapshot.children[0].selected;
+
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('N'));
+        assert!(selected(&app));
+
+        app.handle_key(KeyCode::Char('n'));
+        assert!(!selected(&app));
     }
 }

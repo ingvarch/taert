@@ -1,0 +1,19 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+  ╭────────────────────────────────────────────╮
+  │ Keyboard Shortcuts                         │
+  │                                            │
+  │ EXPLORE                                    │
+  │  ␣         Toggle select                   │
+  │  A / N     Select all / none               │
+  │  ↵ / →     Enter folder                    │
+  │  D / ⌫     Delete selected                 │
+  │ Enlarge the window to see more             │
+  │                                            │
+  │                                            │
+  │                                      Done  │
+  │                                ↵/⎋/? Close │
+  ╰────────────────────────────────────────────╯

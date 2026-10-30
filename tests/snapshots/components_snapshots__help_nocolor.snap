@@ -7,9 +7,13 @@ expression: output
     ╭────────────────────────────────────────────────────────────╮
     │ Keyboard Shortcuts                                         │
     │                                                            │
-    │  ↑↓      Move               N       Select none            │
-    │  ␣       Select             /       Search                 │
-    │  A       Select all         ↵       Review                 │
+    │ EXPLORE                       SORT BY                      │
+    │  ␣       Toggle select         ⇧S        Size              │
+    │  A / N   Select all / none     ⇧N        Name              │
+    │  ↵ / →   Enter folder                                      │
+    │  D / ⌫   Delete selected      GENERAL                      │
+    │                                ↑↓ / jk   Navigate          │
+    │                                ?         Toggle help       │
     │                                                            │
     │                                                            │
     │                                                      Done  │

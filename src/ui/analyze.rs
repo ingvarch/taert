@@ -89,14 +89,6 @@ pub enum SortOrder {
 }
 
 impl SortOrder {
-    pub fn next(&self) -> Self {
-        match self {
-            Self::Size => Self::Date,
-            Self::Date => Self::Name,
-            Self::Name => Self::Size,
-        }
-    }
-
     pub fn label(&self) -> &'static str {
         match self {
             Self::Size => "Size",
@@ -246,9 +238,8 @@ impl AnalyzeState {
         }
     }
 
-    pub fn cycle_sort(&mut self) {
-        self.sort_order = self.sort_order.next();
-        let sort_order = self.sort_order;
+    pub fn set_sort(&mut self, sort_order: SortOrder) {
+        self.sort_order = sort_order;
         self.status_notice = Some(format!("Sorted by {}", sort_order.description()));
         if let Some(level) = self.current_level_mut() {
             let selected_path = level
@@ -795,7 +786,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     let mut hints = vec![
         Hint::new("↑↓", "Move"),
         Hint::new("␣", "Select"),
-        Hint::new("s", state.sort_order.hint_label()),
+        Hint::new("⇧S/N/D", state.sort_order.hint_label()),
         Hint::new("D", "Delete"),
     ];
     if can_open {
@@ -1436,7 +1427,7 @@ mod tests {
         assert_eq!(items[1].name, "b_file.txt");
         assert_eq!(items[2].name, "c_file.txt");
 
-        // Cycle sort
+        // Pick a sort order
         let mut state = AnalyzeState {
             root: PathBuf::from("/test"),
             levels: vec![BrowserLevel {
@@ -1463,13 +1454,13 @@ mod tests {
         };
 
         assert_eq!(state.sort_order, SortOrder::Size);
-        state.cycle_sort();
+        state.set_sort(SortOrder::Date);
         assert_eq!(state.sort_order, SortOrder::Date);
         assert!(state.status_notice.as_ref().unwrap().contains("date"));
-        state.cycle_sort();
+        state.set_sort(SortOrder::Name);
         assert_eq!(state.sort_order, SortOrder::Name);
         assert!(state.status_notice.as_ref().unwrap().contains("name"));
-        state.cycle_sort();
+        state.set_sort(SortOrder::Size);
         assert_eq!(state.sort_order, SortOrder::Size);
     }
 }

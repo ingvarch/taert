@@ -7,7 +7,7 @@ use taert::ui::components::button::{Button, render_button_group};
 use taert::ui::components::chrome::AppChrome;
 use taert::ui::components::empty::EmptyState;
 use taert::ui::components::gauge::{bar, legend, segmented_bar};
-use taert::ui::components::help::HelpSheet;
+use taert::ui::components::help::{HelpSection, HelpSheet};
 use taert::ui::components::hints::{Hint, PrimaryAction};
 use taert::ui::components::list::{ListRow, render_section_header};
 use taert::ui::components::modal::Modal;
@@ -200,20 +200,45 @@ fn snapshot_component_toast() {
     }
 }
 
+fn sample_help_sheet() -> HelpSheet<'static> {
+    HelpSheet::new(vec![
+        HelpSection::new(
+            "Explore",
+            vec![
+                Hint::new("␣", "Toggle select"),
+                Hint::new("A / N", "Select all / none"),
+                Hint::new("↵ / →", "Enter folder"),
+                Hint::new("D / ⌫", "Delete selected"),
+            ],
+        ),
+        HelpSection::new(
+            "Sort by",
+            vec![Hint::new("⇧S", "Size"), Hint::new("⇧N", "Name")],
+        ),
+        HelpSection::new(
+            "General",
+            vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("?", "Toggle help"),
+            ],
+        ),
+    ])
+}
+
 #[test]
 fn snapshot_component_help() {
     for (name, theme) in [("dark", dark_theme()), ("nocolor", nocolor_theme())] {
-        let output = render_to_string(70, 16, |f| {
-            let sheet = HelpSheet::new(vec![
-                Hint::new("↑↓", "Move"),
-                Hint::new("␣", "Select"),
-                Hint::new("A", "Select all"),
-                Hint::new("N", "Select none"),
-                Hint::new("/", "Search"),
-                Hint::new("↵", "Review"),
-            ]);
-            sheet.render(f, f.area(), &theme);
+        let output = render_to_string(70, 20, |f| {
+            sample_help_sheet().render(f, f.area(), &theme);
         });
         assert_snapshot!(format!("help_{name}"), output);
     }
+}
+
+#[test]
+fn snapshot_component_help_narrow() {
+    let output = render_to_string(50, 16, |f| {
+        sample_help_sheet().render(f, f.area(), &dark_theme());
+    });
+    assert_snapshot!("help_narrow", output);
 }
