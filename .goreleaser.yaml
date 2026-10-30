@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: taert
+
+# The licenses of what taert links ask for their texts in every copy. This also
+# fails on a license about.toml does not accept.
+before:
+  hooks:
+    - cargo about generate --fail --output-file THIRD_PARTY_NOTICES about.hbs
+
+builds:
+  - id: taert
+    builder: rust
+    binary: taert
+    # taert links Apple frameworks, and zig has no macOS SDK to link them from,
+    # so build with cargo on a macOS runner instead of the default zigbuild.
+    command: build
+    flags:
+      - --release
+      - --locked
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+
+# Gatekeeper runs a downloaded binary only once Apple has notarized it. A
+# snapshot has no Apple keys, a release fails without them.
+notarize:
+  macos:
+    - enabled: "{{ not .IsSnapshot }}"
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+archives:
+  - formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES
+
+changelog:
+  use: github-native
+
+homebrew_casks:
+  - homepage: https://github.com/ingvarch/taert
+    description: Fast, transparent, and keyboard-driven macOS disk cleanup and storage explorer
+    license: MIT
+    skip_upload: auto
+    repository:
+      owner: ingvarch
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"

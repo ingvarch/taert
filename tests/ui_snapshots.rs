@@ -10,6 +10,7 @@ use taert::core::profiler::{
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use taert::core::stores::{Config, IgnoreStore};
 use taert::ui::analyze::{AnalyzeState, render_analyze};
+use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::preferences::{PreferencesState, render_preferences};
 use taert::ui::progress::{ProgressState, render_progress};
@@ -18,6 +19,11 @@ use taert::ui::select::{SelectState, render_select};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{StartConfirmKind, WorkspaceState, render_workspace};
+
+// Theme::new reads the terminal's env, and a snapshot must not depend on it.
+fn snapshot_theme() -> Theme {
+    Theme::with_env(UiEnv::default())
+}
 
 fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
     let backend = TestBackend::new(w, h);
@@ -92,7 +98,7 @@ const SIZES: &[(u16, u16, &str)] = &[(80, 24, "80x24"), (120, 32, "120x32"), (50
 
 #[test]
 fn snapshot_workspace() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
     for &(w, h, label) in SIZES {
@@ -103,7 +109,7 @@ fn snapshot_workspace() {
 
 #[test]
 fn snapshot_workspace_clean_submenu() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
     state.open_clean_submenu();
@@ -115,7 +121,7 @@ fn snapshot_workspace_clean_submenu() {
 
 #[test]
 fn snapshot_workspace_confirm() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
     state.open_confirmation(StartConfirmKind::ExploreHome);
@@ -127,7 +133,7 @@ fn snapshot_workspace_confirm() {
 
 #[test]
 fn snapshot_select() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let state = SelectState::new(sample_scan());
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
@@ -137,7 +143,7 @@ fn snapshot_select() {
 
 #[test]
 fn snapshot_review() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let state = ReviewState::new(sample_scan());
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_review(f, &state, &theme));
@@ -147,7 +153,7 @@ fn snapshot_review() {
 
 #[test]
 fn snapshot_analyze() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let state = AnalyzeState {
         root: PathBuf::from("/Users/test/Documents"),
         levels: vec![taert::ui::analyze::BrowserLevel {
@@ -202,7 +208,7 @@ fn snapshot_analyze() {
 
 #[test]
 fn snapshot_system_status() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let state = SystemStatusState {
         status: mock_system_status(),
         scroll_offset: 0,
@@ -215,7 +221,7 @@ fn snapshot_system_status() {
 
 #[test]
 fn snapshot_progress() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let mut state = ProgressState::new("Scanning developer caches");
     state.headline = "Scanning Developer, 2 of 5".to_string();
     state.folder = Some("~/Library/Caches/Cargo".to_string());
@@ -229,7 +235,7 @@ fn snapshot_progress() {
 
 #[test]
 fn snapshot_preferences() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let config = Config::default();
     let ignore = IgnoreStore::default();
     let state = PreferencesState::new(&config, &ignore);
@@ -241,7 +247,7 @@ fn snapshot_preferences() {
 
 #[test]
 fn snapshot_path_list_editor() {
-    let theme = Theme::new();
+    let theme = snapshot_theme();
     let ignore = IgnoreStore {
         roots: vec![
             "/Users/test/Documents/Secret".to_string(),

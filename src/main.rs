@@ -232,7 +232,7 @@ fn handle_analyze(path: PathBuf, depth: usize, cli: &Cli, use_plain: bool) -> Ex
         }
     }
 
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     if cli.json {
         let json_entries: Vec<_> = entries

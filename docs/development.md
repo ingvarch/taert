@@ -56,7 +56,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-CI runs these checks on every push to `main` and all pull requests (`.github/workflows/ci.yml`).
+CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). Releases are in [releasing.md](releasing.md).
 
 ## Project structure
 
@@ -120,8 +120,14 @@ taert/
 │   ├── architecture.md         # Safety engine, APFS accounting, and smart cache
 │   ├── configuration.md        # Preferences, environment flags, and ignore list
 │   ├── development.md          # This guide
+│   ├── releasing.md            # Release workflow and its secrets
 │   └── usage.md                # Interactive workspace, CLI commands, keybindings
-├── .github/workflows/ci.yml    # Continuous integration workflow
+├── .github/workflows/
+│   ├── ci.yml                  # Continuous integration workflow
+│   └── release.yml             # Release workflow, starts on a version tag
+├── .goreleaser.yaml            # Build, sign, archive and Homebrew cask settings
+├── about.toml                  # Licenses taert may link
+├── about.hbs                   # Template of THIRD_PARTY_NOTICES
 ├── Cargo.toml                  # Dependencies and build settings
 ├── LICENSE                     # MIT license
 └── README.md                   # Repository entry page
