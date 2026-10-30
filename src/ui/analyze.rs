@@ -30,10 +30,31 @@ use super::components::progress::ProgressView;
 use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
+use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
 use crate::core::sizer::DirSizer;
 use crate::core::stores::IgnoreStore;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzeConfirmButton {
+    Cancel,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub enum AnalyzeOverlay {
+    None,
+    ConfirmDelete {
+        items: Vec<ChildItem>,
+        button: AnalyzeConfirmButton,
+    },
+    Deleting {
+        progress: RemovalProgress,
+        spinner_idx: usize,
+    },
+    Outcome(RemovalReport),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildItem {
@@ -42,6 +63,7 @@ pub struct ChildItem {
     pub size_bytes: u64,
     pub is_dir: bool,
     pub is_package: bool,
+    pub selected: bool,
 }
 
 impl ChildItem {
@@ -98,6 +120,7 @@ pub struct AnalyzeState {
     pub spinner_idx: usize,
     pub status_notice: Option<String>,
     pub started_at: Instant,
+    pub overlay: AnalyzeOverlay,
 }
 
 impl AnalyzeState {
@@ -112,6 +135,7 @@ impl AnalyzeState {
             spinner_idx: 0,
             status_notice: None,
             started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
         };
         state.start_measuring(root);
         state
@@ -136,6 +160,75 @@ impl AnalyzeState {
             spinner_idx: 0,
             status_notice: None,
             started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
+        }
+    }
+
+    pub fn toggle_current(&mut self) {
+        if let Some(level) = self.current_level_mut()
+            && let Some(child) = level.snapshot.children.get_mut(level.selected)
+        {
+            child.selected = !child.selected;
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        if let Some(level) = self.current_level_mut() {
+            for child in &mut level.snapshot.children {
+                child.selected = true;
+            }
+        }
+    }
+
+    pub fn select_none(&mut self) {
+        if let Some(level) = self.current_level_mut() {
+            for child in &mut level.snapshot.children {
+                child.selected = false;
+            }
+        }
+    }
+
+    pub fn items_to_delete(&self) -> Vec<ChildItem> {
+        if let Some(level) = self.current_level() {
+            let selected: Vec<ChildItem> = level
+                .snapshot
+                .children
+                .iter()
+                .filter(|c| c.selected)
+                .cloned()
+                .collect();
+            if !selected.is_empty() {
+                return selected;
+            }
+            if let Some(focused) = level.snapshot.children.get(level.selected) {
+                return vec![focused.clone()];
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn open_delete_confirmation(&mut self) {
+        let items = self.items_to_delete();
+        if !items.is_empty() {
+            self.overlay = AnalyzeOverlay::ConfirmDelete {
+                items,
+                button: AnalyzeConfirmButton::Cancel,
+            };
+        }
+    }
+
+    pub fn handle_removal_finished(&mut self, report: &RemovalReport) {
+        if report.removed_count == 0 {
+            return;
+        }
+        if let Some(level) = self.current_level_mut() {
+            level.snapshot.children.retain(|child| child.path.exists());
+            level.snapshot.total_bytes = level.snapshot.children.iter().map(|c| c.size_bytes).sum();
+            if level.selected >= level.snapshot.children.len()
+                && !level.snapshot.children.is_empty()
+            {
+                level.selected = level.snapshot.children.len() - 1;
+            }
         }
     }
 
@@ -263,6 +356,7 @@ impl AnalyzeState {
                 size_bytes: size,
                 is_dir,
                 is_package,
+                selected: false,
             });
         }
 
@@ -493,22 +587,44 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         crumbs.push(seg);
     }
 
-    let status_text = format!(
-        "{}  ·  {} items",
-        format_bytes(level.snapshot.total_bytes),
-        level.snapshot.children.len()
-    );
-    let right_status = Line::from(vec![Span::styled(status_text, theme.callout())]);
+    let selected_items: Vec<&ChildItem> = level
+        .snapshot
+        .children
+        .iter()
+        .filter(|c| c.selected)
+        .collect();
+    let selected_count = selected_items.len();
+    let selected_bytes: u64 = selected_items.iter().map(|c| c.size_bytes).sum();
+
+    let right_status = if selected_count > 0 {
+        Line::from(vec![
+            Span::styled(format!("{selected_count}"), theme.headline()),
+            Span::styled(
+                format!(" of {} selected  ·  ", level.snapshot.children.len()),
+                theme.callout(),
+            ),
+            Span::styled(format_bytes(selected_bytes), theme.headline()),
+        ])
+    } else {
+        let status_text = format!(
+            "{}  ·  {} items",
+            format_bytes(level.snapshot.total_bytes),
+            level.snapshot.children.len()
+        );
+        Line::from(vec![Span::styled(status_text, theme.callout())])
+    };
 
     let can_open = match level.snapshot.children.get(level.selected) {
         Some(c) => c.is_dir && !c.is_package,
         None => false,
     };
 
-    let primary_action = if can_open {
-        PrimaryAction::new("Open", "→")
+    let primary_action = if selected_count > 0 {
+        PrimaryAction::destructive(format!("Delete {selected_count} items"), "D")
+    } else if can_open {
+        PrimaryAction::new("Open", "↵")
     } else {
-        PrimaryAction::disabled("Open", "→")
+        PrimaryAction::disabled("Open", "↵")
     };
 
     let toast = state
@@ -516,14 +632,20 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         .as_ref()
         .map(|msg| Toast::success(msg.clone()));
 
+    let mut hints = vec![
+        Hint::new("↑↓", "Move"),
+        Hint::new("␣", "Select"),
+        Hint::new("D", "Delete"),
+    ];
+    if can_open {
+        hints.push(Hint::new("↵", "Open"));
+    }
+    hints.push(Hint::new("←", "Back"));
+    hints.push(Hint::new("?", "More"));
+
     let chrome = AppChrome::new(crumbs)
         .status(right_status)
-        .hints(vec![
-            Hint::new("↑↓", "Move"),
-            Hint::new("←", "Back"),
-            Hint::new("O", "Reveal in Finder"),
-            Hint::new("?", "More"),
-        ])
+        .hints(hints)
         .primary(primary_action)
         .toast(toast.as_ref());
 
@@ -556,6 +678,12 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     {
         let is_selected = idx == level.selected;
 
+        let (bullet, bullet_style) = if child.selected {
+            (theme.g.check_on, theme.accent_text())
+        } else {
+            (theme.g.check_off, theme.footnote())
+        };
+
         let icon = if child.is_package {
             theme.g.package
         } else if child.is_dir {
@@ -576,8 +704,13 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         let size_style = theme.size(child.size_bytes);
         let detail_str = format!("{:>9}", format_bytes(child.size_bytes));
 
-        let mut row = ListRow::new(vec![Span::styled(display_name, theme.body())])
-            .leading(Span::styled(icon, icon_style))
+        let title_spans = vec![
+            Span::styled(format!("{icon} "), icon_style),
+            Span::styled(display_name, theme.body()),
+        ];
+
+        let mut row = ListRow::new(title_spans)
+            .leading(Span::styled(bullet, bullet_style))
             .detail(Span::styled(detail_str, size_style))
             .chevron(child.is_dir && !child.is_package)
             .selected(is_selected);
@@ -602,6 +735,23 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     // Measuring Modal
     if let Some(ref prog) = state.current_progress {
         render_measuring_modal(frame, prog, state.spinner_idx, theme);
+    }
+
+    // Modal Overlays (Deletion confirmation, deletion progress, deletion outcome)
+    match &state.overlay {
+        AnalyzeOverlay::None => {}
+        AnalyzeOverlay::ConfirmDelete { items, button } => {
+            render_analyze_confirm_dialog(frame, items, *button, &state.ignore, theme);
+        }
+        AnalyzeOverlay::Deleting {
+            progress,
+            spinner_idx,
+        } => {
+            render_analyze_deleting_dialog(frame, progress, *spinner_idx, theme);
+        }
+        AnalyzeOverlay::Outcome(report) => {
+            render_analyze_outcome_dialog(frame, report, theme);
+        }
     }
 }
 
@@ -671,6 +821,174 @@ fn render_measuring_modal(
         .render(frame, frame.area(), theme);
 }
 
+fn render_analyze_confirm_dialog(
+    frame: &mut Frame,
+    items: &[ChildItem],
+    focus_btn: AnalyzeConfirmButton,
+    ignore: &IgnoreStore,
+    theme: &Theme,
+) {
+    let cancel_focused = focus_btn == AnalyzeConfirmButton::Cancel;
+    let delete_focused = focus_btn == AnalyzeConfirmButton::Delete;
+
+    let (title, message_lines) = if items.len() == 1 {
+        let item = &items[0];
+        let pretty = prettify_path(&item.path);
+        let title = format!("Delete {}?", item.name);
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Permanently delete ", theme.body()),
+                Span::styled(pretty, theme.headline()),
+                Span::styled(
+                    format!(" ({})?", format_bytes(item.size_bytes)),
+                    theme.body(),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "This action cannot be undone.",
+                theme.callout(),
+            )),
+        ];
+        if let Err(e) = Safety::can_remove(&item.path, ignore) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Warning: ", theme.danger()),
+                Span::styled(format!("Protected path: {e}"), theme.danger()),
+            ]));
+        }
+        (title, lines)
+    } else {
+        let count = items.len();
+        let total_bytes: u64 = items.iter().map(|i| i.size_bytes).sum();
+        let title = format!("Delete {count} items?");
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Permanently delete ", theme.body()),
+                Span::styled(format!("{count} items"), theme.headline()),
+                Span::styled(format!(" ({})?", format_bytes(total_bytes)), theme.body()),
+            ]),
+            Line::from(Span::styled(
+                "This action cannot be undone.",
+                theme.callout(),
+            )),
+        ];
+        let protected_count = items
+            .iter()
+            .filter(|i| Safety::can_remove(&i.path, ignore).is_err())
+            .count();
+        if protected_count > 0 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("Warning: {protected_count} items are protected and will be skipped."),
+                theme.danger(),
+            )));
+        }
+        (title, lines)
+    };
+
+    Modal::new(&title)
+        .message(message_lines)
+        .buttons(vec![
+            Button::new("Cancel (esc)").focused(cancel_focused),
+            Button::destructive("Delete (↵)").focused(delete_focused),
+        ])
+        .render(frame, frame.area(), theme);
+}
+
+fn render_analyze_deleting_dialog(
+    frame: &mut Frame,
+    progress: &RemovalProgress,
+    spinner_idx: usize,
+    theme: &Theme,
+) {
+    let count = progress.total_count;
+    let noun = if count == 1 { "item" } else { "items" };
+    let title = format!("Deleting {count} {noun}…");
+
+    let spinner_char = if theme.env.reduce_motion {
+        "*"
+    } else {
+        match spinner_idx % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        }
+    };
+
+    let pretty_path = prettify_path(&progress.path);
+    let path_line = Line::from(vec![
+        Span::styled(format!("{spinner_char} "), theme.accent_text()),
+        Span::styled(pretty_path, theme.body()),
+    ]);
+
+    let fraction = if progress.total_count > 0 {
+        progress.current_index as f64 / progress.total_count as f64
+    } else {
+        0.0
+    };
+
+    let bar_spans = bar(fraction, 40, theme.p.accent, theme);
+
+    Modal::new(&title)
+        .message(vec![
+            path_line,
+            Line::from(bar_spans),
+            Line::from(vec![Span::styled(
+                format!("{} of {}", progress.current_index, progress.total_count),
+                theme.footnote(),
+            )]),
+        ])
+        .buttons(vec![])
+        .render(frame, frame.area(), theme);
+}
+
+fn render_analyze_outcome_dialog(frame: &mut Frame, report: &RemovalReport, theme: &Theme) {
+    let title = if report.freed_bytes > 0 {
+        "Deletion Complete"
+    } else {
+        "Nothing was deleted"
+    };
+
+    let mut message = vec![Line::from(vec![
+        Span::styled(format_bytes(report.freed_bytes), theme.success()),
+        Span::styled(
+            format!(
+                " freed · {} items permanently deleted.",
+                report.removed_count
+            ),
+            theme.body(),
+        ),
+    ])];
+
+    if !report.failures.is_empty() {
+        message.push(Line::from(""));
+        message.push(Line::from(Span::styled(
+            format!("{} items could not be deleted:", report.failures.len()),
+            theme.danger(),
+        )));
+        for fail in report.failures.iter().take(3) {
+            let pretty = prettify_path(&fail.path);
+            message.push(Line::from(vec![
+                Span::styled("• ", theme.danger()),
+                Span::styled(format!("{pretty}: "), theme.callout()),
+                Span::styled(&fail.error, theme.footnote()),
+            ]));
+        }
+        if report.failures.len() > 3 {
+            message.push(Line::from(Span::styled(
+                format!("… and {} more", report.failures.len() - 3),
+                theme.footnote(),
+            )));
+        }
+    }
+
+    Modal::new(title)
+        .message(message)
+        .buttons(vec![Button::primary("Done (↵)").focused(true)])
+        .render(frame, frame.area(), theme);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +1019,7 @@ mod tests {
             spinner_idx: 1,
             status_notice: None,
             started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
         };
 
         terminal
@@ -734,6 +1053,7 @@ mod tests {
                         size_bytes: 1024,
                         is_dir: true,
                         is_package: false,
+                        selected: false,
                     }],
                     total_bytes: 1024,
                     inaccessible_count: 0,
@@ -757,6 +1077,7 @@ mod tests {
             spinner_idx: 0,
             status_notice: None,
             started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
         };
 
         terminal
@@ -771,5 +1092,88 @@ mod tests {
         assert!(rendered.contains("Documents"));
         assert!(rendered.contains("3 of 10"));
         assert!(rendered.contains("45 files"));
+    }
+
+    #[test]
+    fn test_analyze_selection_and_confirm_dialog() {
+        let mut state = AnalyzeState {
+            root: PathBuf::from("/Users/test"),
+            levels: vec![BrowserLevel {
+                snapshot: FolderSnapshot {
+                    path: PathBuf::from("/Users/test"),
+                    children: vec![
+                        ChildItem {
+                            name: "file1.bin".to_string(),
+                            path: PathBuf::from("/Users/test/file1.bin"),
+                            size_bytes: 1000,
+                            is_dir: false,
+                            is_package: false,
+                            selected: false,
+                        },
+                        ChildItem {
+                            name: "file2.bin".to_string(),
+                            path: PathBuf::from("/Users/test/file2.bin"),
+                            size_bytes: 2000,
+                            is_dir: false,
+                            is_package: false,
+                            selected: false,
+                        },
+                    ],
+                    total_bytes: 3000,
+                    inaccessible_count: 0,
+                    skipped_count: 0,
+                },
+                selected: 0,
+                offset: 0,
+            }],
+            ignore: IgnoreStore::default(),
+            measuring_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_progress: None,
+            spinner_idx: 0,
+            status_notice: None,
+            started_at: Instant::now(),
+            overlay: AnalyzeOverlay::None,
+        };
+
+        // Initially nothing selected
+        assert_eq!(state.items_to_delete().len(), 1); // focused item
+        assert_eq!(state.items_to_delete()[0].name, "file1.bin");
+
+        // Toggle selection with Space
+        state.toggle_current();
+        assert!(state.current_level().unwrap().snapshot.children[0].selected);
+
+        // Select all
+        state.select_all();
+        assert_eq!(state.items_to_delete().len(), 2);
+
+        // Select none
+        state.select_none();
+        assert_eq!(state.items_to_delete().len(), 1); // falls back to focused
+
+        // Open delete confirmation
+        state.open_delete_confirmation();
+        assert!(matches!(
+            state.overlay,
+            AnalyzeOverlay::ConfirmDelete { .. }
+        ));
+
+        // Render with dialog open
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::new();
+
+        terminal
+            .draw(|f| {
+                render_analyze(f, &state, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+        assert!(rendered.contains("Delete file1.bin?"));
+        assert!(rendered.contains("Cancel"));
+        assert!(rendered.contains("Delete"));
     }
 }

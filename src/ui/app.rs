@@ -16,7 +16,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use super::analyze::{AnalyzeState, render_analyze};
+use super::analyze::{AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, render_analyze};
 use super::path_list_editor::{
     PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
 };
@@ -35,7 +35,7 @@ use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{PurgeScanEvent, Purger};
 use crate::core::safety::Safety;
-use crate::core::scanner::{CategoryScan, CategoryScanner, ScanProgressEvent};
+use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
 use crate::core::stores::{Config, IgnoreStore};
 
 pub enum Screen {
@@ -215,6 +215,11 @@ impl App {
                                     progress: prog,
                                     spinner_idx: self.removal_spinner,
                                 };
+                            } else if let Screen::Analyze(ref mut analyze) = self.screen {
+                                analyze.overlay = AnalyzeOverlay::Deleting {
+                                    progress: prog,
+                                    spinner_idx: self.removal_spinner,
+                                };
                             }
                         }
                         RemovalMessage::Finished(report) => {
@@ -224,6 +229,9 @@ impl App {
                                     group.items.retain(|item| !item.selected);
                                 }
                                 select.overlay = ModalOverlay::Outcome(report);
+                            } else if let Screen::Analyze(ref mut analyze) = self.screen {
+                                analyze.handle_removal_finished(&report);
+                                analyze.overlay = AnalyzeOverlay::Outcome(report);
                             }
                             self.removal_rx = None;
                             break;
@@ -484,6 +492,45 @@ impl App {
                     return;
                 }
 
+                // Modal Overlays
+                match state.overlay {
+                    AnalyzeOverlay::ConfirmDelete { ref mut button, .. } => {
+                        match code {
+                            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                                *button = match button {
+                                    AnalyzeConfirmButton::Cancel => AnalyzeConfirmButton::Delete,
+                                    AnalyzeConfirmButton::Delete => AnalyzeConfirmButton::Cancel,
+                                };
+                            }
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                state.overlay = AnalyzeOverlay::None;
+                            }
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                self.start_analyze_removal();
+                            }
+                            KeyCode::Enter => {
+                                if *button == AnalyzeConfirmButton::Delete {
+                                    self.start_analyze_removal();
+                                } else {
+                                    state.overlay = AnalyzeOverlay::None;
+                                }
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
+                    AnalyzeOverlay::Deleting { .. } => {
+                        return;
+                    }
+                    AnalyzeOverlay::Outcome(_) => {
+                        if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
+                            state.overlay = AnalyzeOverlay::None;
+                        }
+                        return;
+                    }
+                    AnalyzeOverlay::None => {}
+                }
+
                 match code {
                     KeyCode::Up | KeyCode::Char('k') => state.previous(),
                     KeyCode::Down | KeyCode::Char('j') => state.next(),
@@ -491,13 +538,22 @@ impl App {
                     KeyCode::PageDown => state.page_down(),
                     KeyCode::Home => state.move_to_start(),
                     KeyCode::End => state.move_to_end(),
+                    KeyCode::Char(' ') => state.toggle_current(),
+                    KeyCode::Char('a') | KeyCode::Char('A') => state.select_all(),
+                    KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
+                    KeyCode::Char('d')
+                    | KeyCode::Char('D')
+                    | KeyCode::Delete
+                    | KeyCode::Backspace => {
+                        state.open_delete_confirmation();
+                    }
                     KeyCode::Enter | KeyCode::Right => {
                         state.enter_selected();
                     }
                     KeyCode::Char('o') | KeyCode::Char('O') => {
                         state.reveal_in_finder();
                     }
-                    KeyCode::Left | KeyCode::Backspace => {
+                    KeyCode::Left => {
                         if !state.go_up() {
                             self.screen = Screen::Workspace(WorkspaceState::new());
                         }
@@ -624,10 +680,13 @@ impl App {
             ],
             Screen::Analyze(_) => vec![
                 Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("␣", "Toggle select"),
+                Hint::new("A / N", "Select all / none"),
+                Hint::new("D / ⌫", "Delete selected"),
                 Hint::new("↵ / →", "Enter folder"),
-                Hint::new("⎋ / ←", "Up one level"),
+                Hint::new("←", "Up one level"),
                 Hint::new("O", "Reveal in Finder"),
-                Hint::new("q", "Back"),
+                Hint::new("q", "Quit explore"),
                 Hint::new("?", "Toggle help"),
             ],
             Screen::SystemStatus(_) => vec![
@@ -678,6 +737,48 @@ impl App {
                 let tx_prog = tx.clone();
                 let report = Cleaner::remove_items_with_progress(
                     &selected_items,
+                    &ignore,
+                    Some(move |prog| {
+                        let _ = tx_prog.send(RemovalMessage::Progress(prog));
+                    }),
+                );
+                let _ = tx.send(RemovalMessage::Finished(report));
+            });
+
+            self.removal_rx = Some(rx);
+        }
+    }
+
+    fn start_analyze_removal(&mut self) {
+        if let Screen::Analyze(ref mut analyze) = self.screen {
+            let items_to_remove = analyze.items_to_delete();
+            if items_to_remove.is_empty() {
+                analyze.overlay = AnalyzeOverlay::None;
+                return;
+            }
+
+            let scan_items: Vec<ScanItem> = items_to_remove
+                .into_iter()
+                .map(|child| ScanItem::new(child.path, child.size_bytes, true, false))
+                .collect();
+
+            let initial_prog = RemovalProgress {
+                current_index: 1,
+                total_count: scan_items.len(),
+                path: scan_items[0].path.clone(),
+            };
+            analyze.overlay = AnalyzeOverlay::Deleting {
+                progress: initial_prog,
+                spinner_idx: 0,
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let ignore = self.ignore.clone();
+
+            thread::spawn(move || {
+                let tx_prog = tx.clone();
+                let report = Cleaner::remove_items_with_progress(
+                    &scan_items,
                     &ignore,
                     Some(move |prog| {
                         let _ = tx_prog.send(RemovalMessage::Progress(prog));

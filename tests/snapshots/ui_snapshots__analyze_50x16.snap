@@ -4,8 +4,8 @@ expression: output
 ---
  Documents                     4.1 KB  ·  2 items
 ──────────────────────────────────────────────────
-   ▌ · file.bin                          4.1 KB
-     ▸ subdir/                            0 B ›
+   ▌ ○ · file.bin                        4.1 KB
+     ○ ▸ subdir/                          0 B ›
 
 
 
@@ -17,4 +17,4 @@ expression: output
 
 
 ──────────────────────────────────────────────────
-  ?  Help                                Open  →
+  ?  Help                                Open  ↵

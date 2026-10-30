@@ -160,6 +160,7 @@ fn snapshot_analyze() {
                         size_bytes: 4096,
                         is_dir: false,
                         is_package: false,
+                        selected: false,
                     },
                     taert::ui::analyze::ChildItem {
                         name: "subdir".to_string(),
@@ -167,6 +168,7 @@ fn snapshot_analyze() {
                         size_bytes: 0,
                         is_dir: true,
                         is_package: false,
+                        selected: false,
                     },
                 ],
                 total_bytes: 4096,
@@ -183,6 +185,7 @@ fn snapshot_analyze() {
         spinner_idx: 0,
         status_notice: None,
         started_at: std::time::Instant::now(),
+        overlay: taert::ui::analyze::AnalyzeOverlay::None,
     };
 
     for &(w, h, label) in SIZES {

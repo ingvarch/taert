@@ -18,7 +18,7 @@ It finds caches, system junk, and project build artifacts, giving you full, tran
   - Toggle selections (`Space`), select all (`A`), or clear (`N`).
   - Modal sheets with backdrop dimming and drop shadows.
   - Interactive help sheet (`?`) accessible on all screens.
-  - Read-only storage directory analyzer with proportional usage bars.
+  - Interactive storage directory analyzer with item selection, live progress bar, and safe deletion.
 - **Unattended & Script-Friendly**: Complete support for `--dry-run`, `--json`, and non-interactive `--plain` modes.
 - **Zero Telemetry**: Free, open-source, and private.
 
@@ -84,9 +84,10 @@ taert optimize
 | `↑` / `↓` or `k` / `j` | Move selection cursor |
 | `Space` | Toggle focused item on/off |
 | `A` / `N` | Select all visible / clear selection |
+| `D` / `Backspace` | Delete selected item(s) with confirmation |
 | `/` | Live search filter |
 | `←` / `→` | Scroll long path in footer / navigate directories |
-| `Enter` | Review selection & proceed to confirmation |
+| `Enter` | Review selection & proceed to confirmation / Enter folder |
 | `?` | Toggle interactive keyboard shortcuts sheet |
 | `Esc` / `q` | Cancel / Go back / Quit |
 
