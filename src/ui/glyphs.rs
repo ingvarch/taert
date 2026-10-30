@@ -59,7 +59,7 @@ impl Glyphs {
             search: "⌕",
             bullet: "●",
             bar_fill: "━",
-            bar_track: "━",
+            bar_track: "─",
             gauge_blocks: &["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"],
             spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
             key_up_down: "↑↓",

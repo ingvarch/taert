@@ -14,9 +14,11 @@ use crate::ui::theme::Theme;
 pub struct ListRow<'a> {
     pub leading: Option<Span<'a>>,
     pub title: Vec<Span<'a>>,
+    pub meta: Option<Span<'a>>,
     pub detail: Option<Span<'a>>,
     pub bar: Option<f64>,
     pub chevron: bool,
+    pub reserve_chevron: bool,
     pub selected: bool,
 }
 
@@ -25,15 +27,22 @@ impl<'a> ListRow<'a> {
         Self {
             leading: None,
             title,
+            meta: None,
             detail: None,
             bar: None,
             chevron: false,
+            reserve_chevron: false,
             selected: false,
         }
     }
 
     pub fn leading(mut self, leading: Span<'a>) -> Self {
         self.leading = Some(leading);
+        self
+    }
+
+    pub fn meta(mut self, meta: Span<'a>) -> Self {
+        self.meta = Some(meta);
         self
     }
 
@@ -49,6 +58,11 @@ impl<'a> ListRow<'a> {
 
     pub fn chevron(mut self, chevron: bool) -> Self {
         self.chevron = chevron;
+        self
+    }
+
+    pub fn reserve_chevron(mut self, reserve: bool) -> Self {
+        self.reserve_chevron = reserve;
         self
     }
 
@@ -82,17 +96,37 @@ impl<'a> ListRow<'a> {
         }
 
         // Calculate right side width
-        let chevron_width = if self.chevron { 2 } else { 0 }; // " ›"
+        let chevron_width = if self.chevron || self.reserve_chevron {
+            2
+        } else {
+            0
+        }; // " ›" or "  "
         let detail_width = self.detail.as_ref().map(|d| d.content.width()).unwrap_or(0);
-        let bar_width = if self.bar.is_some() && width >= 100 {
-            14
+
+        let show_bar_graphic = self.bar.is_some() && width >= 115;
+        let show_percentage = self.bar.is_some() && width >= 95;
+        let bar_total_width = if show_bar_graphic {
+            8 + 1 + 6 + 2 // bar(8) + space(1) + pct(6) + pad(2) = 17
+        } else if show_percentage {
+            6 + 2 // pct(6) + pad(2) = 8
         } else {
             0
         };
-        let right_total = chevron_width + detail_width + bar_width;
+
+        let show_meta = self.meta.is_some() && width >= 85;
+        let meta_width = if show_meta {
+            self.meta
+                .as_ref()
+                .map(|m| m.content.width() + 2)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let right_total = chevron_width + detail_width + bar_total_width + meta_width;
 
         let left_fixed = 2 + 3; // bar (2) + leading (3)
-        let avail_for_title = width.saturating_sub(left_fixed + right_total + 2);
+        let avail_for_title = width.saturating_sub(left_fixed + right_total + 1);
 
         // 3. Title spans with truncation if needed
         let mut current_title_w = 0;
@@ -119,26 +153,50 @@ impl<'a> ListRow<'a> {
             spans.push(Span::raw(" ".repeat(pad)));
         }
 
-        // 5. Optional bar (Wide)
-        if let Some(frac) = self.bar
-            && bar_width > 0
-        {
-            let b = crate::ui::components::gauge::bar(frac, 12, theme.p.accent, theme);
-            spans.extend(b);
+        // 5. Meta (Date)
+        if show_meta && let Some(meta) = &self.meta {
+            spans.push(Span::styled(meta.content.to_string(), meta.style));
             spans.push(Span::raw("  "));
         }
 
-        // 6. Detail
+        // 6. Optional bar / percentage
+        if let Some(frac) = self.bar {
+            let pct = (frac * 100.0).clamp(0.0, 100.0);
+            let pct_str = if pct >= 99.95 && frac >= 0.999 {
+                "100.0%".to_string()
+            } else if pct >= 0.05 {
+                format!("{:>5.1}%", pct)
+            } else if frac > 0.0 {
+                "<0.1%".to_string()
+            } else {
+                " 0.0%".to_string()
+            };
+
+            if show_bar_graphic {
+                let b = crate::ui::components::gauge::bar(frac, 8, theme.p.accent, theme);
+                spans.extend(b);
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(pct_str, theme.footnote()));
+                spans.push(Span::raw("  "));
+            } else if show_percentage {
+                spans.push(Span::styled(pct_str, theme.footnote()));
+                spans.push(Span::raw("  "));
+            }
+        }
+
+        // 7. Detail
         if let Some(detail) = &self.detail {
             spans.push(Span::styled(detail.content.to_string(), detail.style));
         }
 
-        // 7. Chevron
+        // 8. Chevron
         if self.chevron {
             spans.push(Span::styled(
                 format!(" {}", theme.g.chevron),
                 theme.footnote(),
             ));
+        } else if self.reserve_chevron {
+            spans.push(Span::raw("  "));
         }
 
         // If selected, apply selection background style to all spans

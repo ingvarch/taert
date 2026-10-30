@@ -2,7 +2,7 @@
 source: tests/components_snapshots.rs
 expression: output
 ---
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────
 ████████████████████████░░░░░░░░░░░░░░░░
 
 ● Used 370 GB    ● Purgeable 5.7 GB    ● Free 118 GB

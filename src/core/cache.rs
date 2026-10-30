@@ -20,6 +20,7 @@ pub struct ChildItem {
     pub is_dir: bool,
     pub is_package: bool,
     pub selected: bool,
+    pub created: Option<SystemTime>,
 }
 
 impl ChildItem {
@@ -321,6 +322,7 @@ mod tests {
                 is_dir: false,
                 is_package: false,
                 selected: false,
+                created: None,
             }],
             total_bytes: 512,
             inaccessible_count: 0,

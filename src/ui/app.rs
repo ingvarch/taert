@@ -552,6 +552,7 @@ impl App {
                     KeyCode::Char(' ') => state.toggle_current(),
                     KeyCode::Char('a') | KeyCode::Char('A') => state.select_all(),
                     KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
+                    KeyCode::Char('s') | KeyCode::Char('S') => state.cycle_sort(),
                     KeyCode::Char('d')
                     | KeyCode::Char('D')
                     | KeyCode::Delete
@@ -696,6 +697,7 @@ impl App {
                 Hint::new("↑↓ / jk", "Navigate"),
                 Hint::new("␣", "Toggle select"),
                 Hint::new("A / N", "Select all / none"),
+                Hint::new("S", "Cycle sort (Size/Date/Name)"),
                 Hint::new("D / ⌫", "Delete selected"),
                 Hint::new("↵ / →", "Enter folder"),
                 Hint::new("←", "Up one level"),

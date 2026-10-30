@@ -161,6 +161,7 @@ fn snapshot_analyze() {
                         is_dir: false,
                         is_package: false,
                         selected: false,
+                        created: None,
                     },
                     taert::ui::analyze::ChildItem {
                         name: "subdir".to_string(),
@@ -169,6 +170,7 @@ fn snapshot_analyze() {
                         is_dir: true,
                         is_package: false,
                         selected: false,
+                        created: None,
                     },
                 ],
                 total_bytes: 4096,
@@ -189,6 +191,7 @@ fn snapshot_analyze() {
         cache: std::sync::Arc::new(std::sync::RwLock::new(
             taert::core::cache::StorageCache::new(),
         )),
+        sort_order: taert::ui::analyze::SortOrder::default(),
     };
 
     for &(w, h, label) in SIZES {

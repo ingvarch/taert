@@ -2,6 +2,7 @@ pub mod bytes;
 pub mod cache;
 pub mod catalog;
 pub mod cleaner;
+pub mod date_utils;
 pub mod path_utils;
 pub mod profiler;
 pub mod projects_store;
