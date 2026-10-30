@@ -11,7 +11,7 @@ jobs:
     name: Check, Test, Format, Clippy
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -21,3 +21,36 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run Tests
         run: cargo test --all-targets --all-features
+
+  snapshot:
+    name: Release Snapshot
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      # A release refuses a dirty tree and a snapshot does not check, so check
+      # here that the steps above left nothing untracked.
+      - name: Tree Is Clean
+        run: |
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version-file: .tool-versions
+          args: release --snapshot --clean
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # A snapshot skips notarizing, so sign the macOS binaries ad hoc with the
+      # same signer to find a binary it cannot sign before a tag does.
+      - name: Sign macOS Binaries Ad Hoc
+        run: |
+          for binary in dist/taert_*-apple-darwin/taert; do
+            go run github.com/anchore/quill/cmd/quill@v0.7.1 sign --ad-hoc "$binary"
+          done

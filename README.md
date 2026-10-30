@@ -17,6 +17,12 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 
+## Install
+
+```bash
+brew install ingvarch/tap/taert
+```
+
 ## Usage
 
 ```bash
@@ -31,7 +37,7 @@ taert analyze ~/Downloads
 
 For subcommands, keyboard shortcuts, and scripting options, see [docs/usage.md](docs/usage.md).
 
-## Quick start
+## Build from source
 
 You need Rust and macOS 11+, see [docs/development.md](docs/development.md#prerequisites).
 
@@ -48,6 +54,7 @@ cargo build --release
 - [Usage](docs/usage.md): interactive workspace, CLI subcommands, keybindings
 - [Architecture](docs/architecture.md): safety engine, APFS block measurement, smart storage cache
 - [Configuration](docs/configuration.md): appearance, accessibility flags, ignore list
+- [Releasing](docs/releasing.md): the release workflow and its secrets
 
 ## License
 

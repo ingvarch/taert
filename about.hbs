@@ -1,0 +1,16 @@
+Third-party licenses in taert
+
+taert includes the crates below. Each license text follows the list of crates
+it covers.
+{{#each licenses}}
+
+================================================================================
+{{name}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

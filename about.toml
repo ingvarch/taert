@@ -1,0 +1,13 @@
+# Licenses taert may link. cargo-about fails on any other, and picks the first
+# match from this list when a crate offers a choice. MPL-2.0 is for option-ext,
+# which dirs pulls in.
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib", "MPL-2.0"]
+
+# The release targets in .goreleaser.yaml.
+targets = [
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
