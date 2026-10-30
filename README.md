@@ -145,10 +145,6 @@ taert ignore remove ~/Projects/important-project
 
 ---
 
-## Acknowledgements
-
-Path catalogs and safety rules are inspired by and ported from [PureMac CLI](https://github.com/momenbasel/PureMac) under the MIT License (see `NOTICE`).
-
 ## License
 
 MIT © 2026 Igor (ingvarch)
