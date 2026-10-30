@@ -1,34 +1,39 @@
 # taert
 
-> From Icelandic *tært*: "clear, crystal clean".
+[![CI](https://github.com/ingvarch/taert/actions/workflows/ci.yml/badge.svg)](https://github.com/ingvarch/taert/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/ingvarch/taert)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-dea584?logo=rust&logoColor=black)](Cargo.toml)
+[![macOS](https://img.shields.io/badge/macOS-11+-000000?logo=apple&logoColor=white)](https://apple.com)
 
-**taert** is a fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with **Rust** and **Ratatui**.
+A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with Rust and Ratatui. It finds caches, system junk, and project build artifacts, giving you transparent control over what gets deleted permanently.
 
-It finds caches, system junk, and project build artifacts, giving you full, transparent control over what gets deleted permanently.
+## Features
 
----
+- Apple Human Interface Guidelines-inspired TUI with adaptive split-view on wide terminals (≥100 columns)
+- Safety engine protecting system roots, credentials, symlinks, and iCloud dataless files
+- Accurate APFS space accounting via allocated blocks (`st_blocks * 512`) with hardlink deduplication
+- Interactive storage browser with streaming progress, selection, deletion, and tree-aggregating cache
+- Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
+- Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
+- Zero telemetry, zero analytics, private and open-source
 
-## Highlights
+## Usage
 
-- **Safety First**: Deep system root protection (`/System`, `/Library`, `/Applications`), credential isolation (`.ssh`, `.aws`, `.gnupg`), protection of iCloud / CloudStorage / APFS dataless files, and symlink rejection.
-- **Accurate Space Accounting**: Measures actual allocated APFS storage blocks (`st_blocks * 512`), deduping hardlinks.
-- **Interactive TUI**: Apple Human Interface Guidelines (HIG)-inspired keyboard workspace powered by Ratatui:
-  - Adaptive two-column split view on wide terminals (≥100 columns).
-  - Live search filtering (`/`).
-  - Toggle selections (`Space`), select all (`A`), or clear (`N`).
-  - Modal sheets with backdrop dimming and drop shadows.
-  - Interactive help sheet (`?`) accessible on all screens.
-  - Interactive storage directory analyzer with item selection, live progress bar, and safe deletion.
-- **Unattended & Script-Friendly**: Complete support for `--dry-run`, `--json`, and non-interactive `--plain` modes.
-- **Zero Telemetry**: Free, open-source, and private.
+```bash
+# Launch the interactive terminal workspace
+taert
 
----
+# Or run direct non-interactive cleanups
+taert clean dev --dry-run
+taert purge ~/Projects --older-than 30 --json
+taert analyze ~/Downloads
+```
 
-## Installation
+For subcommands, keyboard shortcuts, and scripting options, see [docs/usage.md](docs/usage.md).
 
-### From Source
+## Quick start
 
-Requires macOS 11+ and Rust toolchain:
+You need Rust and macOS 11+, see [docs/development.md](docs/development.md#prerequisites).
 
 ```bash
 git clone https://github.com/ingvarch/taert.git
@@ -37,114 +42,13 @@ cargo build --release
 ./target/release/taert
 ```
 
-### Universal Binary Build (Apple Silicon & Intel)
+## Documentation
 
-```bash
-./scripts/build-universal.sh
-./dist/taert
-```
-
----
-
-## Quick Start
-
-Launch the interactive workspace:
-```bash
-taert
-```
-
-Or jump straight to a specific action:
-
-```bash
-# Scan developer tool caches
-taert clean dev
-
-# Scan system junk & logs
-taert clean junk
-
-# Scan AI tool caches (Ollama, LM Studio, Cursor)
-taert clean ai
-
-# Purge project artifacts (node_modules, target, .venv) in a directory
-taert purge ~/Projects
-
-# Browse disk usage interactively (read-only)
-taert analyze ~/Projects
-
-# View factual RAM pressure & APFS disk state
-taert optimize
-```
-
----
-
-## Keybindings (Interactive TUI)
-
-| Key | Action |
-|---|---|
-| `↑` / `↓` or `k` / `j` | Move selection cursor |
-| `Space` | Toggle focused item on/off |
-| `A` / `N` | Select all visible / clear selection |
-| `D` / `Backspace` | Delete selected item(s) with confirmation |
-| `/` | Live search filter |
-| `←` / `→` | Scroll long path in footer / navigate directories |
-| `Enter` | Review selection & proceed to confirmation / Enter folder |
-| `?` | Toggle interactive keyboard shortcuts sheet |
-| `Esc` / `q` | Cancel / Go back / Quit |
-
----
-
-## Appearance & Accessibility
-
-taert automatically detects terminal capabilities, system appearance, and user preferences:
-
-- **Apple HIG Design**: Native semantic colors, split-views on wide terminals (≥100 columns), drop-shadow sheets, and clean typography.
-- **Dark & Light Modes**: Automatically respects host terminal appearance or configure manually:
-  ```bash
-  taert config --appearance dark   # force dark mode
-  taert config --appearance light  # force light mode
-  taert config --appearance auto   # detect automatically
-  ```
-- **Environment Overrides**:
-  - `TAERT_APPEARANCE=dark|light`: Override appearance mode for the current session.
-  - `TAERT_ASCII=1`: Replace Unicode glyphs with clean ASCII equivalents.
-  - `TAERT_REDUCE_MOTION=1`: Disable spinners and animated progress indicators for reduced motion accessibility.
-  - `NO_COLOR=1`: Standard no-color mode with high-contrast text formatting.
-
----
-
-## Scripting & Automation
-
-- **`--dry-run`**: Preview scan results without modifying any files.
-  ```bash
-  taert clean dev --dry-run
-  ```
-- **`--json`**: Structured JSON output for scripts.
-  ```bash
-  taert purge ~/Projects --json
-  ```
-- **`--force`**: Non-interactive unattended cleanup of default-selected items (previews recommended first).
-  ```bash
-  taert purge ~/Projects --older-than 30 --force
-  ```
-- **`--plain`**: Text mode without TUI.
-  ```bash
-  taert clean junk --plain
-  ```
-
----
-
-## Protecting Paths (Ignore List)
-
-You can prevent any directory from ever being scanned or cleaned:
-
-```bash
-taert ignore add ~/Projects/important-project
-taert ignore list
-taert ignore remove ~/Projects/important-project
-```
-
----
+- [Development](docs/development.md): local setup, checks, universal binary, project structure
+- [Usage](docs/usage.md): interactive workspace, CLI subcommands, keybindings
+- [Architecture](docs/architecture.md): safety engine, APFS block measurement, smart storage cache
+- [Configuration](docs/configuration.md): appearance, accessibility flags, ignore list
 
 ## License
 
-MIT © 2026 Igor (ingvarch)
+[MIT](LICENSE)
