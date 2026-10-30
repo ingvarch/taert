@@ -1,0 +1,13 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+
+
+
+
+                                   ✓
+
+                           Nothing to clean
+                     Your caches are already tidy.

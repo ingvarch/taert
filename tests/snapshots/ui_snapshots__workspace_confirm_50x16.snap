@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert              118.6 GB available · 24% free
+──────────────────────────────────────────────────
+   Your Mac, crystal clean.
+  ╭────────────────────────────────────────────╮
+  │ Explore your home folder?                  │
+  │                                            │
+  │ Measuring every folder can take a few      │
+  │ minutes.                                   │
+  │                                            │
+  │                                            │
+  │                           Cancel    Start  │
+  │                    Enter select   Esc back │
+  ╰────────────────────────────────────────────╯
+     SETTINGS
+──────────────────────────────────────────────────
+  ?  Help                                Open  ↵

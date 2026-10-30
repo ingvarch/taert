@@ -121,8 +121,8 @@ fn test_render_workspace_project_cleanup_dialog() {
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
     assert!(rendered_text.contains("Scan your project folders?"));
-    assert!(rendered_text.contains("Searching 6 folders for build artifacts can take a"));
-    assert!(rendered_text.contains("few minutes."));
+    assert!(rendered_text.contains("Searching 6 folders for build artifacts"));
+    assert!(rendered_text.contains("minutes."));
     assert!(rendered_text.contains("Cancel"));
     assert!(rendered_text.contains("Start"));
 }
@@ -144,8 +144,8 @@ fn test_render_select_screen() {
 
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
-    assert!(rendered_text.contains("Choose Test Scan"));
-    assert!(rendered_text.contains("Cargo"));
+    assert!(rendered_text.contains("Test Scan"));
+    assert!(rendered_text.contains("CARGO"));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn test_render_review_screen() {
 
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
-    assert!(rendered_text.contains("Confirm Permanent Deletion"));
+    assert!(rendered_text.contains("permanently deleted"));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn test_render_analyze_screen() {
 
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
-    assert!(rendered_text.contains("Space Explorer"));
+    assert!(rendered_text.contains("Explore"));
     assert!(rendered_text.contains("subdir/"));
     assert!(rendered_text.contains("file.bin"));
 }
@@ -211,12 +211,12 @@ fn test_render_system_status_screen() {
 
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
-    assert!(rendered_text.contains("This Mac"));
-    assert!(rendered_text.contains("Memory"));
-    assert!(rendered_text.contains("Storage"));
-    assert!(rendered_text.contains("Free now"));
-    assert!(rendered_text.contains("Total"));
-    assert!(rendered_text.contains("System status reflects live macOS metrics"));
+    assert!(rendered_text.contains("System status"));
+    assert!(rendered_text.contains("MEMORY"));
+    assert!(rendered_text.contains("STORAGE"));
+    assert!(rendered_text.contains("Free"));
+    assert!(rendered_text.contains("of"));
+    assert!(rendered_text.contains("Managed space may include purgeable"));
 }
 
 #[test]
@@ -323,5 +323,5 @@ fn test_render_progress_screen_with_live_folders() {
     assert!(rendered.contains("Scanning ~/Repos"));
     assert!(rendered.contains("~/Repos/ingvarch/taert/target"));
     assert!(rendered.contains("Found 1 item · 50.0 MB"));
-    assert!(rendered.contains("cancel"));
+    assert!(rendered.contains("Cancel"));
 }

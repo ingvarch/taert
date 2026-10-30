@@ -1,15 +1,19 @@
 //! Interactive Path List Editor.
 //! Used for editing Protected Paths (Ignore list) and Project Folders inside the TUI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::dialog::{Dialog, DialogButton, DialogHint, MessageAlignment};
+use super::components::button::Button;
+use super::components::chrome::AppChrome;
+use super::components::empty::EmptyState;
+use super::components::hints::Hint;
+use super::components::list::{ListRow, path_spans};
+use super::components::modal::Modal;
 use super::theme::Theme;
 use crate::core::path_utils::{prettify_path, standardize_path};
 use crate::core::projects_store::ProjectFoldersStore;
@@ -162,124 +166,108 @@ impl PathListEditorState {
 }
 
 pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, theme: &Theme) {
-    let area = frame.area();
+    let count_text = format!("{} configured", state.items.len());
+    let mut chrome =
+        AppChrome::new(vec!["taert", "Preferences", state.title()]).status(Line::from(count_text));
 
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(
-            format!(" {} ", state.title()),
-            theme.title,
-        )]))
-        .title_alignment(Alignment::Left);
+    match state.mode {
+        PathListMode::Normal => {
+            chrome = chrome.hints(vec![
+                Hint::new(theme.g.key_up_down, "Move"),
+                Hint::new("A", "Add"),
+                Hint::new("D", "Remove"),
+                Hint::new(theme.g.key_esc, "Back"),
+                Hint::new("?", "Help"),
+            ]);
+        }
+        PathListMode::Adding(_) => {
+            chrome = chrome.hints(vec![
+                Hint::new(theme.g.key_enter, "Add"),
+                Hint::new(theme.g.key_esc, "Cancel"),
+            ]);
+        }
+        PathListMode::ConfirmRemove(_) => {
+            chrome = chrome.hints(vec![
+                Hint::new(theme.g.key_enter, "Remove"),
+                Hint::new(theme.g.key_esc, "Cancel"),
+            ]);
+        }
+    }
 
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
+    let inner = chrome.render(frame, theme);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // Subtitle
-            Constraint::Min(6),    // Path list
-            Constraint::Length(1), // Divider
-            Constraint::Length(1), // Footer keyhints
+            Constraint::Min(4),    // Path list or Empty state
+            Constraint::Length(2), // + - Action row
         ])
-        .split(inner_area);
+        .split(inner);
 
     let subtitle = match state.kind {
         PathListKind::ProtectedPaths => "Paths excluded from all cleaning and purge scans",
         PathListKind::ProjectFolders => "Folders scanned by project artifact purger",
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(subtitle, theme.muted))),
+        Paragraph::new(Line::from(Span::styled(subtitle, theme.callout()))),
         chunks[0],
     );
 
-    // List rendering
-    let list_area_height = chunks[1].height as usize;
-    let scroll_offset = if state.items.len() > list_area_height && list_area_height > 0 {
-        let half = list_area_height / 2;
-        let max_offset = state.items.len().saturating_sub(list_area_height);
-        state.selected_index.saturating_sub(half).min(max_offset)
-    } else {
-        0
-    };
-
-    let mut list_lines = Vec::new();
-    for (idx, path_str) in state
-        .items
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(list_area_height)
-    {
-        let is_selected = idx == state.selected_index;
-        let cursor = if is_selected { "› " } else { "  " };
-
-        let cursor_style = if is_selected {
-            theme.cursor
-        } else {
-            theme.muted
-        };
-        let row_style = if is_selected {
-            theme.focused_row
-        } else {
-            theme.normal
-        };
-
-        let pretty = prettify_path(&PathBuf::from(path_str));
-        list_lines.push(Line::from(vec![
-            Span::styled(cursor, cursor_style),
-            Span::styled(pretty, row_style),
-        ]));
-    }
-
     if state.items.is_empty() {
-        list_lines.push(Line::from(Span::styled(
-            "  (no paths configured, press A to add)",
-            theme.muted,
-        )));
+        let (empty_title, empty_msg) = match state.kind {
+            PathListKind::ProtectedPaths => ("No protected paths", "Press A to add a path."),
+            PathListKind::ProjectFolders => ("No project folders", "Press A to add a folder."),
+        };
+        EmptyState::new(theme.g.folder, empty_title, empty_msg).render(frame, chunks[1], theme);
+    } else {
+        let list_area_height = chunks[1].height as usize;
+        let scroll_offset = if state.items.len() > list_area_height && list_area_height > 0 {
+            let half = list_area_height / 2;
+            let max_offset = state.items.len().saturating_sub(list_area_height);
+            state.selected_index.saturating_sub(half).min(max_offset)
+        } else {
+            0
+        };
+
+        let mut lines = Vec::new();
+        for (idx, path_str) in state
+            .items
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(list_area_height)
+        {
+            let is_selected = idx == state.selected_index;
+            let max_path_len = (chunks[1].width as usize).saturating_sub(8);
+            let row = ListRow::new(path_spans(Path::new(path_str), max_path_len, theme))
+                .leading(Span::styled(theme.g.folder, theme.footnote()))
+                .selected(is_selected);
+            lines.push(row.render_line(chunks[1].width as usize, theme));
+        }
+        frame.render_widget(Paragraph::new(lines), chunks[1]);
     }
 
-    frame.render_widget(Paragraph::new(list_lines), chunks[1]);
-
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[2]);
-
-    let footer_text = match state.mode {
-        PathListMode::Normal => Line::from(vec![
-            Span::styled("↑↓ ", theme.footer_key),
-            Span::styled("move  ", theme.footer_desc),
-            Span::styled("A ", theme.footer_key),
-            Span::styled("add  ", theme.footer_desc),
-            Span::styled("D ", theme.footer_key),
-            Span::styled("remove  ", theme.footer_desc),
-            Span::styled("Esc/q ", theme.footer_key),
-            Span::styled("back", theme.footer_desc),
-        ]),
-        PathListMode::Adding(_) => Line::from(vec![
-            Span::styled("Enter ", theme.footer_key),
-            Span::styled("confirm add  ", theme.footer_desc),
-            Span::styled("Esc ", theme.footer_key),
-            Span::styled("cancel", theme.footer_desc),
-        ]),
-        PathListMode::ConfirmRemove(_) => Line::from(vec![
-            Span::styled("Enter/Y ", theme.footer_key),
-            Span::styled("confirm remove  ", theme.footer_desc),
-            Span::styled("Esc/N ", theme.footer_key),
-            Span::styled("cancel", theme.footer_desc),
-        ]),
+    // Action row
+    let add_style = theme.accent_text();
+    let remove_style = if !state.items.is_empty() {
+        theme.accent_text()
+    } else {
+        theme.footnote()
     };
-    frame.render_widget(Paragraph::new(footer_text), chunks[3]);
+    let action_line = Line::from(vec![
+        Span::styled("  + ", add_style),
+        Span::styled("Add path (a)    ", add_style),
+        Span::styled("− ", remove_style),
+        Span::styled("Remove selected (d)", remove_style),
+    ]);
+    frame.render_widget(Paragraph::new(action_line), chunks[2]);
 
     // Modal input for Adding path
     if let PathListMode::Adding(ref input) = state.mode {
         render_input_dialog(
             frame,
-            " Add path ",
+            state.kind,
             input,
             state.error_message.as_deref(),
             theme,
@@ -296,28 +284,41 @@ pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, t
 
 fn render_input_dialog(
     frame: &mut Frame,
-    title: &str,
+    kind: PathListKind,
     input: &str,
     err: Option<&str>,
     theme: &Theme,
 ) {
-    let mut message = vec![Line::from(vec![
-        Span::styled("Path: ", theme.muted),
-        Span::styled(input, theme.normal),
-        Span::styled("█", theme.accent),
-    ])];
+    let title = match kind {
+        PathListKind::ProtectedPaths => "Add Protected Path",
+        PathListKind::ProjectFolders => "Add Project Folder",
+    };
+    let cursor_char = "▏";
+    let mut msg = vec![
+        Line::from(vec![
+            Span::styled("Path:  ", theme.headline()),
+            Span::styled(input, theme.body()),
+            Span::styled(cursor_char, theme.accent_text()),
+        ]),
+        Line::from(Span::styled("─".repeat(34), theme.separator())),
+    ];
 
     if let Some(e) = err {
-        message.push(Line::from(Span::styled(e.to_string(), theme.error)));
+        msg.push(Line::from(Span::styled(e, theme.body().fg(theme.p.red))));
     }
 
-    Dialog::new(title)
-        .with_message(message)
-        .with_hints(vec![
-            DialogHint::new("Enter", "confirm"),
-            DialogHint::new("Esc", "cancel"),
+    Modal::new(title)
+        .message(msg)
+        .buttons(vec![
+            Button::new("Cancel (esc)"),
+            Button::primary("Add (↵)"),
         ])
-        .with_alignment(MessageAlignment::Leading)
+        .hints(Line::from(vec![
+            Span::styled(theme.g.key_enter, theme.callout()),
+            Span::styled(" Add   ", theme.footnote()),
+            Span::styled(theme.g.key_esc, theme.callout()),
+            Span::styled(" Cancel", theme.footnote()),
+        ]))
         .render(frame, frame.area(), theme);
 }
 
@@ -326,17 +327,17 @@ fn render_remove_dialog(frame: &mut Frame, path_str: &str, theme: &Theme) {
     let title = format!("Remove {pretty}?");
     let message = format!("Stop tracking {pretty}?");
 
-    Dialog::new(title)
-        .with_title_style(theme.warning)
-        .with_border_style(theme.warning)
-        .with_message(vec![Line::from(message)])
-        .with_buttons(
-            vec![
-                DialogButton::new("Cancel"),
-                DialogButton::destructive("Remove"),
-            ],
-            Some(1),
-        )
-        .with_hints(DialogHint::choice_hints())
+    Modal::new(&title)
+        .message(vec![Line::from(Span::styled(message, theme.body()))])
+        .buttons(vec![
+            Button::new("Cancel (esc)"),
+            Button::destructive("Remove (↵)"),
+        ])
+        .hints(Line::from(vec![
+            Span::styled(theme.g.key_enter, theme.callout()),
+            Span::styled(" Remove   ", theme.footnote()),
+            Span::styled(theme.g.key_esc, theme.callout()),
+            Span::styled(" Cancel", theme.footnote()),
+        ]))
         .render(frame, frame.area(), theme);
 }

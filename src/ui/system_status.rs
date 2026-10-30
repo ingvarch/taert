@@ -1,13 +1,14 @@
 //! Interactive System & Memory Status screen.
-//! 3 separate rounded panels ("This Mac", "Memory", "Storage"), live gauges, factual APFS metrics,
-//! footnote, and key hint footer.
+//! Features hardware telemetry, memory pressure, and APFS storage breakdown.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
+use super::components::chrome::AppChrome;
+use super::components::gauge::{legend, segmented_bar};
+use super::components::hints::Hint;
+use super::components::list::render_section_header;
 use super::theme::Theme;
 use crate::core::bytes::{format_bytes, format_memory_bytes};
 use crate::core::profiler::{FullSystemStatus, MemoryPressureLevel, SystemProfiler};
@@ -57,290 +58,186 @@ impl SystemStatusState {
 }
 
 pub fn render_system_status(frame: &mut Frame, state: &SystemStatusState, theme: &Theme) {
-    let area = frame.area();
-    if area.width < 10 || area.height < 5 {
-        return;
-    }
+    let chrome = AppChrome::new(vec!["taert", "System status"])
+        .status(Line::from(vec![Span::styled(
+            "Updated just now",
+            theme.footnote(),
+        )]))
+        .hints(vec![
+            Hint::new("↑↓", "Scroll"),
+            Hint::new("⎋", "Back"),
+            Hint::new("?", "More"),
+        ]);
 
-    let side_by_side = area.width >= 80;
+    let content_rect = chrome.render(frame, theme);
+    let width = content_rect.width as usize;
 
-    // 1. This Mac Panel Lines
+    let mut lines = Vec::new();
+
+    // 1. Hardware Summary
     let mach = &state.status.machine;
+    let model = mach.model.as_deref().unwrap_or("Mac");
+    let chip = mach.chip.as_deref().unwrap_or("Apple Silicon");
+    let cores = mach.cores.as_deref().unwrap_or("");
+    let mem_str = mach
+        .memory_bytes
+        .map(format_memory_bytes)
+        .unwrap_or_default();
+    let macos = &mach.macos_version;
+
     let uptime_days = mach.uptime_seconds / 86400;
     let uptime_hours = (mach.uptime_seconds % 86400) / 3600;
-    let uptime_mins = (mach.uptime_seconds % 3600) / 60;
     let uptime_str = if uptime_days > 0 {
-        format!("{uptime_days}d {uptime_hours}h {uptime_mins}m")
+        format!("{uptime_days}d {uptime_hours}h")
     } else {
-        format!("{uptime_hours}h {uptime_mins}m")
+        format!("{uptime_hours}h")
     };
 
-    let this_mac_lines = vec![
-        metric_line(
-            "Chip",
-            mach.chip.as_deref().unwrap_or("Apple Silicon"),
-            theme,
-        ),
-        metric_line("Cores", mach.cores.as_deref().unwrap_or(""), theme),
-        metric_line(
-            "Memory",
-            mach.memory_bytes
-                .map(format_memory_bytes)
-                .unwrap_or_default(),
-            theme,
-        ),
-        metric_line("macOS", &mach.macos_version, theme),
-        metric_line("Model", mach.model.as_deref().unwrap_or("Mac"), theme),
-        metric_line("Uptime", &uptime_str, theme),
-    ];
+    lines.push(Line::from(vec![Span::styled(model, theme.headline())]));
 
-    let this_mac_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(
-            Line::from(vec![Span::styled(" This Mac ", theme.title)]).alignment(Alignment::Left),
-        );
+    let mut hw_parts = vec![chip.to_string()];
+    if !cores.is_empty() {
+        hw_parts.push(cores.to_string());
+    }
+    if !mem_str.is_empty() {
+        hw_parts.push(mem_str);
+    }
+    hw_parts.push(format!("macOS {macos}"));
+    hw_parts.push(format!("up {uptime_str}"));
 
-    // 2. Memory Panel Lines & Gauge
+    lines.push(Line::from(vec![Span::styled(
+        hw_parts.join(" · "),
+        theme.callout(),
+    )]));
+    lines.push(Line::from(""));
+
+    // 2. Memory Section
     let mem = &state.status.memory;
-    let mem_used_bytes = mem.total_bytes.saturating_sub(mem.free_bytes);
-    let mem_fraction = if mem.total_bytes > 0 {
-        mem_used_bytes as f64 / mem.total_bytes as f64
-    } else {
-        0.0
+    let (pressure_text, _pressure_color) = match mem.pressure {
+        Some(MemoryPressureLevel::Normal) | None => ("Normal", theme.p.green),
+        Some(MemoryPressureLevel::Warning) => ("Warning", theme.p.yellow),
+        Some(MemoryPressureLevel::Critical) => ("Critical", theme.p.red),
     };
-    let mem_gauge_spans = gauge_spans(
-        mem_fraction,
-        20,
-        &format!(
-            "{} in use of {}",
-            format_memory_bytes(mem_used_bytes),
-            format_memory_bytes(mem.total_bytes)
-        ),
-        match mem.pressure {
-            Some(MemoryPressureLevel::Normal) | None => theme.success,
-            Some(MemoryPressureLevel::Warning) => theme.warning,
-            Some(MemoryPressureLevel::Critical) => theme.error,
-        },
+    let pressure_detail = format!("Pressure  ● {pressure_text}");
+
+    lines.push(render_section_header(
+        "MEMORY",
+        Some(&pressure_detail),
+        width,
+        theme,
+    ));
+
+    let bar_w = (width as u16).saturating_sub(22).max(10);
+    let app_bytes = mem.active_bytes.saturating_add(mem.inactive_bytes);
+    let total_mem = mem.total_bytes.max(1) as f64;
+
+    let app_frac = app_bytes as f64 / total_mem;
+    let wired_frac = mem.wired_bytes as f64 / total_mem;
+    let comp_frac = mem.compressed_bytes as f64 / total_mem;
+
+    let mem_bar_spans = segmented_bar(
+        &[
+            (app_frac, theme.p.accent),
+            (wired_frac, theme.p.purple),
+            (comp_frac, theme.p.teal),
+        ],
+        bar_w,
         theme,
     );
 
-    let (pressure_text, pressure_style) = match mem.pressure {
-        Some(MemoryPressureLevel::Normal) | None => ("Normal", theme.success),
-        Some(MemoryPressureLevel::Warning) => ("Warning", theme.warning),
-        Some(MemoryPressureLevel::Critical) => ("Critical", theme.error),
-    };
-
-    let memory_lines = vec![
-        Line::from(mem_gauge_spans),
-        metric_line_colored("Pressure", pressure_text, pressure_style, theme),
-        metric_line("Installed", format_memory_bytes(mem.total_bytes), theme),
-        metric_line("Free now", format_memory_bytes(mem.free_bytes), theme),
-        metric_line("Active", format_memory_bytes(mem.active_bytes), theme),
-        metric_line("Inactive", format_memory_bytes(mem.inactive_bytes), theme),
-        metric_line(
-            "Compressed",
-            format_memory_bytes(mem.compressed_bytes),
-            theme,
-        ),
-        metric_line("Wired", format_memory_bytes(mem.wired_bytes), theme),
-    ];
-
-    let memory_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(" Memory ", theme.title)]).alignment(Alignment::Left))
-        .title(
-            Line::from(vec![Span::styled(
-                format!(" {pressure_text} "),
-                pressure_style,
-            )])
-            .alignment(Alignment::Right),
-        );
-
-    // 3. Storage Panel Lines & Gauge
-    let st = &state.status.storage;
-    let storage_free_ratio = st.free_fraction();
-    let free_pct = (storage_free_ratio * 100.0).round() as usize;
-    let storage_color = if storage_free_ratio < 0.1 {
-        theme.error
-    } else if storage_free_ratio < 0.2 {
-        theme.warning
-    } else {
-        theme.success
-    };
-
-    // Gauge displays USED fraction, matching macOS
-    let storage_gauge_spans = gauge_spans(
-        st.used_fraction(),
-        20,
-        &format!(
-            "{} free of {}",
-            format_bytes(st.available_bytes),
-            format_bytes(st.total_bytes)
-        ),
-        storage_color,
-        theme,
+    let used_mem_bytes = mem.total_bytes.saturating_sub(mem.free_bytes);
+    let mem_metric_str = format!(
+        "   {} of {}",
+        format_memory_bytes(used_mem_bytes),
+        format_memory_bytes(mem.total_bytes)
     );
 
-    let mut storage_lines = vec![
-        Line::from(storage_gauge_spans),
-        metric_line_colored(
-            "Free now",
-            format_bytes(st.available_bytes),
-            storage_color,
-            theme,
-        ),
-        metric_line("Total", format_bytes(st.total_bytes), theme),
-        metric_line("Managed by macOS", format_bytes(st.managed_bytes), theme),
-    ];
+    let mut mem_bar_row = mem_bar_spans;
+    mem_bar_row.push(Span::styled(mem_metric_str, theme.headline()));
+    lines.push(Line::from(mem_bar_row));
 
-    if st.managed_bytes > 0 {
-        storage_lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "Managed capacity may include purgeable files and is not guaranteed",
-                theme.muted,
+    let mem_legend = legend(
+        &[
+            ("App", format_memory_bytes(app_bytes), theme.p.accent),
+            (
+                "Wired",
+                format_memory_bytes(mem.wired_bytes),
+                theme.p.purple,
             ),
-        ]));
-        storage_lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("free space.", theme.muted),
-        ]));
-    } else {
-        storage_lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Controlled and managed by macOS", theme.muted),
-        ]));
-    }
+            (
+                "Compressed",
+                format_memory_bytes(mem.compressed_bytes),
+                theme.p.teal,
+            ),
+            (
+                "Free",
+                format_memory_bytes(mem.free_bytes),
+                theme.p.quaternary,
+            ),
+        ],
+        theme,
+    );
+    lines.push(mem_legend);
+    lines.push(Line::from(""));
 
-    let storage_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(" Storage ", theme.title)]).alignment(Alignment::Left))
-        .title(
-            Line::from(vec![Span::styled(
-                format!(" {free_pct}% free "),
-                storage_color,
-            )])
-            .alignment(Alignment::Right),
-        );
+    // 3. Storage Section
+    let st = &state.status.storage;
+    let storage_detail = format!("{} available", format_bytes(st.available_bytes));
+    lines.push(render_section_header(
+        "STORAGE",
+        Some(&storage_detail),
+        width,
+        theme,
+    ));
 
-    // Layout
-    if side_by_side {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8),  // This Mac
-                Constraint::Length(10), // Memory & Storage side-by-side
-                Constraint::Length(1),  // Footnote
-                Constraint::Min(0),     // Filler
-                Constraint::Length(1),  // Footer
-            ])
-            .split(area);
+    let total_st = st.total_bytes.max(1) as f64;
+    let used_st_bytes = st.total_bytes.saturating_sub(st.free_bytes);
+    let used_frac = used_st_bytes as f64 / total_st;
+    let managed_frac = st.managed_bytes as f64 / total_st;
 
-        frame.render_widget(
-            Paragraph::new(this_mac_lines).block(this_mac_block),
-            rows[0],
-        );
+    let storage_bar_spans = segmented_bar(
+        &[(used_frac, theme.p.accent), (managed_frac, theme.p.gray)],
+        bar_w,
+        theme,
+    );
 
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[1]);
+    let storage_metric_str = format!(
+        "   {} of {}",
+        format_bytes(used_st_bytes),
+        format_bytes(st.total_bytes)
+    );
 
-        frame.render_widget(Paragraph::new(memory_lines).block(memory_block), cols[0]);
-        frame.render_widget(Paragraph::new(storage_lines).block(storage_block), cols[1]);
+    let mut storage_bar_row = storage_bar_spans;
+    storage_bar_row.push(Span::styled(storage_metric_str, theme.headline()));
+    lines.push(Line::from(storage_bar_row));
 
-        let footnote = Line::from(Span::styled(
-            "  System status reflects live macOS metrics. Caches and memory are managed automatically by macOS.",
-            theme.muted,
-        ));
-        frame.render_widget(Paragraph::new(footnote), rows[2]);
+    let storage_legend = legend(
+        &[
+            ("Used", format_bytes(used_st_bytes), theme.p.accent),
+            (
+                "Managed by macOS",
+                format_bytes(st.managed_bytes),
+                theme.p.gray,
+            ),
+            ("Free", format_bytes(st.free_bytes), theme.p.quaternary),
+        ],
+        theme,
+    );
+    lines.push(storage_legend);
+    lines.push(Line::from(""));
 
-        let footer = Line::from(vec![
-            Span::styled("  ", theme.normal),
-            Span::styled("↑↓ ", theme.footer_key),
-            Span::styled("scroll  ", theme.footer_desc),
-            Span::styled("Esc ", theme.footer_key),
-            Span::styled("back", theme.footer_desc),
-        ]);
-        frame.render_widget(Paragraph::new(footer), rows[4]);
-    } else {
-        // Stacked vertically for narrow screens
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8),  // This Mac
-                Constraint::Length(10), // Memory
-                Constraint::Length(7),  // Storage
-                Constraint::Length(1),  // Footnote
-                Constraint::Min(0),     // Filler
-                Constraint::Length(1),  // Footer
-            ])
-            .split(area);
+    // Footnote
+    lines.push(Line::from(vec![Span::styled(
+        "Managed space may include purgeable files and isn't counted as free.",
+        theme.footnote(),
+    )]));
 
-        frame.render_widget(
-            Paragraph::new(this_mac_lines).block(this_mac_block),
-            rows[0],
-        );
-        frame.render_widget(Paragraph::new(memory_lines).block(memory_block), rows[1]);
-        frame.render_widget(Paragraph::new(storage_lines).block(storage_block), rows[2]);
+    // Scrolling
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(state.scroll_offset)
+        .take(content_rect.height as usize)
+        .collect();
 
-        let footnote = Line::from(Span::styled(
-            "  System status reflects live macOS metrics.",
-            theme.muted,
-        ));
-        frame.render_widget(Paragraph::new(footnote), rows[3]);
-
-        let footer = Line::from(vec![
-            Span::styled("  ", theme.normal),
-            Span::styled("↑↓ ", theme.footer_key),
-            Span::styled("scroll  ", theme.footer_desc),
-            Span::styled("Esc ", theme.footer_key),
-            Span::styled("back", theme.footer_desc),
-        ]);
-        frame.render_widget(Paragraph::new(footer), rows[5]);
-    }
-}
-
-fn metric_line<'a>(label: &'static str, value: impl Into<String>, theme: &Theme) -> Line<'a> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:<17}", label), theme.muted),
-        Span::styled(value.into(), theme.normal),
-    ])
-}
-
-fn metric_line_colored<'a>(
-    label: &'static str,
-    value: impl Into<String>,
-    style: ratatui::style::Style,
-    theme: &Theme,
-) -> Line<'a> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:<17}", label), theme.muted),
-        Span::styled(value.into(), style),
-    ])
-}
-
-fn gauge_spans<'a>(
-    fraction: f64,
-    width: usize,
-    text: &str,
-    filled_style: ratatui::style::Style,
-    theme: &Theme,
-) -> Vec<Span<'a>> {
-    let filled_count = ((fraction * width as f64).round() as usize).min(width);
-    let empty_count = width.saturating_sub(filled_count);
-    vec![
-        Span::raw("  "),
-        Span::styled("█".repeat(filled_count), filled_style),
-        Span::styled("░".repeat(empty_count), theme.muted),
-        Span::styled(format!(" {text}"), theme.normal),
-    ]
+    frame.render_widget(Paragraph::new(visible_lines), content_rect);
 }

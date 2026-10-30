@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Preferences › Protected paths                             2 configured
+────────────────────────────────────────────────────────────────────────────────
+   Paths excluded from all cleaning and purge scans
+
+   ▌ ▸ /Users/test/Documents/Secret
+     ▸ /Users/test/Projects/keep-this
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+     + Add path (a)    − Remove selected (d)
+
+────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    A  Add    D  Remove    ⎋  Back

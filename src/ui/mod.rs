@@ -1,6 +1,9 @@
 pub mod analyze;
 pub mod app;
-pub mod dialog;
+pub mod components;
+pub mod env;
+pub mod glyphs;
+pub mod palette;
 pub mod path_list_editor;
 pub mod preferences;
 pub mod progress;

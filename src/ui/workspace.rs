@@ -2,13 +2,21 @@
 //! 6 Main Options + Clean Caches Submenu + Start Confirmations.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
-use super::dialog::{Dialog, DialogButton, DialogHint};
+use super::components::button::Button;
+use super::components::chrome::AppChrome;
+use super::components::hints::{Hint, PrimaryAction};
+use super::components::list::{ListRow, render_section_header};
+use super::components::modal::Modal;
+use super::env::ColorDepth;
 use super::theme::Theme;
+use crate::core::bytes::format_bytes;
+use crate::core::sysinfo::SysInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -32,20 +40,21 @@ pub enum CleanSubcategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartConfirmKind {
     ExploreHome,
-    ProjectCleanup(usize), // folder count
+    ProjectCleanup(usize),
 }
 
 pub enum WorkspaceView {
     MainMenu,
     CleanSubmenu { selected: usize },
-    Confirm(StartConfirmKind, bool), // (kind, start_is_focused)
+    Confirm(StartConfirmKind, bool),
 }
 
 pub struct WorkspaceState {
     pub selected_index: usize,
     pub view: WorkspaceView,
-    pub items: Vec<(MainMenuChoice, &'static str, &'static str)>,
+    pub items: Vec<(MainMenuChoice, &'static str, &'static str, &'static str)>,
     pub clean_options: Vec<(CleanSubcategory, &'static str, &'static str)>,
+    pub disk_status: Option<String>,
 }
 
 impl Default for WorkspaceState {
@@ -56,39 +65,60 @@ impl Default for WorkspaceState {
 
 impl WorkspaceState {
     pub fn new() -> Self {
+        let disk_status = SysInfo::current_status().main_disk.map(|d| {
+            let free_fraction = if d.total_bytes > 0 {
+                d.available_bytes as f64 / d.total_bytes as f64
+            } else {
+                0.0
+            };
+            let free_pct = (free_fraction * 100.0).round();
+            format!(
+                "{} available · {:.0}% free",
+                format_bytes(d.available_bytes),
+                free_pct
+            )
+        });
+
         Self {
             selected_index: 0,
             view: WorkspaceView::MainMenu,
+            disk_status,
             items: vec![
                 (
                     MainMenuChoice::CleanCaches,
                     "Clean caches",
                     "Choose tools and individual paths to remove",
+                    "Choose tools and individual paths to remove.\n\nIncludes developer caches, user junk, AI tool caches\nand the Trash. You'll review every item before\nanything is removed.",
                 ),
                 (
                     MainMenuChoice::ProjectCleanup,
                     "Project cleanup",
                     "Review dependencies and generated build artifacts",
+                    "Scan project directories for build targets, dependencies,\nand intermediate artifacts. Reclaim gigabytes of space\nacross multiple repositories at once.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
                     "Explore storage",
                     "Browse folders and find what takes up space",
+                    "Interactive directory size analyzer with breadcrumb\nnavigation. Inspect deep subfolders and reveal large\nfiles directly in Finder.",
                 ),
                 (
                     MainMenuChoice::SystemStatus,
                     "System status",
                     "Inspect memory and available disk space",
+                    "Live macOS hardware, memory pressure, and APFS\nstorage telemetry with visual breakdown.",
                 ),
                 (
                     MainMenuChoice::Preferences,
                     "Preferences",
                     "Change cleanup age, project folders, and protection",
+                    "Configure artifact age threshold presets and shortcuts\nto project folders and protected paths.",
                 ),
                 (
                     MainMenuChoice::ProtectedPaths,
                     "Protected paths",
                     "Choose paths excluded from cleanup",
+                    "Manage directories and files permanently protected from\nall automated cleanup and purge operations.",
                 ),
             ],
             clean_options: vec![
@@ -206,134 +236,280 @@ impl WorkspaceState {
 }
 
 pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme) {
-    let area = frame.area();
-
-    // Framed window with rounded corners
-    let window_title = match &state.view {
-        WorkspaceView::CleanSubmenu { .. } => " Clean caches ",
-        _ => " taert ",
+    let is_submenu = matches!(state.view, WorkspaceView::CleanSubmenu { .. });
+    let crumbs = if is_submenu {
+        vec!["taert", "Clean caches"]
+    } else {
+        vec!["taert"]
     };
 
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(window_title, theme.title)]))
-        .title_alignment(Alignment::Left);
+    let status_line = state
+        .disk_status
+        .as_ref()
+        .map(|s| Line::from(vec![Span::styled(s.clone(), theme.callout())]));
 
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
+    let mut hints = vec![Hint::new("↑↓", "Move")];
+    if is_submenu {
+        hints.push(Hint::new("⎋", "Back"));
+    }
+    hints.push(Hint::new("?", "More"));
 
-    // Layout inside window
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Subtitle line
-            Constraint::Min(8),    // Menu list
-            Constraint::Length(1), // Divider
-            Constraint::Length(1), // Footer key hints
-        ])
-        .split(inner_area);
+    let mut chrome = AppChrome::new(crumbs)
+        .hints(hints)
+        .primary(PrimaryAction::new("Open", theme.g.key_enter));
 
-    let subtitle = match &state.view {
-        WorkspaceView::CleanSubmenu { .. } => "Scan first. Choose what to remove afterward.",
-        _ => "Your Mac, crystal clean.  /  0.1.0",
-    };
-
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(subtitle, theme.muted))),
-        chunks[0],
-    );
-
-    // Menu list items
-    let mut menu_lines = Vec::new();
-
-    match &state.view {
-        WorkspaceView::CleanSubmenu { selected } => {
-            for (i, (_subcat, title, desc)) in state.clean_options.iter().enumerate() {
-                let is_selected = i == *selected;
-                let num_str = format!("{}. ", i + 1);
-
-                if is_selected {
-                    menu_lines.push(Line::from(vec![
-                        Span::styled("› ", theme.cursor),
-                        Span::styled(num_str, theme.title),
-                        Span::styled(format!("{:<28}", title), theme.focused_row),
-                    ]));
-                } else {
-                    menu_lines.push(Line::from(vec![
-                        Span::styled("  ", theme.muted),
-                        Span::styled(num_str, theme.title),
-                        Span::styled(format!("{:<28}", title), theme.normal),
-                    ]));
-                }
-                menu_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(*desc, theme.muted),
-                ]));
-            }
-        }
-        _ => {
-            for (i, (_choice, title, desc)) in state.items.iter().enumerate() {
-                let is_selected = i == state.selected_index;
-                let num_str = format!("{}. ", i + 1);
-
-                if is_selected {
-                    menu_lines.push(Line::from(vec![
-                        Span::styled("› ", theme.cursor),
-                        Span::styled(num_str, theme.title),
-                        Span::styled(format!("{:<28}", title), theme.focused_row),
-                    ]));
-                } else {
-                    menu_lines.push(Line::from(vec![
-                        Span::styled("  ", theme.muted),
-                        Span::styled(num_str, theme.title),
-                        Span::styled(format!("{:<28}", title), theme.normal),
-                    ]));
-                }
-                menu_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(*desc, theme.muted),
-                ]));
-            }
-        }
+    if let Some(st) = status_line {
+        chrome = chrome.status(st);
     }
 
-    frame.render_widget(Paragraph::new(menu_lines), chunks[1]);
+    let content_rect = chrome.render(frame, theme);
 
-    // Divider line
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[2]);
+    if is_submenu {
+        let selected_idx = match state.view {
+            WorkspaceView::CleanSubmenu { selected } => selected,
+            _ => 0,
+        };
+        render_submenu_content(frame, content_rect, state, selected_idx, theme);
+    } else if content_rect.width >= 100 {
+        render_split_view(frame, content_rect, state, theme);
+    } else {
+        render_regular_menu(frame, content_rect, state, theme);
+    }
 
-    // Footer with keyhints
-    let footer_text = match state.view {
-        WorkspaceView::MainMenu | WorkspaceView::CleanSubmenu { .. } => Line::from(vec![
-            Span::styled("↑↓ ", theme.footer_key),
-            Span::styled("move  ", theme.footer_desc),
-            Span::styled("PgUp/PgDn ", theme.footer_key),
-            Span::styled("page  ", theme.footer_desc),
-            Span::styled("1–9 ", theme.footer_key),
-            Span::styled("open  ", theme.footer_desc),
-            Span::styled("Enter ", theme.footer_key),
-            Span::styled("open  ", theme.footer_desc),
-            Span::styled("Esc/q ", theme.footer_key),
-            Span::styled("cancel", theme.footer_desc),
-        ]),
-        WorkspaceView::Confirm(_, _) => Line::from(vec![
-            Span::styled("Enter ", theme.footer_key),
-            Span::styled("select  ", theme.footer_desc),
-            Span::styled("Esc ", theme.footer_key),
-            Span::styled("back", theme.footer_desc),
-        ]),
-    };
-    frame.render_widget(Paragraph::new(footer_text), chunks[3]);
-
-    // Modal Confirmation Dialog (StartConfirmation)
+    // Modal Confirmation Dialog (if open)
     if let WorkspaceView::Confirm(kind, start_focused) = &state.view {
         render_start_confirmation(frame, *kind, *start_focused, theme);
     }
+}
+
+fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
+    match choice {
+        MainMenuChoice::CleanCaches => theme.g.icon_clean,
+        MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
+        MainMenuChoice::ExploreStorage => theme.g.icon_storage,
+        MainMenuChoice::SystemStatus => theme.g.icon_status,
+        MainMenuChoice::Preferences => theme.g.icon_prefs,
+        MainMenuChoice::ProtectedPaths => theme.g.icon_protected,
+    }
+}
+
+fn render_regular_menu(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
+    let mut lines = Vec::new();
+
+    // Subtitle
+    lines.push(Line::from(vec![Span::styled(
+        "Your Mac, crystal clean.",
+        theme.callout(),
+    )]));
+    lines.push(Line::from(""));
+
+    let sections = [
+        ("CLEANUP", &[0usize, 1][..]),
+        ("INSPECT", &[2, 3][..]),
+        ("SETTINGS", &[4, 5][..]),
+    ];
+
+    for (sec_title, indices) in sections {
+        lines.push(render_section_header(
+            sec_title,
+            None,
+            area.width as usize,
+            theme,
+        ));
+
+        for &i in indices {
+            let (choice, title, desc, _) = &state.items[i];
+            let is_selected = i == state.selected_index;
+            let icon = menu_icon(*choice, theme);
+
+            let icon_style = if is_selected {
+                theme.accent_text().add_modifier(Modifier::BOLD)
+            } else {
+                theme.callout()
+            };
+
+            let row = ListRow::new(vec![Span::styled(*title, theme.body())])
+                .leading(Span::styled(icon, icon_style))
+                .chevron(true)
+                .selected(is_selected);
+
+            lines.push(row.render_line(area.width as usize, theme));
+
+            if is_selected {
+                let desc_row = render_desc_line(desc, area.width as usize, theme);
+                lines.push(desc_row);
+            }
+        }
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_desc_line(desc: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let indent = "     "; // bar (2) + leading (3)
+    let desc_style = theme.callout();
+    let desc_w = desc.width();
+    let pad = width.saturating_sub(indent.len() + desc_w);
+
+    let mut spans = vec![
+        Span::raw(indent),
+        Span::styled(desc.to_string(), desc_style),
+        Span::raw(" ".repeat(pad)),
+    ];
+
+    if theme.env.depth == ColorDepth::NoColor {
+        for s in &mut spans {
+            s.style = s.style.add_modifier(Modifier::REVERSED);
+        }
+    } else {
+        for s in &mut spans {
+            s.style = s.style.bg(theme.p.selection);
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(34),
+            Constraint::Length(1),
+            Constraint::Min(40),
+        ])
+        .split(area);
+
+    // Left Sidebar
+    let mut sidebar_lines = Vec::new();
+    let sections = [
+        ("CLEANUP", &[0usize, 1][..]),
+        ("INSPECT", &[2, 3][..]),
+        ("SETTINGS", &[4, 5][..]),
+    ];
+
+    for (sec_title, indices) in sections {
+        sidebar_lines.push(render_section_header(
+            sec_title,
+            None,
+            chunks[0].width as usize,
+            theme,
+        ));
+
+        for &i in indices {
+            let (choice, title, _, _) = &state.items[i];
+            let is_selected = i == state.selected_index;
+            let icon = menu_icon(*choice, theme);
+
+            let icon_style = if is_selected {
+                theme.accent_text().add_modifier(Modifier::BOLD)
+            } else {
+                theme.callout()
+            };
+
+            let row = ListRow::new(vec![Span::styled(*title, theme.body())])
+                .leading(Span::styled(icon, icon_style))
+                .chevron(true)
+                .selected(is_selected);
+
+            sidebar_lines.push(row.render_line(chunks[0].width as usize, theme));
+        }
+        sidebar_lines.push(Line::from(""));
+    }
+    frame.render_widget(Paragraph::new(sidebar_lines), chunks[0]);
+
+    // Vertical Divider
+    let divider = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(theme.separator());
+    frame.render_widget(divider, chunks[0]);
+
+    // Right Detail Pane
+    let sel = state.selected_index;
+    let (choice, title, _, long_desc) = &state.items[sel];
+    let icon = menu_icon(*choice, theme);
+
+    let mut detail_lines = Vec::new();
+    detail_lines.push(Line::from(""));
+    detail_lines.push(Line::from(vec![
+        Span::styled(
+            format!("{icon}  "),
+            theme.accent_text().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(*title, theme.headline()),
+    ]));
+    detail_lines.push(Line::from(""));
+
+    for line in long_desc.lines() {
+        detail_lines.push(Line::from(vec![Span::styled(
+            line.to_string(),
+            theme.callout(),
+        )]));
+    }
+
+    detail_lines.push(Line::from(""));
+    detail_lines.push(Line::from(vec![Span::styled(
+        format!("{} Open", theme.g.key_enter),
+        theme.headline(),
+    )]));
+
+    let detail_rect = Rect {
+        x: chunks[2].x + 3,
+        y: chunks[2].y,
+        width: chunks[2].width.saturating_sub(3),
+        height: chunks[2].height,
+    };
+    frame.render_widget(Paragraph::new(detail_lines), detail_rect);
+}
+
+fn render_submenu_content(
+    frame: &mut Frame,
+    area: Rect,
+    state: &WorkspaceState,
+    selected: usize,
+    theme: &Theme,
+) {
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "Scan first. Choose what to remove afterward.",
+        theme.callout(),
+    )]));
+    lines.push(Line::from(""));
+
+    for (i, (subcat, title, desc)) in state.clean_options.iter().enumerate() {
+        let is_selected = i == selected;
+        let icon = match subcat {
+            CleanSubcategory::All => theme.g.icon_clean,
+            CleanSubcategory::Developer => theme.g.icon_projects,
+            CleanSubcategory::UserJunk => theme.g.check_off,
+            CleanSubcategory::AiTools => "◎",
+            CleanSubcategory::Trash => theme.g.key_backspace,
+        };
+
+        let icon_style = if is_selected {
+            theme.accent_text().add_modifier(Modifier::BOLD)
+        } else {
+            theme.callout()
+        };
+
+        let mut row = ListRow::new(vec![Span::styled(*title, theme.body())])
+            .leading(Span::styled(icon, icon_style))
+            .selected(is_selected);
+
+        if *subcat == CleanSubcategory::All {
+            row = row.detail(Span::styled("Recommended", theme.footnote()));
+        }
+
+        lines.push(row.render_line(area.width as usize, theme));
+
+        if is_selected {
+            let desc_row = render_desc_line(desc, area.width as usize, theme);
+            lines.push(desc_row);
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_start_confirmation(
@@ -357,14 +533,17 @@ fn render_start_confirmation(
         ),
     };
 
-    let focused_idx = if start_focused { 1 } else { 0 };
-
-    Dialog::new(title)
-        .with_message(vec![Line::from(message)])
-        .with_buttons(
-            vec![DialogButton::new("Cancel"), DialogButton::new("Start")],
-            Some(focused_idx),
-        )
-        .with_hints(DialogHint::choice_hints())
+    Modal::new(title)
+        .message(vec![Line::from(message)])
+        .buttons(vec![
+            Button::new("Cancel").focused(!start_focused),
+            Button::primary("Start").focused(start_focused),
+        ])
+        .hints(Line::from(vec![
+            Span::styled("Enter", theme.callout()),
+            Span::styled(" select   ", theme.footnote()),
+            Span::styled("Esc", theme.callout()),
+            Span::styled(" back", theme.footnote()),
+        ]))
         .render(frame, frame.area(), theme);
 }

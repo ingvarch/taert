@@ -84,6 +84,8 @@ impl IgnoreStore {
 pub struct Config {
     #[serde(default = "default_older_than_days")]
     pub older_than_days: u64,
+    #[serde(default = "default_appearance")]
+    pub appearance: String,
     #[serde(default)]
     pub extra_artifacts: Vec<String>,
 }
@@ -92,10 +94,15 @@ fn default_older_than_days() -> u64 {
     7
 }
 
+fn default_appearance() -> String {
+    "auto".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             older_than_days: default_older_than_days(),
+            appearance: default_appearance(),
             extra_artifacts: Vec::new(),
         }
     }

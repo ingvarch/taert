@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Clean caches                             118.6 GB available · 24% free
+────────────────────────────────────────────────────────────────────────────────
+   Scan first. Choose what to remove afterward.
+
+   ▌ ✧ All categories                                             Recommended
+        Developer caches, user junk, AI tools, and Trash
+     ◇ Developer caches
+     ○ User junk
+     ◎ AI tools
+     ⌫ Trash
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ⎋  Back    ?  More                                       Open  ↵

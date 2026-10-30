@@ -1,0 +1,5 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+ Cancel    Remove 12 items

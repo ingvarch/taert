@@ -1,26 +1,23 @@
-//! TUI Color Theme and Styling.
+//! TUI Color Theme, Design Tokens, and Styling.
 
-use std::env;
+use ratatui::style::{Modifier, Style};
 
-use ratatui::style::{Color, Modifier, Style};
+use super::env::{Appearance, ColorDepth, UiEnv};
+use super::glyphs::Glyphs;
+use super::palette::Palette;
+use crate::core::stores::Config;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    Plain,
+    Primary,
+    Destructive,
+}
 
 pub struct Theme {
-    pub border: Style,
-    pub title: Style,
-    pub subtitle: Style,
-    pub info: Style,
-    pub accent: Style,
-    pub normal: Style,
-    pub muted: Style,
-    pub selected_marker: Style,
-    pub unselected_marker: Style,
-    pub cursor: Style,
-    pub focused_row: Style,
-    pub footer_key: Style,
-    pub footer_desc: Style,
-    pub warning: Style,
-    pub error: Style,
-    pub success: Style,
+    pub p: Palette,
+    pub g: Glyphs,
+    pub env: UiEnv,
 }
 
 impl Default for Theme {
@@ -31,70 +28,168 @@ impl Default for Theme {
 
 impl Theme {
     pub fn new() -> Self {
-        let no_color =
-            env::var("NO_COLOR").is_ok() || env::var("TERM").map(|t| t == "dumb").unwrap_or(false);
+        Self::with_env(UiEnv::detect(&Config::default()))
+    }
 
-        if no_color {
-            return Self::plain();
-        }
+    pub fn with_env(env: UiEnv) -> Self {
+        let p = Palette::resolve(env.appearance, env.depth);
+        let g = if env.ascii_glyphs {
+            Glyphs::ascii()
+        } else {
+            Glyphs::unicode()
+        };
 
-        Self {
-            border: Style::default().fg(Color::Rgb(90, 95, 105)),
-            title: Style::default()
-                .fg(Color::Rgb(0, 210, 235)) // Cyan accent
-                .add_modifier(Modifier::BOLD),
-            subtitle: Style::default()
-                .fg(Color::Rgb(0, 210, 235))
-                .add_modifier(Modifier::BOLD),
-            info: Style::default()
-                .fg(Color::Rgb(220, 225, 230))
-                .add_modifier(Modifier::BOLD),
-            accent: Style::default().fg(Color::Rgb(0, 210, 235)),
-            normal: Style::default().fg(Color::Rgb(215, 220, 225)),
-            muted: Style::default().fg(Color::Rgb(125, 130, 140)),
-            selected_marker: Style::default().fg(Color::Rgb(0, 210, 235)),
-            unselected_marker: Style::default().fg(Color::Rgb(110, 115, 125)),
-            cursor: Style::default()
-                .fg(Color::Rgb(0, 210, 235))
-                .add_modifier(Modifier::BOLD),
-            focused_row: Style::default()
-                .bg(Color::Rgb(215, 220, 225)) // Bright selection highlight
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-            footer_key: Style::default()
-                .fg(Color::Rgb(200, 205, 210))
-                .add_modifier(Modifier::BOLD),
-            footer_desc: Style::default().fg(Color::Rgb(120, 125, 135)),
-            warning: Style::default()
-                .fg(Color::Rgb(255, 180, 50))
-                .add_modifier(Modifier::BOLD),
-            error: Style::default()
-                .fg(Color::Rgb(255, 80, 80))
-                .add_modifier(Modifier::BOLD),
-            success: Style::default()
-                .fg(Color::Rgb(80, 220, 120))
-                .add_modifier(Modifier::BOLD),
-        }
+        Self { p, g, env }
     }
 
     pub fn plain() -> Self {
-        Self {
-            border: Style::default(),
-            title: Style::default().add_modifier(Modifier::BOLD),
-            subtitle: Style::default().add_modifier(Modifier::BOLD),
-            info: Style::default().add_modifier(Modifier::BOLD),
-            accent: Style::default(),
-            normal: Style::default(),
-            muted: Style::default(),
-            selected_marker: Style::default(),
-            unselected_marker: Style::default(),
-            cursor: Style::default().add_modifier(Modifier::BOLD),
-            focused_row: Style::default().add_modifier(Modifier::REVERSED),
-            footer_key: Style::default().add_modifier(Modifier::BOLD),
-            footer_desc: Style::default(),
-            warning: Style::default().add_modifier(Modifier::BOLD),
-            error: Style::default().add_modifier(Modifier::BOLD),
-            success: Style::default().add_modifier(Modifier::BOLD),
+        Self::with_env(UiEnv {
+            appearance: Appearance::Dark,
+            depth: ColorDepth::NoColor,
+            ascii_glyphs: true,
+            reduce_motion: false,
+        })
+    }
+
+    // Typography
+    pub fn headline(&self) -> Style {
+        Style::default()
+            .fg(self.p.label)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn body(&self) -> Style {
+        Style::default().fg(self.p.label)
+    }
+
+    pub fn callout(&self) -> Style {
+        Style::default().fg(self.p.secondary)
+    }
+
+    pub fn footnote(&self) -> Style {
+        Style::default().fg(self.p.tertiary)
+    }
+
+    pub fn section_header(&self) -> Style {
+        Style::default()
+            .fg(self.p.tertiary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    // Chrome
+    pub fn separator(&self) -> Style {
+        Style::default().fg(self.p.separator)
+    }
+
+    pub fn keycap(&self) -> Style {
+        if self.env.depth == ColorDepth::NoColor {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+                .bg(self.p.fill)
+                .fg(self.p.label)
+                .add_modifier(Modifier::BOLD)
+        }
+    }
+
+    pub fn keycap_label(&self) -> Style {
+        Style::default().fg(self.p.secondary)
+    }
+
+    // States
+    pub fn row(&self, selected: bool) -> Style {
+        if selected {
+            if self.env.depth == ColorDepth::NoColor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+                    .bg(self.p.selection)
+                    .fg(self.p.label)
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else {
+            Style::default().fg(self.p.label)
+        }
+    }
+
+    pub fn accent_text(&self) -> Style {
+        Style::default().fg(self.p.accent_text)
+    }
+
+    pub fn success(&self) -> Style {
+        Style::default()
+            .fg(self.p.green)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn warning(&self) -> Style {
+        Style::default()
+            .fg(self.p.yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn danger(&self) -> Style {
+        Style::default().fg(self.p.red).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn button(&self, kind: ButtonKind, focused: bool) -> Style {
+        match kind {
+            ButtonKind::Plain => {
+                if focused {
+                    if self.env.depth == ColorDepth::NoColor {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                            .bg(self.p.fill)
+                            .fg(self.p.label)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                } else {
+                    Style::default().fg(self.p.secondary)
+                }
+            }
+            ButtonKind::Primary => {
+                if focused {
+                    if self.env.depth == ColorDepth::NoColor {
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .bg(self.p.accent)
+                            .fg(self.p.on_accent)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                } else {
+                    Style::default().fg(self.p.accent_text)
+                }
+            }
+            ButtonKind::Destructive => {
+                if focused {
+                    if self.env.depth == ColorDepth::NoColor {
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .bg(self.p.red)
+                            .fg(self.p.on_accent)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                } else {
+                    Style::default().fg(self.p.red)
+                }
+            }
+        }
+    }
+
+    pub fn size(&self, bytes: u64) -> Style {
+        if bytes < 1_000_000_000 {
+            Style::default().fg(self.p.secondary)
+        } else if bytes < 10_000_000_000 {
+            Style::default()
+                .fg(self.p.label)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(self.p.orange)
+                .add_modifier(Modifier::BOLD)
         }
     }
 }

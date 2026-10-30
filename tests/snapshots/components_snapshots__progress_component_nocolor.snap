@@ -1,0 +1,15 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+
+
+
+                          ⠋  Scanning developer caches
+                               Step 2 of 5 · Cargo
+
+              ==================----------------------------   40%
+
+                    ~/Library/Caches/com.apple.dt.Xcode/Index
+                        128 items found · 4.2 GB  ·  0:12

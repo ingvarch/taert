@@ -1,0 +1,17 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+
+
+    ╭────────────────────────────────────────────────────────────╮
+    │ Remove 12 items?                                           │
+    │                                                            │
+    │ 3.4 GB will be permanently deleted. This                   │
+    │ cannot be undone.                                          │
+    │                                                            │
+    │                                                            │
+    │                                 Cancel    Remove 12 items  │
+    │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+    ╰────────────────────────────────────────────────────────────╯

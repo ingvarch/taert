@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert                                            118.6 GB available · 24% free
+────────────────────────────────────────────────────────────────────────────────
+   Your Mac, crystal clean.
+
+     CLEANUP
+   ▌ ✧ Clean caches                                                         ›
+        Choose tools and individual paths to remove
+     ◇ Project cleanup                                                      ›
+
+     INSPECT
+     ◔ Explore storage                                                      ›
+     ▤ System status                                                        ›
+
+     SETTINGS
+     ⌥ Preferences                                                          ›
+     ◈ Protected paths                                                      ›
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ?  More                                                  Open  ↵

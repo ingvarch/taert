@@ -12,10 +12,13 @@ It finds caches, system junk, and project build artifacts, giving you full, tran
 
 - **Safety First**: Deep system root protection (`/System`, `/Library`, `/Applications`), credential isolation (`.ssh`, `.aws`, `.gnupg`), protection of iCloud / CloudStorage / APFS dataless files, and symlink rejection.
 - **Accurate Space Accounting**: Measures actual allocated APFS storage blocks (`st_blocks * 512`), deduping hardlinks.
-- **Interactive TUI**: PureMac-inspired keyboard workspace powered by Ratatui:
+- **Interactive TUI**: Apple Human Interface Guidelines (HIG)-inspired keyboard workspace powered by Ratatui:
+  - Adaptive two-column split view on wide terminals (≥100 columns).
   - Live search filtering (`/`).
   - Toggle selections (`Space`), select all (`A`), or clear (`N`).
-  - Read-only storage directory analyzer with visual proportional bars.
+  - Modal sheets with backdrop dimming and drop shadows.
+  - Interactive help sheet (`?`) accessible on all screens.
+  - Read-only storage directory analyzer with proportional usage bars.
 - **Unattended & Script-Friendly**: Complete support for `--dry-run`, `--json`, and non-interactive `--plain` modes.
 - **Zero Telemetry**: Free, open-source, and private.
 
@@ -78,13 +81,33 @@ taert optimize
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Move selection cursor |
+| `↑` / `↓` or `k` / `j` | Move selection cursor |
 | `Space` | Toggle focused item on/off |
 | `A` / `N` | Select all visible / clear selection |
 | `/` | Live search filter |
 | `←` / `→` | Scroll long path in footer / navigate directories |
 | `Enter` | Review selection & proceed to confirmation |
+| `?` | Toggle interactive keyboard shortcuts sheet |
 | `Esc` / `q` | Cancel / Go back / Quit |
+
+---
+
+## Appearance & Accessibility
+
+taert automatically detects terminal capabilities, system appearance, and user preferences:
+
+- **Apple HIG Design**: Native semantic colors, split-views on wide terminals (≥100 columns), drop-shadow sheets, and clean typography.
+- **Dark & Light Modes**: Automatically respects host terminal appearance or configure manually:
+  ```bash
+  taert config --appearance dark   # force dark mode
+  taert config --appearance light  # force light mode
+  taert config --appearance auto   # detect automatically
+  ```
+- **Environment Overrides**:
+  - `TAERT_APPEARANCE=dark|light`: Override appearance mode for the current session.
+  - `TAERT_ASCII=1`: Replace Unicode glyphs with clean ASCII equivalents.
+  - `TAERT_REDUCE_MOTION=1`: Disable spinners and animated progress indicators for reduced motion accessibility.
+  - `NO_COLOR=1`: Standard no-color mode with high-contrast text formatting.
 
 ---
 

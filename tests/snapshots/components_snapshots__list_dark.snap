@@ -1,0 +1,7 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+  CARGO                                                        2 items · 40.0 MB
+▌ ● ~/.cargo/registry/cache                                             15.0 MB
+  ○ ~/.cargo/git/db                                                     25.0 MB

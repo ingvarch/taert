@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ Test Scan                0 of 2 selected  ·  0 B
+──────────────────────────────────────────────────
+     CARGO                     2 items · 40.0 MB
+   ▌ ○ /Users/test/…gistry/cache        15.0 MB
+     ○ /Users/test/.cargo/git/db        25.0 MB
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────
+  ?  Help                        Review items  ↵

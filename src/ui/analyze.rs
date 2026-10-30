@@ -16,13 +16,15 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::dialog::{Dialog, DialogHint};
-use super::size_level::SizeLevel;
+use super::components::button::Button;
+use super::components::chrome::AppChrome;
+use super::components::hints::{Hint, PrimaryAction};
+use super::components::list::ListRow;
+use super::components::modal::Modal;
+use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::path_utils::prettify_path;
@@ -42,7 +44,7 @@ pub struct ChildItem {
 impl ChildItem {
     pub fn suffix(&self) -> &'static str {
         if self.is_package {
-            " [package]"
+            ""
         } else if self.is_dir {
             "/"
         } else {
@@ -348,66 +350,55 @@ impl AnalyzeState {
 }
 
 pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
-    let area = frame.area();
-
     let level = match state.current_level() {
         Some(l) => l,
         None => return,
     };
 
     let pretty_path = prettify_path(&level.snapshot.path);
-    let window_title = format!(" Space Explorer  /  {pretty_path} ");
-
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(window_title, theme.title)]))
-        .title_alignment(Alignment::Left);
-
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Status line
-            Constraint::Min(6),    // Children list with gauges
-            Constraint::Length(1), // Divider
-            Constraint::Length(1), // Footer keyhints
-        ])
-        .split(inner_area);
-
-    // 1. Status header line (Allocated, Items, Skipped/Inaccessible)
-    let mut status_parts = vec![
-        format!("{} allocated", format_bytes(level.snapshot.total_bytes)),
-        format!("{} items", level.snapshot.children.len()),
-    ];
-    if level.snapshot.skipped_count > 0 {
-        status_parts.push(format!("{} skipped", level.snapshot.skipped_count));
-    }
-    if level.snapshot.inaccessible_count > 0 {
-        status_parts.push(format!(
-            "{} inaccessible",
-            level.snapshot.inaccessible_count
-        ));
+    let mut crumbs = vec!["taert", "Explore"];
+    let path_segments: Vec<&str> = pretty_path.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in path_segments {
+        crumbs.push(seg);
     }
 
-    let status_text = status_parts.join("  ·  ");
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(status_text, theme.muted),
-            if let Some(ref notice) = state.status_notice {
-                Span::styled(format!("   ✓ {notice}"), theme.success)
-            } else {
-                Span::raw("")
-            },
-        ])),
-        chunks[0],
+    let status_text = format!(
+        "{}  ·  {} items",
+        format_bytes(level.snapshot.total_bytes),
+        level.snapshot.children.len()
     );
+    let right_status = Line::from(vec![Span::styled(status_text, theme.callout())]);
 
-    // 2. Children list with Gauge proportional to folder total
-    let list_area_height = chunks[1].height as usize;
+    let can_open = match level.snapshot.children.get(level.selected) {
+        Some(c) => c.is_dir && !c.is_package,
+        None => false,
+    };
+
+    let primary_action = if can_open {
+        PrimaryAction::new("Open", "→")
+    } else {
+        PrimaryAction::disabled("Open", "→")
+    };
+
+    let toast = state
+        .status_notice
+        .as_ref()
+        .map(|msg| Toast::success(msg.clone()));
+
+    let chrome = AppChrome::new(crumbs)
+        .status(right_status)
+        .hints(vec![
+            Hint::new("↑↓", "Move"),
+            Hint::new("←", "Back"),
+            Hint::new("O", "Reveal in Finder"),
+            Hint::new("?", "More"),
+        ])
+        .primary(primary_action)
+        .toast(toast.as_ref());
+
+    let content_rect = chrome.render(frame, theme);
+
+    let list_area_height = content_rect.height as usize;
     let scroll_offset = if level.snapshot.children.len() > list_area_height && list_area_height > 0
     {
         let half = list_area_height / 2;
@@ -433,77 +424,51 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         .take(list_area_height)
     {
         let is_selected = idx == level.selected;
-        let cursor = if is_selected { "› " } else { "  " };
 
-        let cursor_style = if is_selected {
-            theme.cursor
+        let icon = if child.is_package {
+            theme.g.package
+        } else if child.is_dir {
+            theme.g.folder
         } else {
-            theme.muted
-        };
-        let row_style = if is_selected {
-            theme.focused_row
-        } else {
-            theme.normal
+            theme.g.file
         };
 
-        // Gauge proportional to current folder's total size (up to 16 chars: [██████░░░░░░])
+        let icon_style = if child.is_dir || child.is_package {
+            theme.accent_text()
+        } else {
+            theme.callout()
+        };
+
+        let display_name = format!("{}{}", child.name, child.suffix());
         let fraction = (child.size_bytes as f64 / total_dir_bytes as f64).clamp(0.0, 1.0);
-        let filled_chars = (fraction * 16.0).round() as usize;
-        let empty_chars = 16usize.saturating_sub(filled_chars);
-        let gauge_str = format!("[{}{}]", "█".repeat(filled_chars), "░".repeat(empty_chars));
 
-        let size_style = SizeLevel::of(child.size_bytes).style(is_selected);
-        let name_with_suffix = format!("{}{}", child.name, child.suffix());
+        let size_style = theme.size(child.size_bytes);
+        let detail_str = format!("{:>9}", format_bytes(child.size_bytes));
 
-        list_lines.push(Line::from(vec![
-            Span::styled(cursor, cursor_style),
-            Span::styled(
-                format!("{:>9}  ", format_bytes(child.size_bytes)),
-                size_style,
-            ),
-            Span::styled(
-                format!("{gauge_str}  "),
-                if is_selected {
-                    theme.focused_row
-                } else {
-                    theme.muted
-                },
-            ),
-            Span::styled(name_with_suffix, row_style),
-        ]));
+        let mut row = ListRow::new(vec![Span::styled(display_name, theme.body())])
+            .leading(Span::styled(icon, icon_style))
+            .detail(Span::styled(detail_str, size_style))
+            .chevron(child.is_dir && !child.is_package)
+            .selected(is_selected);
+
+        if content_rect.width >= 100 {
+            row = row.bar(fraction);
+        }
+
+        list_lines.push(row.render_line(content_rect.width as usize, theme));
     }
 
     if level.snapshot.children.is_empty() {
+        list_lines.push(Line::from(""));
         list_lines.push(Line::from(Span::styled(
             "  (empty folder or no accessible files)",
-            theme.muted,
+            theme.callout(),
         )));
     }
 
-    frame.render_widget(Paragraph::new(list_lines), chunks[1]);
+    frame.render_widget(Paragraph::new(list_lines), content_rect);
 
-    // 3. Divider
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[2]);
-
-    // 4. Footer keyhints (with O reveal)
-    let footer_text = Line::from(vec![
-        Span::styled("↑↓ ", theme.footer_key),
-        Span::styled("move  ", theme.footer_desc),
-        Span::styled("Enter/→ ", theme.footer_key),
-        Span::styled("open  ", theme.footer_desc),
-        Span::styled("O ", theme.footer_key),
-        Span::styled("reveal in Finder  ", theme.footer_desc),
-        Span::styled("←/Backspace ", theme.footer_key),
-        Span::styled("back  ", theme.footer_desc),
-        Span::styled("Esc/q ", theme.footer_key),
-        Span::styled("exit", theme.footer_desc),
-    ]);
-    frame.render_widget(Paragraph::new(footer_text), chunks[3]);
-
-    // 5. Modal dialog when Measuring a folder in background
+    // Measuring Modal
     if let Some(ref prog) = state.current_progress {
         render_measuring_modal(frame, prog, state.spinner_idx, theme);
     }
@@ -518,22 +483,27 @@ fn render_measuring_modal(
     let pretty_folder = prettify_path(&prog.folder_path);
     let title = format!("Measuring {pretty_folder}…");
 
-    let spinner_char = match spinner_idx % 4 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        _ => "⠸",
+    let spinner_char = if theme.env.reduce_motion {
+        "*"
+    } else {
+        match spinner_idx % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        }
     };
 
-    let line1 = Line::from(vec![
-        Span::styled(format!("{spinner_char} "), theme.accent),
-        Span::styled(&prog.current_name, theme.normal),
-    ]);
+    let step_info = format!("{} of {}", prog.position, prog.total);
 
-    Dialog::new(title)
-        .with_title_style(theme.warning)
-        .with_border_style(theme.warning)
-        .with_message(vec![line1])
-        .with_hints(vec![DialogHint::new("Esc/←", "cancel")])
+    Modal::new(&title)
+        .message(vec![
+            Line::from(vec![
+                Span::styled(format!("{spinner_char} "), theme.accent_text()),
+                Span::styled(&prog.current_name, theme.body()),
+            ]),
+            Line::from(vec![Span::styled(step_info, theme.callout())]),
+        ])
+        .buttons(vec![Button::new("Cancel").focused(true)])
         .render(frame, frame.area(), theme);
 }

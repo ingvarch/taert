@@ -29,7 +29,17 @@ fn test_cli_config() {
         .assert()
         .success()
         .stdout(predicate::str::contains("taert Configuration"))
+        .stdout(predicate::str::contains("Appearance:"))
         .stdout(predicate::str::contains("Default artifact age threshold"));
+}
+
+#[test]
+fn test_cli_config_invalid_appearance() {
+    let mut cmd = Command::cargo_bin("taert").unwrap();
+    cmd.args(["config", "--appearance", "neon"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid appearance"));
 }
 
 #[test]

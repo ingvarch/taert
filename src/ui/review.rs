@@ -1,12 +1,13 @@
 //! Interactive Review & Outcome Screen.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
+use ratatui::layout::Alignment;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::size_level::SizeLevel;
+use super::components::chrome::AppChrome;
+use super::components::hints::{Hint, PrimaryAction};
+use super::components::list::{ListRow, path_spans, render_section_header};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::RemovalReport;
@@ -57,128 +58,151 @@ impl ReviewState {
 }
 
 pub fn render_review(frame: &mut Frame, state: &ReviewState, theme: &Theme) {
-    let area = frame.area();
-
-    let window_title = if state.report.is_some() {
-        " Clean Complete "
-    } else {
-        " Confirm Permanent Deletion "
-    };
-
-    let border_style = if state.report.is_some() {
-        theme.border
-    } else {
-        theme.warning
-    };
-
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(border_style)
-        .title(Line::from(vec![Span::styled(window_title, theme.title)]))
-        .title_alignment(Alignment::Left);
-
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Subtitle / Status
-            Constraint::Min(6),    // List or Summary
-            Constraint::Length(1), // Divider
-            Constraint::Length(1), // Footer keyhints
-        ])
-        .split(inner_area);
-
     if let Some(ref report) = state.report {
-        // Summary View
-        let header_line = Line::from(vec![Span::styled("Cleanup Summary", theme.subtitle)]);
-        frame.render_widget(Paragraph::new(header_line), chunks[0]);
-
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Freed space: ", theme.normal),
-                Span::styled(format_bytes(report.freed_bytes), theme.success),
-            ]),
-            Line::from(vec![
-                Span::styled("Removed items: ", theme.normal),
-                Span::styled(report.removed_count.to_string(), theme.success),
-            ]),
-        ];
-
-        if !report.failures.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("Errors encountered:", theme.error)));
-            for failure in &report.failures {
-                lines.push(Line::from(vec![
-                    Span::styled("  ✕ ", theme.error),
-                    Span::styled(prettify_path(&failure.path), theme.normal),
-                    Span::styled(format!(" ({})", failure.error), theme.muted),
-                ]));
-            }
-        }
-
-        frame.render_widget(Paragraph::new(lines), chunks[1]);
-
-        let divider = Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme.border);
-        frame.render_widget(divider, chunks[2]);
-
-        let footer_text = Line::from(vec![
-            Span::styled("Enter/Esc/q ", theme.footer_key),
-            Span::styled("return to workspace", theme.footer_desc),
-        ]);
-        frame.render_widget(Paragraph::new(footer_text), chunks[3]);
+        render_outcome(frame, report, theme);
         return;
     }
 
-    // List of deletion candidates
     let selected_items = state.scan.selected_items();
     let total_bytes = state.scan.total_selected_bytes();
+    let count = selected_items.len();
 
-    let subtitle = format!(
-        "{} selected item(s) to remove ({})",
-        selected_items.len(),
-        format_bytes(total_bytes)
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(subtitle, theme.subtitle))),
-        chunks[0],
-    );
+    let primary_action =
+        PrimaryAction::destructive(format!("Remove {count} items"), theme.g.key_enter);
 
-    let list_area_height = chunks[1].height as usize;
-    let mut list_lines = Vec::new();
+    let chrome = AppChrome::new(vec!["taert", "Clean caches", "Review"])
+        .hints(vec![
+            Hint::new("↑↓", "Scroll"),
+            Hint::new("⎋", "Back"),
+            Hint::new("?", "More"),
+        ])
+        .primary(primary_action);
 
-    for item in selected_items
-        .iter()
-        .skip(state.scroll_offset)
-        .take(list_area_height)
-    {
-        let size_style = SizeLevel::of(item.size_bytes).style(false);
-        list_lines.push(Line::from(vec![
-            Span::styled("  ✕ ", theme.error),
-            Span::styled(
-                format!("{:>9}  ", format_bytes(item.size_bytes)),
-                size_style,
-            ),
-            Span::styled(prettify_path(&item.path), theme.normal),
-        ]));
+    let content_rect = chrome.render(frame, theme);
+
+    let mut lines = Vec::new();
+
+    // Headline
+    lines.push(Line::from(vec![
+        Span::styled(format!("{count} items"), theme.warning()),
+        Span::styled(" · ", theme.callout()),
+        Span::styled(format_bytes(total_bytes), theme.warning()),
+        Span::styled(" will be permanently deleted", theme.headline()),
+    ]));
+    lines.push(Line::from(""));
+
+    // Grouped items
+    let mut flat_items: Vec<Line> = Vec::new();
+
+    for group in &state.scan.groups {
+        let sel_in_group: Vec<_> = group.items.iter().filter(|it| it.selected).collect();
+        if sel_in_group.is_empty() {
+            continue;
+        }
+
+        let group_bytes: u64 = sel_in_group.iter().map(|it| it.size_bytes).sum();
+        flat_items.push(render_section_header(
+            &group.tool,
+            Some(&format_bytes(group_bytes)),
+            content_rect.width as usize,
+            theme,
+        ));
+
+        for item in sel_in_group {
+            let spans = path_spans(
+                &item.path,
+                (content_rect.width as usize).saturating_sub(20),
+                theme,
+            );
+            let size_style = theme.size(item.size_bytes);
+            let detail = Span::styled(format!("{:>9}", format_bytes(item.size_bytes)), size_style);
+
+            let row = ListRow::new(spans).detail(detail);
+            flat_items.push(row.render_line(content_rect.width as usize, theme));
+        }
+        flat_items.push(Line::from(""));
     }
 
-    frame.render_widget(Paragraph::new(list_lines), chunks[1]);
+    let avail_h = content_rect.height.saturating_sub(2) as usize;
+    let offset = state.scroll_offset.min(flat_items.len().saturating_sub(1));
 
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[2]);
+    for line in flat_items.into_iter().skip(offset).take(avail_h) {
+        lines.push(line);
+    }
 
-    let footer_lines = Line::from(vec![
-        Span::styled("Enter ", theme.footer_key),
-        Span::styled("confirm permanent deletion  ", theme.footer_desc),
-        Span::styled("Esc/q ", theme.footer_key),
-        Span::styled("back", theme.footer_desc),
-    ]);
-    frame.render_widget(Paragraph::new(footer_lines), chunks[3]);
+    frame.render_widget(Paragraph::new(lines), content_rect);
+}
+
+fn render_outcome(frame: &mut Frame, report: &RemovalReport, theme: &Theme) {
+    let chrome = AppChrome::new(vec!["taert", "Clean caches", "Done"])
+        .hints(vec![Hint::new("⎋", "Back")])
+        .primary(PrimaryAction::new("Done", theme.g.key_enter));
+
+    let content_rect = chrome.render(frame, theme);
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    if report.freed_bytes > 0 {
+        lines.push(
+            Line::from(vec![Span::styled(theme.g.success, theme.success())])
+                .alignment(Alignment::Center),
+        );
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(vec![Span::styled(
+                format!("Freed {}", format_bytes(report.freed_bytes)),
+                theme.headline(),
+            )])
+            .alignment(Alignment::Center),
+        );
+    } else {
+        lines.push(
+            Line::from(vec![Span::styled(theme.g.error, theme.danger())])
+                .alignment(Alignment::Center),
+        );
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(vec![Span::styled("Nothing was removed", theme.headline())])
+                .alignment(Alignment::Center),
+        );
+    }
+
+    let fail_part = if report.failures.is_empty() {
+        "".to_string()
+    } else {
+        format!(" · {} couldn't be removed", report.failures.len())
+    };
+
+    lines.push(
+        Line::from(vec![Span::styled(
+            format!("{} items removed{fail_part}", report.removed_count),
+            theme.callout(),
+        )])
+        .alignment(Alignment::Center),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    if !report.failures.is_empty() {
+        lines.push(render_section_header(
+            "COULDN'T REMOVE",
+            None,
+            content_rect.width as usize,
+            theme,
+        ));
+        for fail in &report.failures {
+            let row = ListRow::new(vec![Span::styled(
+                prettify_path(&fail.path),
+                theme.callout(),
+            )])
+            .leading(Span::styled(theme.g.error, theme.danger()))
+            .detail(Span::styled(fail.error.clone(), theme.footnote()));
+
+            lines.push(row.render_line(content_rect.width as usize, theme));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), content_rect);
 }

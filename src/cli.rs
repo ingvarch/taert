@@ -49,7 +49,14 @@ pub enum Command {
     Ignore(IgnoreArgs),
 
     /// Show current configuration and paths
-    Config,
+    Config(ConfigArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct ConfigArgs {
+    /// Set appearance theme: auto, dark, or light
+    #[arg(long)]
+    pub appearance: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum)]

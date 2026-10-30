@@ -68,6 +68,7 @@ pub struct App {
     pub should_quit: bool,
     pub removal_rx: Option<Receiver<RemovalMessage>>,
     pub removal_spinner: usize,
+    pub help_open: bool,
 }
 
 impl App {
@@ -80,6 +81,7 @@ impl App {
             should_quit: false,
             removal_rx: None,
             removal_spinner: 0,
+            help_open: false,
         }
     }
 
@@ -92,6 +94,7 @@ impl App {
             should_quit: false,
             removal_rx: None,
             removal_spinner: 0,
+            help_open: false,
         }
     }
 
@@ -104,6 +107,7 @@ impl App {
             should_quit: false,
             removal_rx: None,
             removal_spinner: 0,
+            help_open: false,
         }
     }
 
@@ -129,15 +133,46 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> io::Result<()> {
         while !self.should_quit {
-            terminal.draw(|frame| match &self.screen {
-                Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
-                Screen::Scanning(state, _, _) => render_progress(frame, state, &self.theme),
-                Screen::Select(state) => render_select(frame, state, &self.theme),
-                Screen::Review(state) => render_review(frame, state, &self.theme),
-                Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
-                Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
-                Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
-                Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
+            terminal.draw(|frame| {
+                let area = frame.area();
+                if area.width < 40 || area.height < 12 {
+                    let msg = "Terminal too small (need >= 40x12)";
+                    let p = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                        ratatui::text::Span::styled(msg, self.theme.callout()),
+                    ))
+                    .alignment(ratatui::layout::Alignment::Center);
+                    let y = area.y + area.height / 2;
+                    let rect = ratatui::layout::Rect {
+                        x: area.x,
+                        y,
+                        width: area.width,
+                        height: 1,
+                    };
+                    frame.render_widget(p, rect);
+                    return;
+                }
+
+                match &self.screen {
+                    Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
+                    Screen::Scanning(state, _, _) => render_progress(frame, state, &self.theme),
+                    Screen::Select(state) => render_select(frame, state, &self.theme),
+                    Screen::Review(state) => render_review(frame, state, &self.theme),
+                    Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
+                    Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
+                    Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
+                    Screen::PathListEditor(state) => {
+                        render_path_list_editor(frame, state, &self.theme)
+                    }
+                }
+
+                if self.help_open {
+                    let shortcuts = self.shortcuts_for_screen();
+                    super::components::help::HelpSheet::new(shortcuts).render(
+                        frame,
+                        area,
+                        &self.theme,
+                    );
+                }
             })?;
 
             // Poll background scan messages if currently scanning
@@ -210,6 +245,26 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode) {
+        if self.help_open {
+            if matches!(
+                code,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char('?')
+            ) {
+                self.help_open = false;
+            }
+            return;
+        }
+
+        let is_typing = match &self.screen {
+            Screen::Select(select) => select.is_searching,
+            Screen::PathListEditor(editor) => matches!(editor.mode, PathListMode::Adding(_)),
+            _ => false,
+        };
+        if !is_typing && code == KeyCode::Char('?') {
+            self.help_open = true;
+            return;
+        }
+
         match &mut self.screen {
             Screen::Workspace(state) => match &mut state.view {
                 WorkspaceView::Confirm(kind, start_focused) => match code {
@@ -235,8 +290,8 @@ impl App {
                 },
 
                 WorkspaceView::CleanSubmenu { selected } => match code {
-                    KeyCode::Up => state.previous(),
-                    KeyCode::Down => state.next(),
+                    KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                    KeyCode::Down | KeyCode::Char('j') => state.next(),
                     KeyCode::PageUp | KeyCode::Home => state.move_to_start(),
                     KeyCode::PageDown | KeyCode::End => state.move_to_end(),
                     KeyCode::Esc | KeyCode::Char('q') => {
@@ -258,8 +313,8 @@ impl App {
                 },
 
                 WorkspaceView::MainMenu => match code {
-                    KeyCode::Up => state.previous(),
-                    KeyCode::Down => state.next(),
+                    KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                    KeyCode::Down | KeyCode::Char('j') => state.next(),
                     KeyCode::PageUp | KeyCode::Home => state.move_to_start(),
                     KeyCode::PageDown | KeyCode::End => state.move_to_end(),
                     KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
@@ -344,8 +399,8 @@ impl App {
                 }
 
                 match code {
-                    KeyCode::Up => state.previous_selectable(),
-                    KeyCode::Down => state.next_selectable(),
+                    KeyCode::Up | KeyCode::Char('k') => state.previous_selectable(),
+                    KeyCode::Down | KeyCode::Char('j') => state.next_selectable(),
                     KeyCode::PageUp => state.page_up(),
                     KeyCode::PageDown => state.page_down(),
                     KeyCode::Home => state.move_to_start(),
@@ -377,8 +432,8 @@ impl App {
                         return;
                     }
                     match code {
-                        KeyCode::Up => state.scroll_up(),
-                        KeyCode::Down => state.scroll_down(),
+                        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                        KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
                         KeyCode::PageUp => state.page_up(),
                         KeyCode::PageDown => state.page_down(),
                         KeyCode::Home => state.move_to_start(),
@@ -389,8 +444,8 @@ impl App {
                 }
 
                 match code {
-                    KeyCode::Up => state.scroll_up(),
-                    KeyCode::Down => state.scroll_down(),
+                    KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                    KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
                     KeyCode::PageUp => state.page_up(),
                     KeyCode::PageDown => state.page_down(),
                     KeyCode::Home => state.move_to_start(),
@@ -427,8 +482,8 @@ impl App {
                 }
 
                 match code {
-                    KeyCode::Up => state.previous(),
-                    KeyCode::Down => state.next(),
+                    KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                    KeyCode::Down | KeyCode::Char('j') => state.next(),
                     KeyCode::PageUp => state.page_up(),
                     KeyCode::PageDown => state.page_down(),
                     KeyCode::Home => state.move_to_start(),
@@ -452,8 +507,8 @@ impl App {
             }
 
             Screen::SystemStatus(state) => match code {
-                KeyCode::Up => state.scroll_up(),
-                KeyCode::Down => state.scroll_down(),
+                KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
                 KeyCode::PageUp => state.page_up(),
                 KeyCode::PageDown => state.page_down(),
                 KeyCode::Home => state.scroll_to_top(),
@@ -465,8 +520,8 @@ impl App {
             },
 
             Screen::Preferences(state) => match code {
-                KeyCode::Up => state.previous(),
-                KeyCode::Down => state.next(),
+                KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                KeyCode::Down | KeyCode::Char('j') => state.next(),
                 KeyCode::Left => state.step_age_left(&mut self.config),
                 KeyCode::Right => state.step_age_right(&mut self.config),
                 KeyCode::Enter => match state.focus {
@@ -514,8 +569,8 @@ impl App {
                     _ => {}
                 },
                 PathListMode::Normal => match code {
-                    KeyCode::Up => state.previous(),
-                    KeyCode::Down => state.next(),
+                    KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                    KeyCode::Down | KeyCode::Char('j') => state.next(),
                     KeyCode::PageUp => state.page_up(),
                     KeyCode::PageDown => state.page_down(),
                     KeyCode::Home => state.move_to_start(),
@@ -531,6 +586,66 @@ impl App {
                     _ => {}
                 },
             },
+        }
+    }
+
+    fn shortcuts_for_screen(&self) -> Vec<super::components::hints::Hint<'static>> {
+        use super::components::hints::Hint;
+        match &self.screen {
+            Screen::Workspace(_) => vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("↵", "Select"),
+                Hint::new("1-5", "Quick select"),
+                Hint::new("⎋ / q", "Quit"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::Scanning(_, _, _) => vec![
+                Hint::new("⎋ / q", "Cancel scan"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::Select(_) => vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("␣", "Toggle item"),
+                Hint::new("A", "Select all"),
+                Hint::new("N", "Select none"),
+                Hint::new("/", "Search"),
+                Hint::new("↵", "Review & clean"),
+                Hint::new("⎋ / q", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::Review(_) => vec![
+                Hint::new("↑↓ / jk", "Scroll"),
+                Hint::new("↵", "Confirm clean"),
+                Hint::new("⎋ / q", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::Analyze(_) => vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("↵ / →", "Enter folder"),
+                Hint::new("⎋ / ←", "Up one level"),
+                Hint::new("O", "Reveal in Finder"),
+                Hint::new("q", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::SystemStatus(_) => vec![
+                Hint::new("↑↓ / jk", "Scroll"),
+                Hint::new("⎋ / q / ↵", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::Preferences(_) => vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("←→", "Change threshold"),
+                Hint::new("↵", "Edit list"),
+                Hint::new("⎋ / q", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
+            Screen::PathListEditor(_) => vec![
+                Hint::new("↑↓ / jk", "Navigate"),
+                Hint::new("A", "Add path"),
+                Hint::new("D / ⌫", "Remove path"),
+                Hint::new("⎋ / q", "Back"),
+                Hint::new("?", "Toggle help"),
+            ],
         }
     }
 

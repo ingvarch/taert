@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert                                                                                    118.6 GB available · 24% free
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+       CLEANUP                        │
+     ▌ ✧ Clean caches                ›│    ✧  Clean caches
+       ◇ Project cleanup             ›│
+                                      │    Choose tools and individual paths to remove.
+       INSPECT                        │
+       ◔ Explore storage             ›│    Includes developer caches, user junk, AI tool caches
+       ▤ System status               ›│    and the Trash. You'll review every item before
+                                      │    anything is removed.
+       SETTINGS                       │
+       ⌥ Preferences                 ›│    ↵ Open
+       ◈ Protected paths             ›│
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+                                      │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ?  More                                                                                          Open  ↵

@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{CleanArgs, CleanCategory, Cli, Command, IgnoreAction, PurgeArgs};
+use crate::cli::{CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs};
 use crate::core::bytes::format_bytes;
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
 
         Some(Command::Ignore(args)) => handle_ignore(args.action, &ignore),
 
-        Some(Command::Config) => handle_config(&config),
+        Some(Command::Config(ref args)) => handle_config(args, &config),
     }
 }
 
@@ -330,7 +330,29 @@ fn handle_ignore(action: IgnoreAction, ignore: &IgnoreStore) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn handle_config(config: &Config) -> ExitCode {
+fn handle_config(args: &ConfigArgs, config: &Config) -> ExitCode {
+    if let Some(ref app) = args.appearance {
+        let normalized = app.to_lowercase();
+        if !["auto", "dark", "light"].contains(&normalized.as_str()) {
+            eprintln!("Error: Invalid appearance '{app}'. Expected 'auto', 'dark', or 'light'.");
+            return ExitCode::FAILURE;
+        }
+        let mut updated = config.clone();
+        updated.appearance = normalized;
+        if let Some(config_path) = Config::default_path() {
+            if let Err(e) = updated.save_to(&config_path) {
+                eprintln!("Failed to save configuration: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "Updated appearance to '{}' in {}",
+                updated.appearance,
+                config_path.display()
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+
     println!("=== taert Configuration ===");
     if let Some(config_path) = Config::default_path() {
         println!("Config path: {}", config_path.display());
@@ -342,6 +364,7 @@ fn handle_config(config: &Config) -> ExitCode {
         "Default artifact age threshold: {} days",
         config.older_than_days
     );
+    println!("Appearance: {}", config.appearance);
     if !config.extra_artifacts.is_empty() {
         println!("Custom artifacts: {:?}", config.extra_artifacts);
     }

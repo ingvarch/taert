@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Clean caches › Scanning
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                          ⠋  Scanning Developer, 2 of 5
+
+
+
+
+                             ~/Library/Caches/Cargo
+                        Found 12 items · 42.0 MB  ·  0:00
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ⎋  Cancel

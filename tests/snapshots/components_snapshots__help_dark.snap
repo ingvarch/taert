@@ -1,0 +1,17 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+
+    ╭────────────────────────────────────────────────────────────╮
+    │ Keyboard Shortcuts                                         │
+    │                                                            │
+    │  ↑↓      Move               N       Select none            │
+    │  ␣       Select             /       Search                 │
+    │  A       Select all         ↵       Review                 │
+    │                                                            │
+    │                                                            │
+    │                                                      Done  │
+    │                                                ↵/⎋/? Close │
+    ╰────────────────────────────────────────────────────────────╯

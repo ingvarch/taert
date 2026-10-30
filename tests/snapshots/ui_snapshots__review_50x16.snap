@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ Review
+──────────────────────────────────────────────────
+   1 items · 15.0 MB will be permanently deleted
+
+     CARGO                               15.0 MB
+        /Users/test/…gistry/cache        15.0 MB
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────
+  ?  Help                      Remove 1 items  ↵

@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Clean caches › Review
+────────────────────────────────────────────────────────────────────────────────
+   1 items · 15.0 MB will be permanently deleted
+
+     CARGO                                                             15.0 MB
+        /Users/test/.cargo/registry/cache                              15.0 MB
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Scroll    ⎋  Back    ?  More                           Remove 1 items  ↵

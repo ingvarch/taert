@@ -2,11 +2,14 @@
 //! Configures artifact age threshold presets and shortcuts to project folders and protected paths.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
+use super::components::chrome::AppChrome;
+use super::components::hints::{Hint, PrimaryAction};
+use super::components::list::{ListRow, render_section_header};
+use super::components::text::plural;
+use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::stores::{Config, IgnoreStore};
@@ -82,133 +85,124 @@ impl PreferencesState {
 }
 
 pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &Theme) {
-    let area = frame.area();
+    let is_link = matches!(
+        state.focus,
+        PreferencesFocus::ProjectFolders | PreferencesFocus::ProtectedPaths
+    );
 
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(" Preferences ", theme.title)]))
-        .title_alignment(Alignment::Left);
+    let primary_action = if is_link {
+        PrimaryAction::new("Open", theme.g.key_enter)
+    } else {
+        PrimaryAction::disabled("Open", theme.g.key_enter)
+    };
 
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
+    let toast = state.save_notice.map(Toast::success);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Subtitle
-            Constraint::Min(6),    // List of settings
-            Constraint::Length(1), // Notice or status
-            Constraint::Length(1), // Divider
-            Constraint::Length(1), // Footer keyhints
+    let chrome = AppChrome::new(vec!["taert", "Preferences"])
+        .hints(vec![
+            Hint::new("↑↓", "Move"),
+            Hint::new("←→", "Adjust"),
+            Hint::new("?", "More"),
         ])
-        .split(inner_area);
+        .primary(primary_action)
+        .toast(toast.as_ref());
 
-    let subtitle = Line::from(vec![Span::styled(
-        "Change cleanup age, project folders, and protected paths",
-        theme.muted,
-    )]);
-    frame.render_widget(Paragraph::new(subtitle), chunks[0]);
+    let content_rect = chrome.render(frame, theme);
+    let width = content_rect.width as usize;
 
-    // Preferences Items
-    let mut rows = Vec::new();
+    let mut lines = Vec::new();
 
-    // 1. Preselect artifacts older than
+    // 1. CLEANUP Section
+    lines.push(render_section_header("CLEANUP", None, width, theme));
+
     let age_focused = state.focus == PreferencesFocus::AgeThreshold;
-    let age_cursor = if age_focused { "› " } else { "  " };
-    let age_val = format!("‹ {} days ›", state.older_than_days);
-    rows.push(Line::from(vec![
-        Span::styled(
-            age_cursor,
-            if age_focused {
-                theme.cursor
-            } else {
-                theme.muted
-            },
-        ),
-        Span::styled(
-            "Preselect artifacts older than    ",
-            if age_focused {
-                theme.focused_row
-            } else {
-                theme.normal
-            },
-        ),
-        Span::styled(format!("{:<14}", age_val), theme.accent),
-    ]));
-    rows.push(Line::from(""));
+    let is_first = state.older_than_days <= *AGE_PRESETS.first().unwrap();
+    let is_last = state.older_than_days >= *AGE_PRESETS.last().unwrap();
 
-    // 2. Project folders
-    let folders_focused = state.focus == PreferencesFocus::ProjectFolders;
-    let folders_cursor = if folders_focused { "› " } else { "  " };
-    rows.push(Line::from(vec![
-        Span::styled(
-            folders_cursor,
-            if folders_focused {
-                theme.cursor
-            } else {
-                theme.muted
-            },
-        ),
-        Span::styled(
-            "Project folders                   ",
-            if folders_focused {
-                theme.focused_row
-            } else {
-                theme.normal
-            },
-        ),
-        Span::styled(format!("{} folder(s) ›", state.folder_count), theme.muted),
-    ]));
-    rows.push(Line::from(""));
+    let left_arr = if is_first { " " } else { "‹" };
+    let right_arr = if is_last { " " } else { "›" };
+    let age_str = format!("{left_arr}  {} days  {right_arr}", state.older_than_days);
 
-    // 3. Protected paths
-    let paths_focused = state.focus == PreferencesFocus::ProtectedPaths;
-    let paths_cursor = if paths_focused { "› " } else { "  " };
-    rows.push(Line::from(vec![
-        Span::styled(
-            paths_cursor,
-            if paths_focused {
-                theme.cursor
-            } else {
-                theme.muted
-            },
-        ),
-        Span::styled(
-            "Protected paths                   ",
-            if paths_focused {
-                theme.focused_row
-            } else {
-                theme.normal
-            },
-        ),
-        Span::styled(format!("{} path(s) ›", state.path_count), theme.muted),
-    ]));
+    let age_row = ListRow::new(vec![Span::styled(
+        "Preselect artifacts older than",
+        theme.body(),
+    )])
+    .detail(Span::styled(
+        age_str,
+        if age_focused {
+            theme.accent_text()
+        } else {
+            theme.callout()
+        },
+    ))
+    .selected(age_focused);
 
-    frame.render_widget(Paragraph::new(rows), chunks[1]);
+    lines.push(age_row.render_line(width, theme));
 
-    if let Some(msg) = state.save_notice {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!("✓ {msg}"), theme.success))),
-            chunks[2],
-        );
+    // Preset slider track if age is focused and regular/wide width
+    if age_focused && width >= 60 {
+        lines.push(render_presets_slider(state.older_than_days, width, theme));
+        lines.push(render_presets_labels(width, theme));
     }
 
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[3]);
+    lines.push(Line::from(""));
 
-    let footer_text = Line::from(vec![
-        Span::styled("↑↓ ", theme.footer_key),
-        Span::styled("move  ", theme.footer_desc),
-        Span::styled("←→ ", theme.footer_key),
-        Span::styled("change age  ", theme.footer_desc),
-        Span::styled("Enter ", theme.footer_key),
-        Span::styled("open list  ", theme.footer_desc),
-        Span::styled("Esc/q ", theme.footer_key),
-        Span::styled("back", theme.footer_desc),
-    ]);
-    frame.render_widget(Paragraph::new(footer_text), chunks[4]);
+    // 2. LOCATIONS Section
+    lines.push(render_section_header("LOCATIONS", None, width, theme));
+
+    let folders_focused = state.focus == PreferencesFocus::ProjectFolders;
+    let folders_row = ListRow::new(vec![Span::styled("Project folders", theme.body())])
+        .detail(Span::styled(
+            plural(state.folder_count, "folder", "folders"),
+            theme.callout(),
+        ))
+        .chevron(true)
+        .selected(folders_focused);
+    lines.push(folders_row.render_line(width, theme));
+
+    let paths_focused = state.focus == PreferencesFocus::ProtectedPaths;
+    let paths_row = ListRow::new(vec![Span::styled("Protected paths", theme.body())])
+        .detail(Span::styled(
+            plural(state.path_count, "path", "paths"),
+            theme.callout(),
+        ))
+        .chevron(true)
+        .selected(paths_focused);
+    lines.push(paths_row.render_line(width, theme));
+
+    frame.render_widget(Paragraph::new(lines), content_rect);
+}
+
+fn render_presets_slider(current: u64, _width: usize, theme: &Theme) -> Line<'static> {
+    let indent = "   ";
+    let mut spans = vec![Span::raw(indent)];
+
+    for (i, &preset) in AGE_PRESETS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("───", theme.footnote()));
+        }
+        if preset == current {
+            spans.push(Span::styled(theme.g.bullet, theme.accent_text()));
+        } else {
+            spans.push(Span::styled(theme.g.check_off, theme.footnote()));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn render_presets_labels(_width: usize, theme: &Theme) -> Line<'static> {
+    let indent = "   ";
+    let mut spans = vec![Span::raw(indent)];
+
+    let labels = ["1d", "3d", "7d", "14d", "30d", "60d", "90d", "180d", "1y"];
+    for (i, lbl) in labels.iter().enumerate() {
+        if i > 0 {
+            let gap = 4usize.saturating_sub(lbl.len());
+            spans.push(Span::raw(" ".repeat(gap.max(1))));
+        }
+        spans.push(Span::styled(*lbl, theme.footnote()));
+    }
+
+    Line::from(spans)
 }

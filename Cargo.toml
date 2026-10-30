@@ -21,11 +21,13 @@ jwalk = "0.8"
 rayon = "1.10"
 libc = "0.2"
 sysinfo = "0.33"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3.17"
 assert_cmd = "2.0"
 predicates = "3.1"
+insta = "1"
 
 [profile.release]
 lto = true

@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ Preferences
+──────────────────────────────────────────────────
+     CLEANUP
+   ▌    Preselect ar…ts older than  ‹  7 days  ›
+
+     LOCATIONS
+        Project folders              6 folders ›
+        Protected paths                0 paths ›
+
+
+
+
+
+
+──────────────────────────────────────────────────
+  ?  Help                                Open  ↵

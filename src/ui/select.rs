@@ -5,13 +5,18 @@
 use std::path::PathBuf;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::symbols::border;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::dialog::{Dialog, DialogButton, DialogHint, MessageAlignment};
-use super::size_level::SizeLevel;
+use super::components::button::Button;
+use super::components::chrome::AppChrome;
+use super::components::empty::EmptyState;
+use super::components::gauge::bar;
+use super::components::hints::{Hint, PrimaryAction};
+use super::components::list::{ListRow, path_spans, render_section_header};
+use super::components::modal::Modal;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
@@ -46,7 +51,7 @@ pub struct SelectState {
 #[derive(Debug, Clone)]
 pub struct FlattenedRow {
     pub group_index: usize,
-    pub item_index: Option<usize>, // None if header
+    pub item_index: Option<usize>,
     pub is_header: bool,
     pub group_name: String,
     pub size_bytes: u64,
@@ -57,7 +62,6 @@ pub struct FlattenedRow {
 
 impl SelectState {
     pub fn new(mut scan: CategoryScan) -> Self {
-        // Interactive review starts with every item unselected
         for group in &mut scan.groups {
             for item in &mut group.items {
                 item.selected = false;
@@ -101,13 +105,10 @@ impl SelectState {
                         true
                     } else {
                         item.path
-                            .to_string_lossy()
+                            .display()
+                            .to_string()
                             .to_lowercase()
                             .contains(&self.search_query.to_lowercase())
-                            || group
-                                .tool
-                                .to_lowercase()
-                                .contains(&self.search_query.to_lowercase())
                     }
                 })
                 .collect();
@@ -116,34 +117,34 @@ impl SelectState {
                 continue;
             }
 
-            let item_count = group.items.len();
-            let count_suffix = if item_count == 1 {
-                "1 item".to_string()
-            } else {
-                format!("{item_count} items")
-            };
+            let group_bytes: u64 = matching_items.iter().map(|(_, it)| it.size_bytes).sum();
 
-            // Group Header
+            // Group header
             rows.push(FlattenedRow {
                 group_index: g_idx,
                 item_index: None,
                 is_header: true,
                 group_name: group.tool.clone(),
-                size_bytes: 0,
-                display_path: count_suffix,
-                is_selected: false,
+                size_bytes: group_bytes,
+                display_path: format!(
+                    "{} items · {}",
+                    matching_items.len(),
+                    format_bytes(group_bytes)
+                ),
+                is_selected: matching_items.iter().all(|(_, it)| it.selected)
+                    && !matching_items.is_empty(),
                 full_path: None,
             });
 
+            // Group items
             for (i_idx, item) in matching_items {
-                let pretty_path = prettify_path(&item.path);
                 rows.push(FlattenedRow {
                     group_index: g_idx,
                     item_index: Some(i_idx),
                     is_header: false,
                     group_name: group.tool.clone(),
                     size_bytes: item.size_bytes,
-                    display_path: pretty_path,
+                    display_path: prettify_path(&item.path),
                     is_selected: item.selected,
                     full_path: Some(item.path.clone()),
                 });
@@ -153,104 +154,23 @@ impl SelectState {
         rows
     }
 
-    pub fn next_selectable(&mut self) {
-        let rows = self.flattened_rows();
-        if rows.is_empty() {
-            return;
-        }
-
-        let mut idx = self.focused_index + 1;
-        while idx < rows.len() {
-            if !rows[idx].is_header {
-                self.focused_index = idx;
-                self.path_scroll = 0;
-                return;
-            }
-            idx += 1;
-        }
-    }
-
-    pub fn previous_selectable(&mut self) {
-        let rows = self.flattened_rows();
-        if rows.is_empty() || self.focused_index == 0 {
-            return;
-        }
-
-        let mut idx = self.focused_index.saturating_sub(1);
-        loop {
-            if !rows[idx].is_header {
-                self.focused_index = idx;
-                self.path_scroll = 0;
-                return;
-            }
-            if idx == 0 {
-                break;
-            }
-            idx -= 1;
-        }
-    }
-
-    pub fn move_by(&mut self, delta: isize) {
-        let rows = self.flattened_rows();
-        if rows.is_empty() {
-            return;
-        }
-
-        if delta > 0 {
-            let mut steps = delta;
-            let mut idx = self.focused_index;
-            while steps > 0 && idx + 1 < rows.len() {
-                idx += 1;
-                if !rows[idx].is_header {
-                    self.focused_index = idx;
-                    steps -= 1;
-                }
-            }
-        } else if delta < 0 {
-            let mut steps = delta.abs();
-            let mut idx = self.focused_index;
-            while steps > 0 && idx > 0 {
-                idx -= 1;
-                if !rows[idx].is_header {
-                    self.focused_index = idx;
-                    steps -= 1;
-                }
-            }
-        }
-        self.path_scroll = 0;
-    }
-
-    pub fn page_down(&mut self) {
-        self.move_by(10);
-    }
-
-    pub fn page_up(&mut self) {
-        self.move_by(-10);
-    }
-
-    pub fn move_to_start(&mut self) {
-        let rows = self.flattened_rows();
-        if let Some((idx, _)) = rows.iter().enumerate().find(|(_, r)| !r.is_header) {
-            self.focused_index = idx;
-            self.path_scroll = 0;
-        }
-    }
-
-    pub fn move_to_end(&mut self) {
-        let rows = self.flattened_rows();
-        if let Some((idx, _)) = rows.iter().enumerate().rfind(|(_, r)| !r.is_header) {
-            self.focused_index = idx;
-            self.path_scroll = 0;
-        }
-    }
-
     pub fn toggle_current(&mut self) {
         let rows = self.flattened_rows();
-        if let Some(row) = rows.get(self.focused_index)
-            && let Some(i_idx) = row.item_index
-        {
-            let item = &mut self.scan.groups[row.group_index].items[i_idx];
-            item.selected = !item.selected;
+        if let Some(row) = rows.get(self.focused_index) {
+            if row.is_header {
+                let g_idx = row.group_index;
+                let all_sel = self.scan.groups[g_idx]
+                    .items
+                    .iter()
+                    .all(|item| item.selected);
+                for item in &mut self.scan.groups[g_idx].items {
+                    item.selected = !all_sel;
+                }
+            } else if let Some(i_idx) = row.item_index {
+                let g_idx = row.group_index;
+                self.scan.groups[g_idx].items[i_idx].selected =
+                    !self.scan.groups[g_idx].items[i_idx].selected;
+            }
         }
     }
 
@@ -270,12 +190,109 @@ impl SelectState {
         }
     }
 
-    pub fn scroll_path_right(&mut self) {
-        self.path_scroll = self.path_scroll.saturating_add(4);
+    pub fn next_selectable(&mut self) {
+        let rows = self.flattened_rows();
+        if rows.is_empty() {
+            return;
+        }
+
+        let mut next = self.focused_index + 1;
+        while next < rows.len() {
+            if !rows[next].is_header {
+                self.focused_index = next;
+                self.path_scroll = 0;
+                return;
+            }
+            next += 1;
+        }
+        self.move_to_end();
+    }
+
+    pub fn previous_selectable(&mut self) {
+        let rows = self.flattened_rows();
+        if rows.is_empty() {
+            return;
+        }
+
+        let mut prev = self.focused_index.saturating_sub(1);
+        loop {
+            if !rows[prev].is_header {
+                self.focused_index = prev;
+                self.path_scroll = 0;
+                return;
+            }
+            if prev == 0 {
+                break;
+            }
+            prev -= 1;
+        }
+        self.move_to_start();
+    }
+
+    pub fn page_down(&mut self) {
+        let rows = self.flattened_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let target = (self.focused_index + 10).min(rows.len().saturating_sub(1));
+        for (idx, row) in rows.iter().enumerate().skip(target) {
+            if !row.is_header {
+                self.focused_index = idx;
+                self.path_scroll = 0;
+                return;
+            }
+        }
+        self.move_to_end();
+    }
+
+    pub fn page_up(&mut self) {
+        let rows = self.flattened_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let target = self.focused_index.saturating_sub(10);
+        for idx in (0..=target).rev() {
+            if !rows[idx].is_header {
+                self.focused_index = idx;
+                self.path_scroll = 0;
+                return;
+            }
+        }
+        self.move_to_start();
+    }
+
+    pub fn move_to_start(&mut self) {
+        let rows = self.flattened_rows();
+        for (idx, row) in rows.iter().enumerate() {
+            if !row.is_header {
+                self.focused_index = idx;
+                self.path_scroll = 0;
+                return;
+            }
+        }
+        self.focused_index = 0;
+        self.path_scroll = 0;
+    }
+
+    pub fn move_to_end(&mut self) {
+        let rows = self.flattened_rows();
+        for (idx, row) in rows.iter().enumerate().rev() {
+            if !row.is_header {
+                self.focused_index = idx;
+                self.path_scroll = 0;
+                return;
+            }
+        }
+        self.focused_index = rows.len().saturating_sub(1);
+        self.path_scroll = 0;
     }
 
     pub fn scroll_path_left(&mut self) {
         self.path_scroll = self.path_scroll.saturating_sub(4);
+    }
+
+    pub fn scroll_path_right(&mut self) {
+        self.path_scroll = self.path_scroll.saturating_add(4);
     }
 
     pub fn current_focused_path(&self) -> Option<PathBuf> {
@@ -305,74 +322,79 @@ impl SelectState {
 }
 
 pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
-    let area = frame.area();
-
     let total_shown_bytes: u64 = state.scan.total_all_bytes();
     let total_selected_bytes: u64 = state.scan.total_selected_bytes();
     let selected_count = state.scan.selected_items().len();
+    let total_count: usize = state.scan.groups.iter().map(|g| g.items.len()).sum();
 
-    let right_status = format!(
-        "{} selected · {}",
-        selected_count,
-        format_bytes(total_selected_bytes)
-    );
+    let right_status = Line::from(vec![
+        Span::styled(format!("{selected_count}"), theme.headline()),
+        Span::styled(format!(" of {total_count} selected  ·  "), theme.callout()),
+        Span::styled(format_bytes(total_selected_bytes), theme.headline()),
+    ]);
 
-    // Framed Window
-    let window_title = format!(" Choose {} ", state.scan.title);
-    let window_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
-        .border_style(theme.border)
-        .title(Line::from(vec![Span::styled(window_title, theme.title)]))
-        .title_alignment(Alignment::Left);
-
-    let inner_area = window_block.inner(area);
-    frame.render_widget(window_block, area);
-
-    // Layout inside window
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Subtitle / Status line
-            Constraint::Min(6),    // List area
-            Constraint::Length(1), // Divider
-            Constraint::Length(2), // Footer: Path + Keybinds
-        ])
-        .split(inner_area);
-
-    // Subtitle & Status
-    let left_status = format!(
-        "{} shown · {}",
-        state
-            .scan
-            .groups
-            .iter()
-            .map(|g| g.items.len())
-            .sum::<usize>(),
-        format_bytes(total_shown_bytes)
-    );
-
-    let mut header_lines = Vec::new();
-    if state.is_searching {
-        header_lines.push(Line::from(vec![
-            Span::styled("Search: ", theme.accent),
-            Span::styled(&state.search_query, theme.normal),
-            Span::styled("█", theme.accent),
-        ]));
+    let primary_action = if selected_count > 0 {
+        PrimaryAction::new(format!("Review {selected_count} items"), theme.g.key_enter)
     } else {
-        header_lines.push(Line::from(vec![
-            Span::styled(left_status, theme.muted),
-            Span::raw("    "),
-            Span::styled(right_status, theme.info),
-        ]));
+        PrimaryAction::disabled("Review items", theme.g.key_enter)
+    };
+
+    let chrome = AppChrome::new(vec!["taert", "Clean caches", &state.scan.title])
+        .status(right_status)
+        .hints(vec![
+            Hint::new("↑↓", "Move"),
+            Hint::new("␣", "Select"),
+            Hint::new("/", "Search"),
+            Hint::new("?", "More"),
+        ])
+        .primary(primary_action);
+
+    let content_rect = chrome.render(frame, theme);
+
+    if total_count == 0 {
+        EmptyState::new("✓", "Nothing to clean", "Your caches are already tidy.")
+            .glyph_color(theme.p.green)
+            .render(frame, content_rect, theme);
+        return;
     }
-    header_lines.push(Line::from(Span::styled(&state.scan.title, theme.normal)));
 
-    frame.render_widget(Paragraph::new(header_lines), chunks[0]);
+    let mut start_y = content_rect.y;
+    let mut avail_h = content_rect.height;
 
-    // List rendering
+    // Search bar if searching or query not empty
+    if state.is_searching || !state.search_query.is_empty() {
+        let results_count = state
+            .flattened_rows()
+            .iter()
+            .filter(|r| !r.is_header)
+            .count();
+        let search_line = Line::from(vec![
+            Span::styled(format!("  {}  ", theme.g.search), theme.accent_text()),
+            Span::styled(&state.search_query, theme.headline()),
+            Span::styled("▏", theme.accent_text().add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled(format!("{results_count} results"), theme.footnote()),
+        ]);
+        let search_rect = Rect {
+            x: content_rect.x,
+            y: start_y,
+            width: content_rect.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(search_line), search_rect);
+        start_y += 2; // bar + blank line
+        avail_h = avail_h.saturating_sub(2);
+    }
+
+    let list_rect = Rect {
+        x: content_rect.x,
+        y: start_y,
+        width: content_rect.width,
+        height: avail_h,
+    };
+
     let rows = state.flattened_rows();
-    let list_area_height = chunks[1].height as usize;
+    let list_area_height = list_rect.height as usize;
     let list_scroll_offset = if rows.len() > list_area_height && list_area_height > 0 {
         let half = list_area_height / 2;
         let max_offset = rows.len().saturating_sub(list_area_height);
@@ -391,89 +413,66 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         let is_focused = idx == state.focused_index;
 
         if row.is_header {
-            list_lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(&row.group_name, theme.muted),
-                Span::raw("  "),
-                Span::styled(&row.display_path, theme.muted),
-            ]));
+            list_lines.push(render_section_header(
+                &row.group_name,
+                Some(&row.display_path),
+                list_rect.width as usize,
+                theme,
+            ));
         } else {
-            let cursor = if is_focused { "›" } else { " " };
-            let bullet = if row.is_selected { "●" } else { "○" };
-
-            let cursor_style = if is_focused {
-                theme.cursor
+            let bullet = if row.is_selected {
+                theme.g.check_on
             } else {
-                theme.muted
+                theme.g.check_off
             };
             let bullet_style = if row.is_selected {
-                theme.selected_marker
+                theme.accent_text().add_modifier(Modifier::BOLD)
             } else {
-                theme.unselected_marker
+                theme.callout()
             };
 
-            let size_style = SizeLevel::of(row.size_bytes).style(is_focused);
-            let path_style = if is_focused {
-                theme.focused_row
+            let title_spans = if let Some(path) = &row.full_path {
+                let mut spans =
+                    path_spans(path, (list_rect.width as usize).saturating_sub(20), theme);
+                if is_focused && state.path_scroll > 0 {
+                    let full_str = prettify_path(path);
+                    if state.path_scroll < full_str.len() {
+                        spans = vec![Span::styled(
+                            full_str[state.path_scroll..].to_string(),
+                            theme.body(),
+                        )];
+                    }
+                }
+                spans
             } else {
-                theme.normal
+                vec![Span::styled(&row.display_path, theme.body())]
             };
 
-            list_lines.push(Line::from(vec![
-                Span::styled(format!("{cursor} "), cursor_style),
-                Span::styled(format!("{bullet} "), bullet_style),
-                Span::styled(format!("{:>9}  ", format_bytes(row.size_bytes)), size_style),
-                Span::styled(&row.display_path, path_style),
-            ]));
+            let size_style = theme.size(row.size_bytes);
+            let detail = Span::styled(format!("{:>9}", format_bytes(row.size_bytes)), size_style);
+
+            let frac = if total_shown_bytes > 0 {
+                Some(row.size_bytes as f64 / total_shown_bytes as f64)
+            } else {
+                None
+            };
+
+            let mut list_row = ListRow::new(title_spans)
+                .leading(Span::styled(bullet, bullet_style))
+                .detail(detail)
+                .selected(is_focused);
+
+            if let Some(f) = frac
+                && list_rect.width >= 100
+            {
+                list_row = list_row.bar(f);
+            }
+
+            list_lines.push(list_row.render_line(list_rect.width as usize, theme));
         }
     }
 
-    frame.render_widget(Paragraph::new(list_lines), chunks[1]);
-
-    // Divider
-    let divider = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.border);
-    frame.render_widget(divider, chunks[2]);
-
-    // Footer: Path + Keybind hints
-    let focused_path_str = state
-        .current_focused_path()
-        .map(|p| prettify_path(&p))
-        .unwrap_or_default();
-
-    let display_path = if state.path_scroll < focused_path_str.len() {
-        &focused_path_str[state.path_scroll..]
-    } else {
-        ""
-    };
-
-    let footer_lines = vec![
-        Line::from(vec![
-            Span::styled("Path  ", theme.muted),
-            Span::styled(display_path, theme.normal),
-        ]),
-        Line::from(vec![
-            Span::styled("↑↓ ", theme.footer_key),
-            Span::styled("move  ", theme.footer_desc),
-            Span::styled("←→ ", theme.footer_key),
-            Span::styled("path  ", theme.footer_desc),
-            Span::styled("Space ", theme.footer_key),
-            Span::styled("toggle  ", theme.footer_desc),
-            Span::styled("A ", theme.footer_key),
-            Span::styled("all  ", theme.footer_desc),
-            Span::styled("N ", theme.footer_key),
-            Span::styled("none  ", theme.footer_desc),
-            Span::styled("/ ", theme.footer_key),
-            Span::styled("search  ", theme.footer_desc),
-            Span::styled("Enter ", theme.footer_key),
-            Span::styled("remove  ", theme.footer_desc),
-            Span::styled("Esc/q ", theme.footer_key),
-            Span::styled("cancel", theme.footer_desc),
-        ]),
-    ];
-
-    frame.render_widget(Paragraph::new(footer_lines), chunks[3]);
+    frame.render_widget(Paragraph::new(list_lines), list_rect);
 
     // Modal Overlays
     match &state.overlay {
@@ -504,27 +503,19 @@ fn render_confirmation_dialog(
     let title = format!("Remove {count} {noun}?");
 
     let msg = format!(
-        "{} will be deleted",
+        "{} will be permanently deleted. This cannot be undone.",
         format_bytes(state.scan.total_selected_bytes())
     );
 
-    let focused = match focus_btn {
-        ConfirmButton::Cancel => 0,
-        ConfirmButton::Remove => 1,
-    };
+    let cancel_focused = matches!(focus_btn, ConfirmButton::Cancel);
+    let remove_focused = matches!(focus_btn, ConfirmButton::Remove);
 
-    Dialog::new(title)
-        .with_title_style(theme.warning)
-        .with_border_style(theme.warning)
-        .with_message(vec![Line::from(msg)])
-        .with_buttons(
-            vec![
-                DialogButton::new("Cancel"),
-                DialogButton::destructive("Remove"),
-            ],
-            Some(focused),
-        )
-        .with_hints(DialogHint::choice_hints())
+    Modal::new(&title)
+        .message(vec![Line::from(msg)])
+        .buttons(vec![
+            Button::new("Cancel").focused(cancel_focused),
+            Button::destructive("Remove").focused(remove_focused),
+        ])
         .render(frame, frame.area(), theme);
 }
 
@@ -538,63 +529,75 @@ fn render_removing_dialog(
     let noun = if count == 1 { "item" } else { "items" };
     let title = format!("Removing {count} {noun}…");
 
-    let spinner_char = match spinner_idx % 4 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        _ => "⠸",
+    let spinner_char = if theme.env.reduce_motion {
+        "*"
+    } else {
+        match spinner_idx % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        }
     };
 
     let pretty_path = prettify_path(&progress.path);
     let path_line = Line::from(vec![
-        Span::styled(format!("{spinner_char} "), theme.accent),
-        Span::styled(pretty_path, theme.normal),
+        Span::styled(format!("{spinner_char} "), theme.accent_text()),
+        Span::styled(pretty_path, theme.body()),
     ]);
 
-    let count_line = Line::from(vec![Span::styled(
-        format!("{} of {}", progress.current_index, progress.total_count),
-        theme.muted,
-    )]);
+    let fraction = if progress.total_count > 0 {
+        progress.current_index as f64 / progress.total_count as f64
+    } else {
+        0.0
+    };
 
-    Dialog::new(title)
-        .with_title_style(theme.warning)
-        .with_border_style(theme.warning)
-        .with_message(vec![path_line, count_line])
-        .with_alignment(MessageAlignment::Leading)
+    let bar_spans = bar(fraction, 40, theme.p.accent, theme);
+
+    Modal::new(&title)
+        .message(vec![
+            path_line,
+            Line::from(bar_spans),
+            Line::from(vec![Span::styled(
+                format!("{} of {}", progress.current_index, progress.total_count),
+                theme.footnote(),
+            )]),
+        ])
+        .buttons(vec![])
         .render(frame, frame.area(), theme);
 }
 
 fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, theme: &Theme) {
-    let has_failures = !report.failures.is_empty();
+    let title = if report.freed_bytes > 0 {
+        "Clean Complete"
+    } else {
+        "Nothing was removed"
+    };
 
     let mut message = vec![Line::from(vec![
-        Span::styled(format_bytes(report.freed_bytes), theme.success),
+        Span::styled(format_bytes(report.freed_bytes), theme.success()),
         Span::styled(
-            format!(" removed across {} item(s)", report.removed_count),
-            theme.normal,
+            format!(" freed across {} items", report.removed_count),
+            theme.body(),
         ),
     ])];
 
-    if has_failures {
+    if !report.failures.is_empty() {
+        message.push(Line::from(""));
         message.push(Line::from(Span::styled(
-            format!("{} item(s) skipped or failed", report.failures.len()),
-            theme.warning,
+            format!("{} items failed to remove:", report.failures.len()),
+            theme.danger(),
         )));
+        for fail in report.failures.iter().take(3) {
+            message.push(Line::from(Span::styled(
+                format!("  ✕ {}", prettify_path(&fail.path)),
+                theme.callout(),
+            )));
+        }
     }
 
-    Dialog::new("Clean Complete")
-        .with_title_style(if has_failures {
-            theme.warning
-        } else {
-            theme.success
-        })
-        .with_border_style(if has_failures {
-            theme.warning
-        } else {
-            theme.success
-        })
-        .with_message(message)
-        .with_buttons(vec![DialogButton::new("Done")], Some(0))
-        .with_hints(vec![DialogHint::new("Enter", "close")])
+    Modal::new(title)
+        .message(message)
+        .buttons(vec![Button::primary("Done").focused(true)])
         .render(frame, frame.area(), theme);
 }

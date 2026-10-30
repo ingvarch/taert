@@ -1,0 +1,9 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+ taert › Clean caches
+────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ␣  Select    /  Search    ?  More              Review 2 items  ↵
