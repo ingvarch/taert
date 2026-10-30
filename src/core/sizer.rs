@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +48,17 @@ impl DirSizer {
     }
 
     pub fn measure(path: &Path) -> Measurement {
+        Self::measure_with_progress(path, None, |_, _, _| {})
+    }
+
+    pub fn measure_with_progress<F>(
+        path: &Path,
+        cancel: Option<&Arc<AtomicBool>>,
+        mut on_progress: F,
+    ) -> Measurement
+    where
+        F: FnMut(&Path, u64, usize),
+    {
         if Safety::has_symlink_component(path) {
             return Measurement {
                 bytes: 0,
@@ -107,10 +120,18 @@ impl DirSizer {
                 });
             });
 
-        for entry_res in walker {
+        let mut files_count = 0;
+        for (idx, entry_res) in walker.into_iter().enumerate() {
+            if let Some(c) = cancel
+                && c.load(Ordering::Relaxed)
+            {
+                break;
+            }
+
             match entry_res {
                 Ok(entry) => {
                     if entry.file_type.is_file() {
+                        files_count += 1;
                         if let Ok(m) = entry.metadata() {
                             let identity = FileIdentity {
                                 dev: m.dev(),
@@ -125,6 +146,9 @@ impl DirSizer {
                         } else {
                             skipped += 1;
                         }
+                    }
+                    if idx % 30 == 0 {
+                        on_progress(&entry.path(), total_bytes, files_count);
                     }
                 }
                 Err(_) => {

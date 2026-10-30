@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::text::{Line, Span};
@@ -21,9 +22,11 @@ use ratatui::widgets::Paragraph;
 
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
+use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::ListRow;
 use super::components::modal::Modal;
+use super::components::progress::ProgressView;
 use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
@@ -75,6 +78,9 @@ pub struct MeasuringProgress {
     pub position: usize,
     pub total: usize,
     pub current_name: String,
+    pub current_subpath: Option<String>,
+    pub scanned_files: usize,
+    pub scanned_bytes: u64,
 }
 
 pub enum MeasureMessage {
@@ -83,6 +89,7 @@ pub enum MeasureMessage {
 }
 
 pub struct AnalyzeState {
+    pub root: PathBuf,
     pub levels: Vec<BrowserLevel>,
     pub ignore: IgnoreStore,
     pub measuring_rx: Option<Receiver<MeasureMessage>>,
@@ -90,10 +97,27 @@ pub struct AnalyzeState {
     pub current_progress: Option<MeasuringProgress>,
     pub spinner_idx: usize,
     pub status_notice: Option<String>,
+    pub started_at: Instant,
 }
 
 impl AnalyzeState {
     pub fn new(root: PathBuf, ignore: IgnoreStore) -> Self {
+        let mut state = Self {
+            root: root.clone(),
+            levels: Vec::new(),
+            ignore,
+            measuring_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_progress: None,
+            spinner_idx: 0,
+            status_notice: None,
+            started_at: Instant::now(),
+        };
+        state.start_measuring(root);
+        state
+    }
+
+    pub fn new_sync(root: PathBuf, ignore: IgnoreStore) -> Self {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshot = Self::scan_folder(&root, &ignore, None, cancel_flag.clone());
         let initial_level = BrowserLevel {
@@ -103,6 +127,7 @@ impl AnalyzeState {
         };
 
         Self {
+            root,
             levels: vec![initial_level],
             ignore,
             measuring_rx: None,
@@ -110,6 +135,7 @@ impl AnalyzeState {
             current_progress: None,
             spinner_idx: 0,
             status_notice: None,
+            started_at: Instant::now(),
         }
     }
 
@@ -151,6 +177,8 @@ impl AnalyzeState {
         raw_paths.sort();
 
         let total_count = raw_paths.len();
+        let mut total_files_count = 0;
+        let mut total_bytes_accum = 0u64;
 
         for (idx, p) in raw_paths.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
@@ -169,6 +197,9 @@ impl AnalyzeState {
                     position: idx + 1,
                     total: total_count,
                     current_name: name.clone(),
+                    current_subpath: None,
+                    scanned_files: total_files_count,
+                    scanned_bytes: total_bytes_accum,
                 }));
             }
 
@@ -188,7 +219,40 @@ impl AnalyzeState {
                     || name.ends_with(".framework")
                     || name.ends_with(".bundle"));
 
-            let size = DirSizer::size_of(p);
+            let size = if is_dir && !is_package {
+                let tx_clone = progress_tx.clone();
+                let dir_buf = dir.to_path_buf();
+                let name_clone = name.clone();
+                let cancel_clone = cancel.clone();
+                let mut child_files = 0;
+                let meas = DirSizer::measure_with_progress(
+                    p,
+                    Some(&cancel_clone),
+                    |subpath, bytes, files| {
+                        child_files = files;
+                        if let Some(ref tx) = tx_clone {
+                            let _ = tx.send(MeasureMessage::Progress(MeasuringProgress {
+                                folder_path: dir_buf.clone(),
+                                position: idx + 1,
+                                total: total_count,
+                                current_name: name_clone.clone(),
+                                current_subpath: Some(subpath.display().to_string()),
+                                scanned_files: total_files_count + files,
+                                scanned_bytes: total_bytes_accum + bytes,
+                            }));
+                        }
+                    },
+                );
+                total_files_count += child_files;
+                total_bytes_accum += meas.bytes;
+                meas.bytes
+            } else {
+                let s = DirSizer::size_of(p);
+                total_files_count += 1;
+                total_bytes_accum += s;
+                s
+            };
+
             if size == 0 && !p.exists() {
                 inaccessible += 1;
             }
@@ -310,11 +374,15 @@ impl AnalyzeState {
         });
 
         self.measuring_rx = Some(rx);
+        self.started_at = Instant::now();
         self.current_progress = Some(MeasuringProgress {
             folder_path: path,
             position: 0,
             total: 0,
-            current_name: "Reading directory...".to_string(),
+            current_name: "Reading directory…".to_string(),
+            current_subpath: None,
+            scanned_files: 0,
+            scanned_bytes: 0,
         });
     }
 
@@ -350,6 +418,69 @@ impl AnalyzeState {
 }
 
 pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
+    if state.levels.is_empty() {
+        let title_path = prettify_path(
+            state
+                .current_progress
+                .as_ref()
+                .map(|p| &p.folder_path)
+                .unwrap_or(&state.root),
+        );
+        let chrome = AppChrome::new(vec!["taert", "Explore", &title_path])
+            .hints(vec![Hint::new(theme.g.key_esc, "Cancel")]);
+        let content_rect = chrome.render(frame, theme);
+
+        if let Some(ref prog) = state.current_progress {
+            let spin_char = if theme.env.reduce_motion {
+                "*"
+            } else {
+                match state.spinner_idx % 4 {
+                    0 => "⠋",
+                    1 => "⠙",
+                    2 => "⠹",
+                    _ => "⠸",
+                }
+            };
+            let headline = format!("Exploring {title_path}");
+            let step = if prog.total > 0 {
+                format!(
+                    "Checking {} ({}/{} items)",
+                    prog.current_name, prog.position, prog.total
+                )
+            } else {
+                format!("Scanning {}…", prog.current_name)
+            };
+            let fraction = if prog.total > 0 {
+                Some(prog.position as f64 / prog.total as f64)
+            } else {
+                None
+            };
+            let counter = format!(
+                "Scanned {} files · {}",
+                prog.scanned_files,
+                format_bytes(prog.scanned_bytes)
+            );
+            let elapsed = state.started_at.elapsed().as_secs();
+            let pretty_sub = prog
+                .current_subpath
+                .as_deref()
+                .map(|sub| prettify_path(Path::new(sub)));
+
+            let mut view = ProgressView::new(spin_char, &headline)
+                .step_info(&step)
+                .fraction(fraction)
+                .counter_info(&counter)
+                .elapsed_seconds(elapsed);
+
+            if let Some(ref sub) = pretty_sub {
+                view = view.current_path(sub);
+            }
+
+            view.render(frame, content_rect, theme);
+        }
+        return;
+    }
+
     let level = match state.current_level() {
         Some(l) => l,
         None => return,
@@ -494,16 +625,151 @@ fn render_measuring_modal(
         }
     };
 
-    let step_info = format!("{} of {}", prog.position, prog.total);
+    let fraction = if prog.total > 0 {
+        prog.position as f64 / prog.total as f64
+    } else {
+        0.0
+    };
+
+    let bar_spans = bar(fraction, 38, theme.p.accent, theme);
+
+    let step_info = if prog.total > 0 {
+        format!("{} of {} items", prog.position, prog.total)
+    } else {
+        "Scanning…".to_string()
+    };
+
+    let active_name = if let Some(ref sub) = prog.current_subpath {
+        prettify_path(Path::new(sub))
+    } else {
+        prog.current_name.clone()
+    };
+
+    let message = vec![
+        Line::from(vec![
+            Span::styled(format!("{spinner_char} "), theme.accent_text()),
+            Span::styled(active_name, theme.body()),
+        ]),
+        Line::from(bar_spans),
+        Line::from(vec![
+            Span::styled(step_info, theme.callout()),
+            Span::raw("  ·  "),
+            Span::styled(
+                format!(
+                    "{} files ({})",
+                    prog.scanned_files,
+                    format_bytes(prog.scanned_bytes)
+                ),
+                theme.footnote(),
+            ),
+        ]),
+    ];
 
     Modal::new(&title)
-        .message(vec![
-            Line::from(vec![
-                Span::styled(format!("{spinner_char} "), theme.accent_text()),
-                Span::styled(&prog.current_name, theme.body()),
-            ]),
-            Line::from(vec![Span::styled(step_info, theme.callout())]),
-        ])
-        .buttons(vec![Button::new("Cancel").focused(true)])
+        .message(message)
+        .buttons(vec![Button::new("Cancel (esc)").focused(true)])
         .render(frame, frame.area(), theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn test_render_analyze_initial_progress() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::new();
+
+        let state = AnalyzeState {
+            root: PathBuf::from("/Users/test"),
+            levels: Vec::new(),
+            ignore: IgnoreStore::default(),
+            measuring_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_progress: Some(MeasuringProgress {
+                folder_path: PathBuf::from("/Users/test"),
+                position: 5,
+                total: 20,
+                current_name: "Library".to_string(),
+                current_subpath: Some("/Users/test/Library/Caches/Cargo".to_string()),
+                scanned_files: 1250,
+                scanned_bytes: 45_000_000,
+            }),
+            spinner_idx: 1,
+            status_notice: None,
+            started_at: Instant::now(),
+        };
+
+        terminal
+            .draw(|f| {
+                render_analyze(f, &state, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+        assert!(rendered.contains("Exploring"));
+        assert!(rendered.contains("Library"));
+        assert!(rendered.contains("5/20"));
+        assert!(rendered.contains("1250 files"));
+    }
+
+    #[test]
+    fn test_render_analyze_modal_progress() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::new();
+
+        let state = AnalyzeState {
+            root: PathBuf::from("/Users/test"),
+            levels: vec![BrowserLevel {
+                snapshot: FolderSnapshot {
+                    path: PathBuf::from("/Users/test"),
+                    children: vec![ChildItem {
+                        name: "Documents".to_string(),
+                        path: PathBuf::from("/Users/test/Documents"),
+                        size_bytes: 1024,
+                        is_dir: true,
+                        is_package: false,
+                    }],
+                    total_bytes: 1024,
+                    inaccessible_count: 0,
+                    skipped_count: 0,
+                },
+                selected: 0,
+                offset: 0,
+            }],
+            ignore: IgnoreStore::default(),
+            measuring_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            current_progress: Some(MeasuringProgress {
+                folder_path: PathBuf::from("/Users/test/Documents"),
+                position: 3,
+                total: 10,
+                current_name: "Work".to_string(),
+                current_subpath: Some("/Users/test/Documents/Work/notes.md".to_string()),
+                scanned_files: 45,
+                scanned_bytes: 500_000,
+            }),
+            spinner_idx: 0,
+            status_notice: None,
+            started_at: Instant::now(),
+        };
+
+        terminal
+            .draw(|f| {
+                render_analyze(f, &state, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = format!("{buffer:?}");
+        assert!(rendered.contains("Measuring"));
+        assert!(rendered.contains("Documents"));
+        assert!(rendered.contains("3 of 10"));
+        assert!(rendered.contains("45 files"));
+    }
 }

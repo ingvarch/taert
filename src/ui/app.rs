@@ -471,6 +471,9 @@ impl App {
                     match code {
                         KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => {
                             state.cancel_measuring();
+                            if state.levels.is_empty() {
+                                self.screen = Screen::Workspace(WorkspaceState::new());
+                            }
                         }
                         KeyCode::Char('q') => {
                             state.cancel_measuring();

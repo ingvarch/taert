@@ -149,6 +149,7 @@ fn snapshot_review() {
 fn snapshot_analyze() {
     let theme = Theme::new();
     let state = AnalyzeState {
+        root: PathBuf::from("/Users/test/Documents"),
         levels: vec![taert::ui::analyze::BrowserLevel {
             snapshot: taert::ui::analyze::FolderSnapshot {
                 path: PathBuf::from("/Users/test/Documents"),
@@ -181,6 +182,7 @@ fn snapshot_analyze() {
         current_progress: None,
         spinner_idx: 0,
         status_notice: None,
+        started_at: std::time::Instant::now(),
     };
 
     for &(w, h, label) in SIZES {

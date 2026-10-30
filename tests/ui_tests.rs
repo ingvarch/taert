@@ -177,7 +177,7 @@ fn test_render_analyze_screen() {
     std::fs::create_dir_all(dir_path.join("subdir")).unwrap();
     std::fs::write(dir_path.join("file.bin"), b"1234567890").unwrap();
 
-    let state = taert::ui::analyze::AnalyzeState::new(
+    let state = taert::ui::analyze::AnalyzeState::new_sync(
         dir_path,
         taert::core::stores::IgnoreStore::default(),
     );
@@ -272,7 +272,7 @@ fn test_analyze_and_review_page_navigation() {
     for i in 0..30 {
         std::fs::write(dir_path.join(format!("file_{i}.txt")), b"hello").unwrap();
     }
-    let mut analyze = taert::ui::analyze::AnalyzeState::new(
+    let mut analyze = taert::ui::analyze::AnalyzeState::new_sync(
         dir_path,
         taert::core::stores::IgnoreStore::default(),
     );
