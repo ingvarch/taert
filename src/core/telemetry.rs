@@ -181,6 +181,30 @@ fn parse_processes(output: &str) -> Vec<ProcessStatus> {
         .collect()
 }
 
+/// The name of the startup volume and the other volumes worth showing.
+pub fn mounted_volumes() -> (Option<String>, Vec<VolumeStatus>) {
+    let disks = Disks::new_with_refreshed_list();
+    let boot_volume = disks
+        .list()
+        .iter()
+        .find(|disk| disk.mount_point() == Path::new("/"))
+        .map(|disk| disk.name().to_string_lossy().into_owned());
+    let volumes = disks
+        .list()
+        .iter()
+        .filter(|disk| {
+            is_external_volume(&disk.mount_point().to_string_lossy(), disk.total_space())
+        })
+        .map(|disk| VolumeStatus {
+            name: disk.name().to_string_lossy().into_owned(),
+            total_bytes: disk.total_space(),
+            available_bytes: disk.available_space(),
+        })
+        .collect();
+
+    (boot_volume, volumes)
+}
+
 // `output` comes sorted by CPU.
 fn rank_processes(output: &str, limit: usize) -> (Vec<ProcessStatus>, Vec<ProcessStatus>) {
     let by_cpu = parse_processes(output);
@@ -395,25 +419,8 @@ impl Sampler {
         self.status.storage = SystemProfiler::detailed_storage(Path::new("/"));
         self.status.machine.uptime_seconds = SystemProfiler::uptime_seconds();
 
-        let disks = Disks::new_with_refreshed_list();
         let live = &mut self.status.live;
-        live.boot_volume = disks
-            .list()
-            .iter()
-            .find(|disk| disk.mount_point() == Path::new("/"))
-            .map(|disk| disk.name().to_string_lossy().into_owned());
-        live.volumes = disks
-            .list()
-            .iter()
-            .filter(|disk| {
-                is_external_volume(&disk.mount_point().to_string_lossy(), disk.total_space())
-            })
-            .map(|disk| VolumeStatus {
-                name: disk.name().to_string_lossy().into_owned(),
-                total_bytes: disk.total_space(),
-                available_bytes: disk.available_space(),
-            })
-            .collect();
+        (live.boot_volume, live.volumes) = mounted_volumes();
 
         self.components.refresh(false);
         let readings: Vec<(String, f32)> = self

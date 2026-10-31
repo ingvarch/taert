@@ -107,6 +107,17 @@ impl SystemStatusState {
         }
     }
 
+    pub fn is_live(&self) -> bool {
+        self.updates.is_some()
+    }
+
+    /// Starts or stops the sampler. It exits on its own once its receiver is gone.
+    pub fn set_live(&mut self, live: bool) {
+        if live != self.is_live() {
+            self.updates = live.then(spawn_sampler);
+        }
+    }
+
     pub fn apply(&mut self, status: FullSystemStatus) {
         self.history.record(&status);
         self.status = status;
@@ -217,6 +228,8 @@ const THREE_COLUMNS: &[&[Panel]] = &[
     &[Panel::Memory, Panel::Storage],
     &[Panel::Power, Panel::Processes],
 ];
+const LOAD_STACKED: &[&[Panel]] = &[&[Panel::Cpu, Panel::Memory]];
+const LOAD_SIDE_BY_SIDE: &[&[Panel]] = &[&[Panel::Cpu], &[Panel::Memory]];
 
 /// The rows each chart and the process lists get from the height of the window.
 #[derive(Clone, Copy)]
@@ -309,6 +322,57 @@ impl Dashboard<'_> {
     }
 }
 
+fn columns_lines(
+    state: &SystemStatusState,
+    columns: &[&[Panel]],
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let panel_w = (width - (columns.len() - 1) * COLUMN_GAP) / columns.len();
+    let dashboard = Dashboard {
+        state,
+        panel_w,
+        theme,
+    };
+
+    let mut lines = Vec::new();
+    for (i, column) in columns.iter().enumerate() {
+        let column = dashboard.column(column, dashboard.room(column, height));
+        lines = if i == 0 {
+            column
+        } else {
+            let left_w = i * (panel_w + COLUMN_GAP) - COLUMN_GAP;
+            side_by_side(lines, left_w, COLUMN_GAP, column)
+        };
+    }
+    lines
+}
+
+/// CPU and memory for the main menu.
+pub fn load_summary(
+    state: &SystemStatusState,
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let columns = if width >= TWO_COLUMNS_MIN_WIDTH {
+        LOAD_SIDE_BY_SIDE
+    } else {
+        LOAD_STACKED
+    };
+    columns_lines(state, columns, width, height, theme)
+}
+
+/// Disk capacity for the main menu. Speeds need the sampler, which runs on demand.
+pub fn storage_summary(
+    state: &SystemStatusState,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    capacity_panel(state, width, theme).0
+}
+
 fn content_lines(
     state: &SystemStatusState,
     width: usize,
@@ -322,27 +386,11 @@ fn content_lines(
     } else {
         ONE_COLUMN
     };
-    let panel_w = (width - (columns.len() - 1) * COLUMN_GAP) / columns.len();
-    let dashboard = Dashboard {
-        state,
-        panel_w,
-        theme,
-    };
 
     let mut lines = summary_lines(state, width, theme);
     // The blank lines around the panels and the footnote.
     let available = height.saturating_sub(lines.len() + 3);
-
-    let mut panels = Vec::new();
-    for (i, column) in columns.iter().enumerate() {
-        let column = dashboard.column(column, dashboard.room(column, available));
-        panels = if i == 0 {
-            column
-        } else {
-            let left_w = i * (panel_w + COLUMN_GAP) - COLUMN_GAP;
-            side_by_side(panels, left_w, COLUMN_GAP, column)
-        };
-    }
+    let panels = columns_lines(state, columns, width, available, theme);
 
     lines.push(Line::default());
     lines.extend(panels);
@@ -829,15 +877,13 @@ fn memory_panel(
     lines
 }
 
-fn disk_panel(
+fn capacity_panel<'t>(
     state: &SystemStatusState,
     width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+    theme: &'t Theme,
+) -> (Vec<Line<'static>>, Rows<'t>) {
     let storage = &state.status.storage;
     let live = &state.status.live;
-    let history = &state.history;
 
     let boot_name = live.boot_volume.as_deref().unwrap_or("System");
     let boot_used = storage.total_bytes.saturating_sub(storage.free_bytes);
@@ -904,7 +950,19 @@ fn disk_panel(
         theme,
     ));
 
-    match &live.disk_io {
+    (lines, rows)
+}
+
+fn disk_panel(
+    state: &SystemStatusState,
+    width: usize,
+    chart_rows: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let history = &state.history;
+    let (mut lines, rows) = capacity_panel(state, width, theme);
+
+    match &state.status.live.disk_io {
         Some(io) => {
             let scale = rate_scale(&[&history.read, &history.write]);
             lines.extend(rows.series(

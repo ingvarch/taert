@@ -17,8 +17,9 @@ use std::thread;
 use std::time::Instant;
 
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
@@ -28,6 +29,7 @@ use super::components::list::ListRow;
 use super::components::modal::Modal;
 use super::components::progress::ProgressView;
 use super::components::toast::Toast;
+use super::folder_preview::{FolderPreview, preview_lines};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 pub use crate::core::cache::{ChildItem, FolderSnapshot, StorageCache};
@@ -36,6 +38,11 @@ use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
 use crate::core::sizer::DirSizer;
 use crate::core::stores::IgnoreStore;
+
+// Below this the panel would squeeze the list or itself.
+const PREVIEW_MIN_WIDTH: u16 = 150;
+const LIST_WIDTH_WITH_PREVIEW: u16 = 100;
+const PREVIEW_GAP: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalyzeConfirmButton {
@@ -155,6 +162,7 @@ pub struct AnalyzeState {
     pub overlay: AnalyzeOverlay,
     pub cache: Arc<RwLock<StorageCache>>,
     pub sort_order: SortOrder,
+    pub preview: FolderPreview,
 }
 
 impl AnalyzeState {
@@ -180,6 +188,7 @@ impl AnalyzeState {
             overlay: AnalyzeOverlay::None,
             cache,
             sort_order: SortOrder::default(),
+            preview: FolderPreview::default(),
         };
         state.start_measuring(root);
         state
@@ -211,6 +220,7 @@ impl AnalyzeState {
             overlay: AnalyzeOverlay::None,
             cache,
             sort_order,
+            preview: FolderPreview::default(),
         }
     }
 
@@ -305,6 +315,7 @@ impl AnalyzeState {
             let mut cache = self.cache.write().unwrap();
             cache.invalidate_prefix(&snapshot.path);
             cache.put_snapshot(snapshot.path.clone(), snapshot);
+            self.preview = FolderPreview::default();
         }
     }
 
@@ -564,6 +575,7 @@ impl AnalyzeState {
         if let Some(level) = self.current_level() {
             let path = level.snapshot.path.clone();
             self.cache.write().unwrap().invalidate_prefix(&path);
+            self.preview = FolderPreview::default();
             self.levels.pop();
             self.start_measuring(path);
         }
@@ -632,6 +644,17 @@ impl AnalyzeState {
         self.current_progress = None;
     }
 
+    fn preview_target(&self) -> Option<PathBuf> {
+        let busy = self.measuring_rx.is_some() || !matches!(self.overlay, AnalyzeOverlay::None);
+        if busy || !self.preview.visible.get() {
+            return None;
+        }
+
+        let level = self.current_level()?;
+        let child = level.snapshot.children.get(level.selected)?;
+        (child.is_dir && !child.is_package).then(|| child.path.clone())
+    }
+
     pub fn tick(&mut self) {
         self.spinner_idx = (self.spinner_idx + 1) % 4;
 
@@ -655,6 +678,10 @@ impl AnalyzeState {
                 }
             }
         }
+
+        let target = self.preview_target();
+        self.preview
+            .follow(target.as_deref(), Instant::now(), &self.ignore, &self.cache);
     }
 }
 
@@ -804,6 +831,17 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
 
     let content_rect = chrome.render(frame, theme);
 
+    let show_preview = content_rect.width >= PREVIEW_MIN_WIDTH;
+    state.preview.visible.set(show_preview);
+    let list_rect = if show_preview {
+        Rect {
+            width: LIST_WIDTH_WITH_PREVIEW,
+            ..content_rect
+        }
+    } else {
+        content_rect
+    };
+
     let list_area_height = content_rect.height as usize;
     let scroll_offset = if level.snapshot.children.len() > list_area_height && list_area_height > 0
     {
@@ -873,7 +911,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
             .bar(fraction)
             .selected(is_selected);
 
-        list_lines.push(row.render_line(content_rect.width as usize, theme));
+        list_lines.push(row.render_line(list_rect.width as usize, theme));
     }
 
     if level.snapshot.children.is_empty() {
@@ -884,7 +922,11 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         )));
     }
 
-    frame.render_widget(Paragraph::new(list_lines), content_rect);
+    frame.render_widget(Paragraph::new(list_lines), list_rect);
+
+    if show_preview && let Some(child) = level.snapshot.children.get(level.selected) {
+        render_preview_panel(frame, content_rect, list_rect, child, state, theme);
+    }
 
     // Measuring Modal
     if let Some(ref prog) = state.current_progress {
@@ -907,6 +949,45 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
             render_analyze_outcome_dialog(frame, report, theme);
         }
     }
+}
+
+fn render_preview_panel(
+    frame: &mut Frame,
+    content: Rect,
+    list: Rect,
+    child: &ChildItem,
+    state: &AnalyzeState,
+    theme: &Theme,
+) {
+    let divider = Rect {
+        x: list.right() + 1,
+        width: 1,
+        ..content
+    };
+    let panel_x = divider.right() + PREVIEW_GAP;
+    let panel = Rect {
+        x: panel_x,
+        width: content.right().saturating_sub(panel_x),
+        ..content
+    };
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(theme.separator()),
+        divider,
+    );
+
+    let parent_bytes = state.current_level().map_or(0, |l| l.snapshot.total_bytes);
+    let lines = preview_lines(
+        child,
+        parent_bytes,
+        &state.preview,
+        panel.width as usize,
+        panel.height as usize,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(lines), panel);
 }
 
 fn render_measuring_modal(
@@ -1176,6 +1257,7 @@ mod tests {
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
+            preview: FolderPreview::default(),
         };
 
         terminal
@@ -1237,6 +1319,7 @@ mod tests {
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
+            preview: FolderPreview::default(),
         };
 
         terminal
@@ -1297,6 +1380,7 @@ mod tests {
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
+            preview: FolderPreview::default(),
         };
 
         // Initially nothing selected
@@ -1338,6 +1422,111 @@ mod tests {
         assert!(rendered.contains("Delete file1.bin?"));
         assert!(rendered.contains("Cancel"));
         assert!(rendered.contains("Delete"));
+    }
+
+    fn screen(state: &AnalyzeState, width: u16, height: u16) -> String {
+        let theme = Theme::with_env(crate::ui::env::UiEnv::default());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| render_analyze(f, state, &theme)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // Holds a folder `sub` with `nested.bin`, and a file `other.bin` that is smaller.
+    fn explore_fixture() -> (tempfile::TempDir, AnalyzeState) {
+        let temp = tempfile::tempdir().unwrap();
+        let sub = temp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("nested.bin"), vec![0_u8; 200_000]).unwrap();
+        fs::write(temp.path().join("other.bin"), b"123").unwrap();
+        let state = AnalyzeState::new_sync(temp.path().to_path_buf(), IgnoreStore::default());
+        (temp, state)
+    }
+
+    fn screen_with(state: &mut AnalyzeState, width: u16, text: &str) -> String {
+        for _ in 0..1000 {
+            let rendered = screen(state, width, 40);
+            if rendered.contains(text) {
+                return rendered;
+            }
+            state.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("{text} never appeared:\n{}", screen(state, width, 40));
+    }
+
+    #[test]
+    fn a_wide_window_shows_what_the_highlighted_folder_holds() {
+        let (_temp, mut state) = explore_fixture();
+
+        let rendered = screen_with(&mut state, 205, "nested.bin");
+
+        assert!(rendered.contains("CONTENTS"), "{rendered}");
+        assert!(rendered.contains("1 item"), "{rendered}");
+    }
+
+    #[test]
+    fn a_highlighted_file_shows_its_details() {
+        let (_temp, mut state) = explore_fixture();
+        state.next();
+
+        let rendered = screen_with(&mut state, 205, "of this folder");
+
+        assert!(!rendered.contains("CONTENTS"), "{rendered}");
+    }
+
+    #[test]
+    fn the_list_stops_at_100_columns_beside_the_panel() {
+        let (_temp, mut state) = explore_fixture();
+
+        let rendered = screen_with(&mut state, 205, "nested.bin");
+
+        let row = rendered.lines().nth(2).unwrap();
+        let divider = row.chars().position(|c| c == '│').unwrap();
+        assert!((103..=106).contains(&divider), "{divider}: {row}");
+    }
+
+    #[test]
+    fn a_narrower_window_has_no_panel_and_measures_nothing() {
+        let (temp, mut state) = explore_fixture();
+
+        screen(&state, 120, 40);
+        for _ in 0..3 {
+            state.tick();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        assert!(!screen(&state, 120, 40).contains("of this folder"));
+        let sub = temp.path().join("sub");
+        assert!(state.cache.read().unwrap().get_snapshot(&sub).is_none());
+    }
+
+    #[test]
+    fn a_dialog_pauses_the_measurement() {
+        let (_temp, mut state) = explore_fixture();
+        screen(&state, 205, 40);
+        state.open_delete_confirmation();
+
+        assert_eq!(state.preview_target(), None);
+    }
+
+    #[test]
+    fn refreshing_forgets_the_preview() {
+        let (temp, mut state) = explore_fixture();
+        screen_with(&mut state, 205, "nested.bin");
+
+        state.refresh_current();
+
+        let sub = temp.path().join("sub");
+        assert!(state.preview.snapshot_of(&sub).is_none());
     }
 
     #[test]
@@ -1452,6 +1641,7 @@ mod tests {
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::Size,
+            preview: FolderPreview::default(),
         };
 
         assert_eq!(state.sort_order, SortOrder::Size);

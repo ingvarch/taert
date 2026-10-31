@@ -46,7 +46,7 @@ pub enum Screen {
     Scanning(ProgressState, Receiver<ScanMessage>, Arc<AtomicBool>),
     Select(SelectState),
     Review(ReviewState),
-    Analyze(AnalyzeState),
+    Analyze(Box<AnalyzeState>),
     SystemStatus(Box<SystemStatusState>),
     Preferences(PreferencesState),
     PathListEditor(PathListEditorState),
@@ -108,11 +108,11 @@ impl App {
         let storage_cache = Arc::new(RwLock::new(StorageCache::new()));
         Self {
             theme: Theme::new(),
-            screen: Screen::Analyze(AnalyzeState::with_cache(
+            screen: Screen::Analyze(Box::new(AnalyzeState::with_cache(
                 path,
                 ignore.clone(),
                 storage_cache.clone(),
-            )),
+            ))),
             ignore,
             config,
             should_quit: false,
@@ -219,6 +219,10 @@ impl App {
             // Take the latest system measurements if active
             if let Screen::SystemStatus(ref mut status) = self.screen {
                 status.tick();
+            }
+
+            if let Screen::Workspace(ref mut workspace) = self.screen {
+                workspace.tick(&self.storage_cache);
             }
 
             // Poll background removal messages
@@ -885,11 +889,11 @@ impl App {
         match kind {
             StartConfirmKind::ExploreHome => {
                 let home = Safety::home_dir();
-                self.screen = Screen::Analyze(AnalyzeState::with_cache(
+                self.screen = Screen::Analyze(Box::new(AnalyzeState::with_cache(
                     home,
                     self.ignore.clone(),
                     self.storage_cache.clone(),
-                ));
+                )));
             }
             StartConfirmKind::ProjectCleanup(_) => {
                 let roots = ProjectFoldersStore::load_or_default().existing_roots();
@@ -1045,10 +1049,10 @@ mod tests {
 
     fn analyze_app(dir: &Path) -> App {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.screen = Screen::Analyze(AnalyzeState::new_sync(
+        app.screen = Screen::Analyze(Box::new(AnalyzeState::new_sync(
             dir.to_path_buf(),
             IgnoreStore::default(),
-        ));
+        )));
         app
     }
 

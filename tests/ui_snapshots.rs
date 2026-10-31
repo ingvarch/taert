@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use insta::assert_snapshot;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use taert::core::cache::StorageCache;
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
@@ -195,6 +197,7 @@ fn snapshot_workspace() {
     let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
+    state.system = Some(Box::new(status_with_history()));
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_workspace(f, &state, &theme));
         assert_snapshot!(format!("workspace_{label}"), output);
@@ -206,6 +209,7 @@ fn snapshot_workspace_clean_submenu() {
     let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
+    state.system = Some(Box::new(status_with_history()));
     state.open_clean_submenu();
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_workspace(f, &state, &theme));
@@ -218,6 +222,7 @@ fn snapshot_workspace_confirm() {
     let theme = snapshot_theme();
     let mut state = WorkspaceState::new();
     state.disk_status = Some("118.6 GB available · 24% free".to_string());
+    state.system = Some(Box::new(status_with_history()));
     state.open_confirmation(StartConfirmKind::ExploreHome);
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_workspace(f, &state, &theme));
@@ -290,6 +295,7 @@ fn sample_analyze() -> AnalyzeState {
             taert::core::cache::StorageCache::new(),
         )),
         sort_order: taert::ui::analyze::SortOrder::default(),
+        preview: Default::default(),
     }
 }
 
@@ -449,4 +455,130 @@ fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
 
     assert!(right_edge(&output) <= 113, "{output}");
     assert!(left_edge(&output) < 10, "{output}");
+}
+
+fn home_state(row: usize) -> WorkspaceState {
+    let mut state = WorkspaceState::new();
+    state.disk_status = Some("118.6 GB available · 24% free".to_string());
+    state.system = Some(Box::new(status_with_history()));
+    state.selected_index = row;
+    state
+}
+
+fn home_screen(state: &WorkspaceState, w: u16, h: u16) -> String {
+    let theme = snapshot_theme();
+    render_to_string(w, h, |f| render_workspace(f, state, &theme))
+}
+
+const CLEAN_CACHES: usize = 0;
+const PROJECT_CLEANUP: usize = 1;
+const EXPLORE_STORAGE: usize = 2;
+const SYSTEM_STATUS: usize = 3;
+const PREFERENCES: usize = 4;
+
+#[test]
+fn cleanup_rows_show_how_full_the_disk_is() {
+    for row in [CLEAN_CACHES, PROJECT_CLEANUP] {
+        let output = home_screen(&home_state(row), 120, 32);
+
+        assert!(output.contains("STORAGE"), "{output}");
+        assert!(output.contains("Macintosh HD"), "{output}");
+    }
+}
+
+#[test]
+fn the_disk_on_the_main_menu_has_no_speed_rows() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 120, 32);
+
+    assert!(!output.contains("Measuring"), "{output}");
+    assert!(!output.contains("Read"), "{output}");
+}
+
+#[test]
+fn the_status_row_shows_cpu_and_memory() {
+    let output = home_screen(&home_state(SYSTEM_STATUS), 120, 32);
+
+    assert!(output.contains("CPU"), "{output}");
+    assert!(output.contains("MEMORY"), "{output}");
+    assert!(!output.contains("PROCESSES"), "{output}");
+}
+
+#[test]
+fn the_status_row_fits_a_large_window_in_two_columns() {
+    let output = home_screen(&home_state(SYSTEM_STATUS), 205, 60);
+
+    let row = output.lines().find(|line| line.contains("CPU")).unwrap();
+    assert!(row.contains("MEMORY"), "{output}");
+    assert!(body_rows(&output).iter().any(|row| row.contains('█')));
+}
+
+#[test]
+fn the_explore_row_lists_the_largest_items_once_home_is_measured() {
+    let mut state = home_state(EXPLORE_STORAGE);
+    let before = home_screen(&state, 120, 32);
+    assert!(before.contains("Open Explore storage"), "{before}");
+
+    state.largest = sample_analyze().levels.pop().map(|level| level.snapshot);
+
+    let after = home_screen(&state, 120, 32);
+    assert!(after.contains("file.bin"), "{after}");
+    assert!(after.contains("LARGEST"), "{after}");
+    assert!(!after.contains("Open Explore storage"), "{after}");
+}
+
+#[test]
+fn other_rows_keep_only_their_description() {
+    let output = home_screen(&home_state(PREFERENCES), 120, 32);
+
+    assert!(!output.contains("STORAGE"), "{output}");
+    assert!(!output.contains("CPU"), "{output}");
+}
+
+#[test]
+fn a_narrow_main_menu_shows_no_data() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 80, 24);
+
+    assert!(!output.contains("STORAGE"), "{output}");
+}
+
+#[test]
+fn the_sampler_runs_only_while_the_status_row_is_highlighted() {
+    let cache = Arc::new(RwLock::new(StorageCache::new()));
+    let is_live = |state: &WorkspaceState| state.system.as_ref().unwrap().is_live();
+    let mut state = home_state(SYSTEM_STATUS);
+
+    state.tick(&cache);
+    assert!(!is_live(&state), "the pane was never drawn");
+
+    home_screen(&state, 120, 32);
+    state.tick(&cache);
+    assert!(is_live(&state));
+
+    state.selected_index = CLEAN_CACHES;
+    state.tick(&cache);
+    assert!(!is_live(&state));
+}
+
+#[test]
+fn the_explore_row_picks_up_a_measured_home_folder() {
+    let home = taert::core::safety::Safety::home_dir();
+    let cache = Arc::new(RwLock::new(StorageCache::new()));
+    let mut snapshot = sample_analyze().levels.pop().unwrap().snapshot;
+    snapshot.path = home.clone();
+    cache.write().unwrap().put_snapshot(home, snapshot);
+    let mut state = home_state(EXPLORE_STORAGE);
+
+    state.tick(&cache);
+
+    assert!(state.largest.is_some());
+}
+
+#[test]
+fn snapshot_main_menu_rows_with_data() {
+    let theme = snapshot_theme();
+    for (row, name) in [(CLEAN_CACHES, "clean"), (SYSTEM_STATUS, "status")] {
+        let state = home_state(row);
+        let output = render_to_string(140, 40, |f| render_workspace(f, &state, &theme));
+        assert_snapshot!(format!("workspace_{name}_140x40"), output);
+    }
 }
