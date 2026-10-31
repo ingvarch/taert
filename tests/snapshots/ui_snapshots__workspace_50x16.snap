@@ -11,10 +11,10 @@ expression: output
    │      Choose tools and individual paths to r
    │   ◇ Project cleanup                     › │
    │   ▦ Docker cleanup                      › │
+   │   ⌦ Uninstall apps                      › │
    ╰───────────────────────────────────────────╯
    ╭─ Inspect ─────────────────────────────────╮
    │   ◔ Explore storage                     › │
    │   ▤ System status                       › │
-   ╰───────────────────────────────────────────╯
 ──────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More         Open  ↵

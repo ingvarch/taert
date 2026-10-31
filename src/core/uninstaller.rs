@@ -543,6 +543,15 @@ pub fn config_mentions(layout: &Layout, removed: &[PathBuf]) -> Vec<String> {
     found
 }
 
+/// True when the selection holds something only root can remove.
+pub fn needs_password(scan: &CategoryScan) -> bool {
+    scan.selected_items().iter().any(|item| match item.role {
+        Some(UninstallRole::Receipt { .. }) => true,
+        Some(_) => !user_can_remove(&item.path),
+        None => false,
+    })
+}
+
 /// One app's selected rows, sorted by who can remove them.
 struct Job<'a> {
     plan: &'a AppPlan,
@@ -2061,6 +2070,24 @@ mod run_tests {
         assert_eq!(unsafe { libc::chflags(locked.as_ptr(), 0) }, 0);
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].error.contains("Full Disk Access"));
+    }
+
+    #[test]
+    fn the_review_knows_when_macos_will_ask_for_a_password() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let cache = folder(layout.user("Library/Caches/com.acme.foo"));
+        let plain = plan_of(&foo, vec![leftover(&cache)]);
+        let receipt = row(
+            &layout.system("private/var/db/receipts/com.acme.foo.plist"),
+            UninstallRole::Receipt {
+                package: "com.acme.foo".to_string(),
+            },
+        );
+        let with_receipt = plan_of(&foo, vec![receipt]);
+
+        assert!(!needs_password(&plain.scan));
+        assert!(needs_password(&with_receipt.scan));
     }
 
     #[test]

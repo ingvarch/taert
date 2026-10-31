@@ -266,6 +266,12 @@ fn pick_apps_to_uninstall(
     ignore: &IgnoreStore,
     layout: &Layout,
 ) -> ExitCode {
+    if !use_plain && !cli.json && !cli.dry_run {
+        let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default());
+        app.launch_app_scan();
+        return run_tui(&mut app);
+    }
+
     apps::measure_apps(installed, &MacHost, None, None);
     let mut list = apps::app_scan(installed, layout);
 
@@ -310,6 +316,16 @@ fn pick_apps_to_uninstall(
     finish_uninstall(plan, cli, use_plain, ignore, layout)
 }
 
+fn run_tui(app: &mut ui::app::App) -> ExitCode {
+    match app.run() {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("TUI Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_uninstall(plan: &UninstallPlan, ignore: &IgnoreStore, layout: &Layout) -> ExitCode {
     let report = Uninstaller {
         host: &MacHost,
@@ -328,7 +344,7 @@ fn run_uninstall(plan: &UninstallPlan, ignore: &IgnoreStore, layout: &Layout) ->
 fn finish_uninstall(
     mut plan: UninstallPlan,
     cli: &Cli,
-    _use_plain: bool,
+    use_plain: bool,
     ignore: &IgnoreStore,
     layout: &Layout,
 ) -> ExitCode {
@@ -354,6 +370,11 @@ fn finish_uninstall(
 
     if cli.force {
         return run_uninstall(&plan, ignore, layout);
+    }
+
+    if !use_plain && !cli.dry_run {
+        let mut app = ui::app::App::with_plan(plan, ignore.clone(), Config::load_or_default());
+        return run_tui(&mut app);
     }
 
     PlainRunner::print_scan(&plan.scan);

@@ -11,16 +11,16 @@ expression: output
    │      Choose tools and individual paths to remove                        │
    │   ◇ ╭────────────────────────────────────────────────────────────╮    › │
    │   ▦ │ Explore your home folder?                                  │    › │
-   ╰─────│                                                            │──────╯
-   ╭─ Ins│ Measuring every folder can take a few minutes.             │──────╮
+   │   ⌦ │                                                            │    › │
+   ╰─────│ Measuring every folder can take a few minutes.             │──────╯
+   ╭─ Ins│                                                            │──────╮
    │   ◔ │                                                            │    › │
-   │   ▤ │                                                            │    › │
-   ╰─────│                                           Cancel    Start  │──────╯
-   ╭─ Set│                                    Enter select   Esc back │──────╮
-   │   ⌥ ╰────────────────────────────────────────────────────────────╯    › │
+   │   ▤ │                                           Cancel    Start  │    › │
+   ╰─────│                                    Enter select   Esc back │──────╯
+   ╭─ Set╰────────────────────────────────────────────────────────────╯──────╮
+   │   ⌥ Preferences                                                       › │
    │   ◈ Protected paths                                                   › │
    ╰─────────────────────────────────────────────────────────────────────────╯
-
 
 
 

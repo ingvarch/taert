@@ -2,7 +2,7 @@
 //! Includes modal confirmation dialog, live removal progress dialog with spinner,
 //! and completion outcome dialog.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ratatui::Frame;
@@ -22,13 +22,16 @@ use super::components::list::{ColumnTitles, ListRow, SIZE_W, path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::theme::Theme;
+use crate::core::apps;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
+use crate::core::leftovers::UninstallRole;
 use crate::core::path_utils::prettify_path;
 use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use crate::core::uninstaller;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmButton {
@@ -56,9 +59,14 @@ pub struct SelectState {
     pub problem: Option<String>,
     /// Lists that can be sorted are drawn as tables.
     pub sort_order: Option<SortOrder>,
+    /// Told before the removal starts.
+    pub notes: Vec<String>,
+    pub asks_password: bool,
 }
 
 const BAR_MIN_WIDTH: usize = 100;
+const MAX_LISTED_FAILURES: usize = 3;
+const MAX_LISTED_NOTES: usize = 3;
 // Fits "About an hour ago", the longest age that lasts more than a few seconds.
 const AGE_W: usize = 17;
 
@@ -113,7 +121,8 @@ impl SelectState {
     }
 
     pub fn with_preserved_selection(scan: CategoryScan) -> Self {
-        let sort_order = (scan.id == SCAN_ID).then(SortOrder::default);
+        let is_table = scan.id == SCAN_ID || scan.id == apps::LIST_ID;
+        let sort_order = is_table.then(SortOrder::default);
         let mut state = Self {
             scan,
             focused_index: 0,
@@ -123,6 +132,8 @@ impl SelectState {
             overlay: ModalOverlay::None,
             problem: None,
             sort_order,
+            notes: Vec::new(),
+            asks_password: false,
         };
         state.move_to_start();
         state
@@ -213,7 +224,7 @@ impl SelectState {
 
             if self.sort_order.is_some() {
                 let is_cache = |item: &ScanItem| item.docker == Some(DockerObject::BuildCache);
-                let date = if group.items.iter().any(is_cache) {
+                let date = if self.scan.id == apps::LIST_ID || group.items.iter().any(is_cache) {
                     "LAST USED"
                 } else {
                     "CREATED"
@@ -392,6 +403,7 @@ impl SelectState {
 
     pub fn open_confirmation(&mut self) {
         if !self.scan.selected_items().is_empty() {
+            self.asks_password = uninstaller::needs_password(&self.scan);
             self.overlay = ModalOverlay::Confirm(ConfirmButton::Cancel);
         }
     }
@@ -425,18 +437,33 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         ),
     ]);
 
+    let enter = theme.g.key_enter;
+    let id = state.scan.id.as_str();
     let primary_action = if state.is_searching {
-        PrimaryAction::new("Apply", theme.g.key_enter)
+        PrimaryAction::new("Apply", enter)
+    } else if id == uninstaller::PLAN_ID && selected_count > 0 {
+        let items = plural(selected_count, "item", "items");
+        PrimaryAction::new(format!("Uninstall {items}"), enter)
+    } else if id == uninstaller::PLAN_ID {
+        PrimaryAction::disabled("Uninstall", enter)
+    } else if id == apps::LIST_ID && selected_count > 0 {
+        let chosen = plural(selected_count, "app", "apps");
+        PrimaryAction::new(format!("Review {chosen}"), enter)
+    } else if id == apps::LIST_ID && total_count > 0 {
+        PrimaryAction::new("Review app", enter)
     } else if selected_count > 0 {
-        PrimaryAction::new(format!("Review {selected_count} items"), theme.g.key_enter)
+        PrimaryAction::new(format!("Review {selected_count} items"), enter)
     } else {
-        PrimaryAction::disabled("Review items", theme.g.key_enter)
+        PrimaryAction::disabled("Review items", enter)
     };
 
-    let crumbs = if state.scan.id == SCAN_ID || state.scan.id == purger::SCAN_ID {
-        vec!["taert", state.scan.title.as_str()]
+    let title = state.scan.title.as_str();
+    let crumbs = if id == uninstaller::PLAN_ID {
+        vec!["taert", "Uninstall apps", title]
+    } else if id == SCAN_ID || id == purger::SCAN_ID || id == apps::LIST_ID {
+        vec!["taert", title]
     } else {
-        vec!["taert", "Clean caches", state.scan.title.as_str()]
+        vec!["taert", "Clean caches", title]
     };
 
     let chrome = AppChrome::new(crumbs)
@@ -450,6 +477,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 
     if total_count == 0 {
         render_nothing_to_show(frame, content_rect, state, theme);
+        render_overlay(frame, state, theme);
         return;
     }
 
@@ -550,7 +578,15 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 theme.callout()
             };
 
-            let title_spans = if let Some(path) = &row.full_path {
+            let app_name = (state.scan.id == apps::LIST_ID)
+                .then(|| row.full_path.as_deref().and_then(Path::file_stem))
+                .flatten();
+            let title_spans = if let Some(name) = app_name {
+                vec![Span::styled(
+                    name.to_string_lossy().into_owned(),
+                    theme.body(),
+                )]
+            } else if let Some(path) = &row.full_path {
                 let mut spans = path_spans(path, row_width.saturating_sub(20), theme);
                 if is_focused && state.path_scroll > 0 {
                     let full_str = prettify_path(path);
@@ -603,7 +639,10 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 
     frame.render_widget(Paragraph::new(list_lines), list_rect);
 
-    // Modal Overlays
+    render_overlay(frame, state, theme);
+}
+
+fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     match &state.overlay {
         ModalOverlay::None => {}
         ModalOverlay::Confirm(focus_btn) => {
@@ -616,9 +655,13 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             render_removing_dialog(frame, progress, *spinner_idx, theme);
         }
         ModalOverlay::Outcome(report) => {
-            render_outcome_dialog(frame, report, theme);
+            render_outcome_dialog(frame, report, is_plan(state), theme);
         }
     }
+}
+
+fn is_plan(state: &SelectState) -> bool {
+    state.scan.id == uninstaller::PLAN_ID
 }
 
 fn section_color(group: &ToolGroup, theme: &Theme) -> Color {
@@ -630,7 +673,7 @@ fn section_color(group: &ToolGroup, theme: &Theme) -> Color {
     }
 }
 
-// Docker sections keep a warning in brackets after their name, for plain output too.
+// Docker and app sections keep a note in brackets after their name, for plain output too.
 fn section_frame_top(
     group: &ToolGroup,
     detail: Vec<Span<'static>>,
@@ -639,9 +682,12 @@ fn section_frame_top(
     theme: &Theme,
 ) -> Line<'static> {
     let name = group.tool.as_str();
-    let is_docker = group.items.iter().any(|item| item.docker.is_some());
+    let has_note = group
+        .items
+        .iter()
+        .any(|item| item.docker.is_some() || item.role.is_some());
     match name.split_once(" (") {
-        Some((title, note)) if is_docker => frame_top(
+        Some((title, note)) if has_note => frame_top(
             title,
             note.trim_end_matches(')'),
             detail,
@@ -686,6 +732,22 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
         EmptyState::new("✓", "Docker has nothing unused", "Every object is in use.")
             .glyph_color(theme.p.green)
             .render(frame, area, theme);
+    } else if state.scan.id == apps::LIST_ID {
+        EmptyState::new(
+            "✓",
+            "No apps to uninstall",
+            "Apps in your Applications folders show up here.",
+        )
+        .glyph_color(theme.p.green)
+        .render(frame, area, theme);
+    } else if is_plan(state) {
+        EmptyState::new(
+            "✓",
+            "Nothing left to remove",
+            "Everything you chose is gone.",
+        )
+        .glyph_color(theme.p.green)
+        .render(frame, area, theme);
     } else {
         EmptyState::new("✓", "Nothing to clean", "Your caches are already tidy.")
             .glyph_color(theme.p.green)
@@ -701,7 +763,17 @@ fn render_confirmation_dialog(
 ) {
     let count = state.scan.selected_items().len();
     let noun = if count == 1 { "item" } else { "items" };
-    let title = format!("Remove {count} {noun}?");
+    let bundles = state
+        .scan
+        .selected_items()
+        .iter()
+        .filter(|item| item.role == Some(UninstallRole::Bundle))
+        .count();
+    let title = if bundles > 0 {
+        format!("Uninstall {}?", plural(bundles, "app", "apps"))
+    } else {
+        format!("Remove {count} {noun}?")
+    };
 
     let msg = format!(
         "{} will be permanently deleted. This cannot be undone.",
@@ -725,6 +797,22 @@ fn render_confirmation_dialog(
         )));
     }
 
+    if bundles > 0 {
+        message.push(Line::from(Span::styled(
+            "Open apps are quit first.",
+            theme.callout(),
+        )));
+    }
+    if state.asks_password {
+        message.push(Line::from(Span::styled(
+            "macOS will ask for your password.",
+            theme.warning(),
+        )));
+    }
+    for note in &state.notes {
+        message.push(Line::from(Span::styled(note.clone(), theme.callout())));
+    }
+
     let cancel_focused = matches!(focus_btn, ConfirmButton::Cancel);
     let remove_focused = matches!(focus_btn, ConfirmButton::Remove);
 
@@ -732,7 +820,8 @@ fn render_confirmation_dialog(
         .message(message)
         .buttons(vec![
             Button::new("Cancel").focused(cancel_focused),
-            Button::destructive("Remove").focused(remove_focused),
+            Button::destructive(if bundles > 0 { "Uninstall" } else { "Remove" })
+                .focused(remove_focused),
         ])
         .render(frame, frame.area(), theme);
 }
@@ -786,17 +875,20 @@ fn render_removing_dialog(
         .render(frame, frame.area(), theme);
 }
 
-fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, theme: &Theme) {
-    let title = if report.freed_bytes > 0 {
-        "Clean Complete"
-    } else {
-        "Nothing was removed"
+fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, theme: &Theme) {
+    let title = match (report.freed_bytes > 0, plan) {
+        (true, true) => "Uninstall Complete",
+        (true, false) => "Clean Complete",
+        (false, _) => "Nothing was removed",
     };
 
     let mut message = vec![Line::from(vec![
         Span::styled(format_bytes(report.freed_bytes), theme.success()),
         Span::styled(
-            format!(" freed across {} items", report.removed_count),
+            format!(
+                " freed across {}",
+                plural(report.removed_count, "item", "items")
+            ),
             theme.body(),
         ),
     ])];
@@ -804,15 +896,29 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, theme: &Them
     if !report.failures.is_empty() {
         message.push(Line::from(""));
         message.push(Line::from(Span::styled(
-            format!("{} items failed to remove:", report.failures.len()),
+            format!(
+                "{} failed to remove:",
+                plural(report.failures.len(), "item", "items")
+            ),
             theme.danger(),
         )));
-        for fail in report.failures.iter().take(3) {
+        for fail in report.failures.iter().take(MAX_LISTED_FAILURES) {
             message.push(Line::from(Span::styled(
                 format!("  ✕ {}", prettify_path(&fail.path)),
                 theme.callout(),
             )));
         }
+        if plan {
+            let reason = report.failures[0].error.clone();
+            message.push(Line::from(Span::styled(reason, theme.callout())));
+        }
+    }
+
+    if !report.notes.is_empty() {
+        message.push(Line::from(""));
+    }
+    for note in report.notes.iter().take(MAX_LISTED_NOTES) {
+        message.push(Line::from(Span::styled(note.clone(), theme.callout())));
     }
 
     Modal::new(title)

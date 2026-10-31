@@ -1,0 +1,35 @@
+---
+source: tests/ui_snapshots.rs
+expression: select_screen(&state)
+---
+ taert › Uninstall apps › Review                                                             5 of 6 selected  ·  1.8 GB
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Zoom  Homebrew cask zoom ─────────────────────────────────────────────────────────────────── 6 items · 1.8 GB ─╮
+   │ ▌ ● /Applications/Zoom.app                                                  ━━━──────────────  17.2%   310.0 MB │
+   │   ● /Users/test/Library/Application Support/zoom.us                         ━━━━━━━━━━━━━────  77.8%     1.4 GB │
+   │   ● /Users/test/Library/Caches/us.zoom.xos                                  ━────────────────   5.0%    90.0 MB │
+   │   ● /Users/test/Library/Preferences/us.zoom.xos.plist                       ─────────────────  <0.1%     4.1 KB │
+   │   ● /Library/LaunchDaemons/us.zoom.ZoomDaemon.plist                         ─────────────────  <0.1%     4.1 KB │
+   │   ○ /Users/test/.config/╭────────────────────────────────────────────────────────────╮───────  <0.1%     4.1 KB │
+   ╰─────────────────────────│ Uninstall Complete                                         │──────────────────────────╯
+                             │                                                            │
+                             │ 1.8 GB freed across 5 items                                │
+                             │                                                            │
+                             │ 1 item failed to remove:                                   │
+                             │   ✕ /Library/LaunchDaemons/us.zoom.ZoomDaemon.plist        │
+                             │ The administrator password was not given                   │
+                             │                                                            │
+                             │ Still mentioned in your configuration: ~/.zshrc:12         │
+                             │                                                            │
+                             │                                                            │
+                             │                                                      Done  │
+                             │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+                             ╰────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

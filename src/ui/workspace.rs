@@ -1,5 +1,5 @@
 //! Workspace Screen (Main Menu).
-//! 6 Main Options + Clean Caches Submenu + Start Confirmations.
+//! Main menu + Clean Caches Submenu + Start Confirmations.
 
 use std::cell::Cell;
 use std::sync::{Arc, RwLock};
@@ -37,16 +37,17 @@ pub enum MainMenuChoice {
     CleanCaches,    // 1
     ProjectCleanup, // 2
     DockerCleanup,  // 3
-    ExploreStorage, // 4
-    SystemStatus,   // 5
-    Preferences,    // 6
-    ProtectedPaths, // 7
+    UninstallApps,  // 4
+    ExploreStorage, // 5
+    SystemStatus,   // 6
+    Preferences,    // 7
+    ProtectedPaths, // 8
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 3] = [
-    ("Cleanup", &[0, 1, 2]),
-    ("Inspect", &[3, 4]),
-    ("Settings", &[5, 6]),
+    ("Cleanup", &[0, 1, 2, 3]),
+    ("Inspect", &[4, 5]),
+    ("Settings", &[6, 7]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +131,12 @@ impl WorkspaceState {
                     "Docker cleanup",
                     "Remove what no container uses",
                     "Find images, volumes and networks that no container uses,\nplus the build cache. Volumes can hold real data, so they\nare never selected for you.",
+                ),
+                (
+                    MainMenuChoice::UninstallApps,
+                    "Uninstall apps",
+                    "Remove apps with everything they left behind",
+                    "Remove an app together with its settings, caches, login\nitems and background helpers. You'll review every file\nbefore anything is removed.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
@@ -358,6 +365,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::CleanCaches => theme.g.icon_clean,
         MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
         MainMenuChoice::DockerCleanup => theme.g.icon_docker,
+        MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Preferences => theme.g.icon_prefs,
@@ -513,9 +521,9 @@ fn detail_data(
     };
 
     match choice {
-        MainMenuChoice::CleanCaches | MainMenuChoice::ProjectCleanup => {
-            storage_summary(system, width, theme)
-        }
+        MainMenuChoice::CleanCaches
+        | MainMenuChoice::ProjectCleanup
+        | MainMenuChoice::UninstallApps => storage_summary(system, width, theme),
         MainMenuChoice::ExploreStorage => {
             let mut lines = storage_summary(system, width, theme);
             lines.push(Line::default());
