@@ -8,6 +8,7 @@ pub mod docker;
 pub mod host;
 pub mod iokit;
 pub mod layout;
+pub mod leftovers;
 pub mod path_utils;
 pub mod profiler;
 pub mod projects_store;

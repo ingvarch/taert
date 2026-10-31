@@ -3,10 +3,12 @@
 //! Supports progress callback for interactive spinners and status updates.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use thiserror::Error;
 
 use super::docker::{DockerClient, DockerRemover};
-use super::safety::{FileIdentity, Safety};
+use super::safety::{FileIdentity, Safety, SafetyError};
 use super::scanner::ScanItem;
 use super::stores::IgnoreStore;
 
@@ -21,6 +23,25 @@ pub struct RemovalReport {
     pub removed_count: usize,
     pub freed_bytes: u64,
     pub failures: Vec<RemovalFailure>,
+    /// Things worth telling that are not failures.
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ItemRemovalError {
+    #[error("{0}")]
+    Refused(String),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl ItemRemovalError {
+    pub fn is_permission_denied(&self) -> bool {
+        match self {
+            Self::Refused(_) => false,
+            Self::Io(error) => matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,47 +133,9 @@ impl Cleaner {
                 continue;
             }
 
-            // 1. Re-validate safety rule immediately before deletion
-            if let Err(e) = Safety::can_remove(&item.path, ignore) {
-                report.failures.push(RemovalFailure {
-                    path: item.path.clone(),
-                    error: format!("Safety check failed: {e}"),
-                });
-                continue;
-            }
-
-            // 2. Re-validate FileIdentity (check device and inode haven't changed / been replaced)
-            if let Some(expected_id) = item.identity {
-                if let Some(current_id) = FileIdentity::of(&item.path) {
-                    if expected_id != current_id {
-                        report.failures.push(RemovalFailure {
-                            path: item.path.clone(),
-                            error:
-                                "File identity mismatch (file was modified or replaced since scan)"
-                                    .into(),
-                        });
-                        continue;
-                    }
-                } else {
-                    report.failures.push(RemovalFailure {
-                        path: item.path.clone(),
-                        error: "Failed to read file identity prior to deletion".into(),
-                    });
-                    continue;
-                }
-            }
-
-            // 3. Perform removal
-            let removal_result = if item.contents_only {
-                Self::remove_contents(&item.path)
-            } else if item.path.is_dir() {
-                fs::remove_dir_all(&item.path)
-            } else {
-                fs::remove_file(&item.path)
-            };
-
-            match removal_result {
-                Ok(_) => {
+            let checked = Self::remove_verified(item, |path| Safety::can_remove(path, ignore));
+            match checked {
+                Ok(()) => {
                     report.removed_count += 1;
                     report.freed_bytes = report.freed_bytes.saturating_add(item.size_bytes);
                 }
@@ -176,6 +159,44 @@ impl Cleaner {
         report.freed_bytes = report.freed_bytes.saturating_add(docker_freed);
 
         report
+    }
+
+    /// Runs the safety rule, confirms the path is the one scanned, and removes it.
+    pub fn remove_verified(
+        item: &ScanItem,
+        check: impl Fn(&Path) -> Result<(), SafetyError>,
+    ) -> Result<(), ItemRemovalError> {
+        Self::verify(item, check)?;
+        if item.contents_only {
+            Self::remove_contents(&item.path)?;
+        } else if item.path.is_dir() {
+            fs::remove_dir_all(&item.path)?;
+        } else {
+            fs::remove_file(&item.path)?;
+        }
+        Ok(())
+    }
+
+    /// The checks of `remove_verified`, for a removal that happens elsewhere.
+    pub fn verify(
+        item: &ScanItem,
+        check: impl Fn(&Path) -> Result<(), SafetyError>,
+    ) -> Result<(), ItemRemovalError> {
+        check(&item.path)
+            .map_err(|error| ItemRemovalError::Refused(format!("Safety check failed: {error}")))?;
+
+        let Some(expected) = item.identity else {
+            return Ok(());
+        };
+        match FileIdentity::of(&item.path) {
+            Some(current) if current == expected => Ok(()),
+            Some(_) => Err(ItemRemovalError::Refused(
+                "File identity mismatch (file was modified or replaced since scan)".into(),
+            )),
+            None => Err(ItemRemovalError::Refused(
+                "Failed to read file identity prior to deletion".into(),
+            )),
+        }
     }
 
     /// Remove directory contents while preserving the root directory itself.
@@ -376,6 +397,72 @@ mod tests {
         assert_eq!(progress_count, 1);
         assert_eq!(report.removed_count, 1);
         assert_eq!(report.failures.len(), 0);
+        assert!(!target.exists());
+    }
+
+    fn refuse(_: &std::path::Path) -> Result<(), SafetyError> {
+        Err(SafetyError::Ignored)
+    }
+
+    fn allow(_: &std::path::Path) -> Result<(), SafetyError> {
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_path_stays_and_says_why() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("data");
+        fs::create_dir_all(&target).unwrap();
+        let item = ScanItem::new(target.clone(), 1, true, false);
+
+        let error = Cleaner::remove_verified(&item, refuse).unwrap_err();
+
+        assert!(target.exists());
+        assert!(error.to_string().contains("Safety check failed"));
+        assert!(!error.is_permission_denied());
+    }
+
+    #[test]
+    fn a_path_replaced_since_the_scan_stays() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("data");
+        fs::create_dir_all(&target).unwrap();
+        let item = ScanItem::new(target.clone(), 1, true, false);
+        fs::remove_dir(&target).unwrap();
+        fs::create_dir_all(temp.path().join("spacer")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+
+        let error = Cleaner::remove_verified(&item, allow).unwrap_err();
+
+        assert!(target.exists());
+        assert!(error.to_string().contains("identity"));
+    }
+
+    #[test]
+    fn a_folder_the_user_cannot_write_is_a_permission_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let parent = temp.path().join("locked");
+        let target = parent.join("data");
+        fs::create_dir_all(&target).unwrap();
+        let item = ScanItem::new(target.clone(), 1, true, false);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let error = Cleaner::remove_verified(&item, allow).unwrap_err();
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(error.is_permission_denied(), "{error}");
+    }
+
+    #[test]
+    fn a_verified_path_is_removed() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("data.bin");
+        fs::write(&target, b"x").unwrap();
+        let item = ScanItem::new(target.clone(), 1, true, false);
+
+        Cleaner::remove_verified(&item, allow).unwrap();
+
         assert!(!target.exists());
     }
 
