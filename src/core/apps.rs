@@ -286,6 +286,11 @@ fn last_used_dates(host: &dyn Host, apps: &mut [InstalledApp]) {
     }
 }
 
+/// The bundle id an app has on disk right now.
+pub fn bundle_id_of(bundle: &Path) -> Option<String> {
+    text(&read_info(bundle)?, "CFBundleIdentifier").filter(|id| is_reverse_dns(id))
+}
+
 /// Finds apps. Sizes take the longest, so progress goes out as each one is measured.
 pub fn installed_apps(
     layout: &Layout,

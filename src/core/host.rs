@@ -139,6 +139,8 @@ pub mod fake {
         pub replies: Mutex<Vec<(String, VecDeque<Output>)>>,
         pub admin_scripts: Mutex<Vec<String>>,
         pub admin_result: Mutex<Option<String>>,
+        pub admin_effect: Mutex<Option<Box<dyn Fn() + Send>>>,
+        pub run_effects: Mutex<Vec<(String, Box<dyn Fn() + Send>)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
     }
 
@@ -174,6 +176,15 @@ pub mod fake {
             }
         }
 
+        /// Runs `effect` when a command starts, like the real tool would.
+        pub fn when(&self, command: &str, effect: impl Fn() + Send + 'static) {
+            let entry = (
+                command.to_string(),
+                Box::new(effect) as Box<dyn Fn() + Send>,
+            );
+            self.run_effects.lock().unwrap().push(entry);
+        }
+
         pub fn ran(&self, command: &str) -> bool {
             self.calls
                 .lock()
@@ -198,6 +209,11 @@ pub mod fake {
                 .collect::<Vec<_>>()
                 .join(" ");
             self.calls.lock().unwrap().push(line.clone());
+            for (command, effect) in self.run_effects.lock().unwrap().iter() {
+                if line.starts_with(command.as_str()) {
+                    effect();
+                }
+            }
             let mut replies = self.replies.lock().unwrap();
             let found = replies
                 .iter_mut()
@@ -211,6 +227,9 @@ pub mod fake {
 
         fn run_admin(&self, script: &str, _prompt: &str) -> Result<(), String> {
             self.admin_scripts.lock().unwrap().push(script.to_string());
+            if let Some(effect) = self.admin_effect.lock().unwrap().as_ref() {
+                effect();
+            }
             match self.admin_result.lock().unwrap().clone() {
                 Some(error) => Err(error),
                 None => Ok(()),

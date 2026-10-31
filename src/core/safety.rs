@@ -450,6 +450,26 @@ impl Safety {
         }
     }
 
+    /// A root removal follows folder links, so no folder between a place macOS
+    /// keeps fixed and the target may be one the user can replace.
+    pub fn is_safe_as_root(path: &Path, layout: &Layout) -> bool {
+        let fixed = std::iter::once(&"Applications").chain(SYSTEM_APP_FOLDERS);
+        let anchor = fixed
+            .map(|rel| layout.system(rel))
+            .filter(|folder| path != folder && path.starts_with(folder))
+            .max_by_key(|folder| folder.as_os_str().len());
+        let Some(anchor) = anchor else {
+            return false;
+        };
+        path.ancestors()
+            .skip(1)
+            .take_while(|folder| *folder != anchor)
+            .all(|folder| {
+                fs::symlink_metadata(folder)
+                    .is_ok_and(|meta| meta.uid() == 0 && meta.mode() & 0o022 == 0)
+            })
+    }
+
     fn is_app_bundle(path: &Path, layout: &Layout) -> bool {
         let is_app = |part: &std::ffi::OsStr| {
             Path::new(part)
@@ -756,6 +776,32 @@ mod tests {
             uninstall_check(&deeper, &layout),
             Err(SafetyError::OutsideUninstallScope)
         );
+    }
+
+    #[test]
+    fn root_may_remove_directly_below_the_fixed_folders() {
+        let (_temp, layout) = sandbox();
+        let app = make(&layout.system("Applications/Foo.app"));
+        let support = make(&layout.system("Library/Application Support/Foo"));
+        let shared = make(&layout.system("Users/Shared/Foo"));
+
+        assert!(Safety::is_safe_as_root(&app, &layout));
+        assert!(Safety::is_safe_as_root(&support, &layout));
+        assert!(Safety::is_safe_as_root(&shared, &layout));
+    }
+
+    #[test]
+    fn root_stays_away_from_paths_the_user_could_redirect() {
+        let (_temp, layout) = sandbox();
+        let nested = make(&layout.system("Applications/Vendor/Foo.app"));
+        let vendor = make(&layout.system("Library/Application Support/Avid/Sibelius"));
+        let in_home = make(&layout.user("Applications/Foo.app"));
+        let volume = make(&layout.system("Volumes/Ext/Applications/Foo.app"));
+
+        assert!(!Safety::is_safe_as_root(&nested, &layout));
+        assert!(!Safety::is_safe_as_root(&vendor, &layout));
+        assert!(!Safety::is_safe_as_root(&in_home, &layout));
+        assert!(!Safety::is_safe_as_root(&volume, &layout));
     }
 
     #[test]
