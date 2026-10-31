@@ -84,6 +84,7 @@ const SYSTEM_APP_FOLDERS: &[&str] = &[
     "Library/Preferences",
     "Library/PrivilegedHelperTools",
     "Library/QuickLook",
+    "Library/Receipts",
     "Library/Screen Savers",
     "Library/StartupItems",
     "Users/Shared",

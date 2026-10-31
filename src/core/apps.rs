@@ -127,11 +127,16 @@ const COMMON_NAMES: &[&str] = &[
 
 /// Where a bundle may hold helpers with their own ids.
 const EMBEDDED_FOLDERS: &[&str] = &[
-    "Contents/PlugIns",
     "Contents/Extensions",
+    "Contents/Frameworks",
+    "Contents/Library/LoginItems",
+    "Contents/PlugIns",
     "Contents/XPCServices",
 ];
 const LOGIN_ITEMS_FOLDER: &str = "Contents/Library/LoginItems";
+const SKIPPED_IN_BUNDLES: &[&str] = &["Headers", "Modules", "Resources", "_CodeSignature"];
+const MAX_EMBEDDED_DEPTH: usize = 6;
+const MAX_EMBEDDED_BUNDLES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstalledApp {
@@ -301,6 +306,20 @@ pub fn find_apps(layout: &Layout) -> Vec<InstalledApp> {
         .collect();
     apps.sort_by_key(|app| app.name.to_lowercase());
     apps
+}
+
+/// Apps taert does not list but a shared file could belong to.
+pub fn find_copies(layout: &Layout) -> Vec<InstalledApp> {
+    let mut bundles = Vec::new();
+    for (root, depth) in layout.copy_roots() {
+        bundles_in(&root, depth, &mut bundles);
+    }
+    let mut copies: Vec<InstalledApp> = bundles
+        .iter()
+        .filter_map(|path| read_app(path, path.parent()?))
+        .collect();
+    copies.sort_by_key(|app| app.name.to_lowercase());
+    copies
 }
 
 fn measure(app: &mut InstalledApp) {
@@ -481,26 +500,62 @@ pub fn is_common_name(name: &str) -> bool {
     COMMON_NAMES.contains(&name.to_lowercase().as_str())
 }
 
-fn bundle_ids_in(folder: &Path, own_id: Option<&str>) -> Vec<String> {
+fn embedded_bundles(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(folder) else {
-        return Vec::new();
+        return;
     };
-    entries
-        .flatten()
-        .filter_map(|entry| text(&read_info(&entry.path())?, "CFBundleIdentifier"))
-        .filter(|id| is_reverse_dns(id) && Some(id.as_str()) != own_id)
+    for entry in entries.flatten() {
+        if depth == 0 || found.len() >= MAX_EMBEDDED_BUNDLES {
+            return;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let is_helper = path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("appex") || extension.eq_ignore_ascii_case("xpc")
+        });
+        if is_helper {
+            found.push(path.clone());
+        }
+        let name = entry.file_name();
+        if !SKIPPED_IN_BUNDLES.iter().any(|skipped| name == *skipped) {
+            embedded_bundles(&path, depth - 1, found);
+        }
+    }
+}
+
+/// A bundle can write any id into its plist, so an Apple id counts only when it
+/// continues the id of the app itself.
+fn is_usable_embedded_id(id: &str, own_id: Option<&str>) -> bool {
+    let is_apple = id.to_ascii_lowercase().starts_with("com.apple.");
+    let continues_own = own_id.is_some_and(|own| id.starts_with(&format!("{own}.")));
+    is_reverse_dns(id)
+        && Some(id) != own_id
         // Sparkle ships in many apps, so these ids belong to none of them.
-        .filter(|id| !id.starts_with("org.sparkle-project."))
-        .collect()
+        && !id.starts_with("org.sparkle-project.")
+        && (!is_apple || continues_own)
 }
 
 /// Bundle ids of the extensions and helpers inside an app, and which of those
 /// are login items.
 pub fn embedded_bundle_ids(app: &Path, own_id: Option<&str>) -> (Vec<String>, Vec<String>) {
-    let login_items = bundle_ids_in(&app.join(LOGIN_ITEMS_FOLDER), own_id);
-    let mut embedded: Vec<String> = EMBEDDED_FOLDERS
+    let bundle_id = |bundle: &Path| {
+        let id = text(&read_info(bundle)?, "CFBundleIdentifier")?;
+        is_usable_embedded_id(&id, own_id).then_some(id)
+    };
+
+    let mut login_bundles = Vec::new();
+    bundles_in(&app.join(LOGIN_ITEMS_FOLDER), 1, &mut login_bundles);
+    let login_items: Vec<String> = login_bundles.iter().filter_map(|b| bundle_id(b)).collect();
+
+    let mut bundles = Vec::new();
+    for folder in EMBEDDED_FOLDERS {
+        embedded_bundles(&app.join(folder), MAX_EMBEDDED_DEPTH, &mut bundles);
+    }
+    let mut embedded: Vec<String> = bundles
         .iter()
-        .flat_map(|folder| bundle_ids_in(&app.join(folder), own_id))
+        .filter_map(|bundle| bundle_id(bundle))
         .chain(login_items.iter().cloned())
         .collect();
     embedded.sort();
@@ -961,39 +1016,109 @@ mod tests {
         let (_temp, layout) = sandbox();
         let foo = layout.system("Applications/Foo.app");
         fake_app(&foo, "com.foo.app", "foo");
+        let contents = foo.join("Contents");
         fake_app(
-            &foo.join("Contents/PlugIns/Share.appex"),
+            &contents.join("PlugIns/Share.appex"),
             "com.foo.app.share",
             "s",
         );
+        fake_app(&contents.join("XPCServices/Net.xpc"), "com.foo.net", "n");
         fake_app(
-            &foo.join("Contents/XPCServices/Net.xpc"),
-            "com.foo.net",
-            "n",
-        );
-        fake_app(
-            &foo.join("Contents/Library/LoginItems/Login.app"),
+            &contents.join("Library/LoginItems/Login.app"),
             "com.foo.login",
             "l",
         );
         fake_app(
-            &foo.join("Contents/XPCServices/Downloader.xpc"),
-            "org.sparkle-project.Downloader",
+            &contents.join("Library/LoginItems/Login.app/Contents/PlugIns/In.appex"),
+            "com.foo.login.widget",
+            "w",
+        );
+        fake_app(
+            &contents.join("Frameworks/Kit.framework/Versions/A/XPCServices/Deep.xpc"),
+            "com.foo.deep",
             "d",
         );
         fake_app(
-            &foo.join("Contents/XPCServices/Self.xpc"),
-            "com.foo.app",
+            &contents.join("XPCServices/Downloader.xpc"),
+            "org.sparkle-project.Downloader",
             "d",
         );
+        fake_app(&contents.join("XPCServices/Self.xpc"), "com.foo.app", "d");
 
         let (embedded, login_items) = embedded_bundle_ids(&foo, Some("com.foo.app"));
 
         assert_eq!(
             embedded,
-            ["com.foo.app.share", "com.foo.login", "com.foo.net"]
+            [
+                "com.foo.app.share",
+                "com.foo.deep",
+                "com.foo.login",
+                "com.foo.login.widget",
+                "com.foo.net"
+            ]
         );
         assert_eq!(login_items, ["com.foo.login"]);
+    }
+
+    #[test]
+    fn only_extensions_and_services_count_as_helpers() {
+        let (_temp, layout) = sandbox();
+        let foo = layout.system("Applications/Foo.app");
+        fake_app(&foo, "com.foo.app", "foo");
+        let contents = foo.join("Contents");
+        fake_app(&contents.join("PlugIns/SDK.bundle"), "com.vendor.sdk", "s");
+        fake_app(
+            &contents.join("Frameworks/Helper.app"),
+            "com.vendor.helper",
+            "h",
+        );
+
+        let (embedded, _) = embedded_bundle_ids(&foo, Some("com.foo.app"));
+
+        assert!(embedded.is_empty(), "{embedded:?}");
+    }
+
+    #[test]
+    fn a_plugin_cannot_claim_an_apple_id() {
+        let (_temp, layout) = sandbox();
+        let foo = layout.system("Applications/Foo.app");
+        fake_app(&foo, "com.foo.app", "foo");
+        fake_app(
+            &foo.join("Contents/PlugIns/Dock.appex"),
+            "com.apple.dock",
+            "d",
+        );
+
+        assert!(embedded_bundle_ids(&foo, Some("com.foo.app")).0.is_empty());
+    }
+
+    #[test]
+    fn an_apple_app_keeps_the_helpers_named_after_it() {
+        let (_temp, layout) = sandbox();
+        let xcode = layout.system("Applications/Xcode.app");
+        fake_app(&xcode, "com.apple.dt.Xcode", "Xcode");
+        let plugins = xcode.join("Contents/PlugIns");
+        fake_app(&plugins.join("Own.appex"), "com.apple.dt.Xcode.Own", "o");
+        fake_app(&plugins.join("Other.appex"), "com.apple.WebKit.Other", "w");
+
+        let (embedded, _) = embedded_bundle_ids(&xcode, Some("com.apple.dt.Xcode"));
+
+        assert_eq!(embedded, ["com.apple.dt.Xcode.Own"]);
+    }
+
+    #[test]
+    fn copies_outside_the_app_folders_are_found_too() {
+        let (_temp, layout) = sandbox();
+        let on_volume = layout.system("Volumes/Backup/Foo.app");
+        let in_setapp = layout.user("Library/Application Support/Setapp/Applications/Bar.app");
+        let in_cask = layout.root.join("opt/homebrew/Caskroom/baz/1.0/Baz.app");
+        fake_app(&on_volume, "com.foo.app", "foo");
+        fake_app(&in_setapp, "com.bar.app", "bar");
+        fake_app(&in_cask, "com.baz.app", "baz");
+
+        let copies = find_copies(&layout);
+
+        assert_eq!(names(&copies), ["Bar", "Baz", "Foo"]);
     }
 
     #[test]

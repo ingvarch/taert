@@ -18,7 +18,9 @@ use super::host::Host;
 use super::layout::Layout;
 use super::safety::FileIdentity;
 
-const MIN_NAME: usize = 3;
+const MIN_NAME: usize = 2;
+const MIN_CHANNEL_BASE: usize = 3;
+const MIN_FAMILY_PARTS: usize = 3;
 const MIN_NAME_OUTSIDE_HOME: usize = 5;
 const MIN_VENDOR_TOKEN: usize = 3;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -71,6 +73,15 @@ const NAMED_EXTENSIONS: &[(&str, &str)] = &[
     ("Library/Workflows", ".workflow"),
 ];
 
+/// The ones of `NAMED_IN_SYSTEM` that vendors spell in different ways.
+const SPELLED_IN_SYSTEM: &[(&str, &str)] = &[
+    ("Library/Application Support", ""),
+    ("Library/Caches", ""),
+    ("Library/Logs", ""),
+    ("Library/Preferences", ""),
+    ("Library/Preferences", ".plist"),
+];
+
 const NAMED_IN_SYSTEM: &[(&str, &str)] = &[
     ("Library/Application Support", ""),
     ("Library/Audio/Plug-Ins/Components", ".component"),
@@ -120,6 +131,8 @@ const BY_ID_IN_SYSTEM: &[(&str, &str)] = &[
     ("Library/Input Methods", ".app"),
     ("Library/Logs", ""),
     ("Library/Preferences", ".plist"),
+    ("Library/Receipts", ".bom"),
+    ("Library/Receipts", ".plist"),
 ];
 
 const BY_EMBEDDED_ID: &[(&str, &str)] = &[
@@ -227,7 +240,8 @@ pub fn find_leftovers(
     finder.embedded_helpers();
     finder.known_products();
     finder.crash_reports();
-    let receipts = finder.receipts(host);
+    let mut receipts = finder.receipts(host);
+    receipts.retain(|package| !finder.names_another_app(package, others));
 
     Findings {
         leftovers: finder.finish(others),
@@ -266,10 +280,11 @@ fn lower_spellings(name: &str) -> Vec<String> {
     all
 }
 
-fn without_channel(name: &str) -> Option<&str> {
+/// `Foo` for `Foo Beta`. `Edge` is no channel, or Microsoft Edge would be Microsoft.
+pub fn without_channel(name: &str) -> Option<&str> {
     CHANNELS.iter().find_map(|channel| {
         let base = name.strip_suffix(channel)?.strip_suffix(' ')?;
-        (base.chars().count() >= MIN_NAME).then_some(base)
+        (base.chars().count() >= MIN_CHANNEL_BASE).then_some(base)
     })
 }
 
@@ -308,7 +323,7 @@ fn is_versioned_ide_folder(leaf: &str, name: &str) -> bool {
     year.len() == 4 && is_digits(year) && minor.split('.').all(is_digits)
 }
 
-fn has_id_boundary(leaf: &str, id: &str) -> bool {
+pub fn has_id_boundary(leaf: &str, id: &str) -> bool {
     let leaf = leaf.to_ascii_lowercase();
     let id = id.to_ascii_lowercase();
     leaf == id || leaf.starts_with(&format!("{id}."))
@@ -458,21 +473,25 @@ struct Finder<'a> {
     app: &'a InstalledApp,
     layout: &'a Layout,
     id: Option<&'a str>,
-    /// The id, when it is long enough to claim names that continue it.
-    /// `com.vendor` would take every app of that vendor.
-    family: Option<&'a str>,
+    /// How sure a name that continues the id is. A short id like `com.vendor`
+    /// could continue into every app of that vendor.
+    family_evidence: Evidence,
     found: Vec<Leftover>,
 }
 
 impl<'a> Finder<'a> {
     fn new(app: &'a InstalledApp, layout: &'a Layout) -> Self {
         let id = app.bundle_id.as_deref().filter(|id| is_reverse_dns(id));
-        let family = id.filter(|id| id.split('.').count() >= 3);
+        let long_id = id.is_some_and(|id| id.split('.').count() >= MIN_FAMILY_PARTS);
         Self {
             app,
             layout,
             id,
-            family,
+            family_evidence: if long_id {
+                Evidence::BundleId
+            } else {
+                Evidence::RelatedName
+            },
             found: Vec::new(),
         }
     }
@@ -531,12 +550,7 @@ impl<'a> Finder<'a> {
         if self.name_reaches_system() {
             self.add_places(&layout.root, NAMED_IN_SYSTEM, &name, Evidence::Name);
             for spelling in spellings(&name) {
-                self.add_places(
-                    &layout.root,
-                    &NAMED_IN_SYSTEM[..1],
-                    &spelling,
-                    Evidence::Name,
-                );
+                self.add_places(&layout.root, SPELLED_IN_SYSTEM, &spelling, Evidence::Name);
             }
             self.named_helpers_and_shared_files(&name);
         }
@@ -635,26 +649,24 @@ impl<'a> Finder<'a> {
             }
         }
 
-        let Some(family) = self.family else {
-            return;
-        };
+        let evidence = self.family_evidence;
         for (path, leaf) in containers
             .into_iter()
             .chain(entries(&layout.user("Library/Application Scripts")))
             .chain(entries(&layout.user("Library/Group Containers")))
         {
-            if contains_id(&leaf, family) {
-                self.add(path, Evidence::BundleId);
+            if contains_id(&leaf, id) {
+                self.add(path, evidence);
             }
         }
         for (path, leaf) in entries(&layout.user("Library/Preferences/ByHost")) {
-            if has_id_boundary(&leaf, family) && leaf.ends_with(".plist") {
-                self.add(path, Evidence::BundleId);
+            if has_id_boundary(&leaf, id) && leaf.ends_with(".plist") {
+                self.add(path, evidence);
             }
         }
         for (path, leaf) in entries(&layout.system("Library/PrivilegedHelperTools")) {
-            if has_id_boundary(&leaf, family) {
-                self.add(path, Evidence::BundleId);
+            if has_id_boundary(&leaf, id) {
+                self.add(path, evidence);
             }
         }
     }
@@ -706,8 +718,8 @@ impl<'a> Finder<'a> {
                 if leaf.starts_with("com.apple.") || !path.is_file() || path.is_symlink() {
                     continue;
                 }
-                if self.is_own_label(stem) {
-                    self.add(path, Evidence::BundleId);
+                if let Some(evidence) = self.label_evidence(stem) {
+                    self.add(path, evidence);
                 } else if launch_program(&path).is_some_and(|p| runs_inside(&p, &self.app.path)) {
                     self.add(path, Evidence::Manifest);
                 } else if quotable && leaf.contains(&self.app.name) {
@@ -717,12 +729,13 @@ impl<'a> Finder<'a> {
         }
     }
 
-    fn is_own_label(&self, label: &str) -> bool {
-        let exact = self.id.is_some_and(|id| label.eq_ignore_ascii_case(id));
-        exact
-            || self
-                .family
-                .is_some_and(|family| has_id_boundary(label, family))
+    fn label_evidence(&self, label: &str) -> Option<Evidence> {
+        let id = self.id?;
+        if label.eq_ignore_ascii_case(id) {
+            Some(Evidence::BundleId)
+        } else {
+            has_id_boundary(label, id).then_some(self.family_evidence)
+        }
     }
 
     fn native_hosts(&mut self) {
@@ -801,6 +814,7 @@ impl<'a> Finder<'a> {
             "net.ankiweb.anki" => {
                 self.add_home_paths(&["Library/Application Support/AnkiProgramFiles"])
             }
+            "com.maestro.studio" => self.add_home_paths(&[".mobiledev"]),
             "com.anthropic.claudefordesktop" => self.add_home_paths(&[
                 "Library/Application Support/Claude-3p",
                 "Library/Logs/Claude-3p",
@@ -813,6 +827,21 @@ impl<'a> Finder<'a> {
         }
         if id.starts_with("com.jetbrains.") {
             self.jetbrains_ide();
+        }
+        if id.starts_with("dev.zed.zed-") {
+            self.add_entries("Library/HTTPStorages", "dev.zed.Zed-");
+        }
+        if id.contains("huawei") && id.contains("deveco") {
+            self.add_entries("Library/Caches/Huawei", "DevEcoStudio");
+            self.add_entries("Library/Logs/Huawei", "DevEcoStudio");
+        }
+    }
+
+    fn add_entries(&mut self, folder: &str, prefix: &str) {
+        for (path, leaf) in entries(&self.layout.user(folder)) {
+            if leaf.starts_with(prefix) {
+                self.add(path, Evidence::BundleId);
+            }
         }
     }
 
@@ -880,10 +909,13 @@ impl<'a> Finder<'a> {
 
     fn receipts(&mut self, host: &dyn Host) -> BTreeSet<String> {
         let mut receipts = BTreeSet::new();
-        if let Some(family) = self.family {
+        if let Some(own) = self
+            .id
+            .filter(|_| self.family_evidence == Evidence::BundleId)
+        {
             for (_, leaf) in entries(&self.layout.system("private/var/db/receipts")) {
                 if let Some(id) = leaf.strip_suffix(".plist")
-                    && has_id_boundary(id, family)
+                    && has_id_boundary(id, own)
                     && is_reverse_dns(id)
                 {
                     receipts.insert(id.to_string());
@@ -970,15 +1002,25 @@ impl<'a> Finder<'a> {
                     simplified(&leaf) == name || simplified(&stem) == name
                 })
             }
-            _ => {
-                let own_length = self.id.map_or(0, str::len);
-                others
-                    .iter()
-                    .filter_map(|other| other.bundle_id.as_deref())
-                    .filter(|id| id.len() > own_length)
-                    .any(|id| contains_id(&leaf, id))
-            }
+            _ => self.names_another_app(&leaf, others),
         }
+    }
+
+    /// Does `name` carry the id of another app? An id this app continues does
+    /// not count: `com.vendor.app` is not `com.vendor`'s.
+    fn names_another_app(&self, name: &str, others: &[InstalledApp]) -> bool {
+        let own = self.id.unwrap_or_default();
+        others
+            .iter()
+            .filter_map(|other| other.bundle_id.as_deref())
+            .filter(|id| !has_id_boundary(own, id))
+            .any(|id| contains_id(name, id))
+    }
+
+    fn is_apple_file(&self, path: &Path) -> bool {
+        let is_apple = |name: &str| name.to_ascii_lowercase().starts_with("com.apple.");
+        let leaf = path.file_name().map(|leaf| leaf.to_string_lossy());
+        leaf.is_some_and(|leaf| is_apple(&leaf)) && !self.id.is_some_and(is_apple)
     }
 
     fn finish(self, others: &[InstalledApp]) -> Vec<Leftover> {
@@ -990,6 +1032,7 @@ impl<'a> Finder<'a> {
             .filter(|item| !item.path.starts_with(&self.app.path))
             .filter(|item| !is_independent_tool(&item.path, home))
             .filter(|item| !is_shared_by_tools(&item.path, home))
+            .filter(|item| !self.is_apple_file(&item.path))
             .filter(|item| !self.claimed_by_another_app(item, others))
             .cloned()
             .collect();
@@ -1145,16 +1188,29 @@ mod tests {
     }
 
     #[test]
-    fn a_two_part_bundle_id_claims_only_its_exact_name() {
+    fn a_two_part_bundle_id_is_sure_only_of_its_exact_name() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "md.obsidian");
+        let own = folder(layout.user("Library/Caches/md.obsidian"));
+        let extension = folder(layout.user("Library/Containers/md.obsidian.share"));
+        let helper = file(layout.system("Library/PrivilegedHelperTools/md.obsidian.helper"));
+
+        let found = find(&target, &layout);
+
+        assert_found(&found, &own, Evidence::BundleId);
+        assert_found(&found, &extension, Evidence::RelatedName);
+        assert_found(&found, &helper, Evidence::RelatedName);
+    }
+
+    #[test]
+    fn apple_files_are_never_claimed_by_a_shorter_id() {
         let (_temp, layout) = sandbox();
         let target = installed(&layout, "Foo", "com.apple");
-        let own = folder(layout.user("Library/Caches/com.apple"));
         let foreign = folder(layout.user("Library/Containers/com.apple.Safari"));
         let plist = file(layout.user("Library/Preferences/com.apple.finder.plist"));
 
         let found = find(&target, &layout);
 
-        assert_found(&found, &own, Evidence::BundleId);
         assert_absent(&found, &foreign);
         assert_absent(&found, &plist);
     }
@@ -1173,6 +1229,32 @@ mod tests {
         assert_found(&found, &own, Evidence::BundleId);
         assert_absent(&found, &theirs);
         assert_absent(&found, &their_extension);
+    }
+
+    #[test]
+    fn an_id_declared_by_a_plugin_claims_nothing_of_an_installed_app() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo.with.a.long.id");
+        let plugin = target.path.join("Contents/PlugIns/Spoof.appex");
+        fake_app(&plugin, "com.tinyspeck.slackmacgap", "spoof");
+        let slack = app("Slack", "com.tinyspeck.slackmacgap");
+        let data = folder(layout.user("Library/Containers/com.tinyspeck.slackmacgap"));
+
+        assert_absent(&find_with(&target, &[slack], &layout), &data);
+    }
+
+    #[test]
+    fn the_receipt_of_an_app_that_stays_is_not_claimed() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo");
+        let pro = app("Foo Pro", "com.acme.foo.pro");
+        let receipts = "private/var/db/receipts";
+        file(layout.system(receipts).join("com.acme.foo.pro.plist"));
+        file(layout.system(receipts).join("com.acme.foo.tools.plist"));
+
+        let findings = find_leftovers(&target, &[pro], &FakeHost::default(), &layout);
+
+        assert_eq!(findings.receipts, ["com.acme.foo.tools"]);
     }
 
     #[test]
@@ -1398,6 +1480,32 @@ mod tests {
     }
 
     #[test]
+    fn system_folders_are_searched_in_every_spelling() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Maestro Studio", "com.acme.maestro");
+        let paths = [
+            file(layout.system("Library/Preferences/MaestroStudio.plist")),
+            folder(layout.system("Library/Caches/Maestro-Studio")),
+            folder(layout.system("Library/Logs/Maestro_Studio")),
+        ];
+
+        let found = find(&target, &layout);
+
+        for path in &paths {
+            assert_found(&found, path, Evidence::Name);
+        }
+    }
+
+    #[test]
+    fn old_style_receipts_are_found_by_bundle_id() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo");
+        let bom = file(layout.system("Library/Receipts/com.acme.foo.bom"));
+
+        assert_found(&find(&target, &layout), &bom, Evidence::BundleId);
+    }
+
+    #[test]
     fn a_short_or_common_name_does_not_reach_system_or_shared_folders() {
         let (_temp, layout) = sandbox();
         let target = installed(&layout, "Notes", "com.acme.notes");
@@ -1413,12 +1521,15 @@ mod tests {
     }
 
     #[test]
-    fn a_two_letter_name_finds_nothing_by_name() {
+    fn a_one_letter_name_finds_nothing_by_name_and_two_letters_do() {
         let (_temp, layout) = sandbox();
-        let target = installed(&layout, "Qt", "com.acme.qt");
-        let folder_named = folder(layout.user("Library/Application Support/Qt"));
+        let single = installed(&layout, "Q", "com.acme.q");
+        let double = installed(&layout, "QQ", "com.acme.qq");
+        let one = folder(layout.user("Library/Application Support/Q"));
+        let two = folder(layout.user("Library/Caches/QQ"));
 
-        assert_absent(&find(&target, &layout), &folder_named);
+        assert_absent(&find(&single, &layout), &one);
+        assert_found(&find(&double, &layout), &two, Evidence::Name);
     }
 
     #[test]
@@ -1565,6 +1676,25 @@ mod tests {
 
         assert_found(&found, &derived, Evidence::BundleId);
         assert_absent(&found, &archives);
+    }
+
+    #[test]
+    fn more_known_products_are_found() {
+        let (_temp, layout) = sandbox();
+        let maestro = installed(&layout, "Maestro Studio", "com.maestro.studio");
+        let mobile = folder(layout.user(".mobiledev"));
+        assert_found(&find(&maestro, &layout), &mobile, Evidence::BundleId);
+
+        let zed = installed(&layout, "Zed Nightly", "dev.zed.Zed-Nightly");
+        let preview = folder(layout.user("Library/HTTPStorages/dev.zed.Zed-Preview"));
+        assert_found(&find(&zed, &layout), &preview, Evidence::BundleId);
+
+        let deveco = installed(&layout, "DevEco-Studio", "com.huawei.deveco.studio");
+        let caches = folder(layout.user("Library/Caches/Huawei/DevEcoStudio5.0"));
+        let account = folder(layout.user("Library/Caches/Huawei/Account"));
+        let found = find(&deveco, &layout);
+        assert_found(&found, &caches, Evidence::BundleId);
+        assert_absent(&found, &account);
     }
 
     #[test]

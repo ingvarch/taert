@@ -16,12 +16,15 @@ use plist::Value;
 use serde::Serialize;
 
 use super::apps::{
-    InstalledApp, bundle_id_of, embedded_bundle_ids, is_common_name, official_uninstaller,
+    InstalledApp, bundle_id_of, embedded_bundle_ids, find_copies, is_common_name,
+    official_uninstaller,
 };
 use super::cleaner::{Cleaner, RemovalFailure, RemovalProgress, RemovalReport};
 use super::host::{Host, shell_quote};
 use super::layout::Layout;
-use super::leftovers::{Evidence, Leftover, UninstallRole, find_leftovers};
+use super::leftovers::{
+    Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary, without_channel,
+};
 use super::path_utils::prettify_path;
 use super::safety::{Safety, SafetyError};
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
@@ -87,13 +90,23 @@ const RECEIPTS: &str = "private/var/db/receipts";
 const SYSTEM_REPORTS: &str = "Library/Logs/DiagnosticReports";
 const CASKROOMS: &[&str] = &["opt/homebrew/Caskroom", "usr/local/Caskroom"];
 
-/// Data that holds far more than settings, compared by the start of the path
-/// relative to the home folder. Removing it takes a decision of its own.
-const PROFILE_PREFIXES: &[&str] = &[
+/// Browser profiles and license or plugin state, compared by the start of the
+/// path below the home folder or the root. Removing it takes a decision of its own.
+const HELD_BACK_PREFIXES: &[&str] = &[
     "library/application support/bravesoftware",
+    "library/application support/codex",
     "library/application support/com.operasoftware.opera",
     "library/application support/google/chrome",
+    "library/application support/izotope",
+    "library/application support/lasersoft imaging",
     "library/application support/microsoft edge",
+    "library/caches/adobe ",
+    "library/caches/ms-playwright",
+    "library/logs/com.openai.codex",
+    "library/preferences/com.avid.mediacomposer",
+    "library/preferences/com.fabfilter.",
+    "library/preferences/com.native-instruments",
+    "library/preferences/com.paceap.",
 ];
 
 const DATA_LIBRARIES: &[&str] = &[
@@ -145,17 +158,24 @@ pub struct PlanRequest<'a> {
     pub layout: &'a Layout,
 }
 
-fn is_copy(app: &InstalledApp, other: &InstalledApp) -> bool {
-    let same_id = match (&app.bundle_id, &other.bundle_id) {
-        (Some(one), Some(two)) => one.eq_ignore_ascii_case(two),
-        _ => false,
-    };
-    same_id || app.name.to_lowercase() == other.name.to_lowercase()
+fn base_name(app: &InstalledApp) -> String {
+    without_channel(&app.name)
+        .unwrap_or(&app.name)
+        .to_lowercase()
 }
 
-fn vendor_prefix(id: &str) -> String {
-    let parts: Vec<&str> = id.split('.').take(2).collect();
-    parts.join(".").to_ascii_lowercase()
+/// Do two apps use the same folders? Copies do, and so do channels of one app,
+/// like Foo and Foo Beta, and ids that continue each other.
+fn shares_data(app: &InstalledApp, other: &InstalledApp) -> bool {
+    let related_ids = match (&app.bundle_id, &other.bundle_id) {
+        (Some(one), Some(two)) => has_id_boundary(one, two) || has_id_boundary(two, one),
+        _ => false,
+    };
+    related_ids || base_name(app) == base_name(other)
+}
+
+fn vendor_token(id: &str) -> Option<String> {
+    id.split('.').nth(1).map(str::to_ascii_lowercase)
 }
 
 fn group_is_shared(
@@ -166,19 +186,23 @@ fn group_is_shared(
 ) -> bool {
     let in_group_containers =
         path.parent() == Some(layout.user("Library/Group Containers").as_path());
-    let vendor = app.bundle_id.as_deref().map(vendor_prefix);
+    let vendor = app.bundle_id.as_deref().and_then(vendor_token);
     in_group_containers
+        && vendor.is_some()
         && staying
             .iter()
-            .any(|other| other.bundle_id.as_deref().map(vendor_prefix) == vendor)
+            .any(|other| other.bundle_id.as_deref().and_then(vendor_token) == vendor)
 }
 
 fn is_held_back(path: &Path, layout: &Layout) -> bool {
-    let Ok(relative) = path.strip_prefix(&layout.home) else {
+    let relative = path
+        .strip_prefix(&layout.home)
+        .or(path.strip_prefix(&layout.root));
+    let Ok(relative) = relative else {
         return false;
     };
     let relative = relative.to_string_lossy().to_lowercase();
-    PROFILE_PREFIXES
+    HELD_BACK_PREFIXES
         .iter()
         .any(|prefix| relative.starts_with(prefix))
         || DATA_LIBRARIES
@@ -207,7 +231,10 @@ fn selected_by_default(
         Evidence::Name => {
             let in_app_place = found.path.starts_with(layout.user("Library"))
                 || found.path.starts_with(layout.user(".cache"));
+            let is_launch_entry = in_folder_named(&found.path, "LaunchAgents")
+                || in_folder_named(&found.path, "LaunchDaemons");
             in_app_place
+                && !is_launch_entry
                 && app.name.chars().count() >= MIN_SELECTED_NAME
                 && !is_common_name(&app.name)
         }
@@ -234,22 +261,26 @@ fn folders_in(folder: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn cask_holds(cask: &Path, bundle: &std::ffi::OsStr) -> bool {
+/// Does this cask hold the very bundle, and not only one with the same name?
+fn cask_holds(cask: &Path, bundle: &Path, name: &std::ffi::OsStr) -> bool {
+    let Ok(target) = fs::canonicalize(bundle) else {
+        return false;
+    };
+    let is_target =
+        |folder: &Path| fs::canonicalize(folder.join(name)).is_ok_and(|entry| entry == target);
     folders_in(cask).iter().any(|version| {
-        let listed = |folder: &Path| fs::symlink_metadata(folder.join(bundle)).is_ok();
-        listed(version) || folders_in(version).iter().any(|folder| listed(folder))
+        is_target(version) || folders_in(version).iter().any(|folder| is_target(folder))
     })
 }
 
 /// The cask that installed an app. More than one candidate means none, because
 /// Homebrew must not uninstall a cask taert only guessed.
 fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<String> {
-    let bundle = app.path.file_name()?;
+    let name = app.path.file_name()?;
     let mut tokens = HashSet::new();
     for room in CASKROOMS {
-        let room = layout.system(room);
-        for cask in folders_in(&room) {
-            if cask_holds(&cask, bundle) {
+        for cask in folders_in(&layout.system(room)) {
+            if cask_holds(&cask, &app.path, name) {
                 tokens.insert(cask.file_name()?.to_string_lossy().into_owned());
             }
         }
@@ -314,18 +345,6 @@ pub fn build_plan(
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
     };
-    let staying: Vec<InstalledApp> = request
-        .installed
-        .iter()
-        .filter(|app| {
-            !request
-                .selected
-                .iter()
-                .any(|chosen| chosen.path == app.path)
-        })
-        .cloned()
-        .collect();
-
     let mut plan = UninstallPlan {
         scan: CategoryScan {
             id: PLAN_ID.to_string(),
@@ -335,22 +354,28 @@ pub fn build_plan(
         apps: Vec::new(),
         notes: Vec::new(),
     };
-    let mut listed = HashSet::new();
 
+    let mut going: Vec<&InstalledApp> = Vec::new();
     for app in request.selected {
-        if cancelled() {
-            break;
-        }
         if let Some(vendor) = official_uninstaller(app) {
             plan.notes.push(format!(
                 "{} needs the uninstaller from {vendor}, so taert leaves it alone.",
                 app.name
             ));
-            continue;
-        }
-        if let Err(reason) = Safety::can_uninstall(&app.path, request.ignore, request.layout) {
+        } else if let Err(reason) = Safety::can_uninstall(&app.path, request.ignore, request.layout)
+        {
             plan.notes.push(format!("{} stays: {reason}.", app.name));
-            continue;
+        } else {
+            going.push(app);
+        }
+    }
+
+    let staying = apps_staying(request, &going);
+    let mut listed = HashSet::new();
+
+    for app in going {
+        if cancelled() {
+            break;
         }
         if let Some(tx) = &progress {
             let _ = tx.send(ScanProgressEvent::ToolStarted(app.name.clone()));
@@ -358,16 +383,25 @@ pub fn build_plan(
             let _ = tx.send(ScanProgressEvent::ItemFound { bytes });
         }
 
-        let mut bundle = ScanItem::new(app.path.clone(), app.size_bytes, true, false);
+        let cask = find_cask(app, request.layout);
+        let link_only = app.path.is_symlink() && cask.is_none();
+        let size = if link_only { 0 } else { app.size_bytes };
+        let mut bundle = ScanItem::new(app.path.clone(), size, true, false);
         bundle.role = Some(UninstallRole::Bundle);
         let mut items = vec![bundle];
 
-        let copy = staying.iter().find(|other| is_copy(app, other));
-        if let Some(copy) = copy {
+        let copy = staying.iter().find(|other| shares_data(app, other));
+        if link_only {
             plan.notes.push(format!(
-                "Another copy of {} stays at {}, so its settings and data stay too.",
-                app.name,
-                prettify_path(&copy.path)
+                "{} is a link, so only the link goes. The app it points to stays.",
+                app.name
+            ));
+        } else if let Some(copy) = copy {
+            plan.notes.push(format!(
+                "{} stays at {}, so the settings and data of {} stay too.",
+                copy.name,
+                prettify_path(&copy.path),
+                app.name
             ));
         } else {
             items.extend(leftover_rows(
@@ -379,7 +413,6 @@ pub fn build_plan(
             ));
         }
 
-        let cask = find_cask(app, request.layout);
         let tool = match &cask {
             Some(token) => format!("{} (Homebrew cask {token})", app.name),
             None => app.name.clone(),
@@ -390,11 +423,35 @@ pub fn build_plan(
             app: app.clone(),
             cask,
             login_helpers,
-            shared: copy.is_some(),
+            shared: link_only || copy.is_some(),
         });
     }
 
     plan
+}
+
+/// Everything that could still use a file: listed apps that are not going, and
+/// copies in places the list leaves out.
+fn apps_staying(request: &PlanRequest, going: &[&InstalledApp]) -> Vec<InstalledApp> {
+    let is_going = |app: &InstalledApp| going.iter().any(|chosen| chosen.path == app.path);
+    let resolved: Vec<PathBuf> = going
+        .iter()
+        .filter_map(|app| fs::canonicalize(&app.path).ok())
+        .collect();
+    let is_same_bundle =
+        |app: &InstalledApp| fs::canonicalize(&app.path).is_ok_and(|path| resolved.contains(&path));
+
+    request
+        .installed
+        .iter()
+        .filter(|app| !is_going(app))
+        .cloned()
+        .chain(
+            find_copies(request.layout)
+                .into_iter()
+                .filter(|app| !is_same_bundle(app)),
+        )
+        .collect()
 }
 
 fn dock_import_path() -> PathBuf {
@@ -1322,6 +1379,57 @@ mod plan_tests {
     }
 
     #[test]
+    fn a_launch_entry_that_only_mentions_the_name_is_not_selected() {
+        let (_temp, layout) = sandbox();
+        let slack = installed(&layout, "Slack", "com.tinyspeck.slackmacgap");
+        let agent = layout.user("Library/LaunchAgents/com.acme.SlackNotifier.plist");
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        fs::write(&agent, b"x").unwrap();
+
+        let plan = plan_for(&[slack], &layout);
+
+        assert!(!row(&plan, &agent).selected);
+    }
+
+    #[test]
+    fn a_group_container_waits_for_a_vendor_under_another_domain_too() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let group = folder(layout.user("Library/Group Containers/group.com.acme.foo"));
+        let sibling = app("Bar", "io.acme.bar");
+
+        let plan = plan_with(
+            std::slice::from_ref(&foo),
+            &[foo.clone(), sibling],
+            &IgnoreStore::default(),
+            &layout,
+        );
+
+        assert!(!row(&plan, &group).selected);
+    }
+
+    #[test]
+    fn license_and_plugin_state_waits_for_a_decision() {
+        let (_temp, layout) = sandbox();
+        let tool = installed(&layout, "Pace", "com.paceap.eden");
+        let plist = layout.user("Library/Preferences/com.paceap.eden.plist");
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, b"x").unwrap();
+        let codex = installed(&layout, "Codex", "com.openai.codex");
+        let state = folder(layout.user("Library/Application Support/Codex"));
+        let izotope = installed(&layout, "iZotope", "com.izotope.portal");
+        let system = folder(layout.system("Library/Application Support/com.izotope.portal"));
+        let vendor = folder(layout.system("Library/Application Support/iZotope"));
+
+        let plan = plan_for(&[tool, codex, izotope], &layout);
+
+        assert!(!row(&plan, &plist).selected);
+        assert!(!row(&plan, &state).selected);
+        assert!(!row(&plan, &vendor).selected);
+        assert!(row(&plan, &system).selected);
+    }
+
+    #[test]
     fn another_copy_of_the_app_keeps_all_shared_data() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
@@ -1342,6 +1450,142 @@ mod plan_tests {
         assert!(!has_row(&plan, &data));
         assert_eq!(plan.scan.groups[0].items.len(), 1);
         assert!(plan.notes[0].contains("Foo Copy"), "{:?}", plan.notes);
+    }
+
+    #[test]
+    fn another_channel_of_the_app_keeps_shared_data() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let beta = installed(&layout, "Foo Beta", "com.acme.foobeta");
+        let data = folder(layout.user("Library/Application Support/Foo"));
+
+        let plan = plan_with(
+            std::slice::from_ref(&foo),
+            &[foo.clone(), beta],
+            &IgnoreStore::default(),
+            &layout,
+        );
+
+        assert!(plan.apps[0].shared);
+        assert!(!has_row(&plan, &data));
+    }
+
+    #[test]
+    fn an_app_whose_id_extends_this_one_keeps_shared_data() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let pro = installed(&layout, "Studio", "com.acme.foo.pro");
+        let data = folder(layout.user("Library/Containers/com.acme.foo"));
+
+        let plan = plan_with(
+            std::slice::from_ref(&foo),
+            &[foo.clone(), pro],
+            &IgnoreStore::default(),
+            &layout,
+        );
+
+        assert!(plan.apps[0].shared);
+        assert!(!has_row(&plan, &data));
+    }
+
+    #[test]
+    fn a_copy_on_a_mounted_volume_keeps_shared_data() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        fake_app(
+            &layout.system("Volumes/Backup/Foo.app"),
+            "com.acme.foo",
+            "Foo",
+        );
+        let data = folder(layout.user("Library/Caches/com.acme.foo"));
+
+        let plan = plan_for(&[foo], &layout);
+
+        assert!(plan.apps[0].shared);
+        assert!(!has_row(&plan, &data));
+    }
+
+    #[test]
+    fn a_selected_copy_that_cannot_go_still_counts_as_staying() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let kept = installed(&layout, "Foo Old", "com.acme.foo");
+        let data = folder(layout.user("Library/Caches/com.acme.foo"));
+        let mut ignore = IgnoreStore::default();
+        ignore.add(kept.path.display().to_string());
+        let both = [kept, foo];
+
+        let plan = plan_with(&both, &both, &ignore, &layout);
+
+        assert_eq!(plan.apps.len(), 1);
+        assert!(plan.apps[0].shared);
+        assert!(!has_row(&plan, &data));
+    }
+
+    #[test]
+    fn a_link_to_an_app_goes_alone_and_frees_nothing() {
+        let (_temp, layout) = sandbox();
+        let real = layout.root.join("opt/homebrew/opt/emacs/Emacs.app");
+        fake_app(&real, "org.gnu.Emacs", "Emacs");
+        let link = layout.system("Applications/Emacs.app");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut emacs = app("Emacs", "org.gnu.Emacs");
+        emacs.path = link.clone();
+        emacs.size_bytes = 500;
+        let data = folder(layout.user("Library/Caches/org.gnu.Emacs"));
+
+        let plan = plan_for(&[emacs], &layout);
+
+        assert!(!has_row(&plan, &data));
+        assert_eq!(row(&plan, &link).size_bytes, 0);
+        assert!(plan.apps[0].shared);
+        assert!(plan.notes[0].contains("link"), "{:?}", plan.notes);
+    }
+
+    #[test]
+    fn a_link_homebrew_put_there_is_a_full_uninstall() {
+        let (_temp, layout) = sandbox();
+        let staged = layout
+            .root
+            .join("opt/homebrew/Caskroom/foo-app/1.0/Foo.app");
+        fake_app(&staged, "com.acme.foo", "Foo");
+        let link = layout.system("Applications/Foo.app");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&staged, &link).unwrap();
+        let mut foo = app("Foo", "com.acme.foo");
+        foo.path = link;
+        let data = folder(layout.user("Library/Caches/com.acme.foo"));
+
+        let plan = plan_for(&[foo], &layout);
+
+        assert_eq!(plan.apps[0].cask.as_deref(), Some("foo-app"));
+        assert!(!plan.apps[0].shared);
+        assert!(has_row(&plan, &data));
+    }
+
+    #[test]
+    fn a_cask_counts_only_for_the_copy_it_installed() {
+        let (_temp, layout) = sandbox();
+        let theirs = installed(&layout, "Foo", "com.acme.foo");
+        let room = layout.root.join("opt/homebrew/Caskroom/foo-app/1.0");
+        fs::create_dir_all(&room).unwrap();
+        std::os::unix::fs::symlink(&theirs.path, room.join("Foo.app")).unwrap();
+        let mine = layout.user("Applications/Foo.app");
+        fake_app(&mine, "com.acme.foo", "Foo");
+        let copy = InstalledApp {
+            path: mine,
+            ..theirs.clone()
+        };
+
+        let plan = plan_with(
+            std::slice::from_ref(&copy),
+            &[theirs, copy.clone()],
+            &IgnoreStore::default(),
+            &layout,
+        );
+
+        assert_eq!(plan.apps[0].cask, None);
     }
 
     #[test]

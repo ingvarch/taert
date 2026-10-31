@@ -51,7 +51,22 @@ impl Layout {
         roots
     }
 
-    fn volume_app_roots(&self) -> Vec<PathBuf> {
+    /// Folders that can hold a copy of an app without it being listed, with how
+    /// deep to look in each.
+    pub fn copy_roots(&self) -> Vec<(PathBuf, usize)> {
+        let mut roots = vec![
+            (
+                self.user("Library/Application Support/Setapp/Applications"),
+                1,
+            ),
+            (self.system("opt/homebrew/Caskroom"), 3),
+            (self.system("usr/local/Caskroom"), 3),
+        ];
+        roots.extend(self.volumes().into_iter().map(|volume| (volume, 1)));
+        roots
+    }
+
+    fn volumes(&self) -> Vec<PathBuf> {
         let Ok(volumes) = std::fs::read_dir(self.system("Volumes")) else {
             return Vec::new();
         };
@@ -60,6 +75,12 @@ impl Layout {
             .map(|volume| volume.path())
             // The boot volume is linked here and only repeats /Applications.
             .filter(|volume| !volume.is_symlink())
+            .collect()
+    }
+
+    fn volume_app_roots(&self) -> Vec<PathBuf> {
+        self.volumes()
+            .into_iter()
             .map(|volume| volume.join("Applications"))
             // Disk images link to /Applications for dragging an app in.
             .filter(|apps| apps.is_dir() && !apps.is_symlink())
