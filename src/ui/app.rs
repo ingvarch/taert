@@ -13,8 +13,8 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::{Frame, Terminal};
 
 use super::analyze::{
     AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, SortOrder, render_analyze,
@@ -37,7 +37,7 @@ use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
 use crate::core::docker;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
-use crate::core::purger::{PurgeScanEvent, Purger};
+use crate::core::purger::{self, PurgeScanEvent, Purger};
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
 use crate::core::stores::{Config, IgnoreStore};
@@ -65,9 +65,20 @@ pub enum RemovalMessage {
     Finished(RemovalReport),
 }
 
+/// A screen Esc can return to. It is rebuilt on return, so disk space and counts stay fresh.
+#[derive(Debug, Clone, Copy)]
+enum ReturnPoint {
+    Workspace {
+        row: usize,
+        submenu_row: Option<usize>,
+    },
+    Preferences(PreferencesFocus),
+}
+
 pub struct App {
     pub theme: Theme,
     pub screen: Screen,
+    back_stack: Vec<ReturnPoint>,
     pub ignore: IgnoreStore,
     pub config: Config,
     pub should_quit: bool,
@@ -82,6 +93,7 @@ impl App {
         Self {
             theme: Theme::new(),
             screen: Screen::Workspace(WorkspaceState::new()),
+            back_stack: Vec::new(),
             ignore,
             config,
             should_quit: false,
@@ -96,6 +108,7 @@ impl App {
         Self {
             theme: Theme::new(),
             screen: Screen::Select(SelectState::new(scan)),
+            back_stack: Vec::new(),
             ignore,
             config,
             should_quit: false,
@@ -115,6 +128,7 @@ impl App {
                 ignore.clone(),
                 storage_cache.clone(),
             ))),
+            back_stack: Vec::new(),
             ignore,
             config,
             should_quit: false,
@@ -166,18 +180,7 @@ impl App {
                     return;
                 }
 
-                match &self.screen {
-                    Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
-                    Screen::Scanning(state, _, _) => render_progress(frame, state, &self.theme),
-                    Screen::Select(state) => render_select(frame, state, &self.theme),
-                    Screen::Review(state) => render_review(frame, state, &self.theme),
-                    Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
-                    Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
-                    Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
-                    Screen::PathListEditor(state) => {
-                        render_path_list_editor(frame, state, &self.theme)
-                    }
-                }
+                self.render_screen(frame);
 
                 if self.help_open {
                     let sections = self.help_sections();
@@ -189,34 +192,7 @@ impl App {
                 }
             })?;
 
-            // Poll background scan messages if currently scanning
-            if let Screen::Scanning(ref mut progress, ref rx, _) = self.screen {
-                progress.tick();
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        ScanMessage::PurgeProgress(evt) => {
-                            progress.apply_purge(evt);
-                        }
-                        ScanMessage::Progress(evt) => {
-                            progress.apply_category(evt);
-                        }
-                        ScanMessage::Failed(problem) => {
-                            self.screen =
-                                Screen::Select(SelectState::unavailable("Docker", problem));
-                            break;
-                        }
-                        ScanMessage::Finished(scan) => {
-                            let state = if scan.id == "purge" || scan.id == docker::SCAN_ID {
-                                SelectState::with_preserved_selection(scan)
-                            } else {
-                                SelectState::new(scan)
-                            };
-                            self.screen = Screen::Select(state);
-                            break;
-                        }
-                    }
-                }
-            }
+            self.poll_scan();
 
             // Tick analyze measuring if active
             if let Screen::Analyze(ref mut analyze) = self.screen {
@@ -279,6 +255,76 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn render_screen(&self, frame: &mut Frame) {
+        match &self.screen {
+            Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
+            Screen::Scanning(state, _, _) => render_progress(frame, state, &self.theme),
+            Screen::Select(state) => render_select(frame, state, &self.theme),
+            Screen::Review(state) => render_review(frame, state, &self.theme),
+            Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
+            Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
+            Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
+            Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
+        }
+    }
+
+    fn open(&mut self, screen: Screen) {
+        match &self.screen {
+            Screen::Workspace(state) => self.back_stack.push(ReturnPoint::Workspace {
+                row: state.selected_index,
+                submenu_row: state.submenu_row(),
+            }),
+            Screen::Preferences(state) => {
+                self.back_stack.push(ReturnPoint::Preferences(state.focus));
+            }
+            _ => {}
+        }
+        self.screen = screen;
+    }
+
+    fn go_back(&mut self) {
+        self.screen = match self.back_stack.pop() {
+            Some(ReturnPoint::Workspace { row, submenu_row }) => {
+                Screen::Workspace(WorkspaceState::at(row, submenu_row))
+            }
+            Some(ReturnPoint::Preferences(focus)) => {
+                let mut state = PreferencesState::new(&self.config, &self.ignore);
+                state.focus = focus;
+                Screen::Preferences(state)
+            }
+            None => Screen::Workspace(WorkspaceState::new()),
+        };
+    }
+
+    fn poll_scan(&mut self) {
+        if let Screen::Scanning(ref mut progress, ref rx, _) = self.screen {
+            progress.tick();
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    ScanMessage::PurgeProgress(evt) => {
+                        progress.apply_purge(evt);
+                    }
+                    ScanMessage::Progress(evt) => {
+                        progress.apply_category(evt);
+                    }
+                    ScanMessage::Failed(problem) => {
+                        self.screen = Screen::Select(SelectState::unavailable("Docker", problem));
+                        break;
+                    }
+                    ScanMessage::Finished(scan) => {
+                        let state = if scan.id == purger::SCAN_ID || scan.id == docker::SCAN_ID {
+                            SelectState::with_preserved_selection(scan)
+                        } else {
+                            SelectState::new(scan)
+                        };
+                        self.screen = Screen::Select(state);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode) {
@@ -374,7 +420,7 @@ impl App {
                 if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
                     progress.is_cancelling = true;
                     cancel_flag.store(true, Ordering::Relaxed);
-                    self.screen = Screen::Workspace(WorkspaceState::new());
+                    self.go_back();
                 }
             }
 
@@ -464,7 +510,7 @@ impl App {
                         state.open_confirmation();
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen = Screen::Workspace(WorkspaceState::new());
+                        self.go_back();
                     }
                     _ => {}
                 }
@@ -474,7 +520,7 @@ impl App {
                 if state.report.is_some() {
                     // Result view
                     if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
-                        self.screen = Screen::Workspace(WorkspaceState::new());
+                        self.go_back();
                         return;
                     }
                     match code {
@@ -518,12 +564,12 @@ impl App {
                         KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => {
                             state.cancel_measuring();
                             if state.levels.is_empty() {
-                                self.screen = Screen::Workspace(WorkspaceState::new());
+                                self.go_back();
                             }
                         }
                         KeyCode::Char('q') => {
                             state.cancel_measuring();
-                            self.screen = Screen::Workspace(WorkspaceState::new());
+                            self.go_back();
                         }
                         _ => {}
                     }
@@ -594,14 +640,12 @@ impl App {
                     KeyCode::Char('o') | KeyCode::Char('O') => {
                         state.reveal_in_finder();
                     }
-                    KeyCode::Left => {
+                    KeyCode::Esc | KeyCode::Left => {
                         if !state.go_up() {
-                            self.screen = Screen::Workspace(WorkspaceState::new());
+                            self.go_back();
                         }
                     }
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen = Screen::Workspace(WorkspaceState::new());
-                    }
+                    KeyCode::Char('q') => self.go_back(),
                     _ => {}
                 }
             }
@@ -614,7 +658,7 @@ impl App {
                 KeyCode::Home => state.scroll_to_top(),
                 KeyCode::End => state.scroll_to_bottom(),
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                    self.screen = Screen::Workspace(WorkspaceState::new());
+                    self.go_back();
                 }
                 _ => {}
             },
@@ -627,20 +671,20 @@ impl App {
                 KeyCode::Enter => match state.focus {
                     PreferencesFocus::AgeThreshold => {}
                     PreferencesFocus::ProjectFolders => {
-                        self.screen = Screen::PathListEditor(PathListEditorState::new(
+                        self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProjectFolders,
                             &self.ignore,
-                        ));
+                        )));
                     }
                     PreferencesFocus::ProtectedPaths => {
-                        self.screen = Screen::PathListEditor(PathListEditorState::new(
+                        self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProtectedPaths,
                             &self.ignore,
-                        ));
+                        )));
                     }
                 },
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    self.screen = Screen::Workspace(WorkspaceState::new());
+                    self.go_back();
                 }
                 _ => {}
             },
@@ -679,10 +723,7 @@ impl App {
                     KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Backspace => {
                         state.prompt_remove()
                     }
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen =
-                            Screen::Preferences(PreferencesState::new(&self.config, &self.ignore));
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
                     _ => {}
                 },
             },
@@ -712,12 +753,19 @@ impl App {
         };
 
         match &self.screen {
-            Screen::Workspace(_) => vec![
+            Screen::Workspace(state) => vec![
                 HelpSection::new(
                     "Menu",
                     vec![Hint::new("↵", "Select"), Hint::new("1-7", "Quick select")],
                 ),
-                general(vec![navigate, Hint::new("⎋ / q", "Quit")]),
+                general(vec![
+                    navigate,
+                    if state.submenu_row().is_some() {
+                        back
+                    } else {
+                        Hint::new("⎋ / q", "Quit")
+                    },
+                ]),
             ],
             Screen::Scanning(_, _, _) => vec![
                 HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
@@ -751,14 +799,14 @@ impl App {
                         Hint::new("␣", "Toggle select"),
                         Hint::new("A / N", "Select all / none"),
                         Hint::new("↵ / →", "Enter folder"),
-                        Hint::new("←", "Up one level"),
+                        Hint::new("⎋ / ←", "Up one level"),
                         Hint::new("R", "Refresh folder"),
                         Hint::new("O", "Reveal in Finder"),
                         Hint::new("D / ⌫", "Delete selected"),
                     ],
                 ),
                 sort_section(),
-                general(vec![navigate, Hint::new("⎋ / q", "Quit explore")]),
+                general(vec![navigate, Hint::new("q", "Quit explore")]),
             ],
             Screen::SystemStatus(_) => vec![general(vec![scroll, Hint::new("⎋ / q / ↵", "Back")])],
             Screen::Preferences(_) => vec![
@@ -884,16 +932,18 @@ impl App {
                 }
             }
             MainMenuChoice::SystemStatus => {
-                self.screen = Screen::SystemStatus(Box::default());
+                self.open(Screen::SystemStatus(Box::default()));
             }
             MainMenuChoice::Preferences => {
-                self.screen =
-                    Screen::Preferences(PreferencesState::new(&self.config, &self.ignore));
+                self.open(Screen::Preferences(PreferencesState::new(
+                    &self.config,
+                    &self.ignore,
+                )));
             }
             MainMenuChoice::ProtectedPaths => {
-                self.screen = Screen::PathListEditor(PathListEditorState::new(
-                    PathListKind::ProtectedPaths,
-                    &self.ignore,
+                self.open(Screen::PathListEditor(
+                    PathListEditorState::new(PathListKind::ProtectedPaths, &self.ignore)
+                        .top_level(),
                 ));
             }
         }
@@ -913,11 +963,11 @@ impl App {
         match kind {
             StartConfirmKind::ExploreHome => {
                 let home = Safety::home_dir();
-                self.screen = Screen::Analyze(Box::new(AnalyzeState::with_cache(
+                self.open(Screen::Analyze(Box::new(AnalyzeState::with_cache(
                     home,
                     self.ignore.clone(),
                     self.storage_cache.clone(),
-                )));
+                ))));
             }
             StartConfirmKind::ProjectCleanup(_) => {
                 let roots = ProjectFoldersStore::load_or_default().existing_roots();
@@ -937,11 +987,11 @@ impl App {
             let _ = tx.send(message);
         });
 
-        self.screen = Screen::Scanning(
-            ProgressState::new("Reading Docker"),
+        self.open(Screen::Scanning(
+            ProgressState::new("Reading Docker").top_level(),
             rx,
             Arc::new(AtomicBool::new(false)),
-        );
+        ));
     }
 
     fn launch_category_scan(&mut self, cat_id: &'static str, cat_title: &'static str) {
@@ -976,11 +1026,11 @@ impl App {
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
-        self.screen = Screen::Scanning(
+        self.open(Screen::Scanning(
             ProgressState::new(format!("Scanning {cat_title}")),
             fwd_rx,
             cancel_flag,
-        );
+        ));
     }
 
     fn launch_all_categories_scan(&mut self) {
@@ -1037,11 +1087,11 @@ impl App {
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
-        self.screen = Screen::Scanning(
+        self.open(Screen::Scanning(
             ProgressState::new("Scanning Developer Caches, 1 of 4"),
             fwd_rx,
             cancel_flag,
-        );
+        ));
     }
 
     fn launch_purge_scan(&mut self, roots: Vec<std::path::PathBuf>) {
@@ -1078,7 +1128,11 @@ impl App {
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
-        self.screen = Screen::Scanning(ProgressState::new(initial_headline), fwd_rx, cancel_flag);
+        self.open(Screen::Scanning(
+            ProgressState::new(initial_headline).top_level(),
+            fwd_rx,
+            cancel_flag,
+        ));
     }
 }
 
@@ -1087,6 +1141,7 @@ mod tests {
     use super::*;
     use crate::core::scanner::{ScanItem, ToolGroup};
     use crate::ui::analyze::SortOrder;
+    use ratatui::backend::TestBackend;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -1268,5 +1323,276 @@ mod tests {
 
         app.handle_key(KeyCode::Char('n'));
         assert!(!selected(&app));
+    }
+
+    fn press(app: &mut App, keys: &[KeyCode]) {
+        for key in keys {
+            app.handle_key(*key);
+        }
+    }
+
+    fn finish_scan(app: &mut App, scan: CategoryScan) {
+        let (tx, rx) = mpsc::channel();
+        tx.send(ScanMessage::Finished(scan)).unwrap();
+        let Screen::Scanning(_, scan_rx, cancel) = &mut app.screen else {
+            panic!("expected the scanning screen");
+        };
+        cancel.store(true, Ordering::Relaxed);
+        *scan_rx = rx;
+        app.poll_scan();
+    }
+
+    fn empty_scan() -> CategoryScan {
+        CategoryScan {
+            id: "ai".to_string(),
+            title: "AI Tool Caches".to_string(),
+            groups: Vec::new(),
+        }
+    }
+
+    #[track_caller]
+    fn assert_main_menu(app: &App, row: usize) {
+        let Screen::Workspace(state) = &app.screen else {
+            panic!("expected the workspace screen");
+        };
+        assert!(matches!(state.view, WorkspaceView::MainMenu));
+        assert_eq!(state.selected_index, row);
+    }
+
+    #[track_caller]
+    fn assert_clean_submenu(app: &App, row: usize) {
+        let Screen::Workspace(state) = &app.screen else {
+            panic!("expected the workspace screen");
+        };
+        assert!(matches!(
+            state.view,
+            WorkspaceView::CleanSubmenu { selected } if selected == row
+        ));
+    }
+
+    fn enter_subfolder(app: &mut App) {
+        app.handle_key(KeyCode::Enter);
+        let Screen::Analyze(state) = &mut app.screen else {
+            panic!("expected the analyze screen");
+        };
+        while state.measuring_rx.is_some() {
+            state.tick();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(state.levels.len(), 2);
+    }
+
+    #[test]
+    fn esc_from_an_empty_scan_walks_back_through_the_submenu_and_the_menu() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let ai_tools = 3;
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+        finish_scan(&mut app, empty_scan());
+        assert!(matches!(app.screen, Screen::Select(_)));
+
+        app.handle_key(KeyCode::Esc);
+        assert_clean_submenu(&app, ai_tools);
+
+        app.handle_key(KeyCode::Esc);
+        assert_main_menu(&app, 0);
+        assert!(!app.should_quit);
+
+        app.handle_key(KeyCode::Esc);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn esc_during_a_scan_returns_to_the_row_of_the_submenu() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(
+            &mut app,
+            &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter, KeyCode::Esc],
+        );
+
+        assert_clean_submenu(&app, 1);
+    }
+
+    #[test]
+    fn esc_returns_to_the_menu_row_a_screen_was_opened_from() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(&mut app, &[KeyCode::Char('5'), KeyCode::Esc]);
+
+        assert_main_menu(&app, 4);
+    }
+
+    #[test]
+    fn esc_from_explore_does_not_reopen_its_start_dialog() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(
+            &mut app,
+            &[KeyCode::Char('4'), KeyCode::Enter, KeyCode::Esc],
+        );
+
+        assert_main_menu(&app, 3);
+    }
+
+    #[test]
+    fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(&mut app, &[KeyCode::Char('7'), KeyCode::Esc]);
+
+        assert_main_menu(&app, 6);
+    }
+
+    #[test]
+    fn esc_from_a_list_opened_in_preferences_keeps_the_row_and_refreshes_counts() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Char('6'),
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+        app.ignore.roots.push("/nowhere/protected".to_string());
+        app.handle_key(KeyCode::Esc);
+
+        let Screen::Preferences(state) = &app.screen else {
+            panic!("expected the preferences screen");
+        };
+        assert_eq!(state.focus, PreferencesFocus::ProtectedPaths);
+        assert_eq!(state.path_count, app.ignore.roots.len());
+
+        app.handle_key(KeyCode::Esc);
+        assert_main_menu(&app, 5);
+    }
+
+    #[test]
+    fn esc_on_a_list_opened_from_the_command_line_opens_the_main_menu() {
+        let mut app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_main_menu(&app, 0);
+    }
+
+    #[test]
+    fn esc_in_explore_goes_up_one_folder_before_leaving() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = analyze_app(dir.path());
+        enter_subfolder(&mut app);
+
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(analyze(&app).levels.len(), 1);
+
+        app.handle_key(KeyCode::Esc);
+        assert_main_menu(&app, 0);
+    }
+
+    #[test]
+    fn q_leaves_explore_from_any_folder() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = analyze_app(dir.path());
+        enter_subfolder(&mut app);
+
+        app.handle_key(KeyCode::Char('q'));
+
+        assert_main_menu(&app, 0);
+    }
+
+    fn screen_text(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render_screen(frame)).unwrap();
+        format!("{:?}", terminal.backend().buffer())
+    }
+
+    #[test]
+    fn protected_paths_name_preferences_only_when_opened_there() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        app.handle_key(KeyCode::Char('7'));
+        assert!(!screen_text(&app).contains("Preferences"));
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Esc,
+                KeyCode::Char('6'),
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+        assert!(screen_text(&app).contains("Preferences"));
+    }
+
+    #[test]
+    fn scans_started_in_the_menu_are_not_shown_under_clean_caches() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(&mut app, &[KeyCode::Char('2'), KeyCode::Enter]);
+        assert!(!screen_text(&app).contains("Clean caches"));
+
+        press(&mut app, &[KeyCode::Esc, KeyCode::Char('3')]);
+        assert!(!screen_text(&app).contains("Clean caches"));
+        app.handle_key(KeyCode::Esc);
+    }
+
+    #[test]
+    fn scans_started_in_clean_caches_are_shown_under_it() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
+        assert!(screen_text(&app).contains("Clean caches"));
+        app.handle_key(KeyCode::Esc);
+    }
+
+    #[test]
+    fn project_results_are_not_shown_under_clean_caches() {
+        assert!(!screen_text(&select_app(scan_with_id("purge"))).contains("Clean caches"));
+        assert!(screen_text(&select_app(scan_with_id("dev"))).contains("Clean caches"));
+    }
+
+    fn help_row(app: &App, desc: &str) -> Option<&'static str> {
+        app.help_sections()
+            .iter()
+            .flat_map(|section| &section.shortcuts)
+            .find(|hint| hint.desc == desc)
+            .map(|hint| hint.key)
+    }
+
+    #[test]
+    fn help_in_the_clean_submenu_says_esc_goes_back() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        assert_eq!(help_row(&app, "Quit"), Some("⎋ / q"));
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(help_row(&app, "Back"), Some("⎋ / q"));
+        assert_eq!(help_row(&app, "Quit"), None);
+    }
+
+    #[test]
+    fn help_for_explore_separates_going_up_from_leaving() {
+        let dir = tempdir().unwrap();
+        let app = analyze_app(dir.path());
+
+        assert_eq!(help_row(&app, "Up one level"), Some("⎋ / ←"));
+        assert_eq!(help_row(&app, "Quit explore"), Some("q"));
     }
 }

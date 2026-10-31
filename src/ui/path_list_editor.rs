@@ -38,6 +38,7 @@ pub struct PathListEditorState {
     pub selected_index: usize,
     pub mode: PathListMode,
     pub error_message: Option<String>,
+    pub in_preferences: bool,
 }
 
 impl PathListEditorState {
@@ -53,7 +54,13 @@ impl PathListEditorState {
             selected_index: 0,
             mode: PathListMode::Normal,
             error_message: None,
+            in_preferences: true,
         }
+    }
+
+    pub fn top_level(mut self) -> Self {
+        self.in_preferences = false;
+        self
     }
 
     pub fn title(&self) -> &'static str {
@@ -168,8 +175,12 @@ impl PathListEditorState {
 
 pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, theme: &Theme) {
     let count_text = format!("{} configured", state.items.len());
-    let mut chrome =
-        AppChrome::new(vec!["taert", "Preferences", state.title()]).status(Line::from(count_text));
+    let crumbs = if state.in_preferences {
+        vec!["taert", "Preferences", state.title()]
+    } else {
+        vec!["taert", state.title()]
+    };
+    let mut chrome = AppChrome::new(crumbs).status(Line::from(count_text));
 
     match state.mode {
         PathListMode::Normal => {

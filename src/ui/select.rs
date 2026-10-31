@@ -27,6 +27,7 @@ use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::path_utils::prettify_path;
+use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,7 +431,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         PrimaryAction::disabled("Review items", theme.g.key_enter)
     };
 
-    let crumbs = if state.scan.id == SCAN_ID {
+    let crumbs = if state.scan.id == SCAN_ID || state.scan.id == purger::SCAN_ID {
         vec!["taert", state.scan.title.as_str()]
     } else {
         vec!["taert", "Clean caches", state.scan.title.as_str()]
