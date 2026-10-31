@@ -2,9 +2,12 @@
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::{ButtonKind, Theme};
+
+const HINT_GAP: &str = "   ";
 
 #[derive(Debug, Clone)]
 pub struct Hint<'a> {
@@ -15,6 +18,11 @@ pub struct Hint<'a> {
 impl<'a> Hint<'a> {
     pub fn new(key: &'a str, desc: &'a str) -> Self {
         Self { key, desc }
+    }
+
+    fn width(&self) -> usize {
+        // Both sides of the keycap and the space after it.
+        self.key.width() + self.desc.width() + 3
     }
 
     pub fn to_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
@@ -96,11 +104,30 @@ impl<'a> PrimaryAction<'a> {
     }
 }
 
+/// Hints are listed by importance. Those that don't fit drop off the end; the last one stays.
+pub fn fit_hints<'a>(hints: &[Hint<'a>], room: usize) -> Vec<Hint<'a>> {
+    let Some((last, rest)) = hints.split_last() else {
+        return Vec::new();
+    };
+
+    let mut used = last.width();
+    let mut fitted = Vec::new();
+    for hint in rest {
+        used += hint.width() + HINT_GAP.len();
+        if used > room {
+            break;
+        }
+        fitted.push(hint.clone());
+    }
+    fitted.push(last.clone());
+    fitted
+}
+
 pub fn render_hints_line<'a>(hints: &[Hint<'a>], theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, hint) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw(HINT_GAP));
         }
         spans.extend(hint.to_spans(theme));
     }

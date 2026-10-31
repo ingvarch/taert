@@ -33,4 +33,4 @@ expression: select_screen(&state)
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ↑↓  Move    ␣  Select    ⇧S/N/D  Sort: Size    ?  More                                             Review 1 items  ↵
+  ␣  Select    A  All    N  None    ⇧S/N/D  Sort: Size    /  Search    ↑↓  Move    ?  More           Review 1 items  ↵

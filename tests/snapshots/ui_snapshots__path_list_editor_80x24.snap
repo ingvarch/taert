@@ -25,4 +25,4 @@ expression: output
      + Add path (a)    − Remove selected (d)
 
 ────────────────────────────────────────────────────────────────────────────────
-  ↑↓  Move    A  Add    D  Remove    ⎋  Back
+  A  Add    D  Remove    ↑↓  Move    ⎋  Back    ?  More

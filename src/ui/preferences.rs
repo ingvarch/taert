@@ -99,12 +99,18 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
 
     let toast = state.save_notice.map(Toast::success);
 
+    let mut hints = Vec::new();
+    if !is_link {
+        hints.push(Hint::new("←→", "Adjust"));
+    }
+    hints.extend([
+        Hint::new("↑↓", "Move"),
+        Hint::new("⎋", "Back"),
+        Hint::new("?", "More"),
+    ]);
+
     let chrome = AppChrome::new(vec!["taert", "Preferences"])
-        .hints(vec![
-            Hint::new("↑↓", "Move"),
-            Hint::new("←→", "Adjust"),
-            Hint::new("?", "More"),
-        ])
+        .hints(hints)
         .primary(primary_action)
         .toast(toast.as_ref());
 

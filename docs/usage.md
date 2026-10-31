@@ -42,6 +42,8 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `?` | All screens | Toggle keyboard shortcuts help sheet |
 | `⎋` (Esc) / `q` | All screens | Cancel dialog / Go back to the previous screen, on the row you left / Quit from the main menu |
 
+The bottom row lists the keys that work right now. In a narrow window the less important ones drop off, and `?` still lists every key of the screen. A letter marked `⇧` needs Shift, and a letter without it doesn't.
+
 ## Non-Interactive CLI Commands
 
 Every action can run directly from the command line without launching the full TUI:

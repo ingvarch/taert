@@ -139,6 +139,10 @@ impl SystemStatusState {
         self.scroll_offset = offset.min(self.max_scroll.get());
     }
 
+    pub fn can_scroll(&self) -> bool {
+        self.max_scroll.get() > 0
+    }
+
     pub fn scroll_up(&mut self) {
         self.scroll_to(self.scroll_offset.saturating_sub(1));
     }
@@ -174,19 +178,22 @@ pub fn render_system_status(frame: &mut Frame, state: &SystemStatusState, theme:
             health_color,
             health.message,
             theme,
-        )))
-        .hints(vec![
-            Hint::new("↑↓", "Scroll"),
-            Hint::new("⎋", "Back"),
-            Hint::new("?", "More"),
-        ]);
+        )));
 
-    let content_rect = chrome.render(frame, theme);
+    let content_rect = chrome.content_rect(frame.area());
     let height = content_rect.height as usize;
     let lines = content_lines(state, content_rect.width as usize, height, theme);
 
     let max_scroll = lines.len().saturating_sub(height);
     state.max_scroll.set(max_scroll);
+
+    let mut hints = Vec::new();
+    if max_scroll > 0 {
+        hints.push(Hint::new("↑↓", "Scroll"));
+    }
+    hints.push(Hint::new("⎋", "Back"));
+    hints.push(Hint::new("?", "More"));
+    chrome.hints(hints).render(frame, theme);
 
     let visible_lines: Vec<Line> = lines
         .into_iter()
@@ -1660,6 +1667,17 @@ mod tests {
 
         assert_eq!(find(&rows, "250.0%").0, find(&rows, " 50.0%").0);
         find(&rows, "…");
+    }
+
+    #[test]
+    fn the_scroll_hint_shows_only_when_there_is_something_to_scroll() {
+        let toolbar =
+            |state: &SystemStatusState, width, height| render(state, width, height).pop().unwrap();
+
+        assert!(!toolbar(&busy_state(), 120, 40).contains("Scroll"));
+
+        let small_window = SystemStatusState::with_status(measured_status());
+        assert!(toolbar(&small_window, 80, 24).contains("Scroll"));
     }
 
     #[test]
