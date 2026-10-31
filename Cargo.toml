@@ -20,6 +20,7 @@ dirs = "6.0"
 jwalk = "0.8"
 rayon = "1.10"
 libc = "0.2"
+plist = "1"
 sysinfo = "0.33"
 unicode-width = "0.2"
 # Pinned: 0.20 and newer read `/system/df` only in the API 1.52 shape, and every

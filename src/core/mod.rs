@@ -5,6 +5,7 @@ pub mod cleaner;
 pub mod date_utils;
 pub mod docker;
 pub mod iokit;
+pub mod layout;
 pub mod path_utils;
 pub mod profiler;
 pub mod projects_store;
