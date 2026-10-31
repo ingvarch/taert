@@ -6,6 +6,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::iokit;
+use super::telemetry::{self, LiveStatus};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineInfo {
     pub chip: Option<String>,
@@ -13,6 +16,7 @@ pub struct MachineInfo {
     pub memory_bytes: Option<u64>,
     pub macos_version: String,
     pub model: Option<String>,
+    pub model_name: Option<String>,
     pub uptime_seconds: u64,
 }
 
@@ -37,17 +41,24 @@ impl MemoryPressureLevel {
 pub struct DetailedMemoryStatus {
     pub total_bytes: u64,
     pub free_bytes: u64,
-    pub active_bytes: u64,
-    pub inactive_bytes: u64,
+    pub app_bytes: u64,
     pub wired_bytes: u64,
     pub compressed_bytes: u64,
+    pub cached_bytes: u64,
+    pub swap_used_bytes: u64,
     pub pressure: Option<MemoryPressureLevel>,
 }
 
 impl DetailedMemoryStatus {
+    pub fn used_bytes(&self) -> u64 {
+        self.app_bytes
+            .saturating_add(self.wired_bytes)
+            .saturating_add(self.compressed_bytes)
+    }
+
     pub fn used_fraction(&self) -> f64 {
         if self.total_bytes > 0 {
-            (self.total_bytes.saturating_sub(self.free_bytes)) as f64 / self.total_bytes as f64
+            self.used_bytes() as f64 / self.total_bytes as f64
         } else {
             0.0
         }
@@ -82,6 +93,7 @@ pub struct FullSystemStatus {
     pub machine: MachineInfo,
     pub memory: DetailedMemoryStatus,
     pub storage: DetailedStorageStatus,
+    pub live: LiveStatus,
 }
 
 pub struct SystemProfiler;
@@ -174,6 +186,8 @@ impl SystemProfiler {
     pub fn machine_info() -> MachineInfo {
         let chip = Self::read_sysctl_string("machdep.cpu.brand_string");
         let model = Self::read_sysctl_string("hw.model");
+        let model_name =
+            iokit::entry("IODeviceTree:/product").and_then(|p| telemetry::product_name(&p));
         let memory_bytes = Self::read_sysctl_u64("hw.memsize");
 
         let cores = match (
@@ -198,8 +212,19 @@ impl SystemProfiler {
             product_version
         };
 
-        // Uptime from sysctl kern.boottime
-        let uptime_seconds = unsafe {
+        MachineInfo {
+            chip,
+            cores,
+            memory_bytes,
+            macos_version,
+            model,
+            model_name,
+            uptime_seconds: Self::uptime_seconds(),
+        }
+    }
+
+    pub fn uptime_seconds() -> u64 {
+        unsafe {
             let mut boot_time = MaybeUninit::<libc::timeval>::uninit();
             let mut size = std::mem::size_of::<libc::timeval>();
             let c_name = CString::new("kern.boottime").unwrap();
@@ -221,15 +246,6 @@ impl SystemProfiler {
             } else {
                 0
             }
-        };
-
-        MachineInfo {
-            chip,
-            cores,
-            memory_bytes,
-            macos_version,
-            model,
-            uptime_seconds,
         }
     }
 
@@ -312,22 +328,24 @@ impl SystemProfiler {
 
             if kr == 0 {
                 let stat = vm_stat.assume_init();
-                let page_size = 16384u64; // macOS Apple Silicon standard page size 16KB
+                let page_size = Self::page_size();
+                let bytes = |pages: u32| (pages as u64).saturating_mul(page_size);
 
-                let free_bytes = (stat.free_count as u64).saturating_mul(page_size);
-                let active_bytes = (stat.active_count as u64).saturating_mul(page_size);
-                let inactive_bytes = (stat.inactive_count as u64).saturating_mul(page_size);
-                let wired_bytes = (stat.wire_count as u64).saturating_mul(page_size);
-                let compressed_bytes =
-                    (stat.compressor_page_count as u64).saturating_mul(page_size);
-
+                // The same split as Activity Monitor: purgeable pages count as cache.
                 return DetailedMemoryStatus {
                     total_bytes,
-                    free_bytes,
-                    active_bytes,
-                    inactive_bytes,
-                    wired_bytes,
-                    compressed_bytes,
+                    free_bytes: bytes(stat.free_count),
+                    app_bytes: bytes(
+                        stat.internal_page_count
+                            .saturating_sub(stat.purgeable_count),
+                    ),
+                    wired_bytes: bytes(stat.wire_count),
+                    compressed_bytes: bytes(stat.compressor_page_count),
+                    cached_bytes: bytes(
+                        stat.external_page_count
+                            .saturating_add(stat.purgeable_count),
+                    ),
+                    swap_used_bytes: 0,
                     pressure,
                 };
             }
@@ -336,12 +354,18 @@ impl SystemProfiler {
         DetailedMemoryStatus {
             total_bytes,
             free_bytes: total_bytes / 2,
-            active_bytes: total_bytes / 4,
-            inactive_bytes: total_bytes / 8,
+            app_bytes: total_bytes / 4,
             wired_bytes: total_bytes / 8,
             compressed_bytes: 0,
+            cached_bytes: total_bytes / 8,
+            swap_used_bytes: 0,
             pressure,
         }
+    }
+
+    // 16 KB on Apple Silicon and 4 KB on Intel.
+    fn page_size() -> u64 {
+        Self::read_sysctl_u64("hw.pagesize").unwrap_or(16384)
     }
 
     pub fn detailed_storage(path: &Path) -> DetailedStorageStatus {
@@ -387,8 +411,27 @@ impl SystemProfiler {
         }
     }
 
+    // Foundation autoreleases what it returns, and these threads have no pool to drain it.
     #[cfg(target_os = "macos")]
     fn query_foundation_volume_capacities(path_str: &str) -> Option<(u64, u64, u64)> {
+        use std::ffi::c_void;
+
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn objc_autoreleasePoolPush() -> *mut c_void;
+            fn objc_autoreleasePoolPop(pool: *mut c_void);
+        }
+
+        unsafe {
+            let pool = objc_autoreleasePoolPush();
+            let capacities = Self::read_foundation_volume_capacities(path_str);
+            objc_autoreleasePoolPop(pool);
+            capacities
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_foundation_volume_capacities(path_str: &str) -> Option<(u64, u64, u64)> {
         use std::ffi::c_void;
 
         #[link(name = "Foundation", kind = "framework")]
@@ -495,6 +538,44 @@ impl SystemProfiler {
             machine: Self::machine_info(),
             memory: Self::detailed_memory(),
             storage: Self::detailed_storage(Path::new("/")),
+            live: LiveStatus::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_size_matches_the_system() {
+        let system = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+
+        assert_eq!(SystemProfiler::page_size(), system);
+    }
+
+    #[test]
+    fn memory_parts_stay_within_the_total() {
+        let memory = SystemProfiler::detailed_memory();
+
+        assert!(memory.total_bytes > 0);
+        assert!(memory.used_bytes() + memory.free_bytes <= memory.total_bytes);
+    }
+
+    #[test]
+    fn used_memory_leaves_out_the_cache() {
+        let memory = DetailedMemoryStatus {
+            total_bytes: 100,
+            free_bytes: 10,
+            app_bytes: 20,
+            wired_bytes: 10,
+            compressed_bytes: 10,
+            cached_bytes: 50,
+            swap_used_bytes: 0,
+            pressure: None,
+        };
+
+        assert_eq!(memory.used_bytes(), 40);
+        assert_eq!(memory.used_fraction(), 0.4);
     }
 }

@@ -2,19 +2,19 @@
 source: tests/ui_snapshots.rs
 expression: output
 ---
- System status                   Updated just now
+ System status                        ● All clear
 ──────────────────────────────────────────────────
-   Mac16,7
-   Apple M4 Pro · 14 cores (10 performance, 4 ef
+     MacBook Pro (16-inch, Nov 2024)
+     Apple M4 Pro
+     14 cores (10 performance, 4 efficiency)
+     20-core GPU · 48 GB
+     macOS 27.0.1 (26A434) · up 10d 4h
 
-     MEMORY                   Pressure  ● Normal
-   █████████████████░░░░░░   37 GB of 48 GB
-   ● App 18.2 GB    ● Wired 5.3 GB    ● Compress
+     CPU              61°C · Load 8.43 6.50 5.86
+     Usage   ██████████████░░░░░░░░░░░░░░  48.8%
+     GPU     █████████░░░░░░░░░░░░░░░░░░░  31.0%
+     Cores   ▂▂▂▃ ▇▆▅▅▄▄▃▂▂▁
+     History ▄▄▅▅▅▆▆▆▇▂▃▃▃▄▄▅▅▅▆▆▆▇▂▃▃▃▄▄
 
-     STORAGE                  118.6 GB available
-   █████████████████░░░░░░   375.8 GB of 494.4 G
-   ● Used 375.8 GB    ● Managed by macOS 5.7 GB
-
-   Managed space may include purgeable files and
 ──────────────────────────────────────────────────
   ?  Help

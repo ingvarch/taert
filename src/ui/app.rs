@@ -47,7 +47,7 @@ pub enum Screen {
     Select(SelectState),
     Review(ReviewState),
     Analyze(AnalyzeState),
-    SystemStatus(SystemStatusState),
+    SystemStatus(Box<SystemStatusState>),
     Preferences(PreferencesState),
     PathListEditor(PathListEditorState),
 }
@@ -214,6 +214,11 @@ impl App {
             // Tick analyze measuring if active
             if let Screen::Analyze(ref mut analyze) = self.screen {
                 analyze.tick();
+            }
+
+            // Take the latest system measurements if active
+            if let Screen::SystemStatus(ref mut status) = self.screen {
+                status.tick();
             }
 
             // Poll background removal messages
@@ -851,7 +856,7 @@ impl App {
                 }
             }
             MainMenuChoice::SystemStatus => {
-                self.screen = Screen::SystemStatus(SystemStatusState::new());
+                self.screen = Screen::SystemStatus(Box::default());
             }
             MainMenuChoice::Preferences => {
                 self.screen =

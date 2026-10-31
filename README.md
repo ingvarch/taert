@@ -13,6 +13,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Safety engine protecting system roots, credentials, symlinks, and iCloud dataless files
 - Accurate APFS space accounting via allocated blocks (`st_blocks * 512`) with hardlink deduplication
 - Interactive storage browser with streaming progress, selection, deletion, and tree-aggregating cache
+- Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
