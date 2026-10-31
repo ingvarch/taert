@@ -34,12 +34,13 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `⇧S` / `⇧N` / `⇧D` | Explore Storage | Sort by size / name / date created |
 | `↵` (Enter) | Select / Review | Review selection / Confirm cleanup |
 | `↵` / `→` | Explore Storage | Enter selected folder |
-| `←` | Explore Storage | Go up one directory level |
+| `⎋` (Esc) / `←` | Explore Storage | Go up one directory level; from the top folder, leave Explore Storage |
+| `q` | Explore Storage | Leave Explore Storage from any folder |
 | `R` | Explore Storage | Refresh and re-scan current folder |
 | `O` | Explore Storage | Reveal selected item in Finder (`open -R`) |
 | `/` | Select / Search | Live search filter |
 | `?` | All screens | Toggle keyboard shortcuts help sheet |
-| `⎋` (Esc) / `q` | All screens | Cancel dialog / Go back / Quit |
+| `⎋` (Esc) / `q` | All screens | Cancel dialog / Go back to the previous screen, on the row you left / Quit from the main menu |
 
 ## Non-Interactive CLI Commands
 

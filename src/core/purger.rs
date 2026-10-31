@@ -15,6 +15,8 @@ use super::scanner::{CategoryScan, ScanItem, ToolGroup};
 use super::sizer::DirSizer;
 use super::stores::IgnoreStore;
 
+pub const SCAN_ID: &str = "purge";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PurgeScanEvent {
     Root(String),
@@ -246,7 +248,7 @@ impl Purger {
         groups.sort_by(|a, b| a.tool.cmp(&b.tool));
 
         CategoryScan {
-            id: "purge".to_string(),
+            id: SCAN_ID.to_string(),
             title: "Project Artifacts".to_string(),
             groups,
         }

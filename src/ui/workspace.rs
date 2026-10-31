@@ -186,6 +186,22 @@ impl WorkspaceState {
         }
     }
 
+    pub fn at(row: usize, submenu_row: Option<usize>) -> Self {
+        let mut state = Self::new();
+        state.selected_index = row;
+        if let Some(selected) = submenu_row {
+            state.view = WorkspaceView::CleanSubmenu { selected };
+        }
+        state
+    }
+
+    pub fn submenu_row(&self) -> Option<usize> {
+        match self.view {
+            WorkspaceView::CleanSubmenu { selected } => Some(selected),
+            _ => None,
+        }
+    }
+
     pub fn tick(&mut self, cache: &Arc<RwLock<StorageCache>>) {
         let choice = self.current_main_choice();
         let live = self.pane_visible.get() && choice == MainMenuChoice::SystemStatus;
@@ -288,7 +304,7 @@ impl WorkspaceState {
 }
 
 pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme) {
-    let is_submenu = matches!(state.view, WorkspaceView::CleanSubmenu { .. });
+    let is_submenu = state.submenu_row().is_some();
     let crumbs = if is_submenu {
         vec!["taert", "Clean caches"]
     } else {
@@ -322,12 +338,8 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
     let split = !is_submenu && content_rect.width >= SPLIT_MIN_WIDTH;
     state.pane_visible.set(split);
 
-    if is_submenu {
-        let selected_idx = match state.view {
-            WorkspaceView::CleanSubmenu { selected } => selected,
-            _ => 0,
-        };
-        render_submenu_content(frame, content_rect, state, selected_idx, theme);
+    if let Some(selected) = state.submenu_row() {
+        render_submenu_content(frame, content_rect, state, selected, theme);
     } else if split {
         render_split_view(frame, content_rect, state, theme);
     } else {

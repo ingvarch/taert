@@ -24,6 +24,7 @@ pub struct ProgressState {
     pub started_at: Instant,
     pub category_index: Option<usize>,
     pub category_total: Option<usize>,
+    pub in_clean_caches: bool,
 }
 
 impl ProgressState {
@@ -39,7 +40,13 @@ impl ProgressState {
             started_at: Instant::now(),
             category_index: None,
             category_total: None,
+            in_clean_caches: true,
         }
+    }
+
+    pub fn top_level(mut self) -> Self {
+        self.in_clean_caches = false;
+        self
     }
 
     pub fn tick(&mut self) {
@@ -101,7 +108,12 @@ impl ProgressState {
 }
 
 pub fn render_progress(frame: &mut Frame, state: &ProgressState, theme: &Theme) {
-    let chrome = AppChrome::new(vec!["taert", "Clean caches", "Scanning"])
+    let crumbs = if state.in_clean_caches {
+        vec!["taert", "Clean caches", "Scanning"]
+    } else {
+        vec!["taert", "Scanning"]
+    };
+    let chrome = AppChrome::new(crumbs)
         .full_width()
         .hints(vec![Hint::new(theme.g.key_esc, "Cancel")]);
     let content_rect = chrome.render(frame, theme);
