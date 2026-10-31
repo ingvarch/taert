@@ -141,6 +141,33 @@ mod uninstall {
     }
 
     #[test]
+    fn dry_run_beats_force() {
+        let home = home_with_app();
+
+        taert(&home)
+            .args(["uninstall", "Taert Fixture", "--dry-run", "--force"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Dry run completed"));
+
+        assert!(home.path().join("Applications/Taert Fixture.app").exists());
+        assert!(home.path().join("Library/Caches/is.taert.fixture").exists());
+    }
+
+    #[test]
+    fn force_needs_the_whole_name() {
+        let home = home_with_app();
+
+        taert(&home)
+            .args(["uninstall", "taert fix", "--force"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("No installed app matches"));
+
+        assert!(home.path().join("Applications/Taert Fixture.app").exists());
+    }
+
+    #[test]
     fn force_without_a_name_refuses() {
         let home = home_with_app();
 

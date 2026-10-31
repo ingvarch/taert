@@ -94,6 +94,7 @@ impl Host for MacHost {
                 "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges",
                 "-e",
                 "end run",
+                "--",
                 script,
                 prompt,
             ];

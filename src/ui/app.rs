@@ -639,6 +639,8 @@ impl App {
                         }
                         _ => {}
                     }
+                    // The rows just changed, so the cursor could sit on a section.
+                    state.move_to_start();
                     return;
                 }
 
@@ -1824,6 +1826,90 @@ mod tests {
         let app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
 
         assert_footer(&app, &["⎋  Back", "?  More"], &LIST_HINTS);
+    }
+
+    fn two_item_scan() -> CategoryScan {
+        let item = |path: &str| {
+            let mut item = ScanItem::new(path.into(), 1, false, false);
+            item.modified = None;
+            item
+        };
+        CategoryScan {
+            id: "dev".to_string(),
+            title: "List".to_string(),
+            groups: vec![
+                ToolGroup {
+                    tool: "One".to_string(),
+                    items: vec![item("/nowhere/slack")],
+                },
+                ToolGroup {
+                    tool: "Two".to_string(),
+                    items: vec![item("/nowhere/zoom"), item("/nowhere/zed")],
+                },
+            ],
+        }
+    }
+
+    fn selected_paths(app: &App) -> Vec<String> {
+        let scan = &select(app).scan;
+        let items = scan.selected_items();
+        items
+            .iter()
+            .map(|item| item.path.display().to_string())
+            .collect()
+    }
+
+    fn search(app: &mut App, text: &str) {
+        app.handle_key(KeyCode::Char('/'));
+        for letter in text.chars() {
+            app.handle_key(KeyCode::Char(letter));
+        }
+        app.handle_key(KeyCode::Enter);
+    }
+
+    #[test]
+    fn select_all_takes_only_what_the_search_shows() {
+        let mut app = select_app(two_item_scan());
+
+        search(&mut app, "slack");
+        app.handle_key(KeyCode::Char('a'));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/slack"]);
+    }
+
+    #[test]
+    fn select_none_leaves_what_the_search_hides() {
+        let mut app = select_app(two_item_scan());
+        app.handle_key(KeyCode::Char('a'));
+
+        search(&mut app, "slack");
+        app.handle_key(KeyCode::Char('n'));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/zoom", "/nowhere/zed"]);
+    }
+
+    #[test]
+    fn a_search_leaves_the_cursor_on_an_item_and_never_on_a_section() {
+        let mut app = select_app(two_item_scan());
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Down]);
+        search(&mut app, "zed");
+        app.handle_key(KeyCode::Char(' '));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/zed"]);
+    }
+
+    #[test]
+    fn scrolling_a_path_never_splits_a_letter() {
+        let path = "/nowhere/Яндекс/файл";
+        let mut scan = scan_with_id("dev");
+        scan.groups[0].items[0].path = path.into();
+        let mut app = select_app(scan);
+
+        for _ in 0..5 {
+            app.handle_key(KeyCode::Right);
+            screen_text(&app);
+        }
     }
 
     #[test]

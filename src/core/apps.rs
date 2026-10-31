@@ -394,9 +394,13 @@ fn is_named(app: &InstalledApp, term: &str) -> bool {
             .is_some_and(|id| id.eq_ignore_ascii_case(term))
 }
 
-fn pick<'a>(apps: &'a [InstalledApp], term: &str) -> Result<&'a InstalledApp, String> {
+fn pick<'a>(
+    apps: &'a [InstalledApp],
+    term: &str,
+    matching: Matching,
+) -> Result<&'a InstalledApp, String> {
     let exact: Vec<&InstalledApp> = apps.iter().filter(|app| is_named(app, term)).collect();
-    let matches = if exact.is_empty() {
+    let matches = if exact.is_empty() && matching == Matching::Partial {
         let lower = term.to_lowercase();
         apps.iter()
             .filter(|app| app.name.to_lowercase().contains(&lower))
@@ -421,9 +425,20 @@ fn pick<'a>(apps: &'a [InstalledApp], term: &str) -> Result<&'a InstalledApp, St
     }
 }
 
-/// Picks apps by name, bundle file or bundle id. An unclear name is an error,
-/// because a guess here would delete the wrong app.
-pub fn find_by_names(apps: &[InstalledApp], terms: &[String]) -> Result<Vec<InstalledApp>, String> {
+/// How far a name given on the command line may be from the app it picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Matching {
+    Exact,
+    Partial,
+}
+
+/// Picks apps by name, bundle file or bundle id. A name that fits several apps
+/// is an error, because a guess here would delete the wrong app.
+pub fn find_by_names(
+    apps: &[InstalledApp],
+    terms: &[String],
+    matching: Matching,
+) -> Result<Vec<InstalledApp>, String> {
     let names_an_app = |term: &String| apps.iter().any(|app| is_named(app, term));
     if terms.len() > 1 && !terms.iter().all(names_an_app) {
         // `taert uninstall Tor Browser` arrives as two words.
@@ -435,7 +450,7 @@ pub fn find_by_names(apps: &[InstalledApp], terms: &[String]) -> Result<Vec<Inst
 
     let mut picked: Vec<InstalledApp> = Vec::new();
     for term in terms {
-        let app = pick(apps, term)?;
+        let app = pick(apps, term, matching)?;
         if !picked.contains(app) {
             picked.push(app.clone());
         }
@@ -494,6 +509,9 @@ pub fn embedded_bundle_ids(app: &Path, own_id: Option<&str>) -> (Vec<String>, Ve
 }
 
 fn is_jetbrains_selector(value: &str) -> bool {
+    if !value.is_ascii() {
+        return false;
+    }
     let Some((product, minor)) = value
         .rsplit_once('.')
         .filter(|(product, _)| product.len() > 4)
@@ -624,6 +642,18 @@ mod tests {
         ] {
             assert!(!is_reverse_dns(id), "{id}");
         }
+    }
+
+    #[test]
+    fn the_applications_link_of_a_disk_image_is_no_app_folder() {
+        let (_temp, layout) = sandbox();
+        fake_app(&layout.system("Applications/A.app"), "com.a.one", "a");
+        let volume = layout.system("Volumes/Installer");
+        fs::create_dir_all(&volume).unwrap();
+        let applications = layout.system("Applications");
+        std::os::unix::fs::symlink(&applications, volume.join("Applications")).unwrap();
+
+        assert_eq!(names(&list(&layout)), ["A"]);
     }
 
     #[test]
@@ -846,50 +876,65 @@ mod tests {
 
     #[test]
     fn names_match_exactly_without_regard_to_case() {
-        let found = find_by_names(&sample(), &terms(&["zoom"])).unwrap();
+        let found = find_by_names(&sample(), &terms(&["zoom"]), Matching::Partial).unwrap();
 
         assert_eq!(names(&found), ["Zoom"]);
     }
 
     #[test]
     fn a_bundle_id_names_an_app() {
-        let found = find_by_names(&sample(), &terms(&["com.google.Chrome"])).unwrap();
+        let found =
+            find_by_names(&sample(), &terms(&["com.google.Chrome"]), Matching::Partial).unwrap();
 
         assert_eq!(names(&found), ["Google Chrome"]);
     }
 
     #[test]
     fn part_of_a_name_works_when_only_one_app_has_it() {
-        let found = find_by_names(&sample(), &terms(&["chrome"])).unwrap();
+        let found = find_by_names(&sample(), &terms(&["chrome"]), Matching::Partial).unwrap();
 
         assert_eq!(names(&found), ["Google Chrome"]);
     }
 
     #[test]
     fn part_of_a_name_shared_by_apps_is_an_error_that_lists_them() {
-        let error = find_by_names(&sample(), &terms(&["google"])).unwrap_err();
+        let error = find_by_names(&sample(), &terms(&["google"]), Matching::Partial).unwrap_err();
 
         assert!(error.contains("Google Chrome"), "{error}");
         assert!(error.contains("Google Drive"), "{error}");
     }
 
     #[test]
+    fn unattended_removal_takes_only_whole_names() {
+        let error = find_by_names(&sample(), &terms(&["chrome"]), Matching::Exact).unwrap_err();
+
+        assert!(error.contains("chrome"), "{error}");
+        assert!(find_by_names(&sample(), &terms(&["zoom"]), Matching::Exact).is_ok());
+    }
+
+    #[test]
     fn an_unknown_name_is_an_error() {
-        let error = find_by_names(&sample(), &terms(&["nothing"])).unwrap_err();
+        let error = find_by_names(&sample(), &terms(&["nothing"]), Matching::Partial).unwrap_err();
 
         assert!(error.contains("nothing"), "{error}");
     }
 
     #[test]
     fn words_of_one_app_name_given_apart_mean_that_app() {
-        let found = find_by_names(&sample(), &terms(&["Tor", "Browser"])).unwrap();
+        let found =
+            find_by_names(&sample(), &terms(&["Tor", "Browser"]), Matching::Partial).unwrap();
 
         assert_eq!(names(&found), ["Tor Browser"]);
     }
 
     #[test]
     fn several_names_pick_several_apps_once_each() {
-        let found = find_by_names(&sample(), &terms(&["zoom", "Zoom", "WebStorm"])).unwrap();
+        let found = find_by_names(
+            &sample(),
+            &terms(&["zoom", "Zoom", "WebStorm"]),
+            Matching::Partial,
+        )
+        .unwrap();
 
         assert_eq!(names(&found), ["Zoom", "WebStorm"]);
     }
@@ -976,6 +1021,9 @@ mod tests {
         write_info(&spoofed, &[("JVMOptions", selector("../.."))]);
 
         assert_eq!(jetbrains_selector(&ide).as_deref(), Some("GoLand2026.2"));
+        assert_eq!(jetbrains_selector(&spoofed), None);
+
+        write_info(&spoofed, &[("JVMOptions", selector("Яabc.1"))]);
         assert_eq!(jetbrains_selector(&spoofed), None);
     }
 }

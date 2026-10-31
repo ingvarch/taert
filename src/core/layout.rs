@@ -61,7 +61,8 @@ impl Layout {
             // The boot volume is linked here and only repeats /Applications.
             .filter(|volume| !volume.is_symlink())
             .map(|volume| volume.join("Applications"))
-            .filter(|apps| apps.is_dir())
+            // Disk images link to /Applications for dragging an app in.
+            .filter(|apps| apps.is_dir() && !apps.is_symlink())
             .collect()
     }
 

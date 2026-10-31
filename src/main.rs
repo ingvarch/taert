@@ -12,7 +12,7 @@ use clap::Parser;
 use crate::cli::{
     CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs, UninstallArgs,
 };
-use crate::core::apps::{self, InstalledApp};
+use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::docker::DockerClient;
 use crate::core::host::MacHost;
@@ -231,7 +231,12 @@ fn handle_uninstall(
         return pick_apps_to_uninstall(&mut installed, cli, use_plain, ignore, &layout);
     }
 
-    let mut selected = match apps::find_by_names(&installed, &args.names) {
+    let matching = if cli.force {
+        Matching::Exact
+    } else {
+        Matching::Partial
+    };
+    let mut selected = match apps::find_by_names(&installed, &args.names, matching) {
         Ok(selected) => selected,
         Err(error) => {
             eprintln!("Error: {error}");
@@ -368,22 +373,24 @@ fn finish_uninstall(
         };
     }
 
+    if cli.dry_run {
+        PlainRunner::print_scan(&plan.scan);
+        PlainRunner::print_notes(&plan.notes);
+        println!("\nDry run completed. No files were deleted.");
+        return ExitCode::SUCCESS;
+    }
+
     if cli.force {
         return run_uninstall(&plan, ignore, layout);
     }
 
-    if !use_plain && !cli.dry_run {
+    if !use_plain {
         let mut app = ui::app::App::with_plan(plan, ignore.clone(), Config::load_or_default());
         return run_tui(&mut app);
     }
 
     PlainRunner::print_scan(&plan.scan);
     PlainRunner::print_notes(&plan.notes);
-    if cli.dry_run {
-        println!("\nDry run completed. No files were deleted.");
-        return ExitCode::SUCCESS;
-    }
-
     if let Err(error) = PlainRunner::prompt_selection(&mut plan.scan) {
         eprintln!("Selection error: {error}");
         return ExitCode::FAILURE;

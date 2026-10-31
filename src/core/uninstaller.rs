@@ -723,7 +723,8 @@ impl Uninstaller<'_> {
         for line in LOGIN_ITEM_SCRIPT {
             args.extend(["-e", line]);
         }
-        args.push(&plan.app.name);
+        // Without `--` a name that starts with a dash is read as an option.
+        args.extend(["--", &plan.app.name]);
         self.host.run(OSASCRIPT, &args, TEARDOWN_TIMEOUT);
 
         let uid = unsafe { libc::getuid() };
@@ -1666,7 +1667,7 @@ mod run_tests {
             .iter()
             .find(|line| line.contains("System Events"))
             .unwrap();
-        assert!(script.ends_with(" Foo"), "{script}");
+        assert!(script.ends_with(" -- Foo"), "{script}");
     }
 
     #[test]

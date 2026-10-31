@@ -274,20 +274,21 @@ impl SelectState {
         }
     }
 
-    pub fn select_all(&mut self) {
-        for group in &mut self.scan.groups {
-            for item in &mut group.items {
-                item.selected = true;
+    fn set_shown_items(&mut self, selected: bool) {
+        for row in self.flattened_rows() {
+            if let Some(item) = row.item_index {
+                self.scan.groups[row.group_index].items[item].selected = selected;
             }
         }
     }
 
+    /// Selects what the search shows, so nothing hidden gets selected.
+    pub fn select_all(&mut self) {
+        self.set_shown_items(true);
+    }
+
     pub fn select_none(&mut self) {
-        for group in &mut self.scan.groups {
-            for item in &mut group.items {
-                item.selected = false;
-            }
-        }
+        self.set_shown_items(false);
     }
 
     pub fn next_selectable(&mut self) {
@@ -589,12 +590,12 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             } else if let Some(path) = &row.full_path {
                 let mut spans = path_spans(path, row_width.saturating_sub(20), theme);
                 if is_focused && state.path_scroll > 0 {
-                    let full_str = prettify_path(path);
-                    if state.path_scroll < full_str.len() {
-                        spans = vec![Span::styled(
-                            full_str[state.path_scroll..].to_string(),
-                            theme.body(),
-                        )];
+                    let rest: String = prettify_path(path)
+                        .chars()
+                        .skip(state.path_scroll)
+                        .collect();
+                    if !rest.is_empty() {
+                        spans = vec![Span::styled(rest, theme.body())];
                     }
                 }
                 spans
