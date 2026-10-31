@@ -183,6 +183,15 @@ pub enum Evidence {
     RelatedName,
 }
 
+/// What a row of an uninstall plan stands for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UninstallRole {
+    Bundle,
+    Leftover { evidence: Evidence },
+    Receipt { package: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leftover {
     pub path: PathBuf,

@@ -19,3 +19,4 @@ pub mod sizer;
 pub mod stores;
 pub mod sysinfo;
 pub mod telemetry;
+pub mod uninstaller;
