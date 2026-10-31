@@ -808,7 +808,14 @@ impl App {
                 sort_section(),
                 general(vec![navigate, Hint::new("q", "Quit explore")]),
             ],
-            Screen::SystemStatus(_) => vec![general(vec![scroll, Hint::new("⎋ / q / ↵", "Back")])],
+            Screen::SystemStatus(state) => {
+                let mut hints = Vec::new();
+                if state.can_scroll() {
+                    hints.push(scroll);
+                }
+                hints.push(Hint::new("⎋ / q / ↵", "Back"));
+                vec![general(hints)]
+            }
             Screen::Preferences(_) => vec![
                 HelpSection::new(
                     "Preferences",
@@ -1565,6 +1572,181 @@ mod tests {
     fn project_results_are_not_shown_under_clean_caches() {
         assert!(!screen_text(&select_app(scan_with_id("purge"))).contains("Clean caches"));
         assert!(screen_text(&select_app(scan_with_id("dev"))).contains("Clean caches"));
+    }
+
+    fn footer(app: &App) -> String {
+        let (width, height) = (160, 30);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.render_screen(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, height - 1)].symbol())
+            .collect()
+    }
+
+    #[track_caller]
+    fn assert_footer(app: &App, shown: &[&str], hidden: &[&str]) {
+        let row = footer(app);
+        for hint in shown {
+            assert!(row.contains(hint), "missing {hint:?} in {row:?}");
+        }
+        for hint in hidden {
+            assert!(!row.contains(hint), "unexpected {hint:?} in {row:?}");
+        }
+    }
+
+    const LIST_HINTS: [&str; 5] = ["↑↓  Move", "␣  Select", "A  All", "N  None", "/  Search"];
+
+    #[test]
+    fn a_list_shows_bulk_selection_and_the_way_back() {
+        let app = select_app(scan_with_id("dev"));
+
+        assert_footer(&app, &LIST_HINTS, &[]);
+        assert_footer(&app, &["⎋  Back", "?  More"], &["Sort:"]);
+    }
+
+    #[test]
+    fn a_docker_table_shows_sorting_next_to_search() {
+        let app = select_app(scan_with_id(docker::SCAN_ID));
+
+        assert_footer(&app, &LIST_HINTS, &[]);
+        assert_footer(&app, &["⇧S/N/D  Sort: Size", "⎋  Back", "?  More"], &[]);
+    }
+
+    #[test]
+    fn an_empty_list_offers_only_back_and_help() {
+        let app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+
+        assert_footer(&app, &["⎋  Back", "?  More"], &LIST_HINTS);
+    }
+
+    #[test]
+    fn typing_a_search_shows_only_the_keys_that_work_while_typing() {
+        let mut app = select_app(scan_with_id("dev"));
+
+        app.handle_key(KeyCode::Char('/'));
+
+        assert_footer(&app, &["Apply", "⎋  Cancel"], &LIST_HINTS);
+        assert_footer(&app, &[], &["Review"]);
+    }
+
+    #[test]
+    fn explore_shows_bulk_selection_and_does_not_repeat_the_main_button() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = analyze_app(dir.path());
+
+        assert_footer(
+            &app,
+            &[
+                "␣  Select",
+                "A  All",
+                "N  None",
+                "⇧S/N/D  Sort: Size",
+                "D  Delete",
+                "↑↓  Move",
+                "⎋  Back",
+                "?  More",
+            ],
+            &["↵  Open"],
+        );
+
+        app.handle_key(KeyCode::Char(' '));
+
+        assert_footer(&app, &["↵  Open"], &["D  Delete"]);
+    }
+
+    #[test]
+    fn an_empty_folder_offers_only_back_and_help() {
+        let dir = tempdir().unwrap();
+        let app = analyze_app(dir.path());
+
+        assert_footer(
+            &app,
+            &["⎋  Back", "?  More"],
+            &[
+                "↑↓  Move",
+                "␣  Select",
+                "A  All",
+                "N  None",
+                "Sort:",
+                "Delete",
+            ],
+        );
+    }
+
+    #[test]
+    fn preferences_show_the_arrows_only_on_the_threshold_row() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        app.handle_key(KeyCode::Char('6'));
+        assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
+
+        app.handle_key(KeyCode::Down);
+        assert_footer(&app, &["⎋  Back"], &["Adjust"]);
+    }
+
+    #[test]
+    fn a_path_list_offers_removal_only_when_it_has_paths() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        press(&mut app, &[KeyCode::Char('7')]);
+        assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
+
+        app.handle_key(KeyCode::Esc);
+        app.ignore.roots.push("/nowhere/protected".to_string());
+
+        app.handle_key(KeyCode::Char('7'));
+        assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
+    }
+
+    #[test]
+    fn the_main_menu_says_esc_quits_and_the_submenu_says_it_goes_back() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+
+        assert_footer(&app, &["⎋  Quit"], &["Back"]);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_footer(&app, &["⎋  Back"], &["Quit"]);
+    }
+
+    #[test]
+    fn a_dialog_empties_the_footer_because_it_lists_its_own_keys() {
+        let toolbar = [
+            "Quit", "Move", "More", "Open", "Select", "All", "Review", "Delete",
+        ];
+
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+        app.handle_key(KeyCode::Char('2'));
+        assert_footer(&app, &[], &toolbar);
+
+        let mut app = select_app(scan_with_id("dev"));
+        app.handle_key(KeyCode::Enter);
+        assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
+        assert_footer(&app, &[], &toolbar);
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+        let mut app = analyze_app(dir.path());
+        press(&mut app, &[KeyCode::Char(' '), KeyCode::Char('d')]);
+        assert_footer(&app, &[], &toolbar);
+    }
+
+    #[test]
+    fn help_mentions_scrolling_only_when_status_can_scroll() {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+        app.handle_key(KeyCode::Char('5'));
+        let draw = |app: &App, width, height| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.render_screen(frame)).unwrap();
+        };
+
+        draw(&app, 205, 85);
+        assert_eq!(help_row(&app, "Scroll"), None);
+
+        draw(&app, 50, 16);
+        assert!(help_row(&app, "Scroll").is_some());
     }
 
     fn help_row(app: &App, desc: &str) -> Option<&'static str> {

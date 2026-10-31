@@ -316,15 +316,16 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
         .as_ref()
         .map(|s| Line::from(vec![Span::styled(s.clone(), theme.callout())]));
 
-    let mut hints = vec![Hint::new("↑↓", "Move")];
-    if is_submenu {
-        hints.push(Hint::new("⎋", "Back"));
-    }
-    hints.push(Hint::new("?", "More"));
+    let hints = vec![
+        Hint::new("↑↓", "Move"),
+        Hint::new("⎋", if is_submenu { "Back" } else { "Quit" }),
+        Hint::new("?", "More"),
+    ];
 
     let mut chrome = AppChrome::new(crumbs)
         .hints(hints)
-        .primary(PrimaryAction::new("Open", theme.g.key_enter));
+        .primary(PrimaryAction::new("Open", theme.g.key_enter))
+        .behind_dialog(matches!(state.view, WorkspaceView::Confirm(..)));
 
     if let Some(st) = status_line {
         chrome = chrome.status(st);

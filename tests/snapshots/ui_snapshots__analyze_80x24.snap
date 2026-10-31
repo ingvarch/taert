@@ -25,4 +25,4 @@ expression: output
    │                                                                         │
    ╰─────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────
-  ↑↓  Move    ␣  Select    ⇧S/N/D  Sort: Size    D  Delete             Open  ↵
+  ␣  Select    A  All    N  None    ⇧S/N/D  Sort: Size    ?  More      Open  ↵

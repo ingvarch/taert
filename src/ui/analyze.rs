@@ -681,9 +681,12 @@ impl AnalyzeState {
         self.current_progress = None;
     }
 
+    fn dialog_open(&self) -> bool {
+        self.measuring_rx.is_some() || !matches!(self.overlay, AnalyzeOverlay::None)
+    }
+
     fn preview_target(&self) -> Option<PathBuf> {
-        let busy = self.measuring_rx.is_some() || !matches!(self.overlay, AnalyzeOverlay::None);
-        if busy || !self.preview.visible.get() {
+        if self.dialog_open() || !self.preview.visible.get() {
             return None;
         }
 
@@ -848,16 +851,22 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         .as_ref()
         .map(|msg| Toast::success(msg.clone()));
 
-    let mut hints = vec![
-        Hint::new("↑↓", "Move"),
-        Hint::new("␣", "Select"),
-        Hint::new("⇧S/N/D", state.sort_order.hint_label()),
-        Hint::new("D", "Delete"),
-    ];
-    if can_open {
-        hints.push(Hint::new("↵", "Open"));
+    let mut hints = Vec::new();
+    if !level.snapshot.children.is_empty() {
+        hints.extend([
+            Hint::new("␣", "Select"),
+            Hint::new("A", "All"),
+            Hint::new("N", "None"),
+            Hint::new("⇧S/N/D", state.sort_order.hint_label()),
+        ]);
+        if selected_count == 0 {
+            hints.push(Hint::new("D", "Delete"));
+        } else if can_open {
+            hints.push(Hint::new("↵", "Open"));
+        }
+        hints.push(Hint::new("↑↓", "Move"));
     }
-    hints.push(Hint::new("←", "Back"));
+    hints.push(Hint::new("⎋", "Back"));
     hints.push(Hint::new("?", "More"));
 
     let chrome = AppChrome::new(crumbs)
@@ -865,7 +874,8 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         .status(right_status)
         .hints(hints)
         .primary(primary_action)
-        .toast(toast.as_ref());
+        .toast(toast.as_ref())
+        .behind_dialog(state.dialog_open());
 
     let content_rect = chrome.render(frame, theme);
 

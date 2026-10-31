@@ -184,13 +184,14 @@ pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, t
 
     match state.mode {
         PathListMode::Normal => {
-            chrome = chrome.hints(vec![
-                Hint::new(theme.g.key_up_down, "Move"),
-                Hint::new("A", "Add"),
-                Hint::new("D", "Remove"),
-                Hint::new(theme.g.key_esc, "Back"),
-                Hint::new("?", "Help"),
-            ]);
+            let mut hints = vec![Hint::new("A", "Add")];
+            if !state.items.is_empty() {
+                hints.push(Hint::new("D", "Remove"));
+                hints.push(Hint::new(theme.g.key_up_down, "Move"));
+            }
+            hints.push(Hint::new(theme.g.key_esc, "Back"));
+            hints.push(Hint::new("?", "More"));
+            chrome = chrome.hints(hints);
         }
         PathListMode::Adding(_) => {
             chrome = chrome.hints(vec![

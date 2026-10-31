@@ -425,7 +425,9 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         ),
     ]);
 
-    let primary_action = if selected_count > 0 {
+    let primary_action = if state.is_searching {
+        PrimaryAction::new("Apply", theme.g.key_enter)
+    } else if selected_count > 0 {
         PrimaryAction::new(format!("Review {selected_count} items"), theme.g.key_enter)
     } else {
         PrimaryAction::disabled("Review items", theme.g.key_enter)
@@ -437,18 +439,12 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Clean caches", state.scan.title.as_str()]
     };
 
-    let mut hints = vec![Hint::new("↑↓", "Move"), Hint::new("␣", "Select")];
-    match state.sort_order {
-        Some(order) => hints.push(Hint::new("⇧S/N/D", order.hint_label())),
-        None => hints.push(Hint::new("/", "Search")),
-    }
-    hints.push(Hint::new("?", "More"));
-
     let chrome = AppChrome::new(crumbs)
         .full_width()
         .status(right_status)
-        .hints(hints)
-        .primary(primary_action);
+        .hints(toolbar_hints(state, total_count > 0))
+        .primary(primary_action)
+        .behind_dialog(!matches!(state.overlay, ModalOverlay::None));
 
     let content_rect = chrome.render(frame, theme);
 
@@ -655,6 +651,29 @@ fn section_frame_top(
         ),
         _ => frame_top(name, "", detail, width, color, theme),
     }
+}
+
+fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
+    if state.is_searching {
+        return vec![Hint::new("⎋", "Cancel")];
+    }
+
+    let mut hints = Vec::new();
+    if has_items {
+        hints.extend([
+            Hint::new("␣", "Select"),
+            Hint::new("A", "All"),
+            Hint::new("N", "None"),
+        ]);
+        if let Some(order) = state.sort_order {
+            hints.push(Hint::new("⇧S/N/D", order.hint_label()));
+        }
+        hints.push(Hint::new("/", "Search"));
+        hints.push(Hint::new("↑↓", "Move"));
+    }
+    hints.push(Hint::new("⎋", "Back"));
+    hints.push(Hint::new("?", "More"));
+    hints
 }
 
 fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, theme: &Theme) {
