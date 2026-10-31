@@ -155,6 +155,17 @@ fn mock_system_status() -> FullSystemStatus {
                 memory_bytes,
             })
             .collect(),
+            memory_processes: vec![
+                ("Safari", 4.0, 2_400_000_000),
+                ("node", 250.1, 1_000_000_000),
+            ]
+            .into_iter()
+            .map(|(name, cpu_percent, memory_bytes)| ProcessStatus {
+                name: name.to_string(),
+                cpu_percent,
+                memory_bytes,
+            })
+            .collect(),
         },
     }
 }
@@ -309,6 +320,14 @@ fn snapshot_system_status_wide_and_tall() {
     let state = status_with_history();
     let output = render_to_string(140, 40, |f| render_system_status(f, &state, &theme));
     assert_snapshot!("system_status_140x40", output);
+}
+
+#[test]
+fn snapshot_system_status_large_window() {
+    let theme = snapshot_theme();
+    let state = status_with_history();
+    let output = render_to_string(205, 85, |f| render_system_status(f, &state, &theme));
+    assert_snapshot!("system_status_205x85", output);
 }
 
 #[test]

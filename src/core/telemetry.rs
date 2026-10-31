@@ -17,7 +17,7 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 // Storage, battery and temperatures change slowly and cost more to read.
 const SLOW_SAMPLE_EVERY: u32 = 5;
-const TOP_PROCESSES: usize = 5;
+const TOP_PROCESSES: usize = 60;
 // Skips mounted installers and other small disk images.
 const MIN_VOLUME_BYTES: u64 = 1_000_000_000;
 const UNKNOWN_MINUTES: i64 = 65535;
@@ -104,6 +104,7 @@ pub struct LiveStatus {
     pub network: NetworkStatus,
     pub power: Option<PowerStatus>,
     pub processes: Vec<ProcessStatus>,
+    pub memory_processes: Vec<ProcessStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +166,7 @@ pub fn product_name(properties: &Properties) -> Option<String> {
     Some(name.trim_end_matches('\0').to_string())
 }
 
-fn parse_processes(output: &str, limit: usize) -> Vec<ProcessStatus> {
+fn parse_processes(output: &str) -> Vec<ProcessStatus> {
     output
         .lines()
         .filter_map(|line| {
@@ -177,16 +178,26 @@ fn parse_processes(output: &str, limit: usize) -> Vec<ProcessStatus> {
                 memory_bytes: rss_kb.parse::<u64>().ok()?.saturating_mul(1024),
             })
         })
-        .take(limit)
         .collect()
 }
 
+// `output` comes sorted by CPU.
+fn rank_processes(output: &str, limit: usize) -> (Vec<ProcessStatus>, Vec<ProcessStatus>) {
+    let by_cpu = parse_processes(output);
+
+    let mut by_memory = by_cpu.clone();
+    by_memory.sort_by_key(|process| std::cmp::Reverse(process.memory_bytes));
+    by_memory.truncate(limit);
+
+    (by_cpu.into_iter().take(limit).collect(), by_memory)
+}
+
 // ps runs setuid root on macOS, so it sees the processes of every user.
-fn top_processes() -> Vec<ProcessStatus> {
+fn top_processes() -> (Vec<ProcessStatus>, Vec<ProcessStatus>) {
     Command::new("/bin/ps")
         .args(["-Aceo", "pcpu=,rss=,comm=", "-r"])
         .output()
-        .map(|output| parse_processes(&String::from_utf8_lossy(&output.stdout), TOP_PROCESSES))
+        .map(|output| rank_processes(&String::from_utf8_lossy(&output.stdout), TOP_PROCESSES))
         .unwrap_or_default()
 }
 
@@ -372,7 +383,10 @@ impl Sampler {
         self.sample_disk_io(elapsed);
         self.sample_network(elapsed);
         self.status.live.gpu = iokit::services("IOAccelerator").iter().find_map(gpu_from);
-        self.status.live.processes = top_processes();
+        (
+            self.status.live.processes,
+            self.status.live.memory_processes,
+        ) = top_processes();
 
         self.status.clone()
     }
@@ -629,7 +643,7 @@ mod tests {
     fn parses_processes_with_spaces_in_their_names() {
         let output = "215.5 969776 node\n 53.5 162400 WindowServer\n 1.0 2048 Google Chrome He\n";
 
-        let processes = parse_processes(output, 5);
+        let processes = parse_processes(output);
 
         assert_eq!(processes.len(), 3);
         assert_eq!(processes[0].name, "node");
@@ -642,10 +656,20 @@ mod tests {
     fn keeps_only_the_top_processes_and_skips_broken_lines() {
         let output = "garbage\n9.0 100 first\n8.0 100 second\n7.0 100 third\n";
 
-        let processes = parse_processes(output, 2);
+        let (by_cpu, _) = rank_processes(output, 2);
 
-        let names: Vec<_> = processes.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<_> = by_cpu.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["first", "second"]);
+    }
+
+    #[test]
+    fn ranks_processes_by_memory_from_the_whole_list() {
+        let output = "9.0 100 busy\n8.0 200 middle\n0.0 900 idle\n";
+
+        let (_, by_memory) = rank_processes(output, 2);
+
+        let names: Vec<_> = by_memory.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["idle", "middle"]);
     }
 
     #[test]
