@@ -36,11 +36,18 @@ const PANEL_INDENT: u16 = 2;
 pub enum MainMenuChoice {
     CleanCaches,    // 1
     ProjectCleanup, // 2
-    ExploreStorage, // 3
-    SystemStatus,   // 4
-    Preferences,    // 5
-    ProtectedPaths, // 6
+    DockerCleanup,  // 3
+    ExploreStorage, // 4
+    SystemStatus,   // 5
+    Preferences,    // 6
+    ProtectedPaths, // 7
 }
+
+const MENU_SECTIONS: [(&str, &[usize]); 3] = [
+    ("CLEANUP", &[0, 1, 2]),
+    ("INSPECT", &[3, 4]),
+    ("SETTINGS", &[5, 6]),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanSubcategory {
@@ -117,6 +124,12 @@ impl WorkspaceState {
                     "Project cleanup",
                     "Review dependencies and generated build artifacts",
                     "Scan project directories for build targets, dependencies,\nand intermediate artifacts. Reclaim gigabytes of space\nacross multiple repositories at once.",
+                ),
+                (
+                    MainMenuChoice::DockerCleanup,
+                    "Docker cleanup",
+                    "Remove what no container uses",
+                    "Find images, volumes and networks that no container uses,\nplus the build cache. Volumes can hold real data, so they\nare never selected for you.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
@@ -331,6 +344,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
     match choice {
         MainMenuChoice::CleanCaches => theme.g.icon_clean,
         MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
+        MainMenuChoice::DockerCleanup => theme.g.icon_docker,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Preferences => theme.g.icon_prefs,
@@ -348,13 +362,7 @@ fn render_regular_menu(frame: &mut Frame, area: Rect, state: &WorkspaceState, th
     )]));
     lines.push(Line::from(""));
 
-    let sections = [
-        ("CLEANUP", &[0usize, 1][..]),
-        ("INSPECT", &[2, 3][..]),
-        ("SETTINGS", &[4, 5][..]),
-    ];
-
-    for (sec_title, indices) in sections {
+    for (sec_title, indices) in MENU_SECTIONS {
         lines.push(render_section_header(
             sec_title,
             None,
@@ -428,13 +436,7 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
 
     // Left Sidebar
     let mut sidebar_lines = Vec::new();
-    let sections = [
-        ("CLEANUP", &[0usize, 1][..]),
-        ("INSPECT", &[2, 3][..]),
-        ("SETTINGS", &[4, 5][..]),
-    ];
-
-    for (sec_title, indices) in sections {
+    for (sec_title, indices) in MENU_SECTIONS {
         sidebar_lines.push(render_section_header(
             sec_title,
             None,
@@ -563,7 +565,9 @@ fn detail_data(
             lines
         }
         MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
-        MainMenuChoice::Preferences | MainMenuChoice::ProtectedPaths => Vec::new(),
+        MainMenuChoice::DockerCleanup
+        | MainMenuChoice::Preferences
+        | MainMenuChoice::ProtectedPaths => Vec::new(),
     }
 }
 

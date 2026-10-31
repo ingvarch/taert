@@ -10,11 +10,11 @@ expression: output
    ▌ ✧ Clean caches                           ›
         Choose tools and individual paths to rem
      ◇ Project cleanup                        ›
+     ▦ Docker cleanup                         ›
 
      INSPECT
      ◔ Explore storage                        ›
      ▤ System status                          ›
 
-     SETTINGS
 ──────────────────────────────────────────────────
   ?  Help                                Open  ↵

@@ -17,9 +17,11 @@ use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ListRow, path_spans, render_section_header_spans};
 use super::components::modal::Modal;
+use super::components::text::plural;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
+use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::path_utils::prettify_path;
 use crate::core::scanner::CategoryScan;
 
@@ -46,6 +48,7 @@ pub struct SelectState {
     pub search_query: String,
     pub is_searching: bool,
     pub overlay: ModalOverlay,
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +78,20 @@ impl SelectState {
             search_query: String::new(),
             is_searching: false,
             overlay: ModalOverlay::None,
+            problem: None,
         };
         state.move_to_start();
+        state
+    }
+
+    /// A scan that could not run, with the reason to show instead of a list.
+    pub fn unavailable(title: &str, problem: String) -> Self {
+        let mut state = Self::new(CategoryScan {
+            id: SCAN_ID.to_string(),
+            title: title.to_string(),
+            groups: Vec::new(),
+        });
+        state.problem = Some(problem);
         state
     }
 
@@ -88,6 +103,7 @@ impl SelectState {
             search_query: String::new(),
             is_searching: false,
             overlay: ModalOverlay::None,
+            problem: None,
         };
         state.move_to_start();
         state
@@ -345,7 +361,13 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         PrimaryAction::disabled("Review items", theme.g.key_enter)
     };
 
-    let chrome = AppChrome::new(vec!["taert", "Clean caches", &state.scan.title])
+    let crumbs = if state.scan.id == SCAN_ID {
+        vec!["taert", state.scan.title.as_str()]
+    } else {
+        vec!["taert", "Clean caches", state.scan.title.as_str()]
+    };
+
+    let chrome = AppChrome::new(crumbs)
         .full_width()
         .status(right_status)
         .hints(vec![
@@ -359,9 +381,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let content_rect = chrome.render(frame, theme);
 
     if total_count == 0 {
-        EmptyState::new("✓", "Nothing to clean", "Your caches are already tidy.")
-            .glyph_color(theme.p.green)
-            .render(frame, content_rect, theme);
+        render_nothing_to_show(frame, content_rect, state, theme);
         return;
     }
 
@@ -504,6 +524,23 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     }
 }
 
+fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, theme: &Theme) {
+    if let Some(problem) = &state.problem {
+        let title = format!("{} isn't available", state.scan.title);
+        EmptyState::new(theme.g.warning, &title, problem)
+            .glyph_color(theme.p.yellow)
+            .render(frame, area, theme);
+    } else if state.scan.id == SCAN_ID {
+        EmptyState::new("✓", "Docker has nothing unused", "Every object is in use.")
+            .glyph_color(theme.p.green)
+            .render(frame, area, theme);
+    } else {
+        EmptyState::new("✓", "Nothing to clean", "Your caches are already tidy.")
+            .glyph_color(theme.p.green)
+            .render(frame, area, theme);
+    }
+}
+
 fn render_confirmation_dialog(
     frame: &mut Frame,
     state: &SelectState,
@@ -519,11 +556,28 @@ fn render_confirmation_dialog(
         format_bytes(state.scan.total_selected_bytes())
     );
 
+    let mut message = vec![Line::from(msg)];
+    let volumes = state
+        .scan
+        .selected_items()
+        .iter()
+        .filter(|item| matches!(item.docker, Some(DockerObject::Volume { .. })))
+        .count();
+    if volumes > 0 {
+        message.push(Line::from(Span::styled(
+            format!(
+                "The data in {} is deleted for good.",
+                plural(volumes, "volume", "volumes")
+            ),
+            theme.warning(),
+        )));
+    }
+
     let cancel_focused = matches!(focus_btn, ConfirmButton::Cancel);
     let remove_focused = matches!(focus_btn, ConfirmButton::Remove);
 
     Modal::new(&title)
-        .message(vec![Line::from(msg)])
+        .message(message)
         .buttons(vec![
             Button::new("Cancel").focused(cancel_focused),
             Button::destructive("Remove").focused(remove_focused),

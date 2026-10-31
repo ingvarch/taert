@@ -15,6 +15,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Interactive storage browser with streaming progress, selection, deletion, and tree-aggregating cache
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
+- Docker cleanup for images, volumes, networks, and build cache that no container uses
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 
@@ -34,6 +35,7 @@ taert
 taert clean dev --dry-run
 taert purge ~/Projects --older-than 30 --json
 taert analyze ~/Downloads
+taert docker --dry-run
 ```
 
 For subcommands, keyboard shortcuts, and scripting options, see [docs/usage.md](docs/usage.md).

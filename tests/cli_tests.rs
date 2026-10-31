@@ -59,3 +59,13 @@ fn test_cli_purge_dry_run() {
         .success()
         .stdout(predicate::str::contains("Dry run completed"));
 }
+
+#[test]
+fn test_cli_docker_reports_an_unreachable_daemon() {
+    let mut cmd = Command::cargo_bin("taert").unwrap();
+    cmd.env("DOCKER_HOST", "tcp://127.0.0.1:1")
+        .args(["docker", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Can't reach Docker"));
+}

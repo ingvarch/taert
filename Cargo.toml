@@ -22,6 +22,11 @@ rayon = "1.10"
 libc = "0.2"
 sysinfo = "0.33"
 unicode-width = "0.2"
+# Pinned: 0.20 and newer read `/system/df` only in the API 1.52 shape, and every
+# daemon before Docker 29 then comes back empty with no error. API 1.49 gets the
+# older shape from all daemons, new ones included.
+bollard = { version = "=0.19.4", default-features = false, features = ["pipe"] }
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3.17"

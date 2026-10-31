@@ -30,6 +30,23 @@ Disk cleanup tools must never compromise system integrity, user credentials, or 
 5. **Path Validation on Deletion**:
    Every file removal re-validates safety rules immediately before `fs::remove_dir_all` or `fs::remove_file` is invoked.
 
+## Docker Cleanup
+
+Docker objects are not files, so they skip the path checks above and go to the daemon instead. `ScanItem::docker` carries a `DockerObject`, and `Cleaner` hands those to `DockerRemover` before any file logic runs. A label that matches a real path can't touch that path.
+
+Rules that keep this safe:
+
+- An object counts as unused only when no container refers to it, stopped containers included. An unknown use count means in use.
+- Nothing is removed with `force`, so Docker refuses whatever a container still needs.
+- A tag is checked again before removal, because it can move to another image after the scan.
+- Volumes are never selected by default, so `--force` can't remove them.
+- A daemon that reports no disk usage is an error, never an empty list.
+- `DOCKER_HOST` and the Docker context pick the daemon. A remote one stops with an error and never falls back to a local daemon.
+
+The freed size comes from the daemon's totals before and after, because images share layers.
+
+`bollard` stays pinned to 0.19. Versions 0.20 and newer read `/system/df` only in the API 1.52 shape, and a daemon on an older API then comes back empty with no error. Daemons answer an API 1.49 client in the older shape, including Docker 29 and newer.
+
 ## APFS Space Accounting
 
 Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on APFS due to sparse files, compression, and block clustering:

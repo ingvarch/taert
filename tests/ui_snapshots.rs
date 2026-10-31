@@ -6,6 +6,7 @@ use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use taert::core::cache::StorageCache;
+use taert::core::docker::DockerObject;
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
@@ -472,9 +473,10 @@ fn home_screen(state: &WorkspaceState, w: u16, h: u16) -> String {
 
 const CLEAN_CACHES: usize = 0;
 const PROJECT_CLEANUP: usize = 1;
-const EXPLORE_STORAGE: usize = 2;
-const SYSTEM_STATUS: usize = 3;
-const PREFERENCES: usize = 4;
+const DOCKER_CLEANUP: usize = 2;
+const EXPLORE_STORAGE: usize = 3;
+const SYSTEM_STATUS: usize = 4;
+const PREFERENCES: usize = 5;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -581,4 +583,127 @@ fn snapshot_main_menu_rows_with_data() {
         let output = render_to_string(140, 40, |f| render_workspace(f, &state, &theme));
         assert_snapshot!(format!("workspace_{name}_140x40"), output);
     }
+}
+
+fn docker_item(object: DockerObject, label: &str, size: u64, selected: bool) -> ScanItem {
+    ScanItem::docker(object, label.to_string(), size, selected)
+}
+
+fn docker_scan() -> CategoryScan {
+    let image = |id: &str, tags: &[&str]| DockerObject::Image {
+        id: id.to_string(),
+        tags: tags.iter().map(|tag| tag.to_string()).collect(),
+    };
+    CategoryScan {
+        id: "docker".to_string(),
+        title: "Docker".to_string(),
+        groups: vec![
+            ToolGroup {
+                tool: "Images".to_string(),
+                items: vec![
+                    docker_item(image("sha256:1", &["app:1"]), "app:1", 900_000_000, false),
+                    docker_item(image("sha256:2", &[]), "<untagged> 2", 200_000_000, true),
+                ],
+            },
+            ToolGroup {
+                tool: "Volumes (data is deleted for good)".to_string(),
+                items: vec![docker_item(
+                    DockerObject::Volume {
+                        name: "pgdata".to_string(),
+                    },
+                    "pgdata",
+                    400_000_000,
+                    false,
+                )],
+            },
+            ToolGroup {
+                tool: "Build cache".to_string(),
+                items: vec![docker_item(
+                    DockerObject::BuildCache,
+                    "Build cache",
+                    10_000_000_000,
+                    false,
+                )],
+            },
+        ],
+    }
+}
+
+fn select_screen(state: &SelectState) -> String {
+    let theme = snapshot_theme();
+    render_to_string(120, 32, |f| render_select(f, state, &theme))
+}
+
+fn select_item(state: &mut SelectState, group: usize, item: usize) {
+    state.scan.groups[group].items[item].selected = true;
+}
+
+#[test]
+fn snapshot_select_docker() {
+    let state = SelectState::with_preserved_selection(docker_scan());
+
+    assert_snapshot!("select_docker_120x32", select_screen(&state));
+}
+
+#[test]
+fn docker_has_its_own_breadcrumb() {
+    let output = select_screen(&SelectState::with_preserved_selection(docker_scan()));
+
+    let title = output.lines().next().unwrap();
+    assert!(title.contains("Docker"), "{title}");
+    assert!(!title.contains("Clean caches"), "{title}");
+}
+
+#[test]
+fn removing_a_volume_says_that_its_data_goes_with_it() {
+    let mut state = SelectState::with_preserved_selection(docker_scan());
+    select_item(&mut state, 1, 0);
+    state.open_confirmation();
+
+    let output = select_screen(&state);
+
+    assert!(output.contains("The data in 1 volume"), "{output}");
+}
+
+#[test]
+fn removing_images_alone_does_not_mention_volumes() {
+    let mut state = SelectState::with_preserved_selection(docker_scan());
+    state.open_confirmation();
+
+    let output = select_screen(&state);
+
+    assert!(output.contains("Remove 1 item?"), "{output}");
+    assert!(!output.contains("The data in"), "{output}");
+}
+
+#[test]
+fn an_unreachable_docker_explains_itself() {
+    let state = SelectState::unavailable("Docker", "Can't reach Docker.".to_string());
+
+    let output = select_screen(&state);
+
+    assert!(output.contains("Docker isn't available"), "{output}");
+    assert!(output.contains("Can't reach Docker."), "{output}");
+    assert!(!output.contains("Nothing to clean"), "{output}");
+}
+
+#[test]
+fn a_docker_with_nothing_unused_says_so_in_its_own_words() {
+    let scan = CategoryScan {
+        groups: Vec::new(),
+        ..docker_scan()
+    };
+
+    let output = select_screen(&SelectState::new(scan));
+
+    assert!(output.contains("Docker has nothing unused"), "{output}");
+    assert!(!output.contains("caches"), "{output}");
+}
+
+#[test]
+fn the_docker_row_sits_in_cleanup_and_says_what_it_does() {
+    let output = home_screen(&home_state(DOCKER_CLEANUP), 120, 32);
+
+    assert!(output.contains("Docker cleanup"), "{output}");
+    assert!(output.contains("never selected for you"), "{output}");
 }

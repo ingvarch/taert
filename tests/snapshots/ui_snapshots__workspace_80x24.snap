@@ -10,6 +10,7 @@ expression: output
    ▌ ✧ Clean caches                                                         ›
         Choose tools and individual paths to remove
      ◇ Project cleanup                                                      ›
+     ▦ Docker cleanup                                                       ›
 
      INSPECT
      ◔ Explore storage                                                      ›
@@ -18,7 +19,6 @@ expression: output
      SETTINGS
      ⌥ Preferences                                                          ›
      ◈ Protected paths                                                      ›
-
 
 
 

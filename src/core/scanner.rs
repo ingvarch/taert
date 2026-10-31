@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::catalog::Catalog;
+use super::docker::DockerObject;
 use super::path_utils::prettify_path;
 use super::safety::{FileIdentity, Safety};
 use super::sizer::DirSizer;
@@ -26,6 +27,8 @@ pub struct ScanItem {
     pub contents_only: bool,
     #[serde(skip)]
     pub identity: Option<FileIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerObject>,
 }
 
 impl ScanItem {
@@ -39,6 +42,7 @@ impl ScanItem {
             selected,
             contents_only,
             identity,
+            docker: None,
         }
     }
 }

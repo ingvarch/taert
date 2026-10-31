@@ -39,6 +39,9 @@ pub enum Command {
     /// Find and remove build artifacts inside project directories
     Purge(PurgeArgs),
 
+    /// Find and remove Docker images, volumes, networks and build cache no container uses
+    Docker,
+
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
 

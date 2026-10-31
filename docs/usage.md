@@ -12,12 +12,14 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Explore Storage, System Status, and Preferences.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Explore Storage, System Status, and Preferences. Keys `1` to `7` open a row directly.
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup items, disk usage and the largest items of your home folder for Explore Storage, and live CPU and memory for System Status. The main menu, System Status, Explore Storage, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and safe deletion via `D` or `Backspace`.
 - **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. Taller windows give each graph more rows, draw a bar for every core, and add a list of the top processes by memory. Reading all of it needs no administrator rights.
+
+- **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
 
 ### Keyboard Shortcuts
 
@@ -81,6 +83,21 @@ taert purge ~/Projects --json
 # Preview dry-run
 taert purge ~/Projects --dry-run
 ```
+
+### Docker Cleanup (`taert docker`)
+
+```bash
+# Preview what no container uses
+taert docker --dry-run
+
+# Structured JSON for automation
+taert docker --json
+
+# Remove only what starts selected: untagged images and unused networks
+taert docker --force
+```
+
+`--force` never removes tagged images, volumes, or the build cache. taert follows `DOCKER_HOST`, `DOCKER_CONTEXT`, and the current Docker context, and supports local sockets only, so a remote daemon stops with an error.
 
 ### Storage Directory Analysis (`taert analyze`)
 
