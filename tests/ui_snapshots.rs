@@ -851,7 +851,7 @@ fn other_lists_get_the_blank_row_but_no_column_titles() {
     let output = select_screen(&SelectState::new(scan));
     let lines: Vec<&str> = output.lines().collect();
 
-    let at = lines.iter().position(|l| l.contains("SECOND")).unwrap();
+    let at = lines.iter().position(|l| l.contains("Second")).unwrap();
     assert_eq!(lines[at - 1], "", "{output}");
     assert!(!output.contains("NAME"), "{output}");
 }
@@ -1119,11 +1119,12 @@ fn ascii_terminals_get_a_plain_frame() {
 }
 
 #[test]
-fn other_lists_stay_without_frames() {
+fn every_list_of_items_sits_in_frames() {
     let output = select_screen(&SelectState::new(sample_scan()));
 
-    assert!(!output.contains('╭'), "{output}");
-    assert!(!output.contains('│'), "{output}");
+    assert!(output.contains("╭─ Cargo"), "{output}");
+    assert!(output.contains('╰'), "{output}");
+    assert!(!output.contains("CREATED"), "{output}");
 }
 
 #[test]
@@ -1161,4 +1162,183 @@ fn a_list_too_long_for_the_window_keeps_its_side_borders() {
         let edge = row.contains('│') || row.contains('╭') || row.contains('╰');
         assert!(edge, "{row}");
     }
+}
+
+fn frame_edges(output: &str) -> (usize, usize, usize, usize) {
+    let lines: Vec<&str> = output.lines().collect();
+    let top = lines.iter().position(|l| l.contains('╭')).unwrap();
+    let bottom = lines.iter().rposition(|l| l.contains('╰')).unwrap();
+    let left = lines[top].chars().position(|c| c == '╭').unwrap();
+    let right = lines[top].chars().position(|c| c == '╮').unwrap();
+    (top, bottom, left, right)
+}
+
+fn assert_centered(output: &str, width: usize, height: usize) {
+    let (top, bottom, left, right) = frame_edges(output);
+    let (right_margin, bottom_margin) = (width - 1 - right, height - 1 - bottom);
+    assert!(
+        left.abs_diff(right_margin) <= 1,
+        "{left} and {right_margin}:\n{output}"
+    );
+    assert!(
+        top.abs_diff(bottom_margin) <= 1,
+        "{top} and {bottom_margin}:\n{output}"
+    );
+}
+
+fn exploring_state() -> AnalyzeState {
+    let mut state = sample_analyze();
+    state.levels.clear();
+    state.current_progress = Some(taert::ui::analyze::MeasuringProgress {
+        folder_path: PathBuf::from("/Users/test/Documents"),
+        position: 3,
+        total: 9,
+        current_name: "Library".to_string(),
+        current_subpath: Some("/Users/test/Library/Caches/Homebrew".to_string()),
+        scanned_files: 1_204,
+        scanned_bytes: 3_200_000_000,
+    });
+    state
+}
+
+#[test]
+fn exploring_sits_in_a_frame_in_the_middle_of_the_window() {
+    let theme = snapshot_theme();
+    let state = exploring_state();
+
+    for (width, height) in [(205_u16, 60_u16), (121, 40), (120, 32), (80, 24), (50, 16)] {
+        let output = render_to_string(width, height, |f| render_analyze(f, &state, &theme));
+        assert_centered(&output, width as usize, height as usize);
+        assert!(output.contains("Exploring"), "{output}");
+        assert!(output.contains("3/9"), "{output}");
+    }
+}
+
+#[test]
+fn scanning_sits_in_a_frame_in_the_middle_of_the_window() {
+    let theme = snapshot_theme();
+    let mut state = ProgressState::new("Scanning developer caches");
+    state.folder = Some("~/Library/Caches/Cargo".to_string());
+    state.found_count = 12;
+
+    for (width, height) in [(205_u16, 60_u16), (120, 32), (80, 24), (50, 16)] {
+        let output = render_to_string(width, height, |f| render_progress(f, &state, &theme));
+        assert_centered(&output, width as usize, height as usize);
+        assert!(output.contains("Scanning developer caches"), "{output}");
+        assert!(output.contains("Found 12 items"), "{output}");
+    }
+}
+
+#[test]
+fn a_long_path_stays_inside_the_progress_frame() {
+    let theme = snapshot_theme();
+    let mut state = ProgressState::new("A very long headline that keeps going ".repeat(4));
+    state.folder = Some(format!("/Users/test/{}", "deep/".repeat(40)));
+
+    let output = render_to_string(80, 24, |f| render_progress(f, &state, &theme));
+
+    let (top, bottom, left, right) = frame_edges(&output);
+    let lines: Vec<&str> = output.lines().collect();
+    for line in &lines[top + 1..bottom] {
+        let cells: Vec<char> = line.chars().collect();
+        assert_eq!(cells[left], '│', "{line}");
+        assert_eq!(cells.get(right), Some(&'│'), "{line}");
+    }
+}
+
+#[test]
+fn explore_lists_its_items_in_a_table_with_titled_columns() {
+    let theme = snapshot_theme();
+    let state = sample_analyze();
+
+    let output = render_to_string(120, 32, |f| render_analyze(f, &state, &theme));
+
+    assert!(output.contains("╭─ Documents"), "{output}");
+    let titles = line_with(&output, "NAME");
+    assert!(titles.contains("CREATED"), "{output}");
+    assert!(titles.contains("SIZE ↓"), "{output}");
+    assert_eq!(
+        column_of(titles, "NAME"),
+        column_of(line_with(&output, "file.bin"), "· file.bin"),
+        "{output}"
+    );
+}
+
+#[test]
+fn the_sorted_column_of_explore_carries_an_arrow() {
+    let theme = snapshot_theme();
+    let mut state = sample_analyze();
+
+    state.set_sort(SortOrder::Name);
+
+    let output = render_to_string(120, 32, |f| render_analyze(f, &state, &theme));
+    assert!(output.contains("NAME ↑"), "{output}");
+}
+
+#[test]
+fn preferences_sit_in_frames() {
+    let theme = snapshot_theme();
+    let config = Config::default();
+    let ignore = IgnoreStore::default();
+    let state = PreferencesState::new(&config, &ignore);
+
+    let output = render_to_string(120, 32, |f| render_preferences(f, &state, &theme));
+
+    assert!(output.contains("╭─ Cleanup"), "{output}");
+    assert!(output.contains("╭─ Locations"), "{output}");
+}
+
+#[test]
+fn a_path_list_sits_in_a_frame_even_when_empty() {
+    let theme = snapshot_theme();
+    let filled = IgnoreStore {
+        roots: vec!["/Users/test/Documents/Secret".to_string()],
+    };
+    let empty = IgnoreStore::default();
+
+    for ignore in [filled, empty] {
+        let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore);
+        let output = render_to_string(120, 32, |f| render_path_list_editor(f, &state, &theme));
+        assert!(output.contains("╭─ Protected paths"), "{output}");
+        assert!(output.contains('╰'), "{output}");
+    }
+}
+
+#[test]
+fn the_main_menu_sits_in_frames_on_every_width() {
+    for (width, height) in [(205, 60), (120, 32), (80, 40)] {
+        let output = home_screen(&home_state(CLEAN_CACHES), width, height);
+        for section in ["╭─ Cleanup", "╭─ Inspect", "╭─ Settings"] {
+            assert!(output.contains(section), "{section} at {width}:\n{output}");
+        }
+    }
+}
+
+#[test]
+fn the_highlighted_row_explains_itself_in_a_frame() {
+    let output = home_screen(&home_state(DOCKER_CLEANUP), 120, 32);
+
+    let top = line_with(&output, "Docker cleanup ─");
+    assert!(top.contains('╭'), "{output}");
+    assert!(output.contains("never selected for you"), "{output}");
+}
+
+#[test]
+fn the_clean_caches_submenu_sits_in_a_frame() {
+    let mut state = home_state(CLEAN_CACHES);
+    state.open_clean_submenu();
+
+    let output = home_screen(&state, 120, 32);
+
+    assert!(output.contains("╭─ Clean caches"), "{output}");
+}
+
+#[test]
+fn a_tool_name_keeps_its_brackets() {
+    let mut scan = sample_scan();
+    scan.groups[0].tool = "Cargo (Rust)".to_string();
+
+    let output = select_screen(&SelectState::new(scan));
+
+    assert!(output.contains("╭─ Cargo (Rust)"), "{output}");
 }

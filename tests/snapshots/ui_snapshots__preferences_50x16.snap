@@ -4,14 +4,14 @@ expression: output
 ---
  Preferences
 ──────────────────────────────────────────────────
-     CLEANUP
-   ▌    Preselect art…ts older than ‹  7 days  ›
+   ╭─ Cleanup ─────────────────────────────────╮
+   │ ▌    Preselect a… older than ‹  7 days  › │
+   ╰───────────────────────────────────────────╯
 
-     LOCATIONS
-        Project folders              6 folders ›
-        Protected paths                0 paths ›
-
-
+   ╭─ Locations ───────────────────────────────╮
+   │      Project folders          6 folders › │
+   │      Protected paths            0 paths › │
+   ╰───────────────────────────────────────────╯
 
 
 

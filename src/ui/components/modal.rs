@@ -3,6 +3,7 @@
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
@@ -10,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::button::{Button, render_button_group};
+use super::frame::frame_style;
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
@@ -27,6 +29,7 @@ pub struct Modal<'a> {
     pub message: Vec<Line<'a>>,
     pub buttons: Vec<Button<'a>>,
     pub hints: Option<Line<'a>>,
+    pub tint: Option<Color>,
 }
 
 impl<'a> Modal<'a> {
@@ -36,7 +39,14 @@ impl<'a> Modal<'a> {
             message: Vec::new(),
             buttons: Vec::new(),
             hints: None,
+            tint: None,
         }
+    }
+
+    /// Colors the border, for dialogs that report work in progress.
+    pub fn tint(mut self, color: Color) -> Self {
+        self.tint = Some(color);
+        self
     }
 
     pub fn message(mut self, message: Vec<Line<'a>>) -> Self {
@@ -146,7 +156,7 @@ impl<'a> Modal<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(theme.separator());
+            .border_style(self.tint.map_or(theme.separator(), frame_style));
         frame.render_widget(block, modal_rect);
 
         // 6. Content inside modal

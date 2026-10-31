@@ -102,6 +102,7 @@ impl ProgressState {
 
 pub fn render_progress(frame: &mut Frame, state: &ProgressState, theme: &Theme) {
     let chrome = AppChrome::new(vec!["taert", "Clean caches", "Scanning"])
+        .full_width()
         .hints(vec![Hint::new(theme.g.key_esc, "Cancel")]);
     let content_rect = chrome.render(frame, theme);
 

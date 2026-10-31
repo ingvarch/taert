@@ -6,14 +6,14 @@ expression: output
 ────────────────────────────────────────────────────────────────────────────────
    Scan first. Choose what to remove afterward.
 
-   ▌ ✧ All categories                                              Recommended
-        Developer caches, user junk, AI tools, and Trash
-     ◇ Developer caches
-     ○ User junk
-     ◎ AI tools
-     ⌫ Trash
-
-
+   ╭─ Clean caches ──────────────────────────────────────────────────────────╮
+   │ ▌ ✧ All categories                                          Recommended │
+   │      Developer caches, user junk, AI tools, and Trash                   │
+   │   ◇ Developer caches                                                    │
+   │   ○ User junk                                                           │
+   │   ◎ AI tools                                                            │
+   │   ⌫ Trash                                                               │
+   ╰─────────────────────────────────────────────────────────────────────────╯
 
 
 

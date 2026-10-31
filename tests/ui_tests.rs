@@ -145,7 +145,7 @@ fn test_render_select_screen() {
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
     assert!(rendered_text.contains("Test Scan"));
-    assert!(rendered_text.contains("CARGO"));
+    assert!(rendered_text.contains("Cargo"));
 }
 
 #[test]

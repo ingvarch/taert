@@ -7,9 +7,11 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::core::path_utils::{middle_truncate, prettify_path};
+use crate::ui::analyze::SortOrder;
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
+pub const SIZE_W: usize = 9;
 const BAR_MIN_ROW_WIDTH: usize = 100;
 const BAR_MIN_WIDTH: usize = 8;
 
@@ -248,6 +250,49 @@ impl<'a> ListRow<'a> {
         }
 
         Line::from(spans)
+    }
+}
+
+/// The heading row of a table of list rows.
+pub struct ColumnTitles<'a> {
+    pub date: &'a str,
+    pub date_width: usize,
+    pub order: SortOrder,
+    pub share: bool,
+    pub chevron: bool,
+}
+
+impl ColumnTitles<'_> {
+    pub fn render(&self, width: usize, theme: &Theme) -> Line<'static> {
+        let style = theme.footnote();
+        let title = |column: SortOrder, label: &str| {
+            let arrow = match column {
+                SortOrder::Name => theme.g.sort_ascending,
+                SortOrder::Size | SortOrder::Date => theme.g.sort_descending,
+            };
+            if column == self.order {
+                format!("{label} {arrow}")
+            } else {
+                label.to_string()
+            }
+        };
+
+        let date_w = self.date_width;
+        let mut row = ListRow::new(vec![Span::styled(title(SortOrder::Name, "NAME"), style)])
+            .leading(Span::raw(" "))
+            .meta(Span::styled(
+                format!("{:<date_w$}", title(SortOrder::Date, self.date)),
+                style,
+            ))
+            .detail(Span::styled(
+                format!("{:>SIZE_W$}", title(SortOrder::Size, "SIZE")),
+                style,
+            ))
+            .reserve_chevron(self.chevron);
+        if self.share {
+            row = row.bar(0.0).bar_heading("SHARE");
+        }
+        row.render_line(width, theme)
     }
 }
 

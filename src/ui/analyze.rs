@@ -19,13 +19,14 @@ use std::time::{Instant, SystemTime};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::ListRow;
+use super::components::list::{ColumnTitles, ListRow};
 use super::components::modal::Modal;
 use super::components::progress::ProgressView;
 use super::components::toast::Toast;
@@ -42,7 +43,9 @@ use crate::core::stores::IgnoreStore;
 
 // Below this the panel would squeeze the list or itself.
 const PREVIEW_MIN_WIDTH: u16 = 150;
-const LIST_WIDTH_WITH_PREVIEW: u16 = 100;
+const LIST_WIDTH_WITH_PREVIEW: u16 = 104;
+// "2026-10-30 11:01".
+const DATE_W: usize = 16;
 const PREVIEW_GAP: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -729,6 +732,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
                 .unwrap_or(&state.root),
         );
         let chrome = AppChrome::new(vec!["taert", "Explore", &title_path])
+            .full_width()
             .hints(vec![Hint::new(theme.g.key_esc, "Cancel")]);
         let content_rect = chrome.render(frame, theme);
 
@@ -876,7 +880,10 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         content_rect
     };
 
-    let list_area_height = content_rect.height as usize;
+    let frame_rows = (content_rect.height as usize).saturating_sub(FRAME_ROWS);
+    let row_width = (list_rect.width as usize).saturating_sub(FRAME_SIDES);
+    // The column titles take the first row.
+    let list_area_height = frame_rows.saturating_sub(1);
     let scroll_offset = if level.snapshot.children.len() > list_area_height && list_area_height > 0
     {
         let half = list_area_height / 2;
@@ -891,7 +898,14 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     };
 
     let total_dir_bytes = level.snapshot.total_bytes.max(1);
-    let mut list_lines = Vec::new();
+    let titles = ColumnTitles {
+        date: "CREATED",
+        date_width: DATE_W,
+        order: state.sort_order,
+        share: true,
+        chevron: true,
+    };
+    let mut list_lines = vec![titles.render(row_width, theme)];
 
     for (idx, child) in level
         .snapshot
@@ -935,6 +949,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         ];
 
         let date_str = crate::core::date_utils::format_system_time_opt(child.created);
+        let date_str = format!("{date_str:<DATE_W$}");
 
         let row = ListRow::new(title_spans)
             .leading(Span::styled(bullet, bullet_style))
@@ -945,18 +960,31 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
             .bar(fraction)
             .selected(is_selected);
 
-        list_lines.push(row.render_line(list_rect.width as usize, theme));
+        list_lines.push(row.render_line(row_width, theme));
     }
 
     if level.snapshot.children.is_empty() {
         list_lines.push(Line::from(""));
         list_lines.push(Line::from(Span::styled(
-            "  (empty folder or no accessible files)",
+            "Empty folder or no accessible files",
             theme.callout(),
         )));
     }
 
-    frame.render_widget(Paragraph::new(list_lines), list_rect);
+    let folder = level.snapshot.path.file_name().map_or_else(
+        || level.snapshot.path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let list_frame = card(
+        &folder,
+        Vec::new(),
+        list_lines,
+        list_rect.width as usize,
+        frame_rows,
+        theme.p.accent,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(list_frame), list_rect);
 
     if show_preview && let Some(child) = level.snapshot.children.get(level.selected) {
         render_preview_panel(frame, content_rect, list_rect, child, state, theme);
@@ -993,24 +1021,12 @@ fn render_preview_panel(
     state: &AnalyzeState,
     theme: &Theme,
 ) {
-    let divider = Rect {
-        x: list.right() + 1,
-        width: 1,
-        ..content
-    };
-    let panel_x = divider.right() + PREVIEW_GAP;
+    let panel_x = list.right() + PREVIEW_GAP;
     let panel = Rect {
         x: panel_x,
         width: content.right().saturating_sub(panel_x),
         ..content
     };
-
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::LEFT)
-            .border_style(theme.separator()),
-        divider,
-    );
 
     let parent_bytes = state.current_level().map_or(0, |l| l.snapshot.total_bytes);
     let lines = preview_lines(
@@ -1085,6 +1101,7 @@ fn render_measuring_modal(
     ];
 
     Modal::new(&title)
+        .tint(theme.p.accent)
         .message(message)
         .buttons(vec![Button::new("Cancel (esc)").focused(true)])
         .render(frame, frame.area(), theme);
@@ -1200,6 +1217,7 @@ fn render_analyze_deleting_dialog(
     let bar_spans = bar(fraction, 40, theme.p.accent, theme);
 
     Modal::new(&title)
+        .tint(theme.p.orange)
         .message(vec![
             path_line,
             Line::from(bar_spans),
@@ -1503,7 +1521,7 @@ mod tests {
 
         let rendered = screen_with(&mut state, 205, "nested.bin");
 
-        assert!(rendered.contains("CONTENTS"), "{rendered}");
+        assert!(rendered.contains("Contents"), "{rendered}");
         assert!(rendered.contains("1 item"), "{rendered}");
     }
 
@@ -1514,18 +1532,24 @@ mod tests {
 
         let rendered = screen_with(&mut state, 205, "of this folder");
 
-        assert!(!rendered.contains("CONTENTS"), "{rendered}");
+        assert!(!rendered.contains("Contents"), "{rendered}");
     }
 
     #[test]
-    fn the_list_stops_at_100_columns_beside_the_panel() {
+    fn the_list_keeps_its_width_beside_the_panel() {
         let (_temp, mut state) = explore_fixture();
 
         let rendered = screen_with(&mut state, 205, "nested.bin");
 
         let row = rendered.lines().nth(2).unwrap();
-        let divider = row.chars().position(|c| c == '│').unwrap();
-        assert!((103..=106).contains(&divider), "{divider}: {row}");
+        let corners: Vec<usize> = row
+            .chars()
+            .enumerate()
+            .filter(|(_, c)| *c == '╭')
+            .map(|(x, _)| x)
+            .collect();
+        assert_eq!(corners.len(), 2, "{row}");
+        assert_eq!(corners[1] - corners[0], 106, "{row}");
     }
 
     #[test]

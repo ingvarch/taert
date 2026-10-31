@@ -6,20 +6,20 @@ expression: output
 ────────────────────────────────────────────────────────────────────────────────
    Your Mac, crystal clean.
 
-     CLEANUP
-   ▌ ✧ Clean caches                                                          ›
-        Choose tools and individual paths to remove
-     ◇ Project cleanup                                                       ›
-     ▦ Docker cleanup                                                        ›
-
-     INSPECT
-     ◔ Explore storage                                                       ›
-     ▤ System status                                                         ›
-
-     SETTINGS
-     ⌥ Preferences                                                           ›
-     ◈ Protected paths                                                       ›
-
+   ╭─ Cleanup ───────────────────────────────────────────────────────────────╮
+   │ ▌ ✧ Clean caches                                                      › │
+   │      Choose tools and individual paths to remove                        │
+   │   ◇ Project cleanup                                                   › │
+   │   ▦ Docker cleanup                                                    › │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+   ╭─ Inspect ───────────────────────────────────────────────────────────────╮
+   │   ◔ Explore storage                                                   › │
+   │   ▤ System status                                                     › │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+   ╭─ Settings ──────────────────────────────────────────────────────────────╮
+   │   ⌥ Preferences                                                       › │
+   │   ◈ Protected paths                                                   › │
+   ╰─────────────────────────────────────────────────────────────────────────╯
 
 
 

@@ -4,33 +4,33 @@ expression: output
 ---
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-     CLEANUP                        │
-   ▌ ✧ Clean caches                 │    ✧  Clean caches
-     ◇ Project cleanup              │
-     ▦ Docker cleanup               │    Choose tools and individual paths to remove.
-                                    │
-     INSPECT                        │    Includes developer caches, user junk, AI tool caches
-     ◔ Explore storage              │    and the Trash. You'll review every item before
-     ▤ System status                │    anything is removed.
-                                    │
-     SETTINGS                ╭────────────────────────────────────────────────────────────╮
-     ⌥ Preferences           │ Explore your home folder?                                  │
-     ◈ Protected paths       │                                                            │───── 118.6 GB available ─╮
-                             │ Measuring every folder can take a few minutes.             │──── 375.8 GB of 494.4 GB │
-                             │                                                            │━───   1.85 TB of 2.00 TB │
+   ╭─ Cleanup ──────────────────────╮  ╭─ ✧  Clean caches ───────────────────────────────────────────────────────────╮
+   │ ▌ ✧ Clean caches             › │  │ Choose tools and individual paths to remove.                                │
+   │   ◇ Project cleanup          › │  │                                                                             │
+   │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches                        │
+   ╰────────────────────────────────╯  │ and the Trash. You'll review every item before                              │
+   ╭─ Inspect ──────────────────────╮  │ anything is removed.                                                        │
+   │   ◔ Explore storage          › │  │                                                                             │
+   │   ▤ System status            › │  │ ↵ Open                                                                      │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╭─ Settings ──────────────╭────────────────────────────────────────────────────────────╮
+   │   ⌥ Preferences         │ Explore your home folder?                                  │───── 118.6 GB available ─╮
+   │   ◈ Protected paths     │                                                            │──── 375.8 GB of 494.4 GB │
+   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
                              │                                                            │                          │
-                             │                                           Cancel    Start  │                          │
-                             │                                    Enter select   Esc back │──────────────────────────╯
+                             │                                                            │                          │
+                             │                                           Cancel    Start  │──────────────────────────╯
+                             │                                    Enter select   Esc back │
                              ╰────────────────────────────────────────────────────────────╯
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
+
+
+
+
+
+
+
+
+
+
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ?  More                                                                                          Open  ↵

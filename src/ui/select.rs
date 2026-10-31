@@ -18,7 +18,7 @@ use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ListRow, path_spans, render_section_header_spans};
+use super::components::list::{ColumnTitles, ListRow, SIZE_W, path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::theme::Theme;
@@ -58,7 +58,6 @@ pub struct SelectState {
 }
 
 const BAR_MIN_WIDTH: usize = 100;
-const SIZE_W: usize = 9;
 // Fits "About an hour ago", the longest age that lasts more than a few seconds.
 const AGE_W: usize = 17;
 
@@ -237,9 +236,7 @@ impl SelectState {
                 });
             }
 
-            if self.sort_order.is_some() {
-                rows.push(heading_row(RowKind::SectionEnd));
-            }
+            rows.push(heading_row(RowKind::SectionEnd));
         }
 
         rows
@@ -505,12 +502,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     };
 
     let width = list_rect.width as usize;
-    let table = state.sort_order.is_some();
-    let row_width = if table {
-        width.saturating_sub(FRAME_SIDES)
-    } else {
-        width
-    };
+    let row_width = width.saturating_sub(FRAME_SIDES);
     let now = SystemTime::now();
     let mut list_lines = Vec::new();
     for (idx, row) in rows
@@ -520,27 +512,35 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .take(list_area_height)
     {
         let is_focused = idx == state.focused_index;
-        let frame = table.then(|| section_color(&state.scan.groups[row.group_index], theme));
+        let color = section_color(&state.scan.groups[row.group_index], theme);
 
         if row.kind == RowKind::Gap {
             list_lines.push(Line::default());
-        } else if let (RowKind::SectionEnd, Some(color)) = (row.kind, frame) {
+        } else if row.kind == RowKind::SectionEnd {
             list_lines.push(frame_bottom(width, color, theme));
         } else if let (RowKind::Columns { date }, Some(order)) = (row.kind, state.sort_order) {
-            let titles = column_titles(date, order, row_width, theme);
-            list_lines.push(in_frame(titles, row_width, frame, theme));
+            let titles = ColumnTitles {
+                date,
+                date_width: AGE_W,
+                order,
+                share: row_width >= BAR_MIN_WIDTH,
+                chevron: false,
+            };
+            let titles = titles.render(row_width, theme);
+            list_lines.push(framed(titles, row_width, color, theme));
         } else if row.kind == RowKind::Section {
             let noun = if row.item_count == 1 { "item" } else { "items" };
             let detail_spans = vec![
                 Span::styled(format!("{} {noun} · ", row.item_count), theme.footnote()),
                 Span::styled(format_bytes(row.size_bytes), theme.size(row.size_bytes)),
             ];
-            list_lines.push(match frame {
-                Some(color) => {
-                    section_frame_top(&row.group_name, detail_spans, width, color, theme)
-                }
-                None => render_section_header_spans(&row.group_name, detail_spans, width, theme),
-            });
+            list_lines.push(section_frame_top(
+                &state.scan.groups[row.group_index],
+                detail_spans,
+                width,
+                color,
+                theme,
+            ));
         } else {
             let bullet = if row.is_selected {
                 theme.g.check_on
@@ -600,7 +600,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             }
 
             let line = list_row.render_line(row_width, theme);
-            list_lines.push(in_frame(line, row_width, frame, theme));
+            list_lines.push(framed(line, row_width, color, theme));
         }
     }
 
@@ -633,59 +633,27 @@ fn section_color(group: &ToolGroup, theme: &Theme) -> Color {
     }
 }
 
-// Everything after " (" in a section name is a note for its frame.
+// Docker sections keep a warning in brackets after their name, for plain output too.
 fn section_frame_top(
-    name: &str,
+    group: &ToolGroup,
     detail: Vec<Span<'static>>,
     width: usize,
     color: Color,
     theme: &Theme,
 ) -> Line<'static> {
-    let (title, note) = name.split_once(" (").unwrap_or((name, ""));
-    let note = note.trim_end_matches(')');
-    frame_top(title, note, detail, width, color, theme)
-}
-
-fn in_frame(
-    line: Line<'static>,
-    width: usize,
-    color: Option<Color>,
-    theme: &Theme,
-) -> Line<'static> {
-    match color {
-        Some(color) => framed(line, width, color, theme),
-        None => line,
+    let name = group.tool.as_str();
+    let is_docker = group.items.iter().any(|item| item.docker.is_some());
+    match name.split_once(" (") {
+        Some((title, note)) if is_docker => frame_top(
+            title,
+            note.trim_end_matches(')'),
+            detail,
+            width,
+            color,
+            theme,
+        ),
+        _ => frame_top(name, "", detail, width, color, theme),
     }
-}
-
-fn column_titles(date: &str, order: SortOrder, width: usize, theme: &Theme) -> Line<'static> {
-    let style = theme.footnote();
-    let title = |column: SortOrder, label: &str| {
-        let arrow = match column {
-            SortOrder::Name => theme.g.sort_ascending,
-            SortOrder::Size | SortOrder::Date => theme.g.sort_descending,
-        };
-        if column == order {
-            format!("{label} {arrow}")
-        } else {
-            label.to_string()
-        }
-    };
-
-    let mut row = ListRow::new(vec![Span::styled(title(SortOrder::Name, "NAME"), style)])
-        .leading(Span::raw(" "))
-        .meta(Span::styled(
-            format!("{:<AGE_W$}", title(SortOrder::Date, date)),
-            style,
-        ))
-        .detail(Span::styled(
-            format!("{:>SIZE_W$}", title(SortOrder::Size, "SIZE")),
-            style,
-        ));
-    if width >= BAR_MIN_WIDTH {
-        row = row.bar(0.0).bar_heading("SHARE");
-    }
-    row.render_line(width, theme)
 }
 
 fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, theme: &Theme) {
@@ -785,6 +753,7 @@ fn render_removing_dialog(
     let bar_spans = bar(fraction, 40, theme.p.accent, theme);
 
     Modal::new(&title)
+        .tint(theme.p.orange)
         .message(vec![
             path_line,
             Line::from(bar_spans),
