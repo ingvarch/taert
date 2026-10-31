@@ -7,15 +7,15 @@ expression: output
      CLEANUP                        │
      ✧ Clean caches                ›│    ▤  System status
      ◇ Project cleanup             ›│
-                                    │    Live macOS hardware, memory pressure, and APFS
-     INSPECT                        │    storage telemetry with visual breakdown.
-     ◔ Explore storage             ›│
-   ▌ ▤ System status               ›│    ↵ Open
-                                    │
-     SETTINGS                       │    CPU                                                                    61°C · Load 8.43 6.50 5.86
-     ⌥ Preferences                 ›│    Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────  48.8%
-     ◈ Protected paths             ›│    GPU     ━━━━━━━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────────────────────  31.0%
-                                    │    Cores
+     ▦ Docker cleanup              ›│    Live macOS hardware, memory pressure, and APFS
+                                    │    storage telemetry with visual breakdown.
+     INSPECT                        │
+     ◔ Explore storage             ›│    ↵ Open
+   ▌ ▤ System status               ›│
+                                    │    CPU                                                                    61°C · Load 8.43 6.50 5.86
+     SETTINGS                       │    Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────  48.8%
+     ⌥ Preferences                 ›│    GPU     ━━━━━━━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────────────────────  31.0%
+     ◈ Protected paths             ›│    Cores
                                     │                            ▄▄▄▄▄
                                     │                            █████ ▇▇▇▇▇ ▂▂▂▂▂
                                     │                            █████ █████ █████ █████ ▂▂▂▂▂

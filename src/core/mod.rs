@@ -3,6 +3,7 @@ pub mod cache;
 pub mod catalog;
 pub mod cleaner;
 pub mod date_utils;
+pub mod docker;
 pub mod iokit;
 pub mod path_utils;
 pub mod profiler;

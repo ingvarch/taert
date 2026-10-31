@@ -10,15 +10,15 @@ expression: output
    ▌ ✧ Clean caches                                                         ›
         Choose tools and individual paths to remove
      ◇ Pr╭────────────────────────────────────────────────────────────╮     ›
-         │ Explore your home folder?                                  │
-     INSP│                                                            │
-     ◔ Ex│ Measuring every folder can take a few minutes.             │     ›
-     ▤ Sy│                                                            │     ›
+     ▦ Do│ Explore your home folder?                                  │     ›
          │                                                            │
-     SETT│                                           Cancel    Start  │
-     ⌥ Pr│                                    Enter select   Esc back │     ›
-     ◈ Pr╰────────────────────────────────────────────────────────────╯     ›
-
+     INSP│ Measuring every folder can take a few minutes.             │
+     ◔ Ex│                                                            │     ›
+     ▤ Sy│                                                            │     ›
+         │                                           Cancel    Start  │
+     SETT│                                    Enter select   Esc back │
+     ⌥ Pr╰────────────────────────────────────────────────────────────╯     ›
+     ◈ Protected paths                                                      ›
 
 
 

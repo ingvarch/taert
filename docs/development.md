@@ -5,7 +5,7 @@ Local setup, checks, and project layout. For user guides and command references,
 ## Prerequisites
 
 - macOS 11 (Big Sur) or newer.
-- Rust stable 1.85 or newer:
+- Rust stable 1.88 or newer:
 
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -58,6 +58,8 @@ cargo fmt --check
 
 CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). Releases are in [releasing.md](releasing.md).
 
+`cargo test --test docker_live -- --ignored` runs against the real Docker daemon. These tests remove only the objects they create, and they leave a few small entries in the build cache.
+
 ## Project structure
 
 ```
@@ -72,6 +74,7 @@ taert/
 │   │   ├── cache.rs            # StorageCache: directory size aggregation & snapshot cache
 │   │   ├── catalog.rs          # Known cache definitions and path catalogs
 │   │   ├── cleaner.rs          # Safe removal engine with progress events
+│   │   ├── docker.rs           # Unused Docker objects and their removal through the daemon API
 │   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
 │   │   ├── path_utils.rs       # Path prettifying, tilde expansion, truncation
 │   │   ├── profiler.rs         # Disk space and system profile analyzers
@@ -115,6 +118,7 @@ taert/
 ├── tests/
 │   ├── cli_tests.rs            # Integration tests for CLI flags and JSON output
 │   ├── components_snapshots.rs # Snapshot tests for individual UI components
+│   ├── docker_live.rs          # Ignored tests against a real Docker daemon
 │   ├── ui_snapshots.rs         # Snapshot tests for full-screen UI views at multiple sizes
 │   ├── ui_tests.rs             # Interactive state and navigation tests
 │   └── snapshots/              # Insta snapshot baselines

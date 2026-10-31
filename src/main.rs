@@ -11,6 +11,7 @@ use clap::Parser;
 
 use crate::cli::{CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs};
 use crate::core::bytes::format_bytes;
+use crate::core::docker::DockerClient;
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
@@ -53,6 +54,8 @@ fn main() -> ExitCode {
         Some(Command::Clean(ref args)) => handle_clean(args, &cli, use_plain, &ignore),
 
         Some(Command::Purge(ref args)) => handle_purge(args, &cli, use_plain, &ignore, &config),
+
+        Some(Command::Docker) => handle_docker(&cli, use_plain, &ignore),
 
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
@@ -114,6 +117,16 @@ fn handle_purge(
     let mut scan = Purger::scan_projects(&scan_root, older_than, &config.extra_artifacts, ignore);
 
     process_scan_result(&mut scan, cli, use_plain, ignore)
+}
+
+fn handle_docker(cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
+    match DockerClient::connect().and_then(|client| client.scan()) {
+        Ok(mut scan) => process_scan_result(&mut scan, cli, use_plain, ignore),
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn process_scan_result(

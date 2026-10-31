@@ -34,6 +34,7 @@ use super::workspace::{
 };
 use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
+use crate::core::docker;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{PurgeScanEvent, Purger};
@@ -56,6 +57,7 @@ pub enum ScanMessage {
     Progress(ScanProgressEvent),
     PurgeProgress(PurgeScanEvent),
     Finished(CategoryScan),
+    Failed(String),
 }
 
 pub enum RemovalMessage {
@@ -198,8 +200,13 @@ impl App {
                         ScanMessage::Progress(evt) => {
                             progress.apply_category(evt);
                         }
+                        ScanMessage::Failed(problem) => {
+                            self.screen =
+                                Screen::Select(SelectState::unavailable("Docker", problem));
+                            break;
+                        }
                         ScanMessage::Finished(scan) => {
-                            let state = if scan.id == "purge" {
+                            let state = if scan.id == "purge" || scan.id == docker::SCAN_ID {
                                 SelectState::with_preserved_selection(scan)
                             } else {
                                 SelectState::new(scan)
@@ -689,7 +696,7 @@ impl App {
             Screen::Workspace(_) => vec![
                 HelpSection::new(
                     "Menu",
-                    vec![Hint::new("↵", "Select"), Hint::new("1-5", "Quick select")],
+                    vec![Hint::new("↵", "Select"), Hint::new("1-7", "Quick select")],
                 ),
                 general(vec![navigate, Hint::new("⎋ / q", "Quit")]),
             ],
@@ -854,6 +861,7 @@ impl App {
                     w.open_confirmation(StartConfirmKind::ProjectCleanup(folder_count));
                 }
             }
+            MainMenuChoice::DockerCleanup => self.launch_docker_scan(),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
@@ -900,6 +908,24 @@ impl App {
                 self.launch_purge_scan(roots);
             }
         }
+    }
+
+    fn launch_docker_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let message = match docker::DockerClient::connect().and_then(|client| client.scan()) {
+                Ok(scan) => ScanMessage::Finished(scan),
+                Err(error) => ScanMessage::Failed(error.to_string()),
+            };
+            let _ = tx.send(message);
+        });
+
+        self.screen = Screen::Scanning(
+            ProgressState::new("Reading Docker"),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+        );
     }
 
     fn launch_category_scan(&mut self, cat_id: &'static str, cat_title: &'static str) {
@@ -1061,6 +1087,30 @@ mod tests {
             Screen::Analyze(state) => state,
             _ => panic!("expected the analyze screen"),
         }
+    }
+
+    #[test]
+    fn help_counts_every_row_of_the_main_menu() {
+        let app = App::new(IgnoreStore::default(), Config::default());
+        let rows = WorkspaceState::new().items.len();
+
+        let sections = app.help_sections();
+        let quick = sections[0]
+            .shortcuts
+            .iter()
+            .find(|h| h.desc == "Quick select");
+
+        assert_eq!(quick.unwrap().key, format!("1-{rows}"));
+    }
+
+    #[test]
+    fn the_third_quick_key_opens_docker_cleanup() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(
+            state.select_by_number(3),
+            Some(MainMenuChoice::DockerCleanup)
+        );
     }
 
     #[test]
