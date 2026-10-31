@@ -2,11 +2,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::button::Button;
+use super::columns::side_by_side;
 use super::hints::Hint;
 use super::modal::Modal;
 use crate::ui::theme::Theme;
@@ -57,6 +57,7 @@ impl<'a> HelpSheet<'a> {
             side_by_side(
                 column_lines(first, theme),
                 first_w,
+                COLUMN_GAP,
                 column_lines(rest, theme),
             )
         } else {
@@ -89,7 +90,7 @@ fn column_lines<'a>(sections: &[HelpSection<'a>], theme: &Theme) -> Vec<Line<'a>
         }
         lines.push(Line::from(Span::styled(
             section.title.to_uppercase(),
-            theme.callout().add_modifier(Modifier::BOLD),
+            theme.section_header(),
         )));
         for hint in &section.shortcuts {
             lines.push(Line::from(vec![
@@ -101,22 +102,6 @@ fn column_lines<'a>(sections: &[HelpSection<'a>], theme: &Theme) -> Vec<Line<'a>
     }
 
     lines
-}
-
-fn side_by_side<'a>(left: Vec<Line<'a>>, left_w: usize, right: Vec<Line<'a>>) -> Vec<Line<'a>> {
-    let height = left.len().max(right.len());
-    let mut left = left.into_iter();
-    let mut right = right.into_iter();
-
-    (0..height)
-        .map(|_| {
-            let mut line = left.next().unwrap_or_default();
-            let pad = left_w + COLUMN_GAP - line.width();
-            line.spans.push(Span::raw(" ".repeat(pad)));
-            line.spans.extend(right.next().unwrap_or_default().spans);
-            line
-        })
-        .collect()
 }
 
 fn fit_height<'a>(mut lines: Vec<Line<'a>>, max_h: usize, theme: &Theme) -> Vec<Line<'a>> {

@@ -72,6 +72,7 @@ taert/
 │   │   ├── cache.rs            # StorageCache: directory size aggregation & snapshot cache
 │   │   ├── catalog.rs          # Known cache definitions and path catalogs
 │   │   ├── cleaner.rs          # Safe removal engine with progress events
+│   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
 │   │   ├── path_utils.rs       # Path prettifying, tilde expansion, truncation
 │   │   ├── profiler.rs         # Disk space and system profile analyzers
 │   │   ├── projects_store.rs   # Persistent store for scanned project folders
@@ -80,7 +81,8 @@ taert/
 │   │   ├── scanner.rs          # Category scanner for dev, junk, ai, and trash caches
 │   │   ├── sizer.rs            # APFS allocated block sizer (st_blocks * 512) and deduplication
 │   │   ├── stores.rs           # Config and IgnoreStore persistence
-│   │   └── sysinfo.rs          # RAM pressure and APFS volume metrics via sysctl/statvfs
+│   │   ├── sysinfo.rs          # RAM pressure and APFS volume metrics via sysctl/statvfs
+│   │   └── telemetry.rs        # Live CPU, GPU, disk, network, battery, and process sampling
 │   ├── plain/
 │   │   └── runner.rs           # Non-interactive plain text output mode
 │   └── ui/
@@ -93,14 +95,15 @@ taert/
 │       ├── progress.rs         # Scanning progress screen with live progress bars
 │       ├── review.rs           # Pre-cleanup review screen with group statistics
 │       ├── select.rs           # Item selection screen with search filtering and modals
-│       ├── system_status.rs    # Live memory pressure and disk allocation monitor
+│       ├── system_status.rs    # Live system overview with panels and history graphs
 │       ├── theme.rs            # Design tokens, typography styles, and symbols
 │       ├── workspace.rs        # Workspace home screen with clean submenus and actions
 │       └── components/         # Reusable HIG-inspired UI components
 │           ├── button.rs       # Keyboard button with primary and active states
 │           ├── chrome.rs       # App header bar, breadcrumbs, and status
+│           ├── columns.rs      # Places two stacks of lines side by side
 │           ├── empty.rs        # Empty state with icons and helpful callouts
-│           ├── gauge.rs        # Proportional bar gauge with legend
+│           ├── gauge.rs        # Proportional bar gauges, sparklines, and legends
 │           ├── help.rs         # Modal keyboard shortcuts help sheet
 │           ├── hints.rs        # Bottom keybinding hints and primary action badge
 │           ├── list.rs         # List row with selection indicator and size badge

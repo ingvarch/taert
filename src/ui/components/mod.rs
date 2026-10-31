@@ -2,6 +2,7 @@
 
 pub mod button;
 pub mod chrome;
+pub mod columns;
 pub mod empty;
 pub mod gauge;
 pub mod help;

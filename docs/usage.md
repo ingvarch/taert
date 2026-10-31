@@ -17,7 +17,7 @@ taert
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and safe deletion via `D` or `Backspace`.
-- **System Status**: Displays live RAM pressure, physical memory allocation, and APFS disk space breakdown.
+- **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. On wide terminals (≥100 columns) the panels sit in two columns; on narrower ones they stack and scroll. Reading all of it needs no administrator rights.
 
 ### Keyboard Shortcuts
 

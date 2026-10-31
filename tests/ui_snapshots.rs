@@ -9,6 +9,10 @@ use taert::core::profiler::{
 };
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use taert::core::stores::{Config, IgnoreStore};
+use taert::core::telemetry::{
+    CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
+    PowerStatus, ProcessStatus, VolumeStatus,
+};
 use taert::ui::analyze::{AnalyzeState, render_analyze};
 use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
@@ -73,15 +77,17 @@ fn mock_system_status() -> FullSystemStatus {
             memory_bytes: Some(48 * 1024 * 1024 * 1024),
             macos_version: "27.0.1 (26A434)".to_string(),
             model: Some("Mac16,7".to_string()),
+            model_name: Some("MacBook Pro (16-inch, Nov 2024)".to_string()),
             uptime_seconds: 879600,
         },
         memory: DetailedMemoryStatus {
             total_bytes: 48 * 1024 * 1024 * 1024,
             free_bytes: 11 * 1024 * 1024 * 1024,
-            active_bytes: 9_900_000_000,
-            inactive_bytes: 9_600_000_000,
+            app_bytes: 19_500_000_000,
             wired_bytes: 5_700_000_000,
             compressed_bytes: 11_200_000_000,
+            cached_bytes: 4_200_000_000,
+            swap_used_bytes: 0,
             pressure: Some(MemoryPressureLevel::Normal),
         },
         storage: DetailedStorageStatus {
@@ -91,7 +97,84 @@ fn mock_system_status() -> FullSystemStatus {
             free_bytes: 118_600_000_000,
             managed_bytes: 5_700_000_000,
         },
+        live: LiveStatus {
+            cpu: CpuStatus {
+                usage_percent: Some(48.8),
+                core_percents: vec![
+                    12.0, 18.0, 9.0, 25.0, 91.0, 76.0, 64.0, 58.0, 44.0, 37.0, 22.0, 15.0, 8.0, 3.0,
+                ],
+                efficiency_cores: 4,
+                load_average: Some([8.43, 6.5, 5.86]),
+                temperature_c: Some(61.0),
+            },
+            gpu: Some(GpuStatus {
+                usage_percent: Some(31.0),
+                core_count: Some(20),
+            }),
+            boot_volume: Some("Macintosh HD".to_string()),
+            volumes: vec![VolumeStatus {
+                name: "Time Machine".to_string(),
+                total_bytes: 2_000_000_000_000,
+                available_bytes: 150_000_000_000,
+            }],
+            disk_io: Some(DiskIo {
+                read_per_sec: 240_000.0,
+                write_per_sec: 5_500_000.0,
+            }),
+            network: NetworkStatus {
+                down_per_sec: Some(1_200_000.0),
+                up_per_sec: Some(84_000.0),
+                local: Some(InterfaceAddress {
+                    interface: "en0".to_string(),
+                    address: "192.168.1.20".to_string(),
+                }),
+                tunnel: Some(InterfaceAddress {
+                    interface: "utun8".to_string(),
+                    address: "100.64.0.7".to_string(),
+                }),
+            },
+            power: Some(PowerStatus {
+                charge_percent: 80,
+                health_percent: Some(96),
+                cycles: Some(124),
+                source: PowerSource::PluggedIn,
+                adapter_watts: Some(96),
+                draw_watts: None,
+                minutes_left: None,
+                temperature_c: Some(31.0),
+            }),
+            processes: vec![
+                ("node", 250.1, 1_000_000_000),
+                ("WindowServer", 53.2, 171_000_000),
+                ("workerd", 36.6, 166_300_000),
+            ]
+            .into_iter()
+            .map(|(name, cpu_percent, memory_bytes)| ProcessStatus {
+                name: name.to_string(),
+                cpu_percent,
+                memory_bytes,
+            })
+            .collect(),
+        },
     }
+}
+
+fn status_with_history() -> SystemStatusState {
+    let mut state = SystemStatusState::with_status(mock_system_status());
+    for step in 0..200_u32 {
+        let wave = (step % 13) as f64 / 12.0;
+        let mut status = mock_system_status();
+        status.live.cpu.usage_percent = Some((20.0 + 60.0 * wave) as f32);
+        status.live.network.down_per_sec = Some(1_200_000.0 * wave);
+        status.live.network.up_per_sec = Some(84_000.0 * wave);
+        status.live.disk_io = Some(DiskIo {
+            read_per_sec: 240_000.0 * wave,
+            write_per_sec: 5_500_000.0 * (1.0 - wave),
+        });
+        state.apply(status);
+    }
+    state.apply(mock_system_status());
+    state
 }
 
 const SIZES: &[(u16, u16, &str)] = &[(80, 24, "80x24"), (120, 32, "120x32"), (50, 16, "50x16")];
@@ -209,14 +292,19 @@ fn snapshot_analyze() {
 #[test]
 fn snapshot_system_status() {
     let theme = snapshot_theme();
-    let state = SystemStatusState {
-        status: mock_system_status(),
-        scroll_offset: 0,
-    };
+    let state = status_with_history();
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_system_status(f, &state, &theme));
         assert_snapshot!(format!("system_status_{label}"), output);
     }
+}
+
+#[test]
+fn snapshot_system_status_wide_and_tall() {
+    let theme = snapshot_theme();
+    let state = status_with_history();
+    let output = render_to_string(140, 40, |f| render_system_status(f, &state, &theme));
+    assert_snapshot!("system_status_140x40", output);
 }
 
 #[test]

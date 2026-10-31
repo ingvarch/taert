@@ -72,7 +72,7 @@ impl Theme {
 
     pub fn section_header(&self) -> Style {
         Style::default()
-            .fg(self.p.tertiary)
+            .fg(self.p.secondary)
             .add_modifier(Modifier::BOLD)
     }
 
