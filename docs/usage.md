@@ -127,7 +127,7 @@ taert uninstall --json
 taert uninstall Zoom --force
 ```
 
-A name can be part of an app name as long as only one app matches. A name that fits several apps is an error, and `--force` needs a name.
+A name can be part of an app name as long as only one app matches. A name that fits several apps is an error. `--force` needs a whole name, so a partial match never removes anything unreviewed. `--dry-run` wins over `--force`.
 
 taert looks for:
 
@@ -142,15 +142,18 @@ What starts selected depends on how sure taert is that a file belongs to the app
 | Starts selected | You choose |
 |---|---|
 | The app itself | Browser profiles and game or emulator libraries |
-| Files named after the bundle id, in your home folder and in `/Library` | Group containers, when another app of the same vendor stays |
-| Launch and native host entries that start the app | Folders named after the app in `~/.config`, `~/.local/share`, `/Library`, and `/Users/Shared` |
-| Launch and helper files from the app's installer package | Folders named after the app when the name is common or under 4 letters |
-| Folders named after the app in `~/Library` and `~/.cache` | Folders named after the app without its channel, like `Zed` for Zed Nightly |
-| Installer receipts | Crash reports in `/Library/Logs/DiagnosticReports` |
+| Files named after the bundle id, in your home folder and in `/Library` | License and plugin state of tools such as iLok, Native Instruments, and iZotope |
+| Launch and native host entries that start the app | Group containers, when another app of the same vendor stays |
+| Launch and helper files from the app's installer package | Folders named after the app in `~/.config`, `~/.local/share`, `/Library`, and `/Users/Shared` |
+| Folders named after the app in `~/Library` and `~/.cache` | Folders and launch entries that only mention the app's name, or use a common or short one |
+| Installer receipts | Folders named after the app without its channel, like `Zed` for Zed Nightly, and files that continue a two-part id such as `md.obsidian` |
+| | Crash reports in `/Library/Logs/DiagnosticReports` |
 
-Removal runs in this order: launch agents are unloaded, the app leaves Launch Services and Login Items, its login helpers stop, and running copies get a quit request, then `SIGTERM`, then `SIGKILL`. The app goes next, through `brew uninstall --cask` if a Homebrew cask installed it. Its other files go only after that, so a failed removal never leaves an app without its data. Last, its Dock tile goes.
+Removal runs in this order. Open apps get a quit request, so they can ask you to save. Then, if anything needs root, macOS asks for your password once per run. An app with files only root can remove goes in that same step, so a cancelled prompt leaves it installed, with its login item and background jobs in place. After that taert stops what is left: launch agents are unloaded, the app leaves Launch Services and Login Items, its login helpers stop, and remaining processes get `SIGTERM`, then `SIGKILL`. The app goes through `brew uninstall --cask` if a Homebrew cask installed it, and Homebrew does that step before the password. An app's other files go only after the app itself, so a failed removal never leaves an app without its data. Last, its Dock tile goes.
 
-macOS asks for your password once per run if a file needs root. If another copy of the app stays, only the selected copy goes, and settings and data stay. Security agents such as CrowdStrike, Jamf, and SentinelOne are left alone, because they need their vendor's uninstaller. Paths on the ignore list are left out too.
+Another copy of the app, another channel of it such as Foo Beta, or an app whose id continues this one keeps everything shared: only the selected bundle goes. taert looks for those in the app folders, Setapp, Homebrew's Caskroom, and on mounted volumes, and again right before it removes anything.
+
+An app in `/Applications` that is a link goes alone: the link is removed, and the app it points to stays, with its files. Security agents such as CrowdStrike, Jamf, and SentinelOne are left alone, because they need their vendor's uninstaller. Paths on the ignore list are left out too.
 
 taert never edits your configuration. If `~/.zshrc`, `~/.config/fish/config.fish`, or a similar file still mentions a removed path, taert names the file and line.
 
