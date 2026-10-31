@@ -446,6 +446,15 @@ impl App {
                     KeyCode::Right => state.scroll_path_right(),
                     KeyCode::Char(' ') => state.toggle_current(),
                     KeyCode::Char('a') | KeyCode::Char('A') => state.select_all(),
+                    KeyCode::Char('S') if state.sort_order.is_some() => {
+                        state.set_sort(SortOrder::Size);
+                    }
+                    KeyCode::Char('N') if state.sort_order.is_some() => {
+                        state.set_sort(SortOrder::Name);
+                    }
+                    KeyCode::Char('D') if state.sort_order.is_some() => {
+                        state.set_sort(SortOrder::Date);
+                    }
                     KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
                     KeyCode::Char('/') => {
                         state.is_searching = true;
@@ -691,6 +700,16 @@ impl App {
             hints.push(Hint::new("?", "Toggle help"));
             HelpSection::new("General", hints)
         };
+        let sort_section = || {
+            HelpSection::new(
+                "Sort by",
+                vec![
+                    Hint::new("⇧S", "Size"),
+                    Hint::new("⇧N", "Name"),
+                    Hint::new("⇧D", "Date created"),
+                ],
+            )
+        };
 
         match &self.screen {
             Screen::Workspace(_) => vec![
@@ -704,8 +723,8 @@ impl App {
                 HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
                 general(Vec::new()),
             ],
-            Screen::Select(_) => vec![
-                HelpSection::new(
+            Screen::Select(state) => {
+                let mut sections = vec![HelpSection::new(
                     "Select items",
                     vec![
                         Hint::new("␣", "Toggle item"),
@@ -714,9 +733,13 @@ impl App {
                         Hint::new("/", "Search"),
                         Hint::new("↵", "Review & clean"),
                     ],
-                ),
-                general(vec![navigate, back]),
-            ],
+                )];
+                if state.sort_order.is_some() {
+                    sections.push(sort_section());
+                }
+                sections.push(general(vec![navigate, back]));
+                sections
+            }
             Screen::Review(_) => vec![
                 HelpSection::new("Review", vec![Hint::new("↵", "Confirm clean")]),
                 general(vec![scroll, back]),
@@ -734,14 +757,7 @@ impl App {
                         Hint::new("D / ⌫", "Delete selected"),
                     ],
                 ),
-                HelpSection::new(
-                    "Sort by",
-                    vec![
-                        Hint::new("⇧S", "Size"),
-                        Hint::new("⇧N", "Name"),
-                        Hint::new("⇧D", "Date created"),
-                    ],
-                ),
+                sort_section(),
                 general(vec![navigate, Hint::new("⎋ / q", "Quit explore")]),
             ],
             Screen::SystemStatus(_) => vec![general(vec![scroll, Hint::new("⎋ / q / ↵", "Back")])],
@@ -1069,6 +1085,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::scanner::{ScanItem, ToolGroup};
     use crate::ui::analyze::SortOrder;
     use std::path::Path;
     use tempfile::tempdir;
@@ -1111,6 +1128,78 @@ mod tests {
             state.select_by_number(3),
             Some(MainMenuChoice::DockerCleanup)
         );
+    }
+
+    fn select_app(scan: CategoryScan) -> App {
+        let mut app = App::new(IgnoreStore::default(), Config::default());
+        app.screen = Screen::Select(SelectState::with_preserved_selection(scan));
+        app
+    }
+
+    fn scan_with_id(id: &str) -> CategoryScan {
+        let mut item = ScanItem::new("/nowhere/a".into(), 1, true, false);
+        item.modified = None;
+        CategoryScan {
+            id: id.to_string(),
+            title: "List".to_string(),
+            groups: vec![ToolGroup {
+                tool: "Group".to_string(),
+                items: vec![item],
+            }],
+        }
+    }
+
+    fn select(app: &App) -> &SelectState {
+        match &app.screen {
+            Screen::Select(state) => state,
+            _ => panic!("expected the select screen"),
+        }
+    }
+
+    #[test]
+    fn shift_letters_sort_a_docker_table() {
+        let mut app = select_app(scan_with_id(docker::SCAN_ID));
+
+        app.handle_key(KeyCode::Char('D'));
+        assert_eq!(select(&app).sort_order, Some(SortOrder::Date));
+        app.handle_key(KeyCode::Char('N'));
+        assert_eq!(select(&app).sort_order, Some(SortOrder::Name));
+        app.handle_key(KeyCode::Char('S'));
+        assert_eq!(select(&app).sort_order, Some(SortOrder::Size));
+    }
+
+    #[test]
+    fn sorting_leaves_the_selection_alone_and_plain_n_clears_it() {
+        let mut app = select_app(scan_with_id(docker::SCAN_ID));
+
+        app.handle_key(KeyCode::Char('N'));
+        assert_eq!(select(&app).scan.selected_items().len(), 1);
+
+        app.handle_key(KeyCode::Char('n'));
+        assert!(select(&app).scan.selected_items().is_empty());
+    }
+
+    #[test]
+    fn other_lists_keep_their_keys() {
+        let mut app = select_app(scan_with_id("dev"));
+
+        app.handle_key(KeyCode::Char('D'));
+        assert_eq!(select(&app).sort_order, None);
+
+        app.handle_key(KeyCode::Char('N'));
+        assert!(select(&app).scan.selected_items().is_empty());
+    }
+
+    #[test]
+    fn help_shows_the_sort_keys_only_for_a_table() {
+        let titles =
+            |app: &App| -> Vec<&str> { app.help_sections().iter().map(|s| s.title).collect() };
+
+        let table = select_app(scan_with_id(docker::SCAN_ID));
+        assert_eq!(titles(&table), ["Select items", "Sort by", "General"]);
+
+        let list = select_app(scan_with_id("dev"));
+        assert_eq!(titles(&list), ["Select items", "General"]);
     }
 
     #[test]

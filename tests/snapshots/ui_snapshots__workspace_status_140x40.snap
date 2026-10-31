@@ -5,17 +5,17 @@ expression: output
  taert                                                                                                        118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
      CLEANUP                        │
-     ✧ Clean caches                ›│    ▤  System status
-     ◇ Project cleanup             ›│
-     ▦ Docker cleanup              ›│    Live macOS hardware, memory pressure, and APFS
+     ✧ Clean caches                 │    ▤  System status
+     ◇ Project cleanup              │
+     ▦ Docker cleanup               │    Live macOS hardware, memory pressure, and APFS
                                     │    storage telemetry with visual breakdown.
      INSPECT                        │
-     ◔ Explore storage             ›│    ↵ Open
-   ▌ ▤ System status               ›│
+     ◔ Explore storage              │    ↵ Open
+   ▌ ▤ System status                │
                                     │    CPU                                                                    61°C · Load 8.43 6.50 5.86
      SETTINGS                       │    Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────  48.8%
-     ⌥ Preferences                 ›│    GPU     ━━━━━━━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────────────────────  31.0%
-     ◈ Protected paths             ›│    Cores
+     ⌥ Preferences                  │    GPU     ━━━━━━━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────────────────────  31.0%
+     ◈ Protected paths              │    Cores
                                     │                            ▄▄▄▄▄
                                     │                            █████ ▇▇▇▇▇ ▂▂▂▂▂
                                     │                            █████ █████ █████ █████ ▂▂▂▂▂

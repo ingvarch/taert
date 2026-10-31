@@ -5,17 +5,17 @@ expression: output
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
      CLEANUP                        │
-   ▌ ✧ Clean caches                ›│    ✧  Clean caches
-     ◇ Project cleanup             ›│
-     ▦ Docker cleanup              ›│    Choose tools and individual paths to remove.
+   ▌ ✧ Clean caches                 │    ✧  Clean caches
+     ◇ Project cleanup              │
+     ▦ Docker cleanup               │    Choose tools and individual paths to remove.
                                     │
      INSPECT                        │    Includes developer caches, user junk, AI tool caches
-     ◔ Explore storage             ›│    and the Trash. You'll review every item before
-     ▤ System status               ›│    anything is removed.
+     ◔ Explore storage              │    and the Trash. You'll review every item before
+     ▤ System status                │    anything is removed.
                                     │
      SETTINGS                       │    ↵ Open
-     ⌥ Preferences                 ›│
-     ◈ Protected paths             ›│    STORAGE                                                    118.6 GB available
+     ⌥ Preferences                  │
+     ◈ Protected paths              │    STORAGE                                                    118.6 GB available
                                     │    Macintosh HD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────── 375.8 GB of 494.4 GB
                                     │    Time Machine ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───   1.85 TB of 2.00 TB
                                     │    ● Used     375.8 GB   ● Managed    5.7 GB

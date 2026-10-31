@@ -7,18 +7,18 @@ expression: output
    Your Mac, crystal clean.
 
      CLEANUP
-   ▌ ✧ Clean caches                                                         ›
+   ▌ ✧ Clean caches                                                          ›
         Choose tools and individual paths to remove
-     ◇ Project cleanup                                                      ›
-     ▦ Docker cleanup                                                       ›
+     ◇ Project cleanup                                                       ›
+     ▦ Docker cleanup                                                        ›
 
      INSPECT
-     ◔ Explore storage                                                      ›
-     ▤ System status                                                        ›
+     ◔ Explore storage                                                       ›
+     ▤ System status                                                         ›
 
      SETTINGS
-     ⌥ Preferences                                                          ›
-     ◈ Protected paths                                                      ›
+     ⌥ Preferences                                                           ›
+     ◈ Protected paths                                                       ›
 
 
 

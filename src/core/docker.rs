@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bollard::models::{
     BuildCache, ContainerSummary, ImageSummary, Network, SystemDataUsageResponse, Volume,
@@ -21,6 +22,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::runtime::{Builder, Runtime};
 
+use super::date_utils::parse_rfc3339;
 use super::safety::Safety;
 use super::scanner::{CategoryScan, ScanItem, ToolGroup};
 
@@ -68,6 +70,16 @@ impl ScanItem {
             docker: Some(object),
         }
     }
+
+    pub fn created(mut self, time: Option<SystemTime>) -> Self {
+        self.modified = time;
+        self
+    }
+}
+
+fn from_unix(seconds: i64) -> Option<SystemTime> {
+    let seconds = u64::try_from(seconds).ok().filter(|seconds| *seconds > 0)?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 fn short_id(id: &str) -> &str {
@@ -107,6 +119,7 @@ fn unused_images(images: &[ImageSummary], containers: &[ContainerSummary]) -> Ve
                 tags,
             };
             ScanItem::docker(object, label, image.size.max(0) as u64, selected)
+                .created(from_unix(image.created))
         })
         .collect();
 
@@ -133,12 +146,8 @@ fn unused_volumes(volumes: &[Volume], containers: &[ContainerSummary]) -> Vec<Sc
             let object = DockerObject::Volume {
                 name: volume.name.clone(),
             };
-            Some(ScanItem::docker(
-                object,
-                label,
-                usage.size.max(0) as u64,
-                false,
-            ))
+            let item = ScanItem::docker(object, label, usage.size.max(0) as u64, false);
+            Some(item.created(volume.created_at.as_deref().and_then(parse_rfc3339)))
         })
         .collect();
 
@@ -160,7 +169,8 @@ fn unused_networks(networks: &[Network], containers: &[ContainerSummary]) -> Vec
             let id = network.id.clone()?;
             let free = !BUILT_IN_NETWORKS.contains(&name) && !joined.contains(name);
             let object = DockerObject::Network { id };
-            free.then(|| ScanItem::docker(object, name.to_string(), 0, true))
+            let created = network.created.as_deref().and_then(parse_rfc3339);
+            free.then(|| ScanItem::docker(object, name.to_string(), 0, true).created(created))
         })
         .collect();
 
@@ -168,12 +178,10 @@ fn unused_networks(networks: &[Network], containers: &[ContainerSummary]) -> Vec
     items
 }
 
-fn removable_cache_bytes(records: &[BuildCache]) -> u64 {
+fn removable_cache(records: &[BuildCache]) -> impl Iterator<Item = &BuildCache> {
     records
         .iter()
         .filter(|record| record.in_use != Some(true) && record.shared != Some(true))
-        .map(|record| record.size.unwrap_or(0).max(0) as u64)
-        .sum()
 }
 
 /// Everything no container refers to, stopped containers included.
@@ -186,7 +194,14 @@ pub fn unused_objects(
         return Err(DockerError::NoUsage);
     };
 
-    let cache_bytes = removable_cache_bytes(usage.build_cache.as_deref().unwrap_or_default());
+    let records = usage.build_cache.as_deref().unwrap_or_default();
+    let cache_bytes: u64 = removable_cache(records)
+        .map(|record| record.size.unwrap_or(0).max(0) as u64)
+        .sum();
+    let last_use = removable_cache(records)
+        .filter_map(|record| record.last_used_at.as_deref())
+        .filter_map(parse_rfc3339)
+        .max();
     let cache = (cache_bytes > 0).then(|| {
         ScanItem::docker(
             DockerObject::BuildCache,
@@ -194,6 +209,7 @@ pub fn unused_objects(
             cache_bytes,
             false,
         )
+        .created(last_use)
     });
 
     let groups = [
@@ -436,6 +452,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::UNIX_EPOCH;
 
     fn image(id: &str, tags: &[&str], containers: i64, size: i64) -> ImageSummary {
         ImageSummary {
@@ -705,6 +722,61 @@ mod tests {
         assert_eq!(rows[0].size_bytes, 100);
         assert!(!rows[0].selected);
         assert_eq!(rows[0].docker, Some(DockerObject::BuildCache));
+    }
+
+    #[test]
+    fn rows_know_when_their_object_was_created() {
+        let mut old_image = image("sha256:a", &["app:1"], 0, 10);
+        old_image.created = 1_700_000_000;
+        let mut data = volume("pgdata", 0, 5);
+        data.created_at = Some("2026-05-11T10:24:36Z".to_string());
+        let mut free = network("old_default", LOCAL_SCOPE);
+        free.created = Some("2026-05-11T10:24:36.261354675Z".to_string());
+        let report = usage(vec![old_image], vec![data], vec![]);
+
+        let scan = unused_objects(&report, &[], &[free]).unwrap();
+
+        let seconds = |group: &str| {
+            let created = items(&scan, group)[0].modified.unwrap();
+            created.duration_since(UNIX_EPOCH).unwrap().as_secs()
+        };
+        assert_eq!(seconds("Images"), 1_700_000_000);
+        assert_eq!(seconds("Volumes"), 1_778_495_076);
+        assert_eq!(seconds("Networks"), 1_778_495_076);
+    }
+
+    #[test]
+    fn a_missing_date_stays_unknown() {
+        let mut undated = image("sha256:a", &["app:1"], 0, 10);
+        undated.created = 0;
+        let report = usage(vec![undated], vec![volume("pgdata", 0, 5)], vec![]);
+
+        let scan = unused_objects(&report, &[], &[]).unwrap();
+
+        assert_eq!(items(&scan, "Images")[0].modified, None);
+        assert_eq!(items(&scan, "Volumes")[0].modified, None);
+    }
+
+    #[test]
+    fn the_build_cache_row_dates_from_its_last_use() {
+        let used = |date: &str| BuildCache {
+            last_used_at: Some(date.to_string()),
+            ..cache(10, false, false)
+        };
+        let report = usage(
+            vec![],
+            vec![],
+            vec![
+                used("2026-05-11T10:24:36Z"),
+                used("2026-05-12T10:24:36Z"),
+                cache(10, false, false),
+            ],
+        );
+
+        let scan = unused_objects(&report, &[], &[]).unwrap();
+
+        let last_use = items(&scan, "Build cache")[0].modified;
+        assert_eq!(last_use, parse_rfc3339("2026-05-12T10:24:36Z"));
     }
 
     #[test]

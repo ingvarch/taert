@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -36,6 +36,7 @@ pub use crate::core::cache::{ChildItem, FolderSnapshot, StorageCache};
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
+use crate::core::scanner::ScanItem;
 use crate::core::sizer::DirSizer;
 use crate::core::stores::IgnoreStore;
 
@@ -120,32 +121,65 @@ impl SortOrder {
         }
     }
 
-    pub fn sort_children(&self, children: &mut [ChildItem]) {
+    pub fn sort_children<T: Sortable>(&self, children: &mut [T]) {
+        let by_name = |a: &T, b: &T| a.sort_name().cmp(&b.sort_name());
         match self {
             Self::Size => {
                 children.sort_by(|a, b| {
-                    b.size_bytes
-                        .cmp(&a.size_bytes)
-                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    b.sort_bytes()
+                        .cmp(&a.sort_bytes())
+                        .then_with(|| by_name(a, b))
                 });
             }
             Self::Date => {
                 children.sort_by(|a, b| {
-                    b.created
-                        .cmp(&a.created)
-                        .then_with(|| b.size_bytes.cmp(&a.size_bytes))
-                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    b.sort_date()
+                        .cmp(&a.sort_date())
+                        .then_with(|| b.sort_bytes().cmp(&a.sort_bytes()))
+                        .then_with(|| by_name(a, b))
                 });
             }
             Self::Name => {
                 children.sort_by(|a, b| {
-                    a.name
-                        .to_lowercase()
-                        .cmp(&b.name.to_lowercase())
-                        .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+                    by_name(a, b).then_with(|| b.sort_bytes().cmp(&a.sort_bytes()))
                 });
             }
         }
+    }
+}
+
+/// What a list row offers to [`SortOrder`]. An item without a date sorts last.
+pub trait Sortable {
+    fn sort_bytes(&self) -> u64;
+    fn sort_date(&self) -> Option<SystemTime>;
+    fn sort_name(&self) -> String;
+}
+
+impl Sortable for ChildItem {
+    fn sort_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    fn sort_date(&self) -> Option<SystemTime> {
+        self.created
+    }
+
+    fn sort_name(&self) -> String {
+        self.name.to_lowercase()
+    }
+}
+
+impl Sortable for ScanItem {
+    fn sort_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    fn sort_date(&self) -> Option<SystemTime> {
+        self.modified
+    }
+
+    fn sort_name(&self) -> String {
+        self.path.display().to_string().to_lowercase()
     }
 }
 

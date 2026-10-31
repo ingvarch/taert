@@ -26,6 +26,7 @@ pub struct ListRow<'a> {
     pub meta: Option<Span<'a>>,
     pub detail: Option<Span<'a>>,
     pub bar: Option<f64>,
+    pub bar_heading: Option<&'a str>,
     pub chevron: bool,
     pub reserve_chevron: bool,
     pub selected: bool,
@@ -39,6 +40,7 @@ impl<'a> ListRow<'a> {
             meta: None,
             detail: None,
             bar: None,
+            bar_heading: None,
             chevron: false,
             reserve_chevron: false,
             selected: false,
@@ -62,6 +64,12 @@ impl<'a> ListRow<'a> {
 
     pub fn bar(mut self, fraction: f64) -> Self {
         self.bar = Some(fraction);
+        self
+    }
+
+    /// Prints `heading` in place of the bar, to title its column.
+    pub fn bar_heading(mut self, heading: &'a str) -> Self {
+        self.bar_heading = Some(heading);
         self
     }
 
@@ -135,7 +143,8 @@ impl<'a> ListRow<'a> {
 
         let right_total = chevron_width + detail_width + bar_total_width + meta_width;
 
-        let left_fixed = 2 + 3; // bar (2) + leading (3)
+        let leading_width = self.leading.as_ref().map_or(3, |l| l.content.width() + 1);
+        let left_fixed = 2 + leading_width;
         let avail_for_title = width.saturating_sub(left_fixed + right_total + 1);
 
         // 3. Title spans with truncation if needed
@@ -183,14 +192,29 @@ impl<'a> ListRow<'a> {
             };
 
             if show_bar_graphic {
-                let b =
-                    crate::ui::components::gauge::bar(frac, bar_w as u16, theme.p.accent, theme);
-                spans.extend(b);
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(pct_str, theme.footnote()));
+                if let Some(heading) = self.bar_heading {
+                    let column = bar_w + 1 + 6;
+                    spans.push(Span::styled(
+                        format!("{heading:<column$}"),
+                        theme.footnote(),
+                    ));
+                } else {
+                    let b = crate::ui::components::gauge::bar(
+                        frac,
+                        bar_w as u16,
+                        theme.p.accent,
+                        theme,
+                    );
+                    spans.extend(b);
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(pct_str, theme.footnote()));
+                }
                 spans.push(Span::raw("  "));
             } else if show_percentage {
-                spans.push(Span::styled(pct_str, theme.footnote()));
+                let pct = self
+                    .bar_heading
+                    .map_or(pct_str, |heading| format!("{heading:>6}"));
+                spans.push(Span::styled(pct, theme.footnote()));
                 spans.push(Span::raw("  "));
             }
         }
@@ -303,6 +327,62 @@ mod tests {
 
     fn bar_cells(line: &Line) -> usize {
         rendered(line).matches(['━', '─']).count()
+    }
+
+    #[test]
+    fn a_row_with_a_leading_glyph_fills_its_width_too() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        for width in [60, 95, 120, 200] {
+            let line = bar_row("a", 0.5)
+                .leading(Span::raw("●"))
+                .render_line(width, &theme);
+            assert_eq!(line.width(), width);
+        }
+    }
+
+    #[test]
+    fn a_heading_row_lines_up_with_the_rows_below_it() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        for width in [90, 97, 100, 150, 203] {
+            let row = ListRow::new(vec![Span::raw("node:22")])
+                .leading(Span::raw("●"))
+                .meta(Span::raw("5 months ago "))
+                .detail(Span::raw("  1.0 GB"))
+                .bar(0.5)
+                .render_line(width, &theme);
+            let heading = ListRow::new(vec![Span::raw("NAME")])
+                .leading(Span::raw(" "))
+                .meta(Span::raw("CREATED      "))
+                .detail(Span::raw("    SIZE"))
+                .bar(0.0)
+                .bar_heading("SHARE")
+                .render_line(width, &theme);
+
+            let (row, heading) = (rendered(&row), rendered(&heading));
+            let at = |line: &str, text: &str| line[..line.find(text).unwrap()].chars().count();
+            assert_eq!(at(&heading, "NAME"), at(&row, "node:22"), "{width}");
+            assert_eq!(at(&heading, "CREATED"), at(&row, "5 months"), "{width}");
+            assert_eq!(heading.chars().count(), width);
+            assert_eq!(row.chars().count(), width);
+            assert!(heading.ends_with("SIZE"), "{heading}");
+            assert!(row.ends_with("1.0 GB"), "{row}");
+        }
+    }
+
+    #[test]
+    fn a_heading_names_the_bar_column_where_the_bar_starts() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let row = bar_row("a", 1.0).render_line(120, &theme);
+        let heading = bar_row("a", 0.0)
+            .bar_heading("SHARE")
+            .render_line(120, &theme);
+
+        let bar_at = rendered(&row).chars().position(|c| c == '━').unwrap();
+        let (byte_at, _) = rendered(&heading).match_indices("SHARE").next().unwrap();
+        assert_eq!(rendered(&heading)[..byte_at].chars().count(), bar_at);
     }
 
     #[test]
