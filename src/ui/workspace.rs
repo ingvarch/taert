@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use super::analyze::SortOrder;
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ListRow, render_section_header};
 use super::components::modal::Modal;
@@ -29,8 +30,6 @@ use crate::core::sysinfo::SysInfo;
 
 const SPLIT_MIN_WIDTH: u16 = 100;
 const DETAIL_GAP: u16 = 3;
-// Panels indent their own content by this much.
-const PANEL_INDENT: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -513,9 +512,9 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
     frame.render_widget(Paragraph::new(detail_lines), detail_rect);
 
     let data_rect = Rect {
-        x: detail_rect.x - PANEL_INDENT,
+        x: detail_rect.x,
         y: detail_rect.y + detail_rows,
-        width: detail_rect.width + PANEL_INDENT,
+        width: detail_rect.width,
         height: detail_rect.height.saturating_sub(detail_rows),
     };
     let data = detail_data(
@@ -548,17 +547,20 @@ fn detail_data(
             lines.push(Line::default());
             match &state.largest {
                 Some(snapshot) => {
-                    lines.push(render_section_header(
-                        "Largest in home folder",
-                        None,
-                        width,
-                        theme,
-                    ));
-                    let rows = height.saturating_sub(lines.len());
-                    lines.extend(folder_rows(snapshot, width, rows, theme));
+                    let color = theme.p.accent;
+                    let inner = width.saturating_sub(FRAME_SIDES);
+                    let rows = height.saturating_sub(lines.len() + FRAME_ROWS);
+                    let title = "Largest in home folder";
+                    lines.push(frame_top(title, "", Vec::new(), width, color, theme));
+                    lines.extend(
+                        folder_rows(snapshot, inner, rows, theme)
+                            .into_iter()
+                            .map(|row| framed(row, inner, color, theme)),
+                    );
+                    lines.push(frame_bottom(width, color, theme));
                 }
                 None => lines.push(Line::from(Span::styled(
-                    "  Open Explore storage to see the largest items in your home folder.",
+                    "Open Explore storage to see the largest items in your home folder.",
                     theme.callout(),
                 ))),
             }

@@ -198,7 +198,7 @@ fn test_render_analyze_screen() {
 
 #[test]
 fn test_render_system_status_screen() {
-    let backend = TestBackend::new(120, 30);
+    let backend = TestBackend::new(120, 90);
     let mut terminal = Terminal::new(backend).unwrap();
     let state = taert::ui::system_status::SystemStatusState::new();
     let theme = Theme::new();
@@ -212,8 +212,8 @@ fn test_render_system_status_screen() {
     let buffer = terminal.backend().buffer();
     let rendered_text = format!("{buffer:?}");
     assert!(rendered_text.contains("System status"));
-    assert!(rendered_text.contains("MEMORY"));
-    assert!(rendered_text.contains("STORAGE"));
+    assert!(rendered_text.contains("Memory"));
+    assert!(rendered_text.contains("Storage"));
     assert!(rendered_text.contains("Free"));
     assert!(rendered_text.contains("of"));
     assert!(rendered_text.contains("Managed space may include purgeable"));

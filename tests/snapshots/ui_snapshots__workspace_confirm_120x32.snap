@@ -15,12 +15,12 @@ expression: output
                                     │
      SETTINGS                ╭────────────────────────────────────────────────────────────╮
      ⌥ Preferences           │ Explore your home folder?                                  │
-     ◈ Protected paths       │                                                            │         118.6 GB available
-                             │ Measuring every folder can take a few minutes.             │────── 375.8 GB of 494.4 GB
-                             │                                                            │━━━───   1.85 TB of 2.00 TB
-                             │                                                            │
-                             │                                           Cancel    Start  │
-                             │                                    Enter select   Esc back │
+     ◈ Protected paths       │                                                            │───── 118.6 GB available ─╮
+                             │ Measuring every folder can take a few minutes.             │──── 375.8 GB of 494.4 GB │
+                             │                                                            │━───   1.85 TB of 2.00 TB │
+                             │                                                            │                          │
+                             │                                           Cancel    Start  │                          │
+                             │                                    Enter select   Esc back │──────────────────────────╯
                              ╰────────────────────────────────────────────────────────────╯
                                     │
                                     │

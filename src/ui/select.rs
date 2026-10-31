@@ -7,15 +7,15 @@ use std::time::SystemTime;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
 use super::components::empty::EmptyState;
+use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ListRow, path_spans, render_section_header_spans};
@@ -58,8 +58,6 @@ pub struct SelectState {
 }
 
 const BAR_MIN_WIDTH: usize = 100;
-// A border and a space on each side.
-const FRAME_SIDES: usize = 4;
 const SIZE_W: usize = 9;
 // Fits "About an hour ago", the longest age that lasts more than a few seconds.
 const AGE_W: usize = 17;
@@ -530,7 +528,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             list_lines.push(frame_bottom(width, color, theme));
         } else if let (RowKind::Columns { date }, Some(order)) = (row.kind, state.sort_order) {
             let titles = column_titles(date, order, row_width, theme);
-            list_lines.push(framed(titles, row_width, frame, theme));
+            list_lines.push(in_frame(titles, row_width, frame, theme));
         } else if row.kind == RowKind::Section {
             let noun = if row.item_count == 1 { "item" } else { "items" };
             let detail_spans = vec![
@@ -538,7 +536,9 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 Span::styled(format_bytes(row.size_bytes), theme.size(row.size_bytes)),
             ];
             list_lines.push(match frame {
-                Some(color) => frame_top(&row.group_name, detail_spans, width, color, theme),
+                Some(color) => {
+                    section_frame_top(&row.group_name, detail_spans, width, color, theme)
+                }
                 None => render_section_header_spans(&row.group_name, detail_spans, width, theme),
             });
         } else {
@@ -600,7 +600,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             }
 
             let line = list_row.render_line(row_width, theme);
-            list_lines.push(framed(line, row_width, frame, theme));
+            list_lines.push(in_frame(line, row_width, frame, theme));
         }
     }
 
@@ -633,80 +633,29 @@ fn section_color(group: &ToolGroup, theme: &Theme) -> Color {
     }
 }
 
-fn frame_style(color: Color) -> Style {
-    Style::default().fg(color).add_modifier(Modifier::DIM)
-}
-
-fn frame_top(
+// Everything after " (" in a section name is a note for its frame.
+fn section_frame_top(
     name: &str,
     detail: Vec<Span<'static>>,
     width: usize,
     color: Color,
     theme: &Theme,
 ) -> Line<'static> {
-    let (title, note) = match name.split_once(" (") {
-        Some((title, note)) => (title, note.trim_end_matches(')')),
-        None => (name, ""),
-    };
-    let detail_w: usize = detail.iter().map(|span| span.content.width()).sum();
-    // "╭─ ", the spaces around the rule, and " ─╮".
-    let fixed = 3 + title.width() + 2 + detail_w + 3;
-    let note = if fixed + 2 + note.width() < width {
-        note
-    } else {
-        ""
-    };
-    let note_w = if note.is_empty() { 0 } else { 2 + note.width() };
-    let rule = width.saturating_sub(fixed + note_w);
+    let (title, note) = name.split_once(" (").unwrap_or((name, ""));
+    let note = note.trim_end_matches(')');
+    frame_top(title, note, detail, width, color, theme)
+}
 
-    let border = frame_style(color);
-    let line = theme.g.frame_horizontal;
-    let mut spans = vec![
-        Span::styled(format!("{}{line} ", theme.g.frame_top_left), border),
-        Span::styled(
-            title.to_string(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if !note.is_empty() {
-        spans.push(Span::styled(
-            format!("  {note}"),
-            Style::default().fg(color),
-        ));
+fn in_frame(
+    line: Line<'static>,
+    width: usize,
+    color: Option<Color>,
+    theme: &Theme,
+) -> Line<'static> {
+    match color {
+        Some(color) => framed(line, width, color, theme),
+        None => line,
     }
-    spans.push(Span::styled(format!(" {} ", line.repeat(rule)), border));
-    spans.extend(detail);
-    spans.push(Span::styled(
-        format!(" {line}{}", theme.g.frame_top_right),
-        border,
-    ));
-    Line::from(spans)
-}
-
-fn frame_bottom(width: usize, color: Color, theme: &Theme) -> Line<'static> {
-    Line::from(Span::styled(
-        format!(
-            "{}{}{}",
-            theme.g.frame_bottom_left,
-            theme.g.frame_horizontal.repeat(width.saturating_sub(2)),
-            theme.g.frame_bottom_right
-        ),
-        frame_style(color),
-    ))
-}
-
-fn framed(line: Line<'static>, width: usize, color: Option<Color>, theme: &Theme) -> Line<'static> {
-    let Some(color) = color else {
-        return line;
-    };
-
-    let border = frame_style(color);
-    let pad = " ".repeat(width.saturating_sub(line.width()));
-    let mut spans = vec![Span::styled(format!("{} ", theme.g.frame_vertical), border)];
-    spans.extend(line.spans);
-    spans.push(Span::raw(pad));
-    spans.push(Span::styled(format!(" {}", theme.g.frame_vertical), border));
-    Line::from(spans)
 }
 
 fn column_titles(date: &str, order: SortOrder, width: usize, theme: &Theme) -> Line<'static> {
