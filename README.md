@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-dea584?logo=rust&logoColor=black)](Cargo.toml)
 [![macOS](https://img.shields.io/badge/macOS-11+-000000?logo=apple&logoColor=white)](https://apple.com)
 
-A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with Rust and Ratatui. It finds caches, system junk, and project build artifacts, giving you transparent control over what gets deleted permanently.
+A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with Rust and Ratatui. It finds caches, system junk, project build artifacts, and everything an app leaves behind, giving you transparent control over what gets deleted permanently.
 
 ## Features
 
@@ -16,6 +16,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
+- App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 
@@ -36,6 +37,7 @@ taert clean dev --dry-run
 taert purge ~/Projects --older-than 30 --json
 taert analyze ~/Downloads
 taert docker --dry-run
+taert uninstall Zoom --dry-run
 ```
 
 For subcommands, keyboard shortcuts, and scripting options, see [docs/usage.md](docs/usage.md).

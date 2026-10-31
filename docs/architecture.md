@@ -47,6 +47,25 @@ The freed size comes from the daemon's totals before and after, because images s
 
 `bollard` stays pinned to 0.19. Versions 0.20 and newer read `/system/df` only in the API 1.52 shape, and a daemon on an older API then comes back empty with no error. Daemons answer an API 1.49 client in the older shape, including Docker 29 and newer.
 
+## Uninstalling Apps
+
+An uninstall has two steps, so nothing is removed before you have seen it:
+
+1. **Plan** ([`uninstaller.rs`](../src/core/uninstaller.rs)): `find_leftovers` in [`leftovers.rs`](../src/core/leftovers.rs) checks exact places and reads single folder levels. It never walks a tree, so a wrong name cannot reach far. Each find carries its `Evidence`, which decides whether it starts selected. The plan is a normal `CategoryScan`, one group per app, so the select screen, `--dry-run`, and `--json` all show the same list.
+2. **Run**: `Uninstaller::run` works through the selected rows of the plan.
+
+These rules keep it from removing the wrong thing:
+
+- **Allowed paths**: `Safety::can_remove` refuses `/Applications` and `/Library`, so uninstalling has its own gate, `Safety::can_uninstall`. Outside the home folder it accepts only app bundles and entries right below the folders apps use, such as `/Library/LaunchDaemons`, and never `com.apple.` names. Credentials, cloud files, and the ignore list stay protected.
+- **Bundle ids**: an id must look like reverse DNS before it builds a path. Only ids of 3 or more parts claim names that continue them, because `com.vendor` would take every app of that vendor. Apple ids count as part of macOS unless they are on a short list of apps people install themselves.
+- **Other apps**: a file named after an app that stays is left alone, and a copy of the app that stays narrows the plan to the selected bundle.
+- **Order**: an app's files go only after the app is gone. If its removal fails, its files stay.
+- **Identity**: every path is checked again right before removal, by device and inode, and the bundle by its id.
+- **Processes**: taert finds them by where their program lives, so a name cannot be spoofed, and it never signals itself or the terminal it runs in.
+- **Root**: everything that needs root runs as one script, so macOS asks for the password once. taert uses `sudo` if it has a cached session, and the macOS password dialog otherwise. Paths are quoted, and `Safety::is_safe_as_root` refuses a target below a folder the user could replace, because `rm` run as root follows folder links.
+
+Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
+
 ## APFS Space Accounting
 
 Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on APFS due to sparse files, compression, and block clustering:
