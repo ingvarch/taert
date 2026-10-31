@@ -4,14 +4,14 @@ expression: output
 ---
  taert › Preferences
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-       CLEANUP
-     ▌    Preselect artifacts older than                                                               ‹  7 days  ›
-        ○───○───●───○───○───○───○───○───○
-        1d  3d  7d 14d 30d 60d 90d 180d  1y
+     CLEANUP
+   ▌    Preselect artifacts older than                                                               ‹  7 days  ›
+      ○───○───●───○───○───○───○───○───○
+      1d  3d  7d 14d 30d 60d 90d 180d  1y
 
-       LOCATIONS
-          Project folders                                                                               6 folders ›
-          Protected paths                                                                                 0 paths ›
+     LOCATIONS
+        Project folders                                                                               6 folders ›
+        Protected paths                                                                                 0 paths ›
 
 
 

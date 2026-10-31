@@ -20,6 +20,7 @@ pub struct AppChrome<'a> {
     pub hints: Vec<Hint<'a>>,
     pub primary: Option<PrimaryAction<'a>>,
     pub toast: Option<&'a Toast>,
+    pub full_width: bool,
 }
 
 impl<'a> AppChrome<'a> {
@@ -30,7 +31,14 @@ impl<'a> AppChrome<'a> {
             hints: Vec::new(),
             primary: None,
             toast: None,
+            full_width: false,
         }
+    }
+
+    /// For data that uses every column. Prose stays at `MAX_CONTENT_WIDTH`.
+    pub fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
     }
 
     pub fn status(mut self, status: Line<'a>) -> Self {
@@ -176,15 +184,14 @@ impl<'a> AppChrome<'a> {
         let content_y = area.y + 2;
 
         let eff_w = area.width.saturating_sub(PAD_LEFT + PAD_RIGHT);
-        let content_w = eff_w.min(MAX_CONTENT_WIDTH);
-        let offset_x = if eff_w > MAX_CONTENT_WIDTH {
-            (eff_w - MAX_CONTENT_WIDTH) / 2
+        let content_w = if self.full_width {
+            eff_w
         } else {
-            0
+            eff_w.min(MAX_CONTENT_WIDTH)
         };
 
         Rect {
-            x: area.x + PAD_LEFT + offset_x,
+            x: area.x + PAD_LEFT,
             y: content_y,
             width: content_w,
             height: total_avail_h,
@@ -197,6 +204,28 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn content_rect(chrome: &AppChrome, width: u16, height: u16) -> Rect {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::new();
+        let mut rect = Rect::default();
+        terminal.draw(|f| rect = chrome.render(f, &theme)).unwrap();
+        rect
+    }
+
+    #[test]
+    fn content_keeps_a_readable_width_at_the_left_edge() {
+        let rect = content_rect(&AppChrome::new(vec!["taert"]), 205, 85);
+
+        assert_eq!((rect.x, rect.width), (PAD_LEFT, MAX_CONTENT_WIDTH));
+    }
+
+    #[test]
+    fn full_width_content_fills_the_window() {
+        let rect = content_rect(&AppChrome::new(vec!["taert"]).full_width(), 205, 85);
+
+        assert_eq!((rect.x, rect.width), (PAD_LEFT, 200));
+    }
 
     #[test]
     fn test_app_chrome_render() {

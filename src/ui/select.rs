@@ -346,6 +346,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     };
 
     let chrome = AppChrome::new(vec!["taert", "Clean caches", &state.scan.title])
+        .full_width()
         .status(right_status)
         .hints(vec![
             Hint::new("↑↓", "Move"),

@@ -50,7 +50,10 @@ pub fn segmented_bar(segments: &[(f64, Color)], width: u16, theme: &Theme) -> Ve
         let chars = (f * w as f64).round() as usize;
         let count = chars.min(w.saturating_sub(total_filled));
         if count > 0 {
-            spans.push(Span::styled("█".repeat(count), Style::default().fg(*color)));
+            spans.push(Span::styled(
+                theme.g.bar_fill.repeat(count),
+                Style::default().fg(*color),
+            ));
             total_filled += count;
         }
     }
@@ -58,7 +61,7 @@ pub fn segmented_bar(segments: &[(f64, Color)], width: u16, theme: &Theme) -> Ve
     let empty = w.saturating_sub(total_filled);
     if empty > 0 {
         spans.push(Span::styled(
-            "░".repeat(empty),
+            theme.g.bar_track.repeat(empty),
             Style::default().fg(theme.p.quaternary),
         ));
     }
@@ -234,6 +237,27 @@ mod tests {
         ];
 
         assert_eq!(legend_grid(&items, 2, 30, &theme).len(), 2);
+    }
+
+    #[test]
+    fn segmented_bar_draws_like_every_other_bar() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let spans = segmented_bar(&[(0.5, Color::Reset)], 4, &theme);
+
+        assert_eq!(text(&Line::from(spans)), "━━──");
+    }
+
+    #[test]
+    fn segmented_bar_uses_ascii_when_asked() {
+        let theme = Theme::with_env(UiEnv {
+            ascii_glyphs: true,
+            ..UiEnv::default()
+        });
+
+        let spans = segmented_bar(&[(0.5, Color::Reset)], 4, &theme);
+
+        assert_eq!(text(&Line::from(spans)), "==--");
     }
 
     #[test]

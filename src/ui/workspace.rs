@@ -262,6 +262,10 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
         chrome = chrome.status(st);
     }
 
+    if !is_submenu {
+        chrome = chrome.full_width();
+    }
+
     let content_rect = chrome.render(frame, theme);
 
     if is_submenu {

@@ -13,7 +13,7 @@ taert
 ### Workspace Navigation
 
 - **Main Menu**: Fast access to Clean Caches, Project Cleanup, Explore Storage, System Status, and Preferences.
-- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and live system status and storage breakdown on the right.
+- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and live system status and storage breakdown on the right. The main menu, System Status, Explore Storage, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and safe deletion via `D` or `Backspace`.
