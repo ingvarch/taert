@@ -1,13 +1,25 @@
 //! Where a Mac keeps apps and their files. Tests point it at a temporary folder.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use super::safety::Safety;
+
+fn user_cache_dir() -> Option<PathBuf> {
+    let output = Command::new("/usr/bin/getconf")
+        .arg("DARWIN_USER_CACHE_DIR")
+        .output()
+        .ok()?;
+    let printed = String::from_utf8(output.stdout).ok()?;
+    PathBuf::from(printed.trim()).canonicalize().ok()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     pub home: PathBuf,
     pub root: PathBuf,
+    /// The per-user cache folder of macOS, under /private/var/folders.
+    pub user_cache: Option<PathBuf>,
 }
 
 impl Layout {
@@ -15,6 +27,7 @@ impl Layout {
         Self {
             home: Safety::home_dir(),
             root: PathBuf::from("/"),
+            user_cache: user_cache_dir(),
         }
     }
 
@@ -53,6 +66,12 @@ impl Layout {
     }
 
     pub fn is_user_path(&self, path: &Path) -> bool {
-        path.starts_with(&self.home)
+        path.starts_with(&self.home) || self.is_user_cache_entry(path)
+    }
+
+    fn is_user_cache_entry(&self, path: &Path) -> bool {
+        self.user_cache
+            .as_deref()
+            .is_some_and(|cache| path.parent() == Some(cache))
     }
 }

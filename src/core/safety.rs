@@ -645,6 +645,7 @@ mod tests {
         let layout = Layout {
             home: base.join("home"),
             root: base.join("root"),
+            user_cache: Some(base.join("root/private/var/folders/x/C")),
         };
         fs::create_dir_all(&layout.home).unwrap();
         fs::create_dir_all(&layout.root).unwrap();
@@ -737,6 +738,24 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_entry_of_the_user_cache_folder_counts_as_the_users_own() {
+        let (_temp, layout) = sandbox();
+        let cache = layout.user_cache.clone().unwrap();
+        let entry = make(&cache.join("com.foo.app"));
+        let deeper = make(&cache.join("com.foo.app/inner"));
+
+        assert_eq!(uninstall_check(&entry, &layout), Ok(UninstallScope::Home));
+        assert_eq!(
+            uninstall_check(&cache, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
+        assert_eq!(
+            uninstall_check(&deeper, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
     }
 
     #[test]
