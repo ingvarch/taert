@@ -237,7 +237,7 @@ pub fn find_leftovers(
     finder.by_vendor();
     finder.launch_entries();
     finder.native_hosts();
-    finder.embedded_helpers();
+    finder.embedded_helpers(others);
     finder.known_products();
     finder.crash_reports();
     let mut receipts = finder.receipts(host);
@@ -321,6 +321,11 @@ fn is_versioned_ide_folder(leaf: &str, name: &str) -> bool {
     };
     let is_digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
     year.len() == 4 && is_digits(year) && minor.split('.').all(is_digits)
+}
+
+/// `acme` of `com.acme.foo`.
+pub fn vendor_token(id: &str) -> Option<String> {
+    id.split('.').nth(1).map(str::to_ascii_lowercase)
 }
 
 pub fn has_id_boundary(leaf: &str, id: &str) -> bool {
@@ -760,15 +765,35 @@ impl<'a> Finder<'a> {
         }
     }
 
-    fn embedded_helpers(&mut self) {
+    /// An app is sure of a helper named after it. A helper from another vendor
+    /// can be an SDK that other apps embed too, and one from this vendor can be
+    /// shared with an app of the same vendor that stays.
+    fn helper_evidence(&self, helper: &str, others: &[InstalledApp]) -> Evidence {
+        let Some(id) = self.id else {
+            return Evidence::RelatedName;
+        };
+        let vendor = vendor_token(id);
+        let vendor_stays = others
+            .iter()
+            .any(|other| other.bundle_id.as_deref().and_then(vendor_token) == vendor);
+        let own_vendor = vendor_token(helper) == vendor;
+        if has_id_boundary(helper, id) || (own_vendor && !vendor_stays) {
+            Evidence::BundleId
+        } else {
+            Evidence::RelatedName
+        }
+    }
+
+    fn embedded_helpers(&mut self, others: &[InstalledApp]) {
         let layout = self.layout;
         let (embedded, _) = embedded_bundle_ids(&self.app.path, self.id);
         for id in embedded {
-            self.add_places(&layout.home, BY_EMBEDDED_ID, &id, Evidence::BundleId);
+            let evidence = self.helper_evidence(&id, others);
+            self.add_places(&layout.home, BY_EMBEDDED_ID, &id, evidence);
             let prefix = format!("{id}.");
             for (path, leaf) in entries(&layout.user("Library/Preferences/ByHost")) {
                 if leaf.starts_with(&prefix) && leaf.ends_with(".plist") {
-                    self.add(path, Evidence::BundleId);
+                    self.add(path, evidence);
                 }
             }
         }
@@ -991,19 +1016,19 @@ impl<'a> Finder<'a> {
         let Some(leaf) = found.path.file_name().map(|leaf| leaf.to_string_lossy()) else {
             return false;
         };
-        match found.evidence {
-            Evidence::Name | Evidence::RelatedName => {
-                let stem = Path::new(leaf.as_ref())
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                others.iter().any(|other| {
-                    let name = simplified(&other.name);
-                    simplified(&leaf) == name || simplified(&stem) == name
-                })
-            }
-            _ => self.names_another_app(&leaf, others),
+        if self.names_another_app(&leaf, others) {
+            return true;
         }
+        let is_by_name = matches!(found.evidence, Evidence::Name | Evidence::RelatedName);
+        let stem = Path::new(leaf.as_ref())
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        is_by_name
+            && others.iter().any(|other| {
+                let name = simplified(&other.name);
+                simplified(&leaf) == name || simplified(&stem) == name
+            })
     }
 
     /// Does `name` carry the id of another app? An id this app continues does
@@ -1384,16 +1409,45 @@ mod tests {
         let (_temp, layout) = sandbox();
         let target = installed(&layout, "Foo", "com.acme.foo");
         let share = target.path.join("Contents/PlugIns/Share.appex");
-        fake_app(&share, "net.other.share", "share");
-        let container = folder(layout.user("Library/Containers/net.other.share"));
-        let prefs = file(layout.user("Library/Preferences/net.other.share.plist"));
-        let by_host = file(layout.user("Library/Preferences/ByHost/net.other.share.ABC.plist"));
+        fake_app(&share, "com.acme.share", "share");
+        let container = folder(layout.user("Library/Containers/com.acme.share"));
+        let prefs = file(layout.user("Library/Preferences/com.acme.share.plist"));
+        let by_host = file(layout.user("Library/Preferences/ByHost/com.acme.share.ABC.plist"));
 
         let found = find(&target, &layout);
 
         assert_found(&found, &container, Evidence::BundleId);
         assert_found(&found, &prefs, Evidence::BundleId);
         assert_found(&found, &by_host, Evidence::BundleId);
+    }
+
+    #[test]
+    fn a_helper_of_another_vendor_may_be_shared_so_it_is_only_related() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo");
+        let kit = target.path.join("Contents/XPCServices/Kit.xpc");
+        fake_app(&kit, "net.sdk.helper", "kit");
+        let container = folder(layout.user("Library/Containers/net.sdk.helper"));
+
+        assert_found(&find(&target, &layout), &container, Evidence::RelatedName);
+    }
+
+    #[test]
+    fn a_helper_is_only_related_while_another_app_of_the_vendor_stays() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo");
+        let kit = target.path.join("Contents/XPCServices/Kit.xpc");
+        fake_app(&kit, "com.acme.helper", "kit");
+        let own = target.path.join("Contents/PlugIns/Own.appex");
+        fake_app(&own, "com.acme.foo.widget", "own");
+        let shared = folder(layout.user("Library/Containers/com.acme.helper"));
+        let widget = folder(layout.user("Library/Caches/com.acme.foo.widget"));
+        let sibling = app("Bar", "com.acme.bar");
+
+        let found = find_with(&target, &[sibling], &layout);
+
+        assert_found(&found, &shared, Evidence::RelatedName);
+        assert_found(&found, &widget, Evidence::BundleId);
     }
 
     #[test]
