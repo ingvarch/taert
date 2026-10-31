@@ -509,8 +509,7 @@ fn is_jetbrains_selector(value: &str) -> bool {
         && is_digits(minor)
 }
 
-/// JetBrains IDEs name their data folders after this value in their Info.plist.
-pub fn jetbrains_selector(app: &Path) -> Option<String> {
+fn selector_in_plist(app: &Path) -> Option<String> {
     let selector = read_info(app)?
         .get("JVMOptions")?
         .as_dictionary()?
@@ -519,7 +518,20 @@ pub fn jetbrains_selector(app: &Path) -> Option<String> {
         .get("idea.paths.selector")?
         .as_string()?
         .to_string();
-    is_jetbrains_selector(&selector).then_some(selector)
+    Some(selector)
+}
+
+fn selector_in_product_info(app: &Path) -> Option<String> {
+    let text = fs::read_to_string(app.join("Contents/Resources/product-info.json")).ok()?;
+    let info: serde_json::Value = serde_json::from_str(&text).ok()?;
+    info.get("dataDirectoryName")?.as_str().map(str::to_string)
+}
+
+/// The name a JetBrains IDE gives its data folders, like `GoLand2026.2`.
+pub fn jetbrains_selector(app: &Path) -> Option<String> {
+    selector_in_plist(app)
+        .or_else(|| selector_in_product_info(app))
+        .filter(|selector| is_jetbrains_selector(selector))
 }
 
 #[cfg(test)]
@@ -937,6 +949,18 @@ mod tests {
             ["com.foo.app.share", "com.foo.login", "com.foo.net"]
         );
         assert_eq!(login_items, ["com.foo.login"]);
+    }
+
+    #[test]
+    fn a_newer_jetbrains_ide_gives_its_folder_name_in_product_info() {
+        let (_temp, layout) = sandbox();
+        let ide = layout.system("Applications/DataGrip.app");
+        let resources = ide.join("Contents/Resources");
+        fs::create_dir_all(&resources).unwrap();
+        let info = r#"{"name":"DataGrip","dataDirectoryName":"DataGrip2025.3"}"#;
+        fs::write(resources.join("product-info.json"), info).unwrap();
+
+        assert_eq!(jetbrains_selector(&ide).as_deref(), Some("DataGrip2025.3"));
     }
 
     #[test]

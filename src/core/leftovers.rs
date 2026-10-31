@@ -145,6 +145,12 @@ const PAYLOAD_FOLDERS: &[&str] = &[
     "Library/LaunchDaemons",
     "Library/PrivilegedHelperTools",
 ];
+const JETBRAINS_ROOTS: &[&str] = &[
+    "Library/Application Support/JetBrains",
+    "Library/Caches/JetBrains",
+    "Library/Logs/JetBrains",
+    "Library/Preferences",
+];
 const REPORT_EXTENSIONS: &[&str] = &["crash", "diag", "ips", "spin"];
 const RUNTIME_EXECUTABLE: &str = "electron";
 
@@ -288,6 +294,18 @@ fn is_product_folder(candidate: &str, spellings: &[String]) -> bool {
                         && after.next().is_some_and(|c| c.is_ascii_digit()))
             })
     })
+}
+
+/// IDEs glue a year and version to their name: `GoLand2026.2`.
+fn is_versioned_ide_folder(leaf: &str, name: &str) -> bool {
+    let Some((year, minor)) = leaf
+        .strip_prefix(name)
+        .and_then(|rest| rest.split_once('.'))
+    else {
+        return false;
+    };
+    let is_digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    year.len() == 4 && is_digits(year) && minor.split('.').all(is_digits)
 }
 
 fn has_id_boundary(leaf: &str, id: &str) -> bool {
@@ -814,16 +832,18 @@ impl<'a> Finder<'a> {
     }
 
     fn jetbrains_ide(&mut self) {
-        let Some(selector) = jetbrains_selector(&self.app.path) else {
-            return;
-        };
-        for root in [
-            "Library/Application Support/JetBrains",
-            "Library/Caches/JetBrains",
-            "Library/Logs/JetBrains",
-            "Library/Preferences",
-        ] {
-            self.add(self.layout.user(root).join(&selector), Evidence::BundleId);
+        let selector = jetbrains_selector(&self.app.path);
+        let name = self.app.name.clone();
+        for root in JETBRAINS_ROOTS {
+            let root = self.layout.user(root);
+            if let Some(selector) = &selector {
+                self.add(root.join(selector), Evidence::BundleId);
+            }
+            for (path, leaf) in entries(&root) {
+                if is_versioned_ide_folder(&leaf, &name) {
+                    self.add(path, Evidence::BundleId);
+                }
+            }
         }
     }
 
@@ -1545,6 +1565,26 @@ mod tests {
 
         assert_found(&found, &derived, Evidence::BundleId);
         assert_absent(&found, &archives);
+    }
+
+    #[test]
+    fn a_jetbrains_ide_without_a_selector_owns_its_versioned_folders() {
+        let (_temp, layout) = sandbox();
+        let ide = installed(&layout, "DataGrip", "com.jetbrains.datagrip");
+        let support = "Library/Application Support/JetBrains";
+        let own = folder(layout.user(support).join("DataGrip2026.2"));
+        let caches = folder(layout.user("Library/Caches/JetBrains/DataGrip2025.3"));
+        let backup = folder(layout.user(support).join("DataGrip-backup"));
+        let other = folder(layout.user(support).join("WebStorm2026.2"));
+        let settings = folder(layout.user(support).join("consentOptions"));
+
+        let found = find(&ide, &layout);
+
+        assert_found(&found, &own, Evidence::BundleId);
+        assert_found(&found, &caches, Evidence::BundleId);
+        assert_absent(&found, &backup);
+        assert_absent(&found, &other);
+        assert_absent(&found, &settings);
     }
 
     #[test]

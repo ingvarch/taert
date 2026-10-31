@@ -48,6 +48,7 @@ const CONTAINER_METADATA: &str = ".com.apple.containermanagerd.metadata.plist";
 
 const ADMIN_PROMPT: &str = "taert needs your password to remove apps and their system files.";
 const APP_MANAGEMENT_HINT: &str = "macOS refused. Allow your terminal in System Settings > Privacy & Security > App Management, or move the app to the Trash in Finder";
+const FULL_DISK_HINT: &str = "macOS refused. Give your terminal Full Disk Access in System Settings > Privacy & Security, then run this again";
 const NOT_SAFE_AS_ROOT: &str = "A folder on the way could be replaced, so taert will not use administrator rights here. Remove it in Finder";
 const NOT_REMOVED: &str = "It was still there after the removal";
 
@@ -83,6 +84,7 @@ const CONFIG_FILES: &[&str] = &[
 ];
 
 const RECEIPTS: &str = "private/var/db/receipts";
+const SYSTEM_REPORTS: &str = "Library/Logs/DiagnosticReports";
 const CASKROOMS: &[&str] = &["opt/homebrew/Caskroom", "usr/local/Caskroom"];
 
 /// Data that holds far more than settings, compared by the start of the path
@@ -193,13 +195,19 @@ fn selected_by_default(
     if is_held_back(&found.path, layout) || group_is_shared(&found.path, app, staying, layout) {
         return false;
     }
+    // Reports here are root's: macOS clears them, and they are not worth a password.
+    if found.path.starts_with(layout.system(SYSTEM_REPORTS)) {
+        return false;
+    }
     match found.evidence {
         Evidence::BundleId | Evidence::Manifest | Evidence::Receipt => true,
         Evidence::RelatedName => false,
         // A name can be a coincidence, so it needs to be distinctive and in the
         // place an app would use. Dot folders and system folders stay a decision.
         Evidence::Name => {
-            found.path.starts_with(layout.user("Library"))
+            let in_app_place = found.path.starts_with(layout.user("Library"))
+                || found.path.starts_with(layout.user(".cache"));
+            in_app_place
                 && app.name.chars().count() >= MIN_SELECTED_NAME
                 && !is_common_name(&app.name)
         }
@@ -936,6 +944,9 @@ impl Uninstaller<'_> {
             match Cleaner::remove_verified(item, |path| self.check(path)) {
                 Ok(()) => tally.removed(item),
                 Err(_) if is_container_stub(&item.path) => tally.removed(item),
+                Err(error) if error.is_permission_denied() => {
+                    tally.failed(&item.path, FULL_DISK_HINT);
+                }
                 Err(error) => tally.failed(&item.path, error.to_string()),
             }
         }
@@ -1182,6 +1193,37 @@ mod plan_tests {
         assert!(!row(&plan, &dot_name).selected);
         assert!(!row(&plan, &system_name).selected);
         assert!(!row(&plan, &shared_name).selected);
+    }
+
+    #[test]
+    fn a_cache_in_a_dot_folder_is_selected_and_settings_are_not() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Ghostly", "com.acme.ghostly");
+        let cache = folder(layout.user(".cache/ghostly"));
+        let settings = folder(layout.user(".config/ghostly"));
+
+        let plan = plan_for(&[foo], &layout);
+
+        assert!(row(&plan, &cache).selected);
+        assert!(!row(&plan, &settings).selected);
+    }
+
+    #[test]
+    fn a_system_crash_report_is_not_worth_a_password() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let reports = "Library/Logs/DiagnosticReports";
+        let system = layout.system(reports).join("Foo_2026-10-01.diag");
+        fs::create_dir_all(system.parent().unwrap()).unwrap();
+        fs::write(&system, b"x").unwrap();
+        let user = layout.user(reports).join("Foo_2026-10-01.ips");
+        fs::create_dir_all(user.parent().unwrap()).unwrap();
+        fs::write(&user, b"x").unwrap();
+
+        let plan = plan_for(&[foo], &layout);
+
+        assert!(!row(&plan, &system).selected);
+        assert!(row(&plan, &user).selected);
     }
 
     #[test]
@@ -2000,6 +2042,25 @@ mod run_tests {
         assert_eq!(report.failures.len(), 1);
         assert!(product.exists());
         assert!(!foo.path.exists());
+    }
+
+    #[test]
+    fn a_file_macos_keeps_from_the_terminal_says_how_to_allow_it() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let container = folder(layout.user("Library/Containers/com.acme.foo"));
+        let locked = CString::new(container.join("data").as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chflags(locked.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+        let plan = plan_of(&foo, vec![leftover(&container)]);
+
+        let report = run(&plan, &FakeHost::default(), &layout);
+
+        assert_eq!(unsafe { libc::chflags(locked.as_ptr(), 0) }, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].error.contains("Full Disk Access"));
     }
 
     #[test]
