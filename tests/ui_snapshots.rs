@@ -6,6 +6,7 @@ use insta::assert_snapshot;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use taert::core::cache::StorageCache;
 use taert::core::docker::DockerObject;
 use taert::core::profiler::{
@@ -791,7 +792,7 @@ fn every_docker_section_titles_its_columns_above_its_rows() {
     let output = select_screen(&docker_table());
     let lines: Vec<&str> = output.lines().collect();
 
-    for section in ["IMAGES", "VOLUMES", "BUILD CACHE"] {
+    for section in ["╭─ Images", "╭─ Volumes", "╭─ Build cache"] {
         let at = lines.iter().position(|l| l.contains(section)).unwrap();
         assert!(lines[at + 1].contains("NAME"), "{section}:\n{output}");
         assert!(lines[at + 1].contains("SIZE"), "{section}:\n{output}");
@@ -824,7 +825,7 @@ fn the_build_cache_column_says_last_used() {
 
     let at = lines
         .iter()
-        .position(|l| l.contains("BUILD CACHE"))
+        .position(|l| l.contains("╭─ Build cache"))
         .unwrap();
     assert!(lines[at + 1].contains("LAST USED"), "{output}");
     assert!(!lines[at + 1].contains("CREATED"), "{output}");
@@ -835,8 +836,8 @@ fn a_blank_row_separates_sections_and_none_comes_first() {
     let output = select_screen(&docker_table());
     let lines: Vec<&str> = output.lines().collect();
 
-    assert!(lines[2].contains("IMAGES"), "{output}");
-    let volumes = lines.iter().position(|l| l.contains("VOLUMES")).unwrap();
+    assert!(lines[2].contains("╭─ Images"), "{output}");
+    let volumes = lines.iter().position(|l| l.contains("╭─ Volumes")).unwrap();
     assert_eq!(lines[volumes - 1], "", "{output}");
 }
 
@@ -969,4 +970,195 @@ fn the_toolbar_shows_the_sort_keys_for_a_table_only() {
 
     assert!(table.contains("Sort: Size"), "{table}");
     assert!(!list.contains("Sort:"), "{list}");
+}
+
+fn framed_rows(output: &str) -> Vec<&str> {
+    body_rows(output)
+        .into_iter()
+        .filter(|row| !row.is_empty())
+        .collect()
+}
+
+fn cells_at(
+    state: &SelectState,
+    width: u16,
+    height: u16,
+    theme: &Theme,
+) -> Vec<Vec<(String, Color)>> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| render_select(f, state, theme)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    let cell = &buffer[(x, y)];
+                    (cell.symbol().to_string(), cell.fg)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn color_of(screen: &[Vec<(String, Color)>], text: &str) -> Color {
+    for row in screen {
+        let joined: String = row.iter().map(|(symbol, _)| symbol.as_str()).collect();
+        if let Some(byte) = joined.find(text) {
+            return row[joined[..byte].chars().count()].1;
+        }
+    }
+    panic!("{text} is not on the screen");
+}
+
+#[test]
+fn every_docker_section_sits_in_its_own_frame() {
+    let output = select_screen(&docker_table());
+    let rows = framed_rows(&output);
+
+    let tops = rows.iter().filter(|row| row.contains('╭')).count();
+    let bottoms = rows.iter().filter(|row| row.contains('╰')).count();
+    assert_eq!((tops, bottoms), (3, 3), "{output}");
+
+    let left = rows[0].chars().position(|c| c == '╭').unwrap();
+    for row in &rows {
+        let cells: Vec<char> = row.chars().collect();
+        assert!(matches!(cells[left], '╭' | '│' | '╰'), "{row}");
+        assert!(matches!(cells[cells.len() - 1], '╮' | '│' | '╯'), "{row}");
+    }
+}
+
+#[test]
+fn a_frame_fills_the_width_at_every_window_size() {
+    let theme = snapshot_theme();
+    let state = docker_table();
+
+    for width in [50_u16, 80, 100, 120, 205] {
+        let output = render_to_string(width, 32, |f| render_select(f, &state, &theme));
+        let rows = framed_rows(&output);
+        for row in &rows {
+            assert_eq!(
+                row.chars().count(),
+                rows[0].chars().count(),
+                "{width}: {row}"
+            );
+        }
+        assert_eq!(rows[0].chars().count(), width as usize - 2, "{width}");
+    }
+}
+
+#[test]
+fn a_frame_title_names_the_section_and_counts_it() {
+    let output = select_screen(&docker_table());
+
+    let top = line_with(&output, "╭─ Images");
+    assert!(top.contains("3 items · 1.2 GB"), "{top}");
+    assert!(top.ends_with('╮'), "{top}");
+}
+
+#[test]
+fn the_volume_frame_keeps_its_warning() {
+    let output = select_screen(&docker_table());
+
+    let top = line_with(&output, "╭─ Volumes");
+    assert!(top.contains("data is deleted for good"), "{top}");
+}
+
+#[test]
+fn each_kind_of_section_has_its_own_color() {
+    let theme = snapshot_theme();
+    let screen = cells_at(&docker_table(), 120, 32, &theme);
+
+    assert_eq!(color_of(&screen, "Images"), theme.p.accent);
+    assert_eq!(color_of(&screen, "Volumes"), theme.p.orange);
+    assert_eq!(color_of(&screen, "Build cache"), theme.p.purple);
+}
+
+#[test]
+fn networks_have_a_color_of_their_own() {
+    let theme = snapshot_theme();
+    let mut scan = docker_scan();
+    scan.groups.push(ToolGroup {
+        tool: "Networks".to_string(),
+        items: vec![docker_item(
+            DockerObject::Network {
+                id: "id".to_string(),
+            },
+            "old_default",
+            0,
+            false,
+        )],
+    });
+    let state = SelectState::with_preserved_selection(scan);
+
+    let screen = cells_at(&state, 120, 40, &theme);
+
+    assert_eq!(color_of(&screen, "Networks"), theme.p.teal);
+}
+
+#[test]
+fn the_frame_shares_the_color_of_its_title() {
+    let theme = snapshot_theme();
+    let screen = cells_at(&docker_table(), 120, 32, &theme);
+
+    assert_eq!(color_of(&screen, "╭─ Volumes"), theme.p.orange);
+}
+
+#[test]
+fn ascii_terminals_get_a_plain_frame() {
+    let theme = Theme::with_env(UiEnv {
+        ascii_glyphs: true,
+        ..UiEnv::default()
+    });
+    let state = docker_table();
+
+    let output = render_to_string(120, 32, |f| render_select(f, &state, &theme));
+
+    assert!(output.contains("+- Images"), "{output}");
+    assert!(!output.contains('╭'), "{output}");
+    assert!(!output.contains('│'), "{output}");
+}
+
+#[test]
+fn other_lists_stay_without_frames() {
+    let output = select_screen(&SelectState::new(sample_scan()));
+
+    assert!(!output.contains('╭'), "{output}");
+    assert!(!output.contains('│'), "{output}");
+}
+
+#[test]
+fn a_search_closes_the_frame_after_what_it_found() {
+    let mut state = docker_table();
+    state.search_query = "pgdata".to_string();
+    state.move_to_start();
+
+    let output = select_screen(&state);
+
+    let rows = framed_rows(&output);
+    let tops = rows.iter().filter(|row| row.contains('╭')).count();
+    let bottoms = rows.iter().filter(|row| row.contains('╰')).count();
+    assert_eq!((tops, bottoms), (1, 1), "{output}");
+}
+
+#[test]
+fn a_list_too_long_for_the_window_keeps_its_side_borders() {
+    let theme = snapshot_theme();
+    let mut scan = docker_scan();
+    for i in 0..60 {
+        let object = DockerObject::Network { id: format!("{i}") };
+        scan.groups[0]
+            .items
+            .push(docker_item(object, &format!("extra-{i}"), 1, false));
+    }
+    let mut state = SelectState::with_preserved_selection(scan);
+    for _ in 0..30 {
+        state.next_selectable();
+    }
+
+    let output = render_to_string(120, 24, |f| render_select(f, &state, &theme));
+
+    for row in framed_rows(&output) {
+        let edge = row.contains('│') || row.contains('╭') || row.contains('╰');
+        assert!(edge, "{row}");
+    }
 }

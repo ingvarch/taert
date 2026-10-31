@@ -7,9 +7,10 @@ use std::time::SystemTime;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
@@ -26,7 +27,7 @@ use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::path_utils::prettify_path;
-use crate::core::scanner::{CategoryScan, ScanItem};
+use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmButton {
@@ -56,7 +57,9 @@ pub struct SelectState {
     pub sort_order: Option<SortOrder>,
 }
 
-const BAR_MIN_WIDTH: u16 = 100;
+const BAR_MIN_WIDTH: usize = 100;
+// A border and a space on each side.
+const FRAME_SIDES: usize = 4;
 const SIZE_W: usize = 9;
 // Fits "About an hour ago", the longest age that lasts more than a few seconds.
 const AGE_W: usize = 17;
@@ -66,6 +69,7 @@ pub enum RowKind {
     Item,
     Section,
     Columns { date: &'static str },
+    SectionEnd,
     Gap,
 }
 
@@ -233,6 +237,10 @@ impl SelectState {
                     item_count: 0,
                     created: item.modified,
                 });
+            }
+
+            if self.sort_order.is_some() {
+                rows.push(heading_row(RowKind::SectionEnd));
             }
         }
 
@@ -499,6 +507,12 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     };
 
     let width = list_rect.width as usize;
+    let table = state.sort_order.is_some();
+    let row_width = if table {
+        width.saturating_sub(FRAME_SIDES)
+    } else {
+        width
+    };
     let now = SystemTime::now();
     let mut list_lines = Vec::new();
     for (idx, row) in rows
@@ -508,23 +522,25 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .take(list_area_height)
     {
         let is_focused = idx == state.focused_index;
+        let frame = table.then(|| section_color(&state.scan.groups[row.group_index], theme));
 
         if row.kind == RowKind::Gap {
             list_lines.push(Line::default());
+        } else if let (RowKind::SectionEnd, Some(color)) = (row.kind, frame) {
+            list_lines.push(frame_bottom(width, color, theme));
         } else if let (RowKind::Columns { date }, Some(order)) = (row.kind, state.sort_order) {
-            list_lines.push(column_titles(date, order, width, theme));
+            let titles = column_titles(date, order, row_width, theme);
+            list_lines.push(framed(titles, row_width, frame, theme));
         } else if row.kind == RowKind::Section {
             let noun = if row.item_count == 1 { "item" } else { "items" };
             let detail_spans = vec![
                 Span::styled(format!("{} {noun} · ", row.item_count), theme.footnote()),
                 Span::styled(format_bytes(row.size_bytes), theme.size(row.size_bytes)),
             ];
-            list_lines.push(render_section_header_spans(
-                &row.group_name,
-                detail_spans,
-                list_rect.width as usize,
-                theme,
-            ));
+            list_lines.push(match frame {
+                Some(color) => frame_top(&row.group_name, detail_spans, width, color, theme),
+                None => render_section_header_spans(&row.group_name, detail_spans, width, theme),
+            });
         } else {
             let bullet = if row.is_selected {
                 theme.g.check_on
@@ -538,8 +554,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             };
 
             let title_spans = if let Some(path) = &row.full_path {
-                let mut spans =
-                    path_spans(path, (list_rect.width as usize).saturating_sub(20), theme);
+                let mut spans = path_spans(path, row_width.saturating_sub(20), theme);
                 if is_focused && state.path_scroll > 0 {
                     let full_str = prettify_path(path);
                     if state.path_scroll < full_str.len() {
@@ -579,12 +594,13 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             }
 
             if let Some(f) = frac
-                && list_rect.width >= BAR_MIN_WIDTH
+                && row_width >= BAR_MIN_WIDTH
             {
                 list_row = list_row.bar(f);
             }
 
-            list_lines.push(list_row.render_line(list_rect.width as usize, theme));
+            let line = list_row.render_line(row_width, theme);
+            list_lines.push(framed(line, row_width, frame, theme));
         }
     }
 
@@ -606,6 +622,91 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             render_outcome_dialog(frame, report, theme);
         }
     }
+}
+
+fn section_color(group: &ToolGroup, theme: &Theme) -> Color {
+    match group.items.first().and_then(|item| item.docker.as_ref()) {
+        Some(DockerObject::Volume { .. }) => theme.p.orange,
+        Some(DockerObject::Network { .. }) => theme.p.teal,
+        Some(DockerObject::BuildCache) => theme.p.purple,
+        _ => theme.p.accent,
+    }
+}
+
+fn frame_style(color: Color) -> Style {
+    Style::default().fg(color).add_modifier(Modifier::DIM)
+}
+
+fn frame_top(
+    name: &str,
+    detail: Vec<Span<'static>>,
+    width: usize,
+    color: Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let (title, note) = match name.split_once(" (") {
+        Some((title, note)) => (title, note.trim_end_matches(')')),
+        None => (name, ""),
+    };
+    let detail_w: usize = detail.iter().map(|span| span.content.width()).sum();
+    // "╭─ ", the spaces around the rule, and " ─╮".
+    let fixed = 3 + title.width() + 2 + detail_w + 3;
+    let note = if fixed + 2 + note.width() < width {
+        note
+    } else {
+        ""
+    };
+    let note_w = if note.is_empty() { 0 } else { 2 + note.width() };
+    let rule = width.saturating_sub(fixed + note_w);
+
+    let border = frame_style(color);
+    let line = theme.g.frame_horizontal;
+    let mut spans = vec![
+        Span::styled(format!("{}{line} ", theme.g.frame_top_left), border),
+        Span::styled(
+            title.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !note.is_empty() {
+        spans.push(Span::styled(
+            format!("  {note}"),
+            Style::default().fg(color),
+        ));
+    }
+    spans.push(Span::styled(format!(" {} ", line.repeat(rule)), border));
+    spans.extend(detail);
+    spans.push(Span::styled(
+        format!(" {line}{}", theme.g.frame_top_right),
+        border,
+    ));
+    Line::from(spans)
+}
+
+fn frame_bottom(width: usize, color: Color, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(
+            "{}{}{}",
+            theme.g.frame_bottom_left,
+            theme.g.frame_horizontal.repeat(width.saturating_sub(2)),
+            theme.g.frame_bottom_right
+        ),
+        frame_style(color),
+    ))
+}
+
+fn framed(line: Line<'static>, width: usize, color: Option<Color>, theme: &Theme) -> Line<'static> {
+    let Some(color) = color else {
+        return line;
+    };
+
+    let border = frame_style(color);
+    let pad = " ".repeat(width.saturating_sub(line.width()));
+    let mut spans = vec![Span::styled(format!("{} ", theme.g.frame_vertical), border)];
+    spans.extend(line.spans);
+    spans.push(Span::raw(pad));
+    spans.push(Span::styled(format!(" {}", theme.g.frame_vertical), border));
+    Line::from(spans)
 }
 
 fn column_titles(date: &str, order: SortOrder, width: usize, theme: &Theme) -> Line<'static> {
@@ -632,7 +733,7 @@ fn column_titles(date: &str, order: SortOrder, width: usize, theme: &Theme) -> L
             format!("{:>SIZE_W$}", title(SortOrder::Size, "SIZE")),
             style,
         ));
-    if width as u16 >= BAR_MIN_WIDTH {
+    if width >= BAR_MIN_WIDTH {
         row = row.bar(0.0).bar_heading("SHARE");
     }
     row.render_line(width, theme)
