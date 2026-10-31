@@ -2,6 +2,7 @@ pub mod analyze;
 pub mod app;
 pub mod components;
 pub mod env;
+pub mod folder_preview;
 pub mod glyphs;
 pub mod palette;
 pub mod path_list_editor;

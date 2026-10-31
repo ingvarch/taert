@@ -1,6 +1,9 @@
 //! Workspace Screen (Main Menu).
 //! 6 Main Options + Clean Caches Submenu + Start Confirmations.
 
+use std::cell::Cell;
+use std::sync::{Arc, RwLock};
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -8,15 +11,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use super::analyze::SortOrder;
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ListRow, render_section_header};
 use super::components::modal::Modal;
 use super::env::ColorDepth;
+use super::folder_preview::folder_rows;
+use super::system_status::{SystemStatusState, load_summary, storage_summary};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
+use crate::core::cache::{FolderSnapshot, StorageCache};
+use crate::core::profiler::SystemProfiler;
+use crate::core::safety::Safety;
 use crate::core::sysinfo::SysInfo;
+
+const SPLIT_MIN_WIDTH: u16 = 100;
+const DETAIL_GAP: u16 = 3;
+// Panels indent their own content by this much.
+const PANEL_INDENT: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -55,6 +69,9 @@ pub struct WorkspaceState {
     pub items: Vec<(MainMenuChoice, &'static str, &'static str, &'static str)>,
     pub clean_options: Vec<(CleanSubcategory, &'static str, &'static str)>,
     pub disk_status: Option<String>,
+    pub system: Option<Box<SystemStatusState>>,
+    pub largest: Option<FolderSnapshot>,
+    pane_visible: Cell<bool>,
 }
 
 impl Default for WorkspaceState {
@@ -83,6 +100,11 @@ impl WorkspaceState {
             selected_index: 0,
             view: WorkspaceView::MainMenu,
             disk_status,
+            system: Some(Box::new(SystemStatusState::with_status(
+                SystemProfiler::current_full_status(),
+            ))),
+            largest: None,
+            pane_visible: Cell::new(false),
             items: vec![
                 (
                     MainMenuChoice::CleanCaches,
@@ -148,6 +170,23 @@ impl WorkspaceState {
                     "Review items already in the Trash",
                 ),
             ],
+        }
+    }
+
+    pub fn tick(&mut self, cache: &Arc<RwLock<StorageCache>>) {
+        let choice = self.current_main_choice();
+        let live = self.pane_visible.get() && choice == MainMenuChoice::SystemStatus;
+        if let Some(system) = &mut self.system {
+            system.set_live(live);
+            system.tick();
+        }
+
+        if choice == MainMenuChoice::ExploreStorage && self.largest.is_none() {
+            let home = Safety::home_dir();
+            self.largest = cache.read().unwrap().get_snapshot(&home);
+            if let Some(snapshot) = &mut self.largest {
+                SortOrder::Size.sort_children(&mut snapshot.children);
+            }
         }
     }
 
@@ -267,6 +306,8 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
     }
 
     let content_rect = chrome.render(frame, theme);
+    let split = !is_submenu && content_rect.width >= SPLIT_MIN_WIDTH;
+    state.pane_visible.set(split);
 
     if is_submenu {
         let selected_idx = match state.view {
@@ -274,7 +315,7 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
             _ => 0,
         };
         render_submenu_content(frame, content_rect, state, selected_idx, theme);
-    } else if content_rect.width >= 100 {
+    } else if split {
         render_split_view(frame, content_rect, state, theme);
     } else {
         render_regular_menu(frame, content_rect, state, theme);
@@ -459,12 +500,71 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
     )]));
 
     let detail_rect = Rect {
-        x: chunks[2].x + 3,
+        x: chunks[2].x + DETAIL_GAP,
         y: chunks[2].y,
-        width: chunks[2].width.saturating_sub(3),
+        width: chunks[2].width.saturating_sub(DETAIL_GAP),
         height: chunks[2].height,
     };
+
+    // The panels line up with the text above them, after a blank line.
+    let detail_rows = detail_lines.len() as u16 + 1;
     frame.render_widget(Paragraph::new(detail_lines), detail_rect);
+
+    let data_rect = Rect {
+        x: detail_rect.x - PANEL_INDENT,
+        y: detail_rect.y + detail_rows,
+        width: detail_rect.width + PANEL_INDENT,
+        height: detail_rect.height.saturating_sub(detail_rows),
+    };
+    let data = detail_data(
+        state,
+        *choice,
+        data_rect.width as usize,
+        data_rect.height as usize,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(data), data_rect);
+}
+
+fn detail_data(
+    state: &WorkspaceState,
+    choice: MainMenuChoice,
+    width: usize,
+    height: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(system) = &state.system else {
+        return Vec::new();
+    };
+
+    match choice {
+        MainMenuChoice::CleanCaches | MainMenuChoice::ProjectCleanup => {
+            storage_summary(system, width, theme)
+        }
+        MainMenuChoice::ExploreStorage => {
+            let mut lines = storage_summary(system, width, theme);
+            lines.push(Line::default());
+            match &state.largest {
+                Some(snapshot) => {
+                    lines.push(render_section_header(
+                        "Largest in home folder",
+                        None,
+                        width,
+                        theme,
+                    ));
+                    let rows = height.saturating_sub(lines.len());
+                    lines.extend(folder_rows(snapshot, width, rows, theme));
+                }
+                None => lines.push(Line::from(Span::styled(
+                    "  Open Explore storage to see the largest items in your home folder.",
+                    theme.callout(),
+                ))),
+            }
+            lines
+        }
+        MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
+        MainMenuChoice::Preferences | MainMenuChoice::ProtectedPaths => Vec::new(),
+    }
 }
 
 fn render_submenu_content(

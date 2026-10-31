@@ -89,6 +89,7 @@ taert/
 │       ├── analyze.rs          # Explore storage screen, breadcrumb stack, measuring thread
 │       ├── app.rs              # Ratatui application state machine, event loop, key router
 │       ├── env.rs              # Terminal capability, appearance, and accessibility detection
+│       ├── folder_preview.rs   # Contents of the folder highlighted in Explore, measured in the background
 │       ├── palette.rs          # Semantic color palette resolver for dark, light, and no-color
 │       ├── path_list_editor.rs # Path list manager for protected paths and project folders
 │       ├── preferences.rs      # Settings and age threshold configuration screen

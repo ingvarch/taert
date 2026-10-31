@@ -534,11 +534,16 @@ impl SystemProfiler {
     }
 
     pub fn current_full_status() -> FullSystemStatus {
+        let (boot_volume, volumes) = telemetry::mounted_volumes();
         FullSystemStatus {
             machine: Self::machine_info(),
             memory: Self::detailed_memory(),
             storage: Self::detailed_storage(Path::new("/")),
-            live: LiveStatus::default(),
+            live: LiveStatus {
+                boot_volume,
+                volumes,
+                ..LiveStatus::default()
+            },
         }
     }
 }
@@ -546,6 +551,13 @@ impl SystemProfiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_status_names_the_startup_volume() {
+        let status = SystemProfiler::current_full_status();
+
+        assert!(status.live.boot_volume.is_some());
+    }
 
     #[test]
     fn page_size_matches_the_system() {
