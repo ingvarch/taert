@@ -149,11 +149,15 @@ What starts selected depends on how sure taert is that a file belongs to the app
 | Installer receipts | Folders named after the app without its channel, like `Zed` for Zed Nightly, and files that continue a two-part id such as `md.obsidian` |
 | | Crash reports in `/Library/Logs/DiagnosticReports` |
 
-Removal runs in this order. Open apps get a quit request, so they can ask you to save. Then, if anything needs root, macOS asks for your password once per run. An app with files only root can remove goes in that same step, so a cancelled prompt leaves it installed, with its login item and background jobs in place. After that taert stops what is left: launch agents are unloaded, the app leaves Launch Services and Login Items, its login helpers stop, and remaining processes get `SIGTERM`, then `SIGKILL`. The app goes through `brew uninstall --cask` if a Homebrew cask installed it, and Homebrew does that step before the password. An app's other files go only after the app itself, so a failed removal never leaves an app without its data. Last, its Dock tile goes.
+Removal runs in this order. Open apps get a quit request and up to 40 seconds to answer it, so they can ask you to save. A Homebrew cask goes next, through `brew uninstall --cask`, without `--zap`. Then, if anything needs root, macOS asks for your password. An app with files only root can remove goes in that same step, so a cancelled prompt leaves it installed, with its login item and background jobs in place. After that taert stops what is left: launch agents are unloaded, the app leaves Launch Services and Login Items, its login helpers stop, and remaining processes get `SIGTERM`, then `SIGKILL`. An app's other files go only after the app itself, so a failed removal never leaves an app without its data. Last, its Dock tile goes.
+
+The password is asked once per run. There is one exception: if macOS refuses a removal only once it has started, taert asks again for that app. By then the app is stopped. An app outside the fixed system folders, such as one in `~/Applications`, goes first, and its files in `/Library` follow after the password. If you cancel, those files stay and taert lists them.
+
+If taert runs in a terminal of the app being removed, the app stays open until you quit it, and the bundle goes anyway.
 
 Another copy of the app, another channel of it such as Foo Beta, or an app whose id continues this one keeps everything shared: only the selected bundle goes. taert looks for those in the app folders, Setapp, Homebrew's Caskroom, and on mounted volumes, and again right before it removes anything.
 
-An app in `/Applications` that is a link goes alone: the link is removed, and the app it points to stays, with its files. Security agents such as CrowdStrike, Jamf, and SentinelOne are left alone, because they need their vendor's uninstaller. Paths on the ignore list are left out too.
+An app in `/Applications` that is a link goes alone: the link is removed, and the app it points to stays, with its files. A Homebrew cask that holds several apps stays with Homebrew: only the selected app goes, and `brew list` keeps showing the cask. Security agents such as CrowdStrike, Jamf, and SentinelOne are left alone, because they need their vendor's uninstaller. Paths on the ignore list are left out too.
 
 taert never edits your configuration. If `~/.zshrc`, `~/.config/fish/config.fish`, or a similar file still mentions a removed path, taert names the file and line.
 

@@ -35,8 +35,11 @@ pub const PLAN_ID: &str = "uninstall";
 
 const MIN_SELECTED_NAME: usize = 4;
 const EXIT_POLLS: usize = 10;
+const QUIT_POLLS: usize = 50;
 const EXIT_POLL: Duration = Duration::from_millis(200);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an app may keep a save dialog open before the quit request counts as ignored.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
 const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const PS: &str = "/bin/ps";
@@ -48,6 +51,7 @@ const BREW_PATHS: &[&str] = &["opt/homebrew/bin/brew", "usr/local/bin/brew"];
 const DOCK_DOMAIN: &str = "com.apple.dock";
 const DOCK_LISTS: &[&str] = &["persistent-apps", "persistent-others", "recent-apps"];
 const CONTAINER_METADATA: &str = ".com.apple.containermanagerd.metadata.plist";
+const WRITE_PROBE: &str = ".taert-write-probe";
 
 const ADMIN_PROMPT: &str = "taert needs your password to remove apps and their system files.";
 const APP_MANAGEMENT_HINT: &str = "macOS refused. Allow your terminal in System Settings > Privacy & Security > App Management, or move the app to the Trash in Finder";
@@ -273,6 +277,32 @@ fn cask_holds(cask: &Path, bundle: &Path, name: &std::ffi::OsStr) -> bool {
     })
 }
 
+fn app_bundles_in(folder: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })
+        .count()
+}
+
+/// `brew uninstall` removes all a cask installed, more than the review showed.
+fn cask_has_several_apps(token: &str, layout: &Layout) -> bool {
+    CASKROOMS.iter().any(|room| {
+        folders_in(&layout.system(room).join(token))
+            .iter()
+            .any(|version| {
+                let nested: usize = folders_in(version).iter().map(|f| app_bundles_in(f)).sum();
+                app_bundles_in(version) + nested > 1
+            })
+    })
+}
+
 /// The cask that installed an app. More than one candidate means none, because
 /// Homebrew must not uninstall a cask taert only guessed.
 fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<String> {
@@ -383,7 +413,13 @@ pub fn build_plan(
             let _ = tx.send(ScanProgressEvent::ItemFound { bytes });
         }
 
-        let cask = find_cask(app, request.layout);
+        let mut cask = find_cask(app, request.layout);
+        if let Some(token) = cask.take_if(|token| cask_has_several_apps(token, request.layout)) {
+            plan.notes.push(format!(
+                "The Homebrew cask {token} holds more apps, so only {} goes and Homebrew keeps listing the cask.",
+                app.name
+            ));
+        }
         let link_only = app.path.is_symlink() && cask.is_none();
         let size = if link_only { 0 } else { app.size_bytes };
         let mut bundle = ScanItem::new(app.path.clone(), size, true, false);
@@ -474,6 +510,36 @@ fn user_can_remove(path: &Path) -> bool {
         .parent()
         .and_then(|parent| CString::new(parent.as_os_str().as_bytes()).ok());
     owned && parent.is_some_and(|parent| unsafe { libc::access(parent.as_ptr(), libc::W_OK) } == 0)
+}
+
+/// App Management can keep a terminal out of an app it owns. Finding that out
+/// now, with one empty file, saves stopping the app and asking for a password twice.
+fn can_write_inside(bundle: &Path) -> bool {
+    let contents = bundle.join("Contents");
+    if bundle.is_symlink() || !contents.is_dir() {
+        return true;
+    }
+    let probe = contents.join(WRITE_PROBE);
+    let writable = fs::File::create(&probe).is_ok();
+    let _ = fs::remove_file(&probe);
+    writable
+}
+
+fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
+    let mut folders = vec![plan.app.path.clone()];
+    // A link can point anywhere. Only a cask's link is known to point at the app.
+    if plan.cask.is_some()
+        && let Ok(target) = fs::canonicalize(&plan.app.path)
+    {
+        folders.push(target);
+    }
+    folders
+}
+
+fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
+    folders
+        .iter()
+        .any(|folder| Path::new(program).starts_with(folder))
 }
 
 fn is_gone(path: &Path) -> bool {
@@ -616,14 +682,16 @@ struct Job<'a> {
     own_files: Vec<&'a ScanItem>,
     root_files: Vec<&'a ScanItem>,
     receipts: Vec<(&'a ScanItem, &'a str)>,
-    /// Labels of system launch agents. Root removes their files before the user
-    /// session stops them, so the file is gone by then.
-    system_agents: Vec<String>,
+    /// System launch agents. Root removes their files, and the session they
+    /// run in can stop them only by label after that.
+    system_agents: Vec<PathBuf>,
     /// Another copy of the app stays, so only this bundle goes.
     shared: bool,
     bundle_needs_root: bool,
     bundle_done: bool,
-    stopped: bool,
+    bundle_counted: bool,
+    root_files_vetted: bool,
+    in_root_script: bool,
     /// The app stays, so everything else of it stays too.
     blocked: bool,
 }
@@ -640,9 +708,20 @@ impl<'a> Job<'a> {
             shared: plan.shared,
             bundle_needs_root: false,
             bundle_done: false,
-            stopped: false,
+            bundle_counted: false,
+            root_files_vetted: false,
+            in_root_script: false,
             blocked: false,
         }
+    }
+
+    /// Something that stays needs this app's files, so nothing but the bundle goes.
+    fn keep_only_bundle(&mut self) {
+        self.shared = true;
+        self.own_files.clear();
+        self.root_files.clear();
+        self.receipts.clear();
+        self.system_agents.clear();
     }
 
     /// The bundle, while it is still there to act on.
@@ -652,10 +731,6 @@ impl<'a> Job<'a> {
 
     fn has_root_files(&self) -> bool {
         !self.root_files.is_empty() || !self.receipts.is_empty()
-    }
-
-    fn has_root_work(&self) -> bool {
-        self.bundle_needs_root || self.has_root_files()
     }
 }
 
@@ -695,6 +770,13 @@ impl<F: FnMut(RemovalProgress)> Tally<F> {
     }
 }
 
+/// What runs from an app right now. When taert itself runs from it, in a terminal
+/// of the app, quitting or signalling the app would end taert halfway.
+struct Running {
+    pids: Vec<u32>,
+    hosts_taert: bool,
+}
+
 enum BrewResult {
     Removed,
     NotTracked,
@@ -710,10 +792,12 @@ pub struct Uninstaller<'a> {
 impl Uninstaller<'_> {
     /// Removes what is selected in `plan`.
     ///
-    /// Nothing that hurts happens before the password: an app is only asked to
-    /// quit, so a cancelled prompt leaves it installed and working. An app's
-    /// files go only after the app is gone, so a failed removal never leaves an
-    /// app without its data.
+    /// Before the password an app is only asked to quit, and Homebrew removes its
+    /// casks. Whatever else hurts an app that stays comes after it, so a refused
+    /// prompt leaves an app with root files installed and working. If macOS only
+    /// refuses during the removal itself, that app is stopped by then, and the
+    /// second root step can ask again. An app's files go only after the app is
+    /// gone, so a failed removal never leaves an app without its data.
     pub fn run(
         &self,
         plan: &UninstallPlan,
@@ -742,14 +826,17 @@ impl Uninstaller<'_> {
             self.remove_cask(job, &mut tally);
         }
         self.remove_as_root(&mut jobs, &mut tally);
+        self.keep_files_of_failed_copies(&mut jobs, &mut tally);
         for job in &mut jobs {
             self.stop_app(job, &mut tally);
             self.remove_bundle(job, &mut tally);
         }
-        // For bundles macOS kept from the user.
+        // For bundles macOS kept from the user, and files that waited for a bundle.
         self.remove_as_root(&mut jobs, &mut tally);
+        self.keep_files_of_failed_copies(&mut jobs, &mut tally);
         for job in &jobs {
-            self.remove_own_files(job, &jobs, &mut tally);
+            self.boot_out_system_agents(job);
+            self.remove_own_files(job, &mut tally);
         }
         self.tidy_up(&jobs, &mut tally);
         tally.report
@@ -773,10 +860,8 @@ impl Uninstaller<'_> {
                         }
                         _ if user_can_remove(&item.path) => job.own_files.push(item),
                         _ => {
-                            if in_folder_named(&item.path, "LaunchAgents")
-                                && let Some(label) = item.path.file_stem()
-                            {
-                                job.system_agents.push(label.to_string_lossy().into_owned());
+                            if in_folder_named(&item.path, "LaunchAgents") {
+                                job.system_agents.push(item.path.clone());
                             }
                             job.root_files.push(item);
                         }
@@ -810,6 +895,7 @@ impl Uninstaller<'_> {
             .filter(|app| fs::canonicalize(&app.path).is_ok_and(|path| !going.contains(&path)))
             .collect();
 
+        let mut stayed = Vec::new();
         for job in jobs
             .iter_mut()
             .filter(|job| job.bundle.is_some() && !job.shared)
@@ -822,11 +908,40 @@ impl Uninstaller<'_> {
                     prettify_path(&copy.path),
                     app.name
                 ));
-                job.shared = true;
-                job.own_files.clear();
-                job.root_files.clear();
-                job.receipts.clear();
-                job.system_agents.clear();
+                stayed.push(copy.path.clone());
+                job.keep_only_bundle();
+            }
+        }
+        for job in jobs
+            .iter_mut()
+            .filter(|job| stayed.contains(&job.plan.app.path))
+        {
+            job.keep_only_bundle();
+        }
+    }
+
+    /// A selected copy that did not go is an app that stays, for every step after.
+    fn keep_files_of_failed_copies<F: FnMut(RemovalProgress)>(
+        &self,
+        jobs: &mut [Job],
+        tally: &mut Tally<F>,
+    ) {
+        let failed: Vec<InstalledApp> = jobs
+            .iter()
+            .filter(|job| job.blocked && job.bundle.is_some())
+            .map(|job| job.plan.app.clone())
+            .collect();
+        for job in jobs.iter_mut().filter(|job| !job.blocked && !job.shared) {
+            let app = &job.plan.app;
+            let copy = failed
+                .iter()
+                .find(|other| other.path != app.path && shares_data(app, other));
+            if let Some(copy) = copy {
+                tally.note(format!(
+                    "{} stayed, so the settings and data of {} stay too.",
+                    copy.name, app.name
+                ));
+                job.keep_only_bundle();
             }
         }
     }
@@ -857,33 +972,27 @@ impl Uninstaller<'_> {
         let (Some(_), Some(id), false) = (job.pending_bundle(), id, job.shared) else {
             return;
         };
-        if !self.processes_in(job.plan).is_empty() {
-            let quit = format!("tell application id \"{id}\" to quit");
-            self.host.run(OSASCRIPT, &["-e", &quit], TEARDOWN_TIMEOUT);
-            self.wait_for_exit(job.plan);
-        }
-    }
-
-    /// Everything that would hurt an app that stays. It runs once, past the point
-    /// where a refused password could keep the app.
-    fn stop_app<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
-        if job.blocked || job.stopped {
+        let running = self.running(job.plan);
+        if running.hosts_taert || running.pids.is_empty() {
             return;
         }
-        job.stopped = true;
-        let uid = unsafe { libc::getuid() };
+        let quit = format!("tell application id \"{id}\" to quit");
+        self.host.run(OSASCRIPT, &["-e", &quit], QUIT_TIMEOUT);
+        self.wait_for_exit(job.plan, QUIT_POLLS);
+    }
 
+    /// Everything that would hurt an app that stays, so it runs past the point
+    /// where the password or Homebrew could still keep the app.
+    fn stop_app<F: FnMut(RemovalProgress)>(&self, job: &Job, tally: &mut Tally<F>) {
+        if job.blocked {
+            return;
+        }
         for item in &job.own_files {
             if in_folder_named(&item.path, "LaunchAgents") {
                 let path = item.path.display().to_string();
                 self.host
                     .run(LAUNCHCTL, &["unload", &path], TEARDOWN_TIMEOUT);
             }
-        }
-        for label in &job.system_agents {
-            let target = format!("gui/{uid}/{label}");
-            self.host
-                .run(LAUNCHCTL, &["bootout", &target], TEARDOWN_TIMEOUT);
         }
 
         let Some(bundle) = job.bundle else {
@@ -895,6 +1004,17 @@ impl Uninstaller<'_> {
             self.remove_login_items(job.plan);
         }
         self.force_stop(job.plan, tally);
+    }
+
+    fn boot_out_system_agents(&self, job: &Job) {
+        let uid = unsafe { libc::getuid() };
+        for agent in job.system_agents.iter().filter(|agent| is_gone(agent)) {
+            if let Some(label) = agent.file_stem() {
+                let target = format!("gui/{uid}/{}", label.to_string_lossy());
+                self.host
+                    .run(LAUNCHCTL, &["bootout", &target], TEARDOWN_TIMEOUT);
+            }
+        }
     }
 
     fn remove_login_items(&self, plan: &AppPlan) {
@@ -917,35 +1037,26 @@ impl Uninstaller<'_> {
     }
 
     /// Finds processes by where their program lives, which a name cannot spoof.
-    fn processes_in(&self, plan: &AppPlan) -> Vec<u32> {
-        let mut folders = vec![plan.app.path.clone()];
-        // A link can point anywhere. Only a cask's link is known to point at the app.
-        if plan.cask.is_some()
-            && let Ok(target) = fs::canonicalize(&plan.app.path)
-        {
-            folders.push(target);
-        }
-
+    fn running(&self, plan: &AppPlan) -> Running {
+        let folders = program_folders(plan);
         let listing = self
             .host
             .run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
         let table = parse_process_table(&listing.stdout);
         let lineage = own_lineage(&table);
-        table
+        let inside = table
             .iter()
-            .filter(|(pid, _, _)| !lineage.contains(pid))
-            .filter(|(_, _, program)| {
-                folders
-                    .iter()
-                    .any(|folder| Path::new(program).starts_with(folder))
-            })
-            .map(|(pid, _, _)| *pid)
-            .collect()
+            .filter(|(_, _, program)| is_inside_any(program, &folders));
+        let (own, others): (Vec<_>, Vec<_>) = inside.partition(|(pid, _, _)| lineage.contains(pid));
+        Running {
+            pids: others.iter().map(|(pid, _, _)| *pid).collect(),
+            hosts_taert: !own.is_empty(),
+        }
     }
 
-    fn wait_for_exit(&self, plan: &AppPlan) -> bool {
-        for _ in 0..EXIT_POLLS {
-            if self.processes_in(plan).is_empty() {
+    fn wait_for_exit(&self, plan: &AppPlan, polls: usize) -> bool {
+        for _ in 0..polls {
+            if self.running(plan).pids.is_empty() {
                 return true;
             }
             self.host.pause(EXIT_POLL);
@@ -954,23 +1065,30 @@ impl Uninstaller<'_> {
     }
 
     fn force_stop<F: FnMut(RemovalProgress)>(&self, plan: &AppPlan, tally: &mut Tally<F>) {
-        let mut running = self.processes_in(plan);
-        if running.is_empty() {
+        let name = &plan.app.name;
+        let Running {
+            mut pids,
+            hosts_taert,
+        } = self.running(plan);
+        if hosts_taert {
+            tally.note(format!(
+                "{name} runs this terminal, so it stays open until you quit it."
+            ));
+            return;
+        }
+        if pids.is_empty() {
             return;
         }
         for signal in [libc::SIGTERM, libc::SIGKILL] {
-            for pid in &running {
+            for pid in &pids {
                 self.host.signal(*pid, signal);
             }
-            if self.wait_for_exit(plan) {
+            if self.wait_for_exit(plan, EXIT_POLLS) {
                 return;
             }
-            running = self.processes_in(plan);
+            pids = self.running(plan).pids;
         }
-        tally.note(format!(
-            "{} was still running when it was removed.",
-            plan.app.name
-        ));
+        tally.note(format!("{name} was still running when it was removed."));
     }
 
     fn brew(&self) -> Option<String> {
@@ -1013,14 +1131,24 @@ impl Uninstaller<'_> {
         }
     }
 
-    /// Homebrew needs the app stopped and takes care of its own rights, so casks
-    /// go before the root script.
+    fn count_bundle<F: FnMut(RemovalProgress)>(
+        &self,
+        job: &mut Job,
+        bundle: &ScanItem,
+        tally: &mut Tally<F>,
+    ) {
+        if !job.bundle_counted {
+            job.bundle_counted = true;
+            tally.step(&bundle.path);
+        }
+    }
+
+    /// Homebrew takes care of its own rights, so casks go before the root script.
     fn remove_cask<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
-        let (Some(bundle), Some(token)) = (job.pending_bundle(), &job.plan.cask) else {
+        let (Some(bundle), Some(token)) = (job.pending_bundle(), job.plan.cask.as_deref()) else {
             return;
         };
-        self.stop_app(job, tally);
-        tally.step(&bundle.path);
+        self.count_bundle(job, bundle, tally);
         match self.brew_uninstall(token, &bundle.path) {
             BrewResult::Removed => {
                 tally.removed(bundle);
@@ -1038,9 +1166,7 @@ impl Uninstaller<'_> {
         let Some(bundle) = job.pending_bundle() else {
             return;
         };
-        if job.plan.cask.is_none() {
-            tally.step(&bundle.path);
-        }
+        self.count_bundle(job, bundle, tally);
         match Cleaner::remove_verified(bundle, |path| self.check(path)) {
             Ok(()) => {
                 tally.removed(bundle);
@@ -1054,14 +1180,12 @@ impl Uninstaller<'_> {
         }
     }
 
-    /// Drops what root must not touch, and puts the bundle in the script when the
-    /// app has files only root can remove: if the password is refused, all of it
-    /// stays together.
-    fn vet_for_root<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    /// Drops what root must not touch.
+    fn vet_root_files<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+        if std::mem::replace(&mut job.root_files_vetted, true) {
+            return;
+        }
         for item in std::mem::take(&mut job.root_files) {
-            if job.blocked {
-                continue;
-            }
             tally.step(&item.path);
             if is_gone(&item.path) {
                 tally.removed(item);
@@ -1073,35 +1197,60 @@ impl Uninstaller<'_> {
                 tally.failed(&item.path, NOT_SAFE_AS_ROOT);
             }
         }
+    }
+
+    /// Decides what of this job goes in the root script. An app with files only
+    /// root can remove goes with them, so a refused password keeps all of it. If
+    /// root must stay away from the app, its files wait until it is gone.
+    fn prepare_for_root<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+        job.in_root_script = false;
+        if job.blocked {
+            return;
+        }
+        self.vet_root_files(job, tally);
 
         let Some(bundle) = job.pending_bundle() else {
+            job.in_root_script = job.has_root_files();
             return;
         };
-        let must = job.bundle_needs_root || !user_can_remove(&bundle.path);
+        let must = job.bundle_needs_root
+            || !user_can_remove(&bundle.path)
+            || !can_write_inside(&bundle.path);
         let safe = bundle.identity.is_some() && Safety::is_safe_as_root(&bundle.path, self.layout);
-        job.bundle_needs_root = safe && (must || job.has_root_files());
         if must && !safe {
+            self.count_bundle(job, bundle, tally);
             tally.failed(&bundle.path, NOT_SAFE_AS_ROOT);
             job.blocked = true;
+            return;
         }
+        job.bundle_needs_root = must || (safe && job.has_root_files());
+        job.in_root_script = job.bundle_needs_root;
     }
 
     fn remove_as_root<F: FnMut(RemovalProgress)>(&self, jobs: &mut [Job], tally: &mut Tally<F>) {
+        self.keep_files_of_failed_copies(jobs, tally);
         for job in jobs.iter_mut() {
-            self.vet_for_root(job, tally);
+            self.prepare_for_root(job, tally);
         }
         let script = root_script(jobs);
         if script.is_empty() {
             return;
         }
 
+        for job in jobs.iter_mut().filter(|job| job.in_root_script) {
+            if let Some(bundle) = job.bundle.filter(|_| job.bundle_needs_root) {
+                self.count_bundle(job, bundle, tally);
+            }
+            for (item, _) in &job.receipts {
+                tally.step(&item.path);
+            }
+        }
+
         let refusal = self.host.run_admin(&script, ADMIN_PROMPT).err();
         let because = |fallback: &str| refusal.clone().unwrap_or_else(|| fallback.to_string());
 
-        for job in jobs
-            .iter_mut()
-            .filter(|job| !job.blocked && job.has_root_work())
-        {
+        for job in jobs.iter_mut().filter(|job| job.in_root_script) {
+            job.in_root_script = false;
             if let Some(bundle) = job.bundle.filter(|_| job.bundle_needs_root) {
                 job.bundle_needs_root = false;
                 if is_gone(&bundle.path) {
@@ -1128,32 +1277,15 @@ impl Uninstaller<'_> {
                     tally.failed(&item.path, because(NOT_REMOVED));
                 }
             }
-
-            // Without the password the app stays whole, as far as it still is.
-            if refusal.is_some() && job.bundle.is_some() && !job.bundle_done {
-                job.blocked = true;
-            }
         }
     }
 
-    fn remove_own_files<F: FnMut(RemovalProgress)>(
-        &self,
-        job: &Job,
-        jobs: &[Job],
-        tally: &mut Tally<F>,
-    ) {
+    fn remove_own_files<F: FnMut(RemovalProgress)>(&self, job: &Job, tally: &mut Tally<F>) {
         if job.blocked {
             return;
         }
-        let name = &job.plan.app.name;
-        let copy_stayed = jobs.iter().any(|other| {
-            other.blocked && other.bundle.is_some() && shares_data(&other.plan.app, &job.plan.app)
-        });
-        if copy_stayed {
-            tally.note(format!("A copy of {name} stayed, so its files stayed too."));
-            return;
-        }
         if job.bundle.is_some_and(|bundle| !is_gone(&bundle.path)) {
+            let name = &job.plan.app.name;
             tally.note(format!("{name} is back in place, so its files stayed."));
             return;
         }
@@ -1313,7 +1445,7 @@ fn guarded_removal(item: &ScanItem) -> Option<String> {
 fn root_script(jobs: &[Job]) -> String {
     let mut lines = Vec::new();
 
-    for job in jobs.iter().filter(|job| !job.blocked) {
+    for job in jobs.iter().filter(|job| job.in_root_script) {
         let mut body = Vec::new();
         for item in &job.root_files {
             if in_folder_named(&item.path, "LaunchDaemons") {
@@ -1732,6 +1864,31 @@ mod plan_tests {
     }
 
     #[test]
+    fn a_cask_with_several_apps_stays_with_homebrew() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let bar = installed(&layout, "Bar", "com.acme.bar");
+        let room = layout.root.join("opt/homebrew/Caskroom/suite/1.0");
+        fs::create_dir_all(&room).unwrap();
+        std::os::unix::fs::symlink(&foo.path, room.join("Foo.app")).unwrap();
+        std::os::unix::fs::symlink(&bar.path, room.join("Bar.app")).unwrap();
+
+        let plan = plan_with(
+            std::slice::from_ref(&foo),
+            &[foo.clone(), bar],
+            &IgnoreStore::default(),
+            &layout,
+        );
+
+        assert_eq!(plan.apps[0].cask, None);
+        assert!(
+            plan.notes.iter().any(|note| note.contains("suite")),
+            "{:?}",
+            plan.notes
+        );
+    }
+
+    #[test]
     fn a_link_homebrew_put_there_is_a_full_uninstall() {
         let (_temp, layout) = sandbox();
         let staged = layout
@@ -1927,7 +2084,7 @@ mod run_tests {
     use crate::core::scanner::ToolGroup;
     use std::os::unix::fs::PermissionsExt;
 
-    const RUN_LOOP_EXIT_CHECKS: usize = EXIT_POLLS + 1;
+    const CHECKS_BEFORE_SIGNALS: usize = QUIT_POLLS + 1;
 
     fn folder(path: PathBuf) -> PathBuf {
         fs::create_dir_all(&path).unwrap();
@@ -2147,7 +2304,7 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let host = FakeHost::default();
-        for _ in 0..=RUN_LOOP_EXIT_CHECKS {
+        for _ in 0..=CHECKS_BEFORE_SIGNALS {
             host.reply(PS, &running(&foo.path, 4242));
         }
         host.reply(PS, "");
@@ -2192,6 +2349,30 @@ mod run_tests {
 
         assert!(host.signals.lock().unwrap().is_empty());
         assert!(!host.ran("/usr/bin/osascript -e tell application id"));
+    }
+
+    #[test]
+    fn an_app_that_hosts_this_terminal_is_left_running_whole() {
+        let (_temp, layout) = sandbox();
+        let code = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        let me = std::process::id();
+        let table = format!(
+            "{me} 1 {path}/Contents/MacOS/shell\n4242 1 {path}/Contents/MacOS/helper\n",
+            path = code.path.display()
+        );
+        host.reply(PS, &table);
+
+        let report = run(&plan_of(&code, Vec::new()), &host, &layout);
+
+        assert!(host.signals.lock().unwrap().is_empty());
+        assert!(!host.ran("/usr/bin/osascript -e tell application id"));
+        assert!(
+            report.notes.iter().any(|note| note.contains("terminal")),
+            "{:?}",
+            report.notes
+        );
+        assert!(!code.path.exists());
     }
 
     #[test]
@@ -2565,6 +2746,44 @@ mod run_tests {
     }
 
     #[test]
+    fn a_cask_homebrew_refuses_keeps_the_app_running_and_registered() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mut plan = plan_of(&foo, Vec::new());
+        plan.apps[0].login_helpers = vec!["com.acme.foo.login".to_string()];
+        with_cask(&layout, &mut plan, "foo-app");
+        let host = FakeHost::default();
+        host.fail("/usr/bin/env", "sudo: a password is required");
+        host.reply(PS, &running(&foo.path, 4242));
+
+        run(&plan, &host, &layout);
+
+        assert!(host.signals.lock().unwrap().is_empty());
+        let calls = host.calls.lock().unwrap().join("\n");
+        for side_effect in [LSREGISTER, "System Events", "bootout"] {
+            assert!(!calls.contains(side_effect), "{side_effect} in {calls}");
+        }
+    }
+
+    #[test]
+    fn a_stopped_cask_is_unregistered_after_homebrew_removed_it() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mut plan = plan_of(&foo, Vec::new());
+        let room = with_cask(&layout, &mut plan, "foo-app");
+        let host = FakeHost::default();
+        host.reply("/usr/bin/env", "");
+        host.when("/usr/bin/env", removing(&foo.path));
+        host.when("/usr/bin/env", removing(&room));
+
+        run(&plan, &host, &layout);
+
+        let brew = host.position("/usr/bin/env").unwrap();
+        let unregister = host.position(LSREGISTER).unwrap();
+        assert!(brew < unregister);
+    }
+
+    #[test]
     fn a_cask_goes_before_the_root_script() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
@@ -2614,6 +2833,208 @@ mod run_tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(!foo.path.exists());
         assert_eq!(report.removed_count, 1);
+    }
+
+    #[test]
+    fn root_files_wait_for_a_bundle_root_must_not_touch() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mut mine = foo.clone();
+        mine.path = layout.user("Applications/Mine.app");
+        mine.name = "Mine".to_string();
+        fake_app(&mine.path, "com.acme.mine", "Mine");
+        mine.bundle_id = Some("com.acme.mine".to_string());
+        fs::remove_dir_all(&foo.path).unwrap();
+        let helpers = layout.system("Library/PrivilegedHelperTools");
+        let helper = file(helpers.join("com.acme.mine.helper"));
+        let plan = plan_of(&mine, vec![leftover(&helper)]);
+        let host = FakeHost::default();
+        let bundle_at_prompt = Arc::new(std::sync::Mutex::new(None));
+        let seen = bundle_at_prompt.clone();
+        let bundle = mine.path.clone();
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            *seen.lock().unwrap() = Some(bundle.exists());
+        }));
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+        lock_folder(&helpers);
+
+        let report = run(&plan, &host, &layout);
+
+        unlock_folder(&helpers);
+        assert_eq!(*bundle_at_prompt.lock().unwrap(), Some(false));
+        assert!(helper.exists());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, helper);
+    }
+
+    #[test]
+    fn root_files_stay_when_a_bundle_root_must_not_touch_cannot_go() {
+        let (_temp, layout) = sandbox();
+        let mine = layout.user("Applications/Mine.app");
+        fake_app(&mine, "com.acme.mine", "Mine");
+        let locked = CString::new(mine.join("Contents/MacOS/Mine").as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chflags(locked.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+        let target = InstalledApp {
+            path: mine.clone(),
+            ..app("Mine", "com.acme.mine")
+        };
+        let helpers = layout.system("Library/PrivilegedHelperTools");
+        let helper = file(helpers.join("com.acme.mine.helper"));
+        let plan = plan_of(&target, vec![leftover(&helper)]);
+        let host = FakeHost::default();
+        lock_folder(&helpers);
+
+        run(&plan, &host, &layout);
+
+        unlock_folder(&helpers);
+        assert_eq!(unsafe { libc::chflags(locked.as_ptr(), 0) }, 0);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert!(helper.exists());
+    }
+
+    #[test]
+    fn a_bundle_the_user_cannot_write_into_waits_for_the_password() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        host.reply(PS, &running(&foo.path, 4242));
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+        let contents = foo.path.join("Contents");
+        lock_folder(&contents);
+
+        let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        unlock_folder(&contents);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+        assert!(foo.path.join("Contents/MacOS/Foo").exists());
+        assert!(host.signals.lock().unwrap().is_empty());
+        assert!(!host.ran(LSREGISTER));
+        assert_eq!(report.failures.len(), 1);
+    }
+
+    #[test]
+    fn a_system_agent_stays_loaded_while_its_file_stays() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let agents = layout.system("Library/LaunchAgents");
+        let agent = file(agents.join("com.acme.foo.plist"));
+        let mut plan = plan_of(&foo, vec![leftover(&agent)]);
+        plan.scan.groups[0].items[0].selected = false;
+        let host = FakeHost::default();
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+        lock_folder(&agents);
+
+        run(&plan, &host, &layout);
+
+        unlock_folder(&agents);
+        assert!(!host.ran("/bin/launchctl bootout"));
+    }
+
+    #[test]
+    fn every_row_counts_once_in_progress() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let helpers = layout.system("Library/PrivilegedHelperTools");
+        let helper = file(helpers.join("com.acme.foo.helper"));
+        let cache = folder(layout.user("Library/Caches/com.acme.foo"));
+        let receipt_path = layout.system("private/var/db/receipts/com.acme.foo.plist");
+        let receipt = row(
+            &receipt_path,
+            UninstallRole::Receipt {
+                package: "com.acme.foo".to_string(),
+            },
+        );
+        let plan = plan_of(&foo, vec![leftover(&helper), leftover(&cache), receipt]);
+        let host = FakeHost::default();
+        let removed = [helper.clone(), foo.path.clone()];
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            for path in &removed {
+                unlock_folder(path.parent().unwrap());
+                let _ = fs::remove_dir_all(path);
+                let _ = fs::remove_file(path);
+            }
+        }));
+        let ignore = IgnoreStore::default();
+        let mut seen = Vec::new();
+        lock_folder(&helpers);
+
+        let report = Uninstaller {
+            host: &host,
+            layout: &layout,
+            ignore: &ignore,
+        }
+        .run(&plan, |step| seen.push(step.current_index));
+
+        unlock_folder(&helpers);
+        assert_eq!(seen, [1, 2, 3, 4]);
+        assert_eq!(report.removed_count, 4);
+    }
+
+    #[test]
+    fn a_failed_copy_keeps_shared_root_files_too() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let old = installed(&layout, "Foo Old", "com.acme.foo");
+        let helpers = layout.system("Library/PrivilegedHelperTools");
+        let helper = file(helpers.join("com.acme.foo.helper"));
+        let plan = plans_of(vec![
+            (foo.clone(), vec![leftover(&helper)]),
+            (old.clone(), Vec::new()),
+        ]);
+        fake_app(&old.path, "com.other.changed", "Foo");
+        let host = FakeHost::default();
+        lock_folder(&helpers);
+
+        let report = run(&plan, &host, &layout);
+
+        unlock_folder(&helpers);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert!(helper.exists());
+        assert!(
+            report.notes.iter().any(|note| note.contains("Foo Old")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn a_failed_copy_keeps_its_dock_tile_and_shared_login_helper() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let old = installed(&layout, "Foo Old", "com.acme.foo");
+        let mut plan = plans_of(vec![(foo.clone(), Vec::new()), (old.clone(), Vec::new())]);
+        plan.apps[0].login_helpers = vec!["com.acme.foo.login".to_string()];
+        fake_app(&old.path, "com.other.changed", "Foo");
+        let host = FakeHost::default();
+        let tiles = dock_with(&layout, &old).replace("com.acme.tile", "com.acme.foo");
+        host.reply("/usr/bin/defaults export", &tiles);
+
+        run(&plan, &host, &layout);
+
+        assert!(!host.ran("/bin/launchctl bootout"));
+        assert!(!host.ran("/usr/bin/defaults import"));
+    }
+
+    #[test]
+    fn a_copy_left_unselected_keeps_the_rows_chosen_for_it() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let old = installed(&layout, "Foo Old", "com.acme.foo");
+        let cache = folder(layout.user("Library/Caches/com.acme.foo"));
+        let mut plan = plans_of(vec![
+            (foo.clone(), vec![leftover(&cache)]),
+            (old.clone(), Vec::new()),
+        ]);
+        plan.scan.groups[0].items[0].selected = false;
+
+        run(&plan, &FakeHost::default(), &layout);
+
+        assert!(foo.path.exists());
+        assert!(!old.path.exists());
+        assert!(cache.exists());
     }
 
     #[test]

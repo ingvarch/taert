@@ -877,7 +877,7 @@ fn render_removing_dialog(
 }
 
 fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, theme: &Theme) {
-    let title = match (report.freed_bytes > 0, plan) {
+    let title = match (report.removed_count > 0, plan) {
         (true, true) => "Uninstall Complete",
         (true, false) => "Clean Complete",
         (false, _) => "Nothing was removed",

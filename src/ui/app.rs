@@ -1768,6 +1768,20 @@ mod tests {
     }
 
     #[test]
+    fn removing_something_that_frees_nothing_still_counts() {
+        let mut app = select_app(scan_with_id("dev"));
+        let Screen::Select(state) = &mut app.screen else {
+            panic!("expected the select screen");
+        };
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            removed_count: 1,
+            ..RemovalReport::default()
+        });
+
+        assert!(!screen_text(&app).contains("Nothing was removed"));
+    }
+
+    #[test]
     fn the_outcome_shows_even_when_the_list_ended_up_empty() {
         let mut app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
         let Screen::Select(state) = &mut app.screen else {
