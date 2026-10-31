@@ -85,7 +85,43 @@ pub fn legend(items: &[(&str, String, Color)], theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// One glyph per value with the newest on the right. A missing past stays blank.
+/// One column per value with the newest on the right, top row first. A missing past stays blank.
+pub fn chart(
+    values: &[f64],
+    width: usize,
+    height: usize,
+    max: f64,
+    color: Color,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let blocks = theme.g.spark_blocks;
+    let newest = &values[values.len().saturating_sub(width)..];
+    let steps = height * blocks.len();
+    let filled: Vec<usize> = newest
+        .iter()
+        .map(|value| {
+            let level = if max > 0.0 {
+                (value / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            1 + (level * (steps - 1) as f64).round() as usize
+        })
+        .collect();
+
+    (0..height)
+        .rev()
+        .map(|row| {
+            let mut text = " ".repeat(width - newest.len());
+            for cell in &filled {
+                let level = cell.saturating_sub(row * blocks.len()).min(blocks.len());
+                text.push_str(if level == 0 { " " } else { blocks[level - 1] });
+            }
+            Span::styled(text, Style::default().fg(color))
+        })
+        .collect()
+}
+
 pub fn sparkline(
     values: &[f64],
     width: usize,
@@ -93,20 +129,7 @@ pub fn sparkline(
     color: Color,
     theme: &Theme,
 ) -> Span<'static> {
-    let blocks = theme.g.spark_blocks;
-    let newest = &values[values.len().saturating_sub(width)..];
-    let mut text = " ".repeat(width - newest.len());
-
-    for value in newest {
-        let level = if max > 0.0 {
-            (value / max).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        text.push_str(blocks[(level * (blocks.len() - 1) as f64).round() as usize]);
-    }
-
-    Span::styled(text, Style::default().fg(color))
+    chart(values, width, 1, max, color, theme).remove(0)
 }
 
 /// Legend rows of two aligned items, or of one when two do not fit in `width`.
@@ -207,6 +230,40 @@ mod tests {
         let span = sparkline(&[0.0, 100.0], 2, 100.0, Color::Reset, &theme);
 
         assert_eq!(span.content, "_#");
+    }
+
+    fn chart_rows<'a>(rows: &'a [Span<'static>]) -> Vec<&'a str> {
+        rows.iter().map(|row| row.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn chart_stacks_blocks_from_the_bottom_row() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let rows = chart(&[0.0, 50.0, 100.0], 3, 2, 100.0, Color::Reset, &theme);
+
+        assert_eq!(chart_rows(&rows), [" ▁█", "▁██"]);
+    }
+
+    #[test]
+    fn chart_leaves_the_missing_past_blank_on_every_row() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let rows = chart(&[100.0], 3, 2, 100.0, Color::Reset, &theme);
+
+        assert_eq!(chart_rows(&rows), ["  █", "  █"]);
+    }
+
+    #[test]
+    fn chart_uses_ascii_when_asked() {
+        let theme = Theme::with_env(UiEnv {
+            ascii_glyphs: true,
+            ..UiEnv::default()
+        });
+
+        let rows = chart(&[0.0, 100.0], 2, 2, 100.0, Color::Reset, &theme);
+
+        assert_eq!(chart_rows(&rows), [" #", "_#"]);
     }
 
     #[test]

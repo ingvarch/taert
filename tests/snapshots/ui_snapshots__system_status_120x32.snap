@@ -14,18 +14,18 @@ expression: output
      Cores   ▂▂▂▃ ▇▆▅▅▄▄▃▂▂▁                                    ● Compressed  10.4 GB   ● Cached       3.9 GB
      History ▅▅▆▆▆▇▂▃▃▃▄▄▅▅▅▆▆▆▇▂▃▃▃▄▄▅▅▅▆▆▆▇▂▃▃▃▄▄             ● Free          11 GB   ● Swap            0 B
 
-     STORAGE                            118.6 GB available      POWER                                    ● Plugged in
-     Macintosh HD ━━━━━━━━━━━━━━───── 375.8 GB of 494.4 GB      Charge ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────  80%
-     Time Machine ━━━━━━━━━━━━━━━━━━─   1.85 TB of 2.00 TB      Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──  96%
-     ● Used     375.8 GB   ● Managed    5.7 GB                  124 cycles · 31°C · 96 W adapter
-     ● Free     118.6 GB
-     Read         ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁           240.0 KB/s
-     Write        █▇▇▆▆▅▅▄▃▃▂▂▁█▇▇▆▆█             5.5 MB/s
-
-     PROCESSES                                  Top by CPU      NETWORK                              en0 192.168.1.20
-     node             ━━━━━━━━━━━━━━━━━━  250.1%  953.7 MB      Down   ▇▇█▁▂▂▃▃▄▅▅▆▆▇▇█▁▂▂▃▃▄▅▅▆▆▇▇█▁▂▂▃▃█   1.2 MB/s
-     WindowServer     ━━━━──────────────   53.2%  163.1 MB      Up     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  84.0 KB/s
-     workerd          ━━━───────────────   36.6%  158.6 MB      Tunnel utun8 100.64.0.7
+     NETWORK                              en0 192.168.1.20      STORAGE                            118.6 GB available
+     Down   ▇▇█▁▂▂▃▃▄▅▅▆▆▇▇█▁▂▂▃▃▄▅▅▆▆▇▇█▁▂▂▃▃█   1.2 MB/s      Macintosh HD ━━━━━━━━━━━━━━───── 375.8 GB of 494.4 GB
+     Up     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  84.0 KB/s      Time Machine ━━━━━━━━━━━━━━━━━━─   1.85 TB of 2.00 TB
+     Tunnel utun8 100.64.0.7                                    ● Used     375.8 GB   ● Managed    5.7 GB
+                                                                ● Free     118.6 GB
+     POWER                                    ● Plugged in      Read         ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁           240.0 KB/s
+     Charge ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────  80%      Write        █▇▇▆▆▅▅▄▃▃▂▂▁█▇▇▆▆█             5.5 MB/s
+     Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──  96%
+     124 cycles · 31°C · 96 W adapter                           PROCESSES                                  Top by CPU
+                                                                node             ━━━━━━━━━━━━━━━━━━  250.1%  953.7 MB
+                                                                WindowServer     ━━━━──────────────   53.2%  163.1 MB
+                                                                workerd          ━━━───────────────   36.6%  158.6 MB
 
      Managed space may include purgeable files and isn't counted as free.
 
