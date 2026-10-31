@@ -2,21 +2,21 @@
 source: tests/ui_snapshots.rs
 expression: select_screen(&state)
 ---
- taert › Docker                                                                            1 of 4 selected  ·  200.0 MB
+ taert › Docker                                                                            1 of 5 selected  ·  200.0 MB
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-     IMAGES                                                                                           2 items · 1.1 GB
-   ▌ ○ app:1                                                                   ━━──────────────────   7.8%   900.0 MB
-     ● <untagged> 2                                                            ────────────────────   1.7%   200.0 MB
+     IMAGES                                                                                           3 items · 1.2 GB
+       NAME                                                  CREATED            SHARE                           SIZE ↓
+   ▌ ○ app:1                                                 5 months ago       ━━──────────────────   7.8%   900.0 MB
+     ● <untagged> 2                                          3 days ago         ────────────────────   1.7%   200.0 MB
+     ○ Zebra:1                                               —                  ────────────────────   0.9%   100.0 MB
+
      VOLUMES (DATA IS DELETED FOR GOOD)                                                              1 item · 400.0 MB
-     ○ pgdata                                                                  ━───────────────────   3.5%   400.0 MB
+       NAME                                                  CREATED            SHARE                           SIZE ↓
+     ○ pgdata                                                2 weeks ago        ━───────────────────   3.4%   400.0 MB
+
      BUILD CACHE                                                                                      1 item · 10.0 GB
-     ○ Build cache                                                             ━━━━━━━━━━━━━━━━━───  87.0%    10.0 GB
-
-
-
-
-
-
+       NAME                                                  LAST USED          SHARE                           SIZE ↓
+     ○ Build cache                                           2 days ago         ━━━━━━━━━━━━━━━━━───  86.2%    10.0 GB
 
 
 
@@ -33,4 +33,4 @@ expression: select_screen(&state)
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ↑↓  Move    ␣  Select    /  Search    ?  More                                                      Review 1 items  ↵
+  ↑↓  Move    ␣  Select    ⇧S/N/D  Sort: Size    ?  More                                             Review 1 items  ↵

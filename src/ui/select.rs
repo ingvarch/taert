@@ -3,6 +3,7 @@
 //! and completion outcome dialog.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -10,6 +11,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::analyze::SortOrder;
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
 use super::components::empty::EmptyState;
@@ -21,9 +23,10 @@ use super::components::text::plural;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
+use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::path_utils::prettify_path;
-use crate::core::scanner::CategoryScan;
+use crate::core::scanner::{CategoryScan, ScanItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmButton {
@@ -49,19 +52,41 @@ pub struct SelectState {
     pub is_searching: bool,
     pub overlay: ModalOverlay,
     pub problem: Option<String>,
+    /// Lists that can be sorted are drawn as tables.
+    pub sort_order: Option<SortOrder>,
+}
+
+const BAR_MIN_WIDTH: u16 = 100;
+const SIZE_W: usize = 9;
+// Fits "About an hour ago", the longest age that lasts more than a few seconds.
+const AGE_W: usize = 17;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Item,
+    Section,
+    Columns { date: &'static str },
+    Gap,
 }
 
 #[derive(Debug, Clone)]
 pub struct FlattenedRow {
     pub group_index: usize,
     pub item_index: Option<usize>,
-    pub is_header: bool,
+    pub kind: RowKind,
     pub group_name: String,
     pub size_bytes: u64,
     pub display_path: String,
     pub is_selected: bool,
     pub full_path: Option<PathBuf>,
     pub item_count: usize,
+    pub created: Option<SystemTime>,
+}
+
+impl FlattenedRow {
+    pub fn is_item(&self) -> bool {
+        self.kind == RowKind::Item
+    }
 }
 
 impl SelectState {
@@ -71,17 +96,7 @@ impl SelectState {
                 item.selected = false;
             }
         }
-        let mut state = Self {
-            scan,
-            focused_index: 0,
-            path_scroll: 0,
-            search_query: String::new(),
-            is_searching: false,
-            overlay: ModalOverlay::None,
-            problem: None,
-        };
-        state.move_to_start();
-        state
+        Self::with_preserved_selection(scan)
     }
 
     /// A scan that could not run, with the reason to show instead of a list.
@@ -96,6 +111,7 @@ impl SelectState {
     }
 
     pub fn with_preserved_selection(scan: CategoryScan) -> Self {
+        let sort_order = (scan.id == SCAN_ID).then(SortOrder::default);
         let mut state = Self {
             scan,
             focused_index: 0,
@@ -104,9 +120,31 @@ impl SelectState {
             is_searching: false,
             overlay: ModalOverlay::None,
             problem: None,
+            sort_order,
         };
         state.move_to_start();
         state
+    }
+
+    /// Sorts inside each section and keeps the cursor on its item.
+    pub fn set_sort(&mut self, sort_order: SortOrder) {
+        let focused = self.flattened_rows().get(self.focused_index).cloned();
+
+        for group in &mut self.scan.groups {
+            sort_order.sort_children(&mut group.items);
+        }
+        self.sort_order = Some(sort_order);
+
+        let Some(focused) = focused else { return };
+        let rows = self.flattened_rows();
+        let same_item = |row: &FlattenedRow| {
+            row.is_item()
+                && row.group_index == focused.group_index
+                && row.full_path == focused.full_path
+        };
+        if let Some(index) = rows.iter().position(same_item) {
+            self.focused_index = index;
+        }
     }
 
     pub fn flattened_rows(&self) -> Vec<FlattenedRow> {
@@ -135,12 +173,28 @@ impl SelectState {
             }
 
             let group_bytes: u64 = matching_items.iter().map(|(_, it)| it.size_bytes).sum();
+            let heading_row = |kind| FlattenedRow {
+                group_index: g_idx,
+                item_index: None,
+                kind,
+                group_name: group.tool.clone(),
+                size_bytes: 0,
+                display_path: String::new(),
+                is_selected: false,
+                full_path: None,
+                item_count: 0,
+                created: None,
+            };
+
+            if !rows.is_empty() {
+                rows.push(heading_row(RowKind::Gap));
+            }
 
             // Group header
             rows.push(FlattenedRow {
                 group_index: g_idx,
                 item_index: None,
-                is_header: true,
+                kind: RowKind::Section,
                 group_name: group.tool.clone(),
                 size_bytes: group_bytes,
                 display_path: format!(
@@ -152,20 +206,32 @@ impl SelectState {
                     && !matching_items.is_empty(),
                 full_path: None,
                 item_count: matching_items.len(),
+                created: None,
             });
+
+            if self.sort_order.is_some() {
+                let is_cache = |item: &ScanItem| item.docker == Some(DockerObject::BuildCache);
+                let date = if group.items.iter().any(is_cache) {
+                    "LAST USED"
+                } else {
+                    "CREATED"
+                };
+                rows.push(heading_row(RowKind::Columns { date }));
+            }
 
             // Group items
             for (i_idx, item) in matching_items {
                 rows.push(FlattenedRow {
                     group_index: g_idx,
                     item_index: Some(i_idx),
-                    is_header: false,
+                    kind: RowKind::Item,
                     group_name: group.tool.clone(),
                     size_bytes: item.size_bytes,
                     display_path: prettify_path(&item.path),
                     is_selected: item.selected,
                     full_path: Some(item.path.clone()),
                     item_count: 0,
+                    created: item.modified,
                 });
             }
         }
@@ -176,7 +242,7 @@ impl SelectState {
     pub fn toggle_current(&mut self) {
         let rows = self.flattened_rows();
         if let Some(row) = rows.get(self.focused_index) {
-            if row.is_header {
+            if row.kind == RowKind::Section {
                 let g_idx = row.group_index;
                 let all_sel = self.scan.groups[g_idx]
                     .items
@@ -217,7 +283,7 @@ impl SelectState {
 
         let mut next = self.focused_index + 1;
         while next < rows.len() {
-            if !rows[next].is_header {
+            if rows[next].is_item() {
                 self.focused_index = next;
                 self.path_scroll = 0;
                 return;
@@ -235,7 +301,7 @@ impl SelectState {
 
         let mut prev = self.focused_index.saturating_sub(1);
         loop {
-            if !rows[prev].is_header {
+            if rows[prev].is_item() {
                 self.focused_index = prev;
                 self.path_scroll = 0;
                 return;
@@ -255,7 +321,7 @@ impl SelectState {
         }
         let target = (self.focused_index + 10).min(rows.len().saturating_sub(1));
         for (idx, row) in rows.iter().enumerate().skip(target) {
-            if !row.is_header {
+            if row.is_item() {
                 self.focused_index = idx;
                 self.path_scroll = 0;
                 return;
@@ -271,7 +337,7 @@ impl SelectState {
         }
         let target = self.focused_index.saturating_sub(10);
         for idx in (0..=target).rev() {
-            if !rows[idx].is_header {
+            if rows[idx].is_item() {
                 self.focused_index = idx;
                 self.path_scroll = 0;
                 return;
@@ -283,7 +349,7 @@ impl SelectState {
     pub fn move_to_start(&mut self) {
         let rows = self.flattened_rows();
         for (idx, row) in rows.iter().enumerate() {
-            if !row.is_header {
+            if row.is_item() {
                 self.focused_index = idx;
                 self.path_scroll = 0;
                 return;
@@ -296,7 +362,7 @@ impl SelectState {
     pub fn move_to_end(&mut self) {
         let rows = self.flattened_rows();
         for (idx, row) in rows.iter().enumerate().rev() {
-            if !row.is_header {
+            if row.is_item() {
                 self.focused_index = idx;
                 self.path_scroll = 0;
                 return;
@@ -367,15 +433,17 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Clean caches", state.scan.title.as_str()]
     };
 
+    let mut hints = vec![Hint::new("↑↓", "Move"), Hint::new("␣", "Select")];
+    match state.sort_order {
+        Some(order) => hints.push(Hint::new("⇧S/N/D", order.hint_label())),
+        None => hints.push(Hint::new("/", "Search")),
+    }
+    hints.push(Hint::new("?", "More"));
+
     let chrome = AppChrome::new(crumbs)
         .full_width()
         .status(right_status)
-        .hints(vec![
-            Hint::new("↑↓", "Move"),
-            Hint::new("␣", "Select"),
-            Hint::new("/", "Search"),
-            Hint::new("?", "More"),
-        ])
+        .hints(hints)
         .primary(primary_action);
 
     let content_rect = chrome.render(frame, theme);
@@ -393,7 +461,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         let results_count = state
             .flattened_rows()
             .iter()
-            .filter(|r| !r.is_header)
+            .filter(|r| r.is_item())
             .count();
         let search_line = Line::from(vec![
             Span::styled(format!("  {}  ", theme.g.search), theme.accent_text()),
@@ -430,6 +498,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         0
     };
 
+    let width = list_rect.width as usize;
+    let now = SystemTime::now();
     let mut list_lines = Vec::new();
     for (idx, row) in rows
         .iter()
@@ -439,7 +509,11 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     {
         let is_focused = idx == state.focused_index;
 
-        if row.is_header {
+        if row.kind == RowKind::Gap {
+            list_lines.push(Line::default());
+        } else if let (RowKind::Columns { date }, Some(order)) = (row.kind, state.sort_order) {
+            list_lines.push(column_titles(date, order, width, theme));
+        } else if row.kind == RowKind::Section {
             let noun = if row.item_count == 1 { "item" } else { "items" };
             let detail_spans = vec![
                 Span::styled(format!("{} {noun} · ", row.item_count), theme.footnote()),
@@ -481,7 +555,10 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             };
 
             let size_style = theme.size(row.size_bytes);
-            let detail = Span::styled(format!("{:>9}", format_bytes(row.size_bytes)), size_style);
+            let detail = Span::styled(
+                format!("{:>SIZE_W$}", format_bytes(row.size_bytes)),
+                size_style,
+            );
 
             let frac = if total_shown_bytes > 0 {
                 Some(row.size_bytes as f64 / total_shown_bytes as f64)
@@ -494,8 +571,15 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 .detail(detail)
                 .selected(is_focused);
 
+            if state.sort_order.is_some() {
+                let age = row
+                    .created
+                    .map_or("—".to_string(), |time| format_age(time, now));
+                list_row = list_row.meta(Span::styled(format!("{age:<AGE_W$}"), theme.footnote()));
+            }
+
             if let Some(f) = frac
-                && list_rect.width >= 100
+                && list_rect.width >= BAR_MIN_WIDTH
             {
                 list_row = list_row.bar(f);
             }
@@ -522,6 +606,36 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             render_outcome_dialog(frame, report, theme);
         }
     }
+}
+
+fn column_titles(date: &str, order: SortOrder, width: usize, theme: &Theme) -> Line<'static> {
+    let style = theme.footnote();
+    let title = |column: SortOrder, label: &str| {
+        let arrow = match column {
+            SortOrder::Name => theme.g.sort_ascending,
+            SortOrder::Size | SortOrder::Date => theme.g.sort_descending,
+        };
+        if column == order {
+            format!("{label} {arrow}")
+        } else {
+            label.to_string()
+        }
+    };
+
+    let mut row = ListRow::new(vec![Span::styled(title(SortOrder::Name, "NAME"), style)])
+        .leading(Span::raw(" "))
+        .meta(Span::styled(
+            format!("{:<AGE_W$}", title(SortOrder::Date, date)),
+            style,
+        ))
+        .detail(Span::styled(
+            format!("{:>SIZE_W$}", title(SortOrder::Size, "SIZE")),
+            style,
+        ));
+    if width as u16 >= BAR_MIN_WIDTH {
+        row = row.bar(0.0).bar_heading("SHARE");
+    }
+    row.render_line(width, theme)
 }
 
 fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, theme: &Theme) {

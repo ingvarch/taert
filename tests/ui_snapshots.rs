@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
 
 use insta::assert_snapshot;
 use ratatui::Frame;
@@ -16,7 +17,7 @@ use taert::core::telemetry::{
     CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
     PowerStatus, ProcessStatus, VolumeStatus,
 };
-use taert::ui::analyze::{AnalyzeState, render_analyze};
+use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::preferences::{PreferencesState, render_preferences};
@@ -589,6 +590,10 @@ fn docker_item(object: DockerObject, label: &str, size: u64, selected: bool) -> 
     ScanItem::docker(object, label.to_string(), size, selected)
 }
 
+fn days_ago(days: u64) -> Option<SystemTime> {
+    Some(SystemTime::now() - Duration::from_secs(days * 24 * 3_600))
+}
+
 fn docker_scan() -> CategoryScan {
     let image = |id: &str, tags: &[&str]| DockerObject::Image {
         id: id.to_string(),
@@ -601,29 +606,43 @@ fn docker_scan() -> CategoryScan {
             ToolGroup {
                 tool: "Images".to_string(),
                 items: vec![
-                    docker_item(image("sha256:1", &["app:1"]), "app:1", 900_000_000, false),
-                    docker_item(image("sha256:2", &[]), "<untagged> 2", 200_000_000, true),
+                    docker_item(image("sha256:1", &["app:1"]), "app:1", 900_000_000, false)
+                        .created(days_ago(150)),
+                    docker_item(image("sha256:2", &[]), "<untagged> 2", 200_000_000, true)
+                        .created(days_ago(3)),
+                    docker_item(
+                        image("sha256:3", &["Zebra:1"]),
+                        "Zebra:1",
+                        100_000_000,
+                        false,
+                    ),
                 ],
             },
             ToolGroup {
                 tool: "Volumes (data is deleted for good)".to_string(),
-                items: vec![docker_item(
-                    DockerObject::Volume {
-                        name: "pgdata".to_string(),
-                    },
-                    "pgdata",
-                    400_000_000,
-                    false,
-                )],
+                items: vec![
+                    docker_item(
+                        DockerObject::Volume {
+                            name: "pgdata".to_string(),
+                        },
+                        "pgdata",
+                        400_000_000,
+                        false,
+                    )
+                    .created(days_ago(20)),
+                ],
             },
             ToolGroup {
                 tool: "Build cache".to_string(),
-                items: vec![docker_item(
-                    DockerObject::BuildCache,
-                    "Build cache",
-                    10_000_000_000,
-                    false,
-                )],
+                items: vec![
+                    docker_item(
+                        DockerObject::BuildCache,
+                        "Build cache",
+                        10_000_000_000,
+                        false,
+                    )
+                    .created(days_ago(2)),
+                ],
             },
         ],
     }
@@ -706,4 +725,248 @@ fn the_docker_row_sits_in_cleanup_and_says_what_it_does() {
 
     assert!(output.contains("Docker cleanup"), "{output}");
     assert!(output.contains("never selected for you"), "{output}");
+}
+
+fn docker_table() -> SelectState {
+    SelectState::with_preserved_selection(docker_scan())
+}
+
+fn line_with<'a>(output: &'a str, text: &str) -> &'a str {
+    output
+        .lines()
+        .find(|line| line.contains(text))
+        .unwrap_or_else(|| panic!("{text} is not on the screen:\n{output}"))
+}
+
+fn column_of(line: &str, text: &str) -> usize {
+    line[..line.find(text).unwrap()].chars().count()
+}
+
+#[test]
+fn docker_rows_show_their_age_like_docker_images() {
+    let output = select_screen(&docker_table());
+
+    assert!(
+        line_with(&output, "app:1").contains("5 months ago"),
+        "{output}"
+    );
+    assert!(
+        line_with(&output, "<untagged>").contains("3 days ago"),
+        "{output}"
+    );
+    assert!(
+        line_with(&output, "pgdata").contains("2 weeks ago"),
+        "{output}"
+    );
+}
+
+#[test]
+fn an_object_without_a_date_keeps_its_place_in_the_table() {
+    let output = select_screen(&docker_table());
+
+    let dated = line_with(&output, "app:1");
+    let undated = line_with(&output, "Zebra:1");
+    assert_eq!(
+        column_of(undated, "—"),
+        column_of(dated, "5 months ago"),
+        "{output}"
+    );
+    assert_eq!(
+        column_of(undated, "100.0 MB"),
+        column_of(dated, "900.0 MB"),
+        "{output}"
+    );
+}
+
+#[test]
+fn other_lists_show_no_age() {
+    let output = select_screen(&SelectState::new(sample_scan()));
+
+    assert!(!output.contains(" ago"), "{output}");
+    assert!(!output.contains("CREATED"), "{output}");
+}
+
+#[test]
+fn every_docker_section_titles_its_columns_above_its_rows() {
+    let output = select_screen(&docker_table());
+    let lines: Vec<&str> = output.lines().collect();
+
+    for section in ["IMAGES", "VOLUMES", "BUILD CACHE"] {
+        let at = lines.iter().position(|l| l.contains(section)).unwrap();
+        assert!(lines[at + 1].contains("NAME"), "{section}:\n{output}");
+        assert!(lines[at + 1].contains("SIZE"), "{section}:\n{output}");
+    }
+}
+
+#[test]
+fn column_titles_line_up_with_the_rows() {
+    let output = select_screen(&docker_table());
+
+    let headings = line_with(&output, "CREATED");
+    let row = line_with(&output, "app:1");
+    assert_eq!(
+        column_of(headings, "NAME"),
+        column_of(row, "app:1"),
+        "{output}"
+    );
+    assert_eq!(
+        column_of(headings, "CREATED"),
+        column_of(row, "5 months ago"),
+        "{output}"
+    );
+    assert_eq!(headings.chars().count(), row.chars().count(), "{output}");
+}
+
+#[test]
+fn the_build_cache_column_says_last_used() {
+    let output = select_screen(&docker_table());
+    let lines: Vec<&str> = output.lines().collect();
+
+    let at = lines
+        .iter()
+        .position(|l| l.contains("BUILD CACHE"))
+        .unwrap();
+    assert!(lines[at + 1].contains("LAST USED"), "{output}");
+    assert!(!lines[at + 1].contains("CREATED"), "{output}");
+}
+
+#[test]
+fn a_blank_row_separates_sections_and_none_comes_first() {
+    let output = select_screen(&docker_table());
+    let lines: Vec<&str> = output.lines().collect();
+
+    assert!(lines[2].contains("IMAGES"), "{output}");
+    let volumes = lines.iter().position(|l| l.contains("VOLUMES")).unwrap();
+    assert_eq!(lines[volumes - 1], "", "{output}");
+}
+
+#[test]
+fn other_lists_get_the_blank_row_but_no_column_titles() {
+    let mut scan = sample_scan();
+    let mut second = scan.groups[0].clone();
+    second.tool = "Second".to_string();
+    scan.groups.push(second);
+
+    let output = select_screen(&SelectState::new(scan));
+    let lines: Vec<&str> = output.lines().collect();
+
+    let at = lines.iter().position(|l| l.contains("SECOND")).unwrap();
+    assert_eq!(lines[at - 1], "", "{output}");
+    assert!(!output.contains("NAME"), "{output}");
+}
+
+#[test]
+fn the_cursor_only_stops_on_items() {
+    let mut state = docker_table();
+    let items = state
+        .scan
+        .groups
+        .iter()
+        .map(|g| g.items.len())
+        .sum::<usize>();
+
+    let mut seen = Vec::new();
+    for _ in 0..items {
+        assert!(state.flattened_rows()[state.focused_index].is_item());
+        seen.push(state.focused_index);
+        state.next_selectable();
+    }
+    seen.dedup();
+    assert_eq!(seen.len(), items);
+
+    for _ in 0..items {
+        state.previous_selectable();
+        assert!(state.flattened_rows()[state.focused_index].is_item());
+    }
+}
+
+#[test]
+fn a_search_keeps_blank_rows_only_between_what_it_found() {
+    let mut state = docker_table();
+    state.search_query = "pgdata".to_string();
+    state.move_to_start();
+
+    let rows = state.flattened_rows();
+
+    assert_eq!(rows[0].group_name, "Volumes (data is deleted for good)");
+    assert_eq!(rows.iter().filter(|row| row.is_item()).count(), 1);
+    assert!(rows.iter().all(|row| row.group_name == rows[0].group_name));
+}
+
+fn names_in_section(state: &SelectState, group: usize) -> Vec<String> {
+    state.scan.groups[group]
+        .items
+        .iter()
+        .map(|item| item.path.display().to_string())
+        .collect()
+}
+
+#[test]
+fn sorting_by_date_puts_the_newest_first_and_the_undated_last() {
+    let mut state = docker_table();
+
+    state.set_sort(SortOrder::Date);
+
+    assert_eq!(
+        names_in_section(&state, 0),
+        ["<untagged> 2", "app:1", "Zebra:1"]
+    );
+}
+
+#[test]
+fn sorting_by_name_ignores_case_and_stays_inside_each_section() {
+    let mut state = docker_table();
+
+    state.set_sort(SortOrder::Name);
+
+    assert_eq!(
+        names_in_section(&state, 0),
+        ["<untagged> 2", "app:1", "Zebra:1"]
+    );
+    assert_eq!(names_in_section(&state, 1), ["pgdata"]);
+}
+
+#[test]
+fn sorting_by_size_puts_the_largest_first() {
+    let mut state = docker_table();
+    state.set_sort(SortOrder::Date);
+
+    state.set_sort(SortOrder::Size);
+
+    assert_eq!(
+        names_in_section(&state, 0),
+        ["app:1", "<untagged> 2", "Zebra:1"]
+    );
+}
+
+#[test]
+fn sorting_keeps_the_cursor_on_its_item() {
+    let mut state = docker_table();
+    assert_eq!(names_in_section(&state, 0)[0], "app:1");
+
+    state.set_sort(SortOrder::Date);
+
+    let focused = &state.flattened_rows()[state.focused_index];
+    assert_eq!(focused.display_path, "app:1");
+}
+
+#[test]
+fn the_sorted_column_carries_an_arrow() {
+    let mut state = docker_table();
+    assert!(select_screen(&state).contains("SIZE ↓"));
+
+    state.set_sort(SortOrder::Date);
+    assert!(select_screen(&state).contains("CREATED ↓"));
+
+    state.set_sort(SortOrder::Name);
+    assert!(select_screen(&state).contains("NAME ↑"));
+}
+
+#[test]
+fn the_toolbar_shows_the_sort_keys_for_a_table_only() {
+    let table = select_screen(&docker_table());
+    let list = select_screen(&SelectState::new(sample_scan()));
+
+    assert!(table.contains("Sort: Size"), "{table}");
+    assert!(!list.contains("Sort:"), "{list}");
 }

@@ -7,18 +7,18 @@ expression: output
    Your Mac, crystal clean.
 
      CLEANUP
-   ▌ ✧ Clean caches                                                         ›
+   ▌ ✧ Clean caches                                                          ›
         Choose tools and individual paths to remove
-     ◇ Pr╭────────────────────────────────────────────────────────────╮     ›
-     ▦ Do│ Explore your home folder?                                  │     ›
+     ◇ Pr╭────────────────────────────────────────────────────────────╮      ›
+     ▦ Do│ Explore your home folder?                                  │      ›
          │                                                            │
      INSP│ Measuring every folder can take a few minutes.             │
-     ◔ Ex│                                                            │     ›
-     ▤ Sy│                                                            │     ›
+     ◔ Ex│                                                            │      ›
+     ▤ Sy│                                                            │      ›
          │                                           Cancel    Start  │
      SETT│                                    Enter select   Esc back │
-     ⌥ Pr╰────────────────────────────────────────────────────────────╯     ›
-     ◈ Protected paths                                                      ›
+     ⌥ Pr╰────────────────────────────────────────────────────────────╯      ›
+     ◈ Protected paths                                                       ›
 
 
 
