@@ -234,10 +234,8 @@ fn snapshot_review() {
     }
 }
 
-#[test]
-fn snapshot_analyze() {
-    let theme = snapshot_theme();
-    let state = AnalyzeState {
+fn sample_analyze() -> AnalyzeState {
+    AnalyzeState {
         root: PathBuf::from("/Users/test/Documents"),
         levels: vec![taert::ui::analyze::BrowserLevel {
             snapshot: taert::ui::analyze::FolderSnapshot {
@@ -281,7 +279,13 @@ fn snapshot_analyze() {
             taert::core::cache::StorageCache::new(),
         )),
         sort_order: taert::ui::analyze::SortOrder::default(),
-    };
+    }
+}
+
+#[test]
+fn snapshot_analyze() {
+    let theme = snapshot_theme();
+    let state = sample_analyze();
 
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_analyze(f, &state, &theme));
@@ -347,4 +351,83 @@ fn snapshot_path_list_editor() {
         let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));
         assert_snapshot!(format!("path_list_editor_{label}"), output);
     }
+}
+
+const WIDE_WINDOW: (u16, u16) = (205, 60);
+
+// The rows between the title bar and the toolbar.
+fn body_rows(output: &str) -> Vec<&str> {
+    let lines: Vec<&str> = output.lines().collect();
+    lines[2..lines.len() - 2].to_vec()
+}
+
+fn right_edge(output: &str) -> usize {
+    body_rows(output)
+        .iter()
+        .map(|row| row.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn left_edge(output: &str) -> usize {
+    body_rows(output)
+        .iter()
+        .filter(|row| !row.trim().is_empty())
+        .map(|row| row.chars().take_while(|c| *c == ' ').count())
+        .min()
+        .unwrap_or(0)
+}
+
+#[test]
+fn data_screens_fill_a_wide_window() {
+    let theme = snapshot_theme();
+    let (w, h) = WIDE_WINDOW;
+    let select = SelectState::new(sample_scan());
+    let analyze = sample_analyze();
+    let status = status_with_history();
+
+    let screens = [
+        (
+            "select",
+            render_to_string(w, h, |f| render_select(f, &select, &theme)),
+        ),
+        (
+            "analyze",
+            render_to_string(w, h, |f| render_analyze(f, &analyze, &theme)),
+        ),
+        (
+            "status",
+            render_to_string(w, h, |f| render_system_status(f, &status, &theme)),
+        ),
+    ];
+
+    for (name, output) in screens {
+        assert!(right_edge(&output) > 190, "{name} stops early:\n{output}");
+        assert!(left_edge(&output) < 10, "{name} is indented:\n{output}");
+    }
+}
+
+#[test]
+fn the_home_menu_starts_at_the_left_edge_of_a_wide_window() {
+    let theme = snapshot_theme();
+    let (w, h) = WIDE_WINDOW;
+    let state = WorkspaceState::new();
+
+    let output = render_to_string(w, h, |f| render_workspace(f, &state, &theme));
+
+    assert!(left_edge(&output) < 10, "{output}");
+}
+
+#[test]
+fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
+    let theme = snapshot_theme();
+    let (w, h) = WIDE_WINDOW;
+    let config = Config::default();
+    let ignore = IgnoreStore::default();
+    let state = PreferencesState::new(&config, &ignore);
+
+    let output = render_to_string(w, h, |f| render_preferences(f, &state, &theme));
+
+    assert!(right_edge(&output) <= 113, "{output}");
+    assert!(left_edge(&output) < 10, "{output}");
 }

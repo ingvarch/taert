@@ -4,10 +4,10 @@ expression: output
 ---
  taert › Clean caches › Review
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-     1 items · 15.0 MB will be permanently deleted
+   1 items · 15.0 MB will be permanently deleted
 
-       CARGO                                                                                                15.0 MB
-          /Users/test/.cargo/registry/cache                                                                 15.0 MB
+     CARGO                                                                                                15.0 MB
+        /Users/test/.cargo/registry/cache                                                                 15.0 MB
 
 
 

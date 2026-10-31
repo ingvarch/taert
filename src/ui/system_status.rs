@@ -141,6 +141,7 @@ pub fn render_system_status(frame: &mut Frame, state: &SystemStatusState, theme:
     let health_color = severity_color(health.severity, theme);
 
     let chrome = AppChrome::new(vec!["taert", "System status"])
+        .full_width()
         .status(Line::from(status_spans(
             health_color,
             health.message,

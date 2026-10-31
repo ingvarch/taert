@@ -4,9 +4,9 @@ expression: output
 ---
  taert › Clean caches › Test Scan                                                               0 of 2 selected  ·  0 B
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-       CARGO                                                                                      2 items · 40.0 MB
-     ▌ ○ /Users/test/.cargo/registry/cache                                                        37.5%    15.0 MB
-       ○ /Users/test/.cargo/git/db                                                                62.5%    25.0 MB
+     CARGO                                                                                           2 items · 40.0 MB
+   ▌ ○ /Users/test/.cargo/registry/cache                                       ━━━━━━━━────────────  37.5%    15.0 MB
+     ○ /Users/test/.cargo/git/db                                               ━━━━━━━━━━━━━───────  62.5%    25.0 MB
 
 
 

@@ -10,6 +10,15 @@ use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
+const BAR_MIN_ROW_WIDTH: usize = 100;
+const BAR_MIN_WIDTH: usize = 8;
+
+// The bar takes most of the extra width and so leads the eye from the name to the size.
+fn bar_width(row_width: usize) -> usize {
+    let extra = row_width.saturating_sub(BAR_MIN_ROW_WIDTH);
+    BAR_MIN_WIDTH + extra - extra / 4
+}
+
 #[derive(Debug, Clone)]
 pub struct ListRow<'a> {
     pub leading: Option<Span<'a>>,
@@ -103,10 +112,11 @@ impl<'a> ListRow<'a> {
         }; // " ›" or "  "
         let detail_width = self.detail.as_ref().map(|d| d.content.width()).unwrap_or(0);
 
-        let show_bar_graphic = self.bar.is_some() && width >= 115;
+        let show_bar_graphic = self.bar.is_some() && width >= BAR_MIN_ROW_WIDTH;
         let show_percentage = self.bar.is_some() && width >= 95;
+        let bar_w = bar_width(width);
         let bar_total_width = if show_bar_graphic {
-            8 + 1 + 6 + 2 // bar(8) + space(1) + pct(6) + pad(2) = 17
+            bar_w + 1 + 6 + 2 // bar + space(1) + pct(6) + pad(2)
         } else if show_percentage {
             6 + 2 // pct(6) + pad(2) = 8
         } else {
@@ -167,13 +177,14 @@ impl<'a> ListRow<'a> {
             } else if pct >= 0.05 {
                 format!("{:>5.1}%", pct)
             } else if frac > 0.0 {
-                "<0.1%".to_string()
+                " <0.1%".to_string()
             } else {
-                " 0.0%".to_string()
+                "  0.0%".to_string()
             };
 
             if show_bar_graphic {
-                let b = crate::ui::components::gauge::bar(frac, 8, theme.p.accent, theme);
+                let b =
+                    crate::ui::components::gauge::bar(frac, bar_w as u16, theme.p.accent, theme);
                 spans.extend(b);
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(pct_str, theme.footnote()));
@@ -277,6 +288,69 @@ pub fn render_section_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::env::UiEnv;
+
+    fn bar_row(title: &str, fraction: f64) -> ListRow<'_> {
+        ListRow::new(vec![Span::raw(title)])
+            .detail(Span::raw("  1.0 GB"))
+            .chevron(true)
+            .bar(fraction)
+    }
+
+    fn rendered(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn bar_cells(line: &Line) -> usize {
+        rendered(line).matches(['━', '─']).count()
+    }
+
+    #[test]
+    fn a_row_of_100_columns_shows_the_bar() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        assert_eq!(bar_cells(&bar_row("a", 0.5).render_line(100, &theme)), 8);
+    }
+
+    #[test]
+    fn a_narrower_row_shows_only_the_percentage() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let line = bar_row("a", 0.5).render_line(99, &theme);
+
+        assert_eq!(bar_cells(&line), 0);
+        assert!(rendered(&line).contains("50.0%"));
+    }
+
+    #[test]
+    fn a_wider_row_gives_most_of_the_extra_space_to_the_bar() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        assert_eq!(bar_cells(&bar_row("a", 0.5).render_line(200, &theme)), 83);
+    }
+
+    #[test]
+    fn bars_line_up_across_titles() {
+        let theme = Theme::with_env(UiEnv::default());
+        let start = |title| {
+            let text = rendered(&bar_row(title, 0.5).render_line(160, &theme));
+            text.chars().position(|c| c == '━')
+        };
+
+        assert_eq!(start("a"), start("a-much-longer-name.bin"));
+    }
+
+    #[test]
+    fn a_row_fills_its_width_at_any_percentage() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        for fraction in [0.0, 0.000_001, 0.5, 1.0] {
+            for width in [95, 100, 150, 200] {
+                let line = bar_row("a", fraction).render_line(width, &theme);
+                assert_eq!(line.width(), width, "{fraction} at {width}");
+            }
+        }
+    }
 
     #[test]
     fn test_list_row_rendering() {

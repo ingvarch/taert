@@ -796,6 +796,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     hints.push(Hint::new("?", "More"));
 
     let chrome = AppChrome::new(crumbs)
+        .full_width()
         .status(right_status)
         .hints(hints)
         .primary(primary_action)
