@@ -6,10 +6,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
+use super::layout::Layout;
 use super::stores::IgnoreStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,7 +51,71 @@ pub enum SafetyError {
     NotFound,
     #[error("not a directory: {0}")]
     NotADirectory(String),
+    #[error("path name is not safe to pass to a removal")]
+    UnsafeName,
+    #[error("path is not an app or a place apps keep their files")]
+    OutsideUninstallScope,
 }
+
+/// Where a path allowed for uninstalling sits, which decides how it is removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallScope {
+    Bundle,
+    Home,
+    System,
+}
+
+/// Folders outside the home folder that hold one entry per app.
+const SYSTEM_APP_FOLDERS: &[&str] = &[
+    "Library/Application Support",
+    "Library/Audio/Plug-Ins/Components",
+    "Library/Audio/Plug-Ins/Digidesign",
+    "Library/Audio/Plug-Ins/VST",
+    "Library/Audio/Plug-Ins/VST3",
+    "Library/Caches",
+    "Library/Frameworks",
+    "Library/Input Methods",
+    "Library/Internet Plug-Ins",
+    "Library/LaunchAgents",
+    "Library/LaunchDaemons",
+    "Library/Logs",
+    "Library/Logs/DiagnosticReports",
+    "Library/PreferencePanes",
+    "Library/Preferences",
+    "Library/PrivilegedHelperTools",
+    "Library/QuickLook",
+    "Library/Receipts",
+    "Library/Screen Savers",
+    "Library/StartupItems",
+    "Users/Shared",
+];
+
+/// Of those, the ones where a vendor keeps a folder per product.
+const VENDOR_FOLDERS: &[&str] = &[
+    "Library/Application Support",
+    "Library/Caches",
+    "Library/Logs",
+];
+
+/// Home folder locations that hold entries of many apps and never go themselves.
+const HOME_APP_FOLDERS: &[&str] = &[
+    "Applications",
+    "Library/Application Scripts",
+    "Library/Autosave Information",
+    "Library/Cookies",
+    "Library/Group Containers",
+    "Library/HTTPStorages",
+    "Library/LaunchAgents",
+    "Library/Logs/DiagnosticReports",
+    "Library/Preferences/ByHost",
+    "Library/Saved Application State",
+    "Library/WebKit",
+    ".local",
+    ".local/share",
+];
+
+/// Most nested an app sits below an app folder: `Vendor/Suite/Foo.app`.
+const MAX_BUNDLE_DEPTH: usize = 3;
 
 pub struct Safety;
 
@@ -61,7 +126,10 @@ impl Safety {
 
     /// Denied roots for cloud/sync storage providers
     pub fn denied_cloud_roots() -> Vec<PathBuf> {
-        let home = Self::home_dir();
+        Self::cloud_roots_in(&Self::home_dir())
+    }
+
+    fn cloud_roots_in(home: &Path) -> Vec<PathBuf> {
         vec![
             home.join("Library/Mobile Documents"),
             home.join("Library/CloudStorage"),
@@ -78,7 +146,10 @@ impl Safety {
 
     /// Critical system and user roots that can NEVER be deleted
     pub fn critical_roots() -> HashSet<PathBuf> {
-        let home = Self::home_dir();
+        Self::critical_roots_in(&Self::home_dir())
+    }
+
+    fn critical_roots_in(home: &Path) -> HashSet<PathBuf> {
         let mut roots = HashSet::new();
 
         let system_paths = [
@@ -98,7 +169,7 @@ impl Safety {
             roots.insert(PathBuf::from(p));
         }
 
-        roots.insert(home.clone());
+        roots.insert(home.to_path_buf());
         let home_roots = [
             "Library",
             "Library/Caches",
@@ -123,7 +194,10 @@ impl Safety {
 
     /// Denied user-level credential and sensitive config directories
     pub fn denied_user_roots() -> Vec<PathBuf> {
-        let home = Self::home_dir();
+        Self::user_roots_in(&Self::home_dir())
+    }
+
+    fn user_roots_in(home: &Path) -> Vec<PathBuf> {
         let dirs = [
             ".ssh",
             ".aws",
@@ -147,7 +221,10 @@ impl Safety {
 
     /// Whitelisted cache paths under credential roots (e.g. ~/.cargo/registry/cache is ok, ~/.cargo itself is not)
     pub fn allowed_credential_subpaths() -> Vec<PathBuf> {
-        let home = Self::home_dir();
+        Self::credential_subpaths_in(&Self::home_dir())
+    }
+
+    fn credential_subpaths_in(home: &Path) -> Vec<PathBuf> {
         vec![
             home.join(".docker/cli-plugins/.cache"),
             home.join(".docker/buildx/cache"),
@@ -179,12 +256,16 @@ impl Safety {
 
     /// Check if path is inside cloud storage or has dataless flag (SF_DATALESS on APFS)
     pub fn is_cloud_or_dataless(path: &Path) -> bool {
+        Self::is_cloud_or_dataless_in(path, &Self::home_dir())
+    }
+
+    fn is_cloud_or_dataless_in(path: &Path, home: &Path) -> bool {
         let path_str = path.to_string_lossy();
         if path_str.contains("com~apple~") {
             return true;
         }
 
-        for cloud_root in Self::denied_cloud_roots() {
+        for cloud_root in Self::cloud_roots_in(home) {
             if path == cloud_root || path.starts_with(&cloud_root) {
                 return true;
             }
@@ -212,13 +293,17 @@ impl Safety {
 
     /// Check if path is a credential root (or sensitive dir) and not whitelisted
     pub fn is_credential_root(path: &Path) -> bool {
-        for allowed in Self::allowed_credential_subpaths() {
+        Self::is_credential_root_in(path, &Self::home_dir())
+    }
+
+    fn is_credential_root_in(path: &Path, home: &Path) -> bool {
+        for allowed in Self::credential_subpaths_in(home) {
             if path == allowed || path.starts_with(&allowed) {
                 return false;
             }
         }
 
-        for denied in Self::denied_user_roots() {
+        for denied in Self::user_roots_in(home) {
             if path == denied || path.starts_with(&denied) {
                 return true;
             }
@@ -309,6 +394,119 @@ impl Safety {
         }
 
         Ok(())
+    }
+
+    /// Can an uninstall remove this path? Stricter than `can_remove` in what it
+    /// accepts outside the home folder, and it opens /Applications and /Library.
+    pub fn can_uninstall(
+        path: &Path,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+    ) -> Result<UninstallScope, SafetyError> {
+        if path.as_os_str().is_empty() || path == Path::new("/") {
+            return Err(SafetyError::RootPath);
+        }
+        let climbs = path.components().any(|c| c == Component::ParentDir);
+        let has_control = path.to_string_lossy().chars().any(char::is_control);
+        if !path.is_absolute() || climbs || has_control {
+            return Err(SafetyError::UnsafeName);
+        }
+        if fs::symlink_metadata(path).is_err() {
+            return Err(SafetyError::NotFound);
+        }
+
+        let is_bundle = Self::is_app_bundle(path, layout);
+        let checked_for_links = if is_bundle {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        if Self::has_symlink_component(checked_for_links) {
+            return Err(SafetyError::SymlinkDetected);
+        }
+
+        let home = &layout.home;
+        let shared_folder = HOME_APP_FOLDERS.iter().any(|rel| path == home.join(rel));
+        if shared_folder || Self::critical_roots_in(home).contains(path) {
+            return Err(SafetyError::ProtectedRoot);
+        }
+        // ~/.config/<app> is that app's own. Everything deeper keeps its protection.
+        let in_xdg_config = path.parent() == Some(home.join(".config").as_path());
+        if !in_xdg_config && Self::is_credential_root_in(path, home) {
+            return Err(SafetyError::CredentialRoot);
+        }
+        if Self::is_cloud_or_dataless_in(path, home) {
+            return Err(SafetyError::CloudOrDataless);
+        }
+        if Self::is_ignored_or_protected(path, ignore) {
+            return Err(SafetyError::Ignored);
+        }
+
+        if is_bundle {
+            Ok(UninstallScope::Bundle)
+        } else if layout.is_user_path(path) {
+            Ok(UninstallScope::Home)
+        } else {
+            Self::system_scope(path, layout)
+        }
+    }
+
+    /// A root removal follows folder links, so no folder between a place macOS
+    /// keeps fixed and the target may be one the user can replace.
+    pub fn is_safe_as_root(path: &Path, layout: &Layout) -> bool {
+        let fixed = std::iter::once(&"Applications").chain(SYSTEM_APP_FOLDERS);
+        let anchor = fixed
+            .map(|rel| layout.system(rel))
+            .filter(|folder| path != folder && path.starts_with(folder))
+            .max_by_key(|folder| folder.as_os_str().len());
+        let Some(anchor) = anchor else {
+            return false;
+        };
+        path.ancestors()
+            .skip(1)
+            .take_while(|folder| *folder != anchor)
+            .all(|folder| {
+                fs::symlink_metadata(folder)
+                    .is_ok_and(|meta| meta.uid() == 0 && meta.mode() & 0o022 == 0)
+            })
+    }
+
+    fn is_app_bundle(path: &Path, layout: &Layout) -> bool {
+        let is_app = |part: &std::ffi::OsStr| {
+            Path::new(part)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        };
+        is_app(path.as_os_str())
+            && layout.app_roots().iter().any(|root| {
+                path.strip_prefix(root).is_ok_and(|inside| {
+                    let parts: Vec<_> = inside.iter().collect();
+                    let folders = &parts[..parts.len().saturating_sub(1)];
+                    parts.len() <= MAX_BUNDLE_DEPTH && !folders.iter().any(|part| is_app(part))
+                })
+            })
+    }
+
+    fn system_scope(path: &Path, layout: &Layout) -> Result<UninstallScope, SafetyError> {
+        let inside = |rel: &&str| path.parent() == Some(layout.system(rel).as_path());
+        let in_vendor =
+            |rel: &&str| path.parent().and_then(Path::parent) == Some(layout.system(rel).as_path());
+        let is_folder = SYSTEM_APP_FOLDERS
+            .iter()
+            .any(|rel| path == layout.system(rel));
+        let allowed = SYSTEM_APP_FOLDERS.iter().any(inside) || VENDOR_FOLDERS.iter().any(in_vendor);
+        if is_folder || !allowed {
+            return Err(SafetyError::OutsideUninstallScope);
+        }
+
+        let below_root = path.strip_prefix(&layout.root).unwrap_or(path);
+        let is_apple = below_root
+            .iter()
+            .any(|part| part.to_string_lossy().starts_with("com.apple."));
+        if is_apple {
+            return Err(SafetyError::ProtectedSystemPath);
+        }
+        Ok(UninstallScope::System)
     }
 
     /// Check if path is valid to scan as a project root (for purge and analyze)
@@ -459,6 +657,242 @@ mod tests {
         assert_eq!(
             Safety::can_remove(&symlink_path, &ignore),
             Err(SafetyError::SymlinkDetected)
+        );
+    }
+
+    fn sandbox() -> (tempfile::TempDir, Layout) {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let layout = Layout {
+            home: base.join("home"),
+            root: base.join("root"),
+            user_cache: Some(base.join("root/private/var/folders/x/C")),
+        };
+        fs::create_dir_all(&layout.home).unwrap();
+        fs::create_dir_all(&layout.root).unwrap();
+        (temp, layout)
+    }
+
+    fn make(path: &Path) -> PathBuf {
+        fs::create_dir_all(path).unwrap();
+        path.to_path_buf()
+    }
+
+    fn uninstall_check(path: &Path, layout: &Layout) -> Result<UninstallScope, SafetyError> {
+        Safety::can_uninstall(path, &IgnoreStore::default(), layout)
+    }
+
+    #[test]
+    fn an_app_bundle_in_an_app_folder_can_be_uninstalled() {
+        let (_temp, layout) = sandbox();
+        let app = make(&layout.system("Applications/Foo.app"));
+        let user_app = make(&layout.user("Applications/Bar.app"));
+        let nested = make(&layout.system("Applications/Vendor/Baz.app"));
+
+        assert_eq!(uninstall_check(&app, &layout), Ok(UninstallScope::Bundle));
+        assert_eq!(
+            uninstall_check(&user_app, &layout),
+            Ok(UninstallScope::Bundle)
+        );
+        assert_eq!(
+            uninstall_check(&nested, &layout),
+            Ok(UninstallScope::Bundle)
+        );
+    }
+
+    #[test]
+    fn a_link_to_an_app_can_go_but_only_as_a_bundle() {
+        let (_temp, layout) = sandbox();
+        let target = make(&layout.user("elsewhere/Foo.app"));
+        make(&layout.system("Applications"));
+        let link = layout.system("Applications/Foo.app");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let data = layout.user("Library/Caches/Foo");
+        make(&layout.user("Library/Caches"));
+        std::os::unix::fs::symlink(&target, &data).unwrap();
+
+        assert_eq!(uninstall_check(&link, &layout), Ok(UninstallScope::Bundle));
+        assert_eq!(
+            uninstall_check(&data, &layout),
+            Err(SafetyError::SymlinkDetected)
+        );
+    }
+
+    #[test]
+    fn a_folder_of_apps_or_anything_else_in_it_cannot_be_uninstalled() {
+        let (_temp, layout) = sandbox();
+        let vendor = make(&layout.system("Applications/Vendor"));
+        let inner = make(&layout.system("Applications/Foo.app/Contents/Helper.app"));
+        let plain = make(&layout.system("Applications/notes.txt.d"));
+
+        for path in [&vendor, &inner, &plain] {
+            assert_eq!(
+                uninstall_check(path, &layout),
+                Err(SafetyError::OutsideUninstallScope),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_files_are_allowed_only_right_below_the_folders_apps_use() {
+        let (_temp, layout) = sandbox();
+        let support = make(&layout.system("Library/Application Support/Foo"));
+        let helper = make(&layout.system("Library/PrivilegedHelperTools/com.foo.helper"));
+        let shared = make(&layout.system("Users/Shared/Foo"));
+        let vendor_product = make(&layout.system("Library/Application Support/Avid/Sibelius"));
+        let deep = make(&layout.system("Library/Application Support/Avid/Sibelius/Data"));
+        let other = make(&layout.system("Library/Keychains/foo"));
+        let parent = layout.system("Library/Application Support");
+
+        for path in [&support, &helper, &shared, &vendor_product] {
+            assert_eq!(
+                uninstall_check(path, &layout),
+                Ok(UninstallScope::System),
+                "{path:?}"
+            );
+        }
+        for path in [&deep, &other, &parent] {
+            assert_eq!(
+                uninstall_check(path, &layout),
+                Err(SafetyError::OutsideUninstallScope),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_of_the_user_cache_folder_counts_as_the_users_own() {
+        let (_temp, layout) = sandbox();
+        let cache = layout.user_cache.clone().unwrap();
+        let entry = make(&cache.join("com.foo.app"));
+        let deeper = make(&cache.join("com.foo.app/inner"));
+
+        assert_eq!(uninstall_check(&entry, &layout), Ok(UninstallScope::Home));
+        assert_eq!(
+            uninstall_check(&cache, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
+        assert_eq!(
+            uninstall_check(&deeper, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
+    }
+
+    #[test]
+    fn root_may_remove_directly_below_the_fixed_folders() {
+        let (_temp, layout) = sandbox();
+        let app = make(&layout.system("Applications/Foo.app"));
+        let support = make(&layout.system("Library/Application Support/Foo"));
+        let shared = make(&layout.system("Users/Shared/Foo"));
+
+        assert!(Safety::is_safe_as_root(&app, &layout));
+        assert!(Safety::is_safe_as_root(&support, &layout));
+        assert!(Safety::is_safe_as_root(&shared, &layout));
+    }
+
+    #[test]
+    fn root_stays_away_from_paths_the_user_could_redirect() {
+        let (_temp, layout) = sandbox();
+        let nested = make(&layout.system("Applications/Vendor/Foo.app"));
+        let vendor = make(&layout.system("Library/Application Support/Avid/Sibelius"));
+        let in_home = make(&layout.user("Applications/Foo.app"));
+        let volume = make(&layout.system("Volumes/Ext/Applications/Foo.app"));
+
+        assert!(!Safety::is_safe_as_root(&nested, &layout));
+        assert!(!Safety::is_safe_as_root(&vendor, &layout));
+        assert!(!Safety::is_safe_as_root(&in_home, &layout));
+        assert!(!Safety::is_safe_as_root(&volume, &layout));
+    }
+
+    #[test]
+    fn apple_files_outside_the_home_folder_stay() {
+        let (_temp, layout) = sandbox();
+        let apple = make(&layout.system("Library/Application Support/com.apple.TCC"));
+
+        assert_eq!(
+            uninstall_check(&apple, &layout),
+            Err(SafetyError::ProtectedSystemPath)
+        );
+    }
+
+    #[test]
+    fn a_home_folder_item_keeps_the_rules_for_credentials_and_cloud_files() {
+        let (_temp, layout) = sandbox();
+        let cache = make(&layout.user("Library/Caches/Foo"));
+        let ssh = make(&layout.user(".ssh/keys"));
+        let icloud = make(&layout.user("Library/Mobile Documents/foo"));
+        let xdg = make(&layout.user(".config/foo"));
+        let xdg_root = layout.user(".config");
+        let library = layout.user("Library/Caches");
+
+        assert_eq!(uninstall_check(&cache, &layout), Ok(UninstallScope::Home));
+        assert_eq!(uninstall_check(&xdg, &layout), Ok(UninstallScope::Home));
+        assert_eq!(
+            uninstall_check(&ssh, &layout),
+            Err(SafetyError::CredentialRoot)
+        );
+        assert_eq!(
+            uninstall_check(&icloud, &layout),
+            Err(SafetyError::CloudOrDataless)
+        );
+        assert_eq!(
+            uninstall_check(&xdg_root, &layout),
+            Err(SafetyError::ProtectedRoot)
+        );
+        assert_eq!(
+            uninstall_check(&library, &layout),
+            Err(SafetyError::ProtectedRoot)
+        );
+    }
+
+    #[test]
+    fn the_ignore_list_protects_an_app_and_its_files() {
+        let (_temp, layout) = sandbox();
+        let app = make(&layout.system("Applications/Foo.app"));
+        let mut ignore = IgnoreStore::default();
+        ignore.add(app.display().to_string());
+
+        assert_eq!(
+            Safety::can_uninstall(&app, &ignore, &layout),
+            Err(SafetyError::Ignored)
+        );
+    }
+
+    #[test]
+    fn a_name_that_could_break_a_command_is_refused() {
+        let (_temp, layout) = sandbox();
+        let newline = make(&layout.user("Library/Caches/foo\nbar"));
+        let control = layout.user("Library/Caches/foo\u{7}bar");
+        fs::create_dir_all(&control).unwrap();
+        let climbing = layout.user("Library/Caches/../../root");
+
+        assert_eq!(
+            uninstall_check(&newline, &layout),
+            Err(SafetyError::UnsafeName)
+        );
+        assert_eq!(
+            uninstall_check(&control, &layout),
+            Err(SafetyError::UnsafeName)
+        );
+        assert_eq!(
+            uninstall_check(&climbing, &layout),
+            Err(SafetyError::UnsafeName)
+        );
+    }
+
+    #[test]
+    fn nothing_outside_the_known_places_can_be_uninstalled() {
+        let (_temp, layout) = sandbox();
+        let stray = make(&layout.root.join("opt/foo"));
+
+        assert_eq!(
+            uninstall_check(&stray, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
+        assert_eq!(
+            uninstall_check(&layout.system("Applications/Missing.app"), &layout),
+            Err(SafetyError::NotFound)
         );
     }
 

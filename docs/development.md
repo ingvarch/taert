@@ -60,6 +60,8 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 
 `cargo test --test docker_live -- --ignored` runs against the real Docker daemon. These tests remove only the objects they create, and they leave a few small entries in the build cache.
 
+`cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
+
 ## Project structure
 
 ```
@@ -70,12 +72,16 @@ taert/
 │   ├── cli/
 │   │   └── args.rs             # Clap CLI flags, commands, and options
 │   ├── core/
+│   │   ├── apps.rs             # Installed apps and what their bundles say
 │   │   ├── bytes.rs            # Binary size formatting (KB, MB, GB)
 │   │   ├── cache.rs            # StorageCache: directory size aggregation & snapshot cache
 │   │   ├── catalog.rs          # Known cache definitions and path catalogs
 │   │   ├── cleaner.rs          # Safe removal engine with progress events
 │   │   ├── docker.rs           # Unused Docker objects and their removal through the daemon API
+│   │   ├── host.rs             # System commands and root scripts, behind a trait for tests
 │   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
+│   │   ├── layout.rs           # Where a Mac keeps apps and their files
+│   │   ├── leftovers.rs        # What an app leaves on disk, and how sure that is
 │   │   ├── path_utils.rs       # Path prettifying, tilde expansion, truncation
 │   │   ├── profiler.rs         # Disk space and system profile analyzers
 │   │   ├── projects_store.rs   # Persistent store for scanned project folders

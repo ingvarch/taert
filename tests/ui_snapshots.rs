@@ -7,8 +7,11 @@ use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
+use taert::core::apps;
 use taert::core::cache::StorageCache;
+use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
+use taert::core::leftovers::{Evidence, UninstallRole};
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
@@ -18,13 +21,14 @@ use taert::core::telemetry::{
     CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
     PowerStatus, ProcessStatus, VolumeStatus,
 };
+use taert::core::uninstaller;
 use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::preferences::{PreferencesState, render_preferences};
 use taert::ui::progress::{ProgressState, render_progress};
 use taert::ui::review::{ReviewState, render_review};
-use taert::ui::select::{SelectState, render_select};
+use taert::ui::select::{ModalOverlay, SelectState, render_select};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{StartConfirmKind, WorkspaceState, render_workspace};
@@ -476,9 +480,9 @@ fn home_screen(state: &WorkspaceState, w: u16, h: u16) -> String {
 const CLEAN_CACHES: usize = 0;
 const PROJECT_CLEANUP: usize = 1;
 const DOCKER_CLEANUP: usize = 2;
-const EXPLORE_STORAGE: usize = 3;
-const SYSTEM_STATUS: usize = 4;
-const PREFERENCES: usize = 5;
+const EXPLORE_STORAGE: usize = 4;
+const SYSTEM_STATUS: usize = 5;
+const PREFERENCES: usize = 6;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -656,6 +660,137 @@ fn select_screen(state: &SelectState) -> String {
 
 fn select_item(state: &mut SelectState, group: usize, item: usize) {
     state.scan.groups[group].items[item].selected = true;
+}
+
+fn app_row(path: &str, size: u64, used: Option<SystemTime>) -> ScanItem {
+    let mut item = ScanItem::new(PathBuf::from(path), size, false, false);
+    item.modified = used;
+    item
+}
+
+fn app_list() -> CategoryScan {
+    CategoryScan {
+        id: apps::LIST_ID.to_string(),
+        title: "Uninstall apps".to_string(),
+        groups: vec![
+            ToolGroup {
+                tool: "/Applications".to_string(),
+                items: vec![
+                    app_row("/Applications/Xcode.app", 4_200_000_000, days_ago(3)),
+                    app_row("/Applications/Docker.app", 2_100_000_000, None),
+                    app_row("/Applications/Zoom.app", 310_000_000, days_ago(120)),
+                ],
+            },
+            ToolGroup {
+                tool: "~/Applications".to_string(),
+                items: vec![app_row(
+                    "/Users/test/Applications/DataGrip.app",
+                    2_300_000_000,
+                    None,
+                )],
+            },
+        ],
+    }
+}
+
+fn plan_row(path: &str, size: u64, selected: bool, role: UninstallRole) -> ScanItem {
+    let mut item = ScanItem::new(PathBuf::from(path), size, selected, false);
+    item.modified = None;
+    item.role = Some(role);
+    item
+}
+
+fn uninstall_plan() -> CategoryScan {
+    let by_id = || UninstallRole::Leftover {
+        evidence: Evidence::BundleId,
+    };
+    let by_name = || UninstallRole::Leftover {
+        evidence: Evidence::Name,
+    };
+    CategoryScan {
+        id: uninstaller::PLAN_ID.to_string(),
+        title: "Review".to_string(),
+        groups: vec![ToolGroup {
+            tool: "Zoom (Homebrew cask zoom)".to_string(),
+            items: vec![
+                plan_row(
+                    "/Applications/Zoom.app",
+                    310_000_000,
+                    true,
+                    UninstallRole::Bundle,
+                ),
+                plan_row(
+                    "/Users/test/Library/Application Support/zoom.us",
+                    1_400_000_000,
+                    true,
+                    by_name(),
+                ),
+                plan_row(
+                    "/Users/test/Library/Caches/us.zoom.xos",
+                    90_000_000,
+                    true,
+                    by_id(),
+                ),
+                plan_row(
+                    "/Users/test/Library/Preferences/us.zoom.xos.plist",
+                    4_096,
+                    true,
+                    by_id(),
+                ),
+                plan_row(
+                    "/Library/LaunchDaemons/us.zoom.ZoomDaemon.plist",
+                    4_096,
+                    true,
+                    by_id(),
+                ),
+                plan_row("/Users/test/.config/zoom", 4_096, false, by_name()),
+            ],
+        }],
+    }
+}
+
+#[test]
+fn snapshot_select_apps() {
+    let state = SelectState::with_preserved_selection(app_list());
+    let theme = snapshot_theme();
+
+    assert_snapshot!("select_apps_120x32", select_screen(&state));
+    let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_apps_80x24", narrow);
+}
+
+#[test]
+fn snapshot_select_uninstall_plan() {
+    let state = SelectState::with_preserved_selection(uninstall_plan());
+    let theme = snapshot_theme();
+
+    assert_snapshot!("select_uninstall_plan_120x32", select_screen(&state));
+    let narrow = render_to_string(50, 16, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_uninstall_plan_50x16", narrow);
+}
+
+#[test]
+fn snapshot_uninstall_confirmation() {
+    let mut state = SelectState::with_preserved_selection(uninstall_plan());
+    state.open_confirmation();
+
+    assert_snapshot!("select_uninstall_confirm_120x32", select_screen(&state));
+}
+
+#[test]
+fn snapshot_uninstall_outcome() {
+    let mut state = SelectState::with_preserved_selection(uninstall_plan());
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        removed_count: 5,
+        freed_bytes: 1_800_000_000,
+        failures: vec![RemovalFailure {
+            path: PathBuf::from("/Library/LaunchDaemons/us.zoom.ZoomDaemon.plist"),
+            error: "The administrator password was not given".to_string(),
+        }],
+        notes: vec!["Still mentioned in your configuration: ~/.zshrc:12".to_string()],
+    });
+
+    assert_snapshot!("select_uninstall_outcome_120x32", select_screen(&state));
 }
 
 #[test]

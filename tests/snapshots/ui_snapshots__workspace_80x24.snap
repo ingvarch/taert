@@ -11,6 +11,7 @@ expression: output
    │      Choose tools and individual paths to remove                        │
    │   ◇ Project cleanup                                                   › │
    │   ▦ Docker cleanup                                                    › │
+   │   ⌦ Uninstall apps                                                    › │
    ╰─────────────────────────────────────────────────────────────────────────╯
    ╭─ Inspect ───────────────────────────────────────────────────────────────╮
    │   ◔ Explore storage                                                   › │
@@ -20,7 +21,6 @@ expression: output
    │   ⌥ Preferences                                                       › │
    │   ◈ Protected paths                                                   › │
    ╰─────────────────────────────────────────────────────────────────────────╯
-
 
 
 

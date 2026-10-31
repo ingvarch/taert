@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::catalog::Catalog;
 use super::docker::DockerObject;
+use super::leftovers::UninstallRole;
 use super::path_utils::prettify_path;
 use super::safety::{FileIdentity, Safety};
 use super::sizer::DirSizer;
@@ -29,6 +30,8 @@ pub struct ScanItem {
     pub identity: Option<FileIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker: Option<DockerObject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<UninstallRole>,
 }
 
 impl ScanItem {
@@ -43,6 +46,7 @@ impl ScanItem {
             contents_only,
             identity,
             docker: None,
+            role: None,
         }
     }
 }

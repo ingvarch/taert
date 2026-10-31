@@ -47,6 +47,26 @@ The freed size comes from the daemon's totals before and after, because images s
 
 `bollard` stays pinned to 0.19. Versions 0.20 and newer read `/system/df` only in the API 1.52 shape, and a daemon on an older API then comes back empty with no error. Daemons answer an API 1.49 client in the older shape, including Docker 29 and newer.
 
+## Uninstalling Apps
+
+An uninstall has two steps, so nothing is removed before you have seen it:
+
+1. **Plan** ([`uninstaller.rs`](../src/core/uninstaller.rs)): `find_leftovers` in [`leftovers.rs`](../src/core/leftovers.rs) checks exact places and reads single folder levels. It never walks a tree, so a wrong name cannot reach far. Each find carries its `Evidence`, which decides whether it starts selected. The plan is a normal `CategoryScan`, one group per app, so the select screen, `--dry-run`, and `--json` all show the same list.
+2. **Run**: `Uninstaller::run` works through the selected rows of the plan.
+
+These rules keep it from removing the wrong thing:
+
+- **Allowed paths**: `Safety::can_remove` refuses `/Applications` and `/Library`, so uninstalling has its own gate, `Safety::can_uninstall`. Outside the home folder it accepts only app bundles and entries right below the folders apps use, such as `/Library/LaunchDaemons`, and never `com.apple.` names. Credentials, cloud files, and the ignore list stay protected.
+- **Bundle ids**: an id must look like reverse DNS before it builds a path. A name that continues an id of 3 or more parts counts as proof. For a shorter id it is only a hint that starts unselected, because `com.vendor` could continue into every app of that vendor. Apple ids count as part of macOS unless they are on a short list of apps people install themselves, and a plug-in can claim one only if it continues the id of its app. Data of a helper inside the app counts as proof only if the helper is named after the app, or comes from the same vendor and no other app of that vendor stays.
+- **Other apps**: a file that carries the id or name of an app that stays is left alone. A copy of the app, another channel of it, or an app whose id continues this one narrows the plan to the selected bundle. That check runs at planning and again right before the run, and also covers copies the list leaves out.
+- **Links**: a bundle that is a link goes alone, with no teardown, because a link can point anywhere. Only a Homebrew cask's link counts as the app itself. A cask counts only if its Caskroom entry resolves to the selected bundle.
+- **Order**: before the password, an app is only asked to quit, and Homebrew removes casks. Whatever hurts an app that stays comes after it: unloading, removing login items, signals. An app with root files is removed in the root script, so a refused password keeps all of it. If root must stay away from the bundle, as in `~/Applications`, its root files wait until it is gone. An app's files go only after the app is gone. Before removing a bundle as the user, taert walks it for anything locked, so a removal does not stop halfway. A selected copy that fails counts as an app that stays from then on, and root files shared by two selected copies wait for both.
+- **Identity**: every path is checked again right before removal, by device and inode, and the bundle by its id.
+- **Processes**: taert finds them by where their program lives, so a name cannot be spoofed. If taert runs from the app, in one of its terminals, the app is neither asked to quit nor signalled.
+- **Root**: everything that needs root runs as one script, so macOS asks for the password once. taert uses `sudo` if it has a cached session, and the macOS password dialog otherwise. Paths are quoted. `Safety::is_safe_as_root` refuses a target below a folder the user could replace, because `rm` run as root follows folder links, and the script compares device and inode again right before each `rm`, since the password prompt can stay open for minutes.
+
+Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
+
 ## APFS Space Accounting
 
 Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on APFS due to sparse files, compression, and block clustering:

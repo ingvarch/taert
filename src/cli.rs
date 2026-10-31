@@ -42,6 +42,9 @@ pub enum Command {
     /// Find and remove Docker images, volumes, networks and build cache no container uses
     Docker,
 
+    /// Remove apps together with everything they left on disk
+    Uninstall(UninstallArgs),
+
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
 
@@ -85,6 +88,12 @@ pub struct PurgeArgs {
     /// Filter by artifact age in days (defaults to 7)
     #[arg(long)]
     pub older_than: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct UninstallArgs {
+    /// Apps to remove, by name or bundle id (shows the list of apps if omitted)
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Args)]

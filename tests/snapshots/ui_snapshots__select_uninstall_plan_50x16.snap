@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: narrow
+---
+ Review                5 of 6 selected  ·  1.8 GB
+──────────────────────────────────────────────────
+   ╭─ Zoom ───────────────── 6 items · 1.8 GB ─╮
+   │ ▌ ● /Applicati…s/Zoom.app        310.0 MB │
+   │   ● /Users/tes…rt/zoom.us          1.4 GB │
+   │   ● /Users/tes…s.zoom.xos         90.0 MB │
+   │   ● /Users/tes….xos.plist          4.1 KB │
+   │   ● /Library/L…emon.plist          4.1 KB │
+   │   ○ /Users/tes…onfig/zoom          4.1 KB │
+   ╰───────────────────────────────────────────╯
+
+
+
+
+──────────────────────────────────────────────────
+  ␣  Select    ?  More      Uninstall 5 items  ↵

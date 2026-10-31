@@ -32,15 +32,19 @@ use super::workspace::{
     CleanSubcategory, MainMenuChoice, StartConfirmKind, WorkspaceState, WorkspaceView,
     render_workspace,
 };
+use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
 use crate::core::docker;
+use crate::core::host::{Host, MacHost};
+use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
 use crate::core::stores::{Config, IgnoreStore};
+use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 
 pub enum Screen {
     Workspace(WorkspaceState),
@@ -58,6 +62,8 @@ pub enum ScanMessage {
     PurgeProgress(PurgeScanEvent),
     Finished(CategoryScan),
     Failed(String),
+    AppsFound(Vec<InstalledApp>),
+    Planned(UninstallPlan),
 }
 
 pub enum RemovalMessage {
@@ -65,14 +71,37 @@ pub enum RemovalMessage {
     Finished(RemovalReport),
 }
 
-/// A screen Esc can return to. It is rebuilt on return, so disk space and counts stay fresh.
-#[derive(Debug, Clone, Copy)]
+/// A screen Esc can return to. It is rebuilt on return, so disk space and counts stay
+/// fresh. The app list comes back as it was, because a search takes a while.
 enum ReturnPoint {
     Workspace {
         row: usize,
         submenu_row: Option<usize>,
     },
     Preferences(PreferencesFocus),
+    AppList(Box<SelectState>),
+}
+
+/// Passes scan progress on to the screen. Join the handle after dropping the sender.
+fn forward_progress(
+    screen: mpsc::Sender<ScanMessage>,
+) -> (mpsc::Sender<ScanProgressEvent>, thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let bridge = thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            let _ = screen.send(ScanMessage::Progress(event));
+        }
+    });
+    (tx, bridge)
+}
+
+fn review_state(plan: &UninstallPlan) -> SelectState {
+    if plan.apps.is_empty() {
+        return SelectState::unavailable("Uninstall", plan.notes.join(" "));
+    }
+    let mut state = SelectState::with_preserved_selection(plan.scan.clone());
+    state.notes = plan.notes.clone();
+    state
 }
 
 pub struct App {
@@ -86,6 +115,12 @@ pub struct App {
     pub removal_spinner: usize,
     pub help_open: bool,
     pub storage_cache: Arc<RwLock<StorageCache>>,
+    pub layout: Layout,
+    pub host: Arc<dyn Host>,
+    /// Apps of the last search, which decide what a selection in the list means.
+    pub installed: Vec<InstalledApp>,
+    /// The plan shown for review. Its selection lives in the select screen.
+    pub plan: Option<UninstallPlan>,
 }
 
 impl App {
@@ -101,6 +136,10 @@ impl App {
             removal_spinner: 0,
             help_open: false,
             storage_cache: Arc::new(RwLock::new(StorageCache::new())),
+            layout: Layout::current(),
+            host: Arc::new(MacHost),
+            installed: Vec::new(),
+            plan: None,
         }
     }
 
@@ -116,6 +155,10 @@ impl App {
             removal_spinner: 0,
             help_open: false,
             storage_cache: Arc::new(RwLock::new(StorageCache::new())),
+            layout: Layout::current(),
+            host: Arc::new(MacHost),
+            installed: Vec::new(),
+            plan: None,
         }
     }
 
@@ -136,7 +179,104 @@ impl App {
             removal_spinner: 0,
             help_open: false,
             storage_cache,
+            layout: Layout::current(),
+            host: Arc::new(MacHost),
+            installed: Vec::new(),
+            plan: None,
         }
+    }
+
+    /// Opens on the review of a plan made before the TUI started.
+    pub fn with_plan(plan: UninstallPlan, ignore: IgnoreStore, config: Config) -> Self {
+        let mut app = Self::new(ignore, config);
+        app.screen = Screen::Select(review_state(&plan));
+        app.plan = Some(plan);
+        app
+    }
+
+    /// Searches for apps. Esc from the list returns to the screen this started on.
+    pub fn launch_app_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (layout, host) = (self.layout.clone(), self.host.clone());
+        let cancel_scan = cancel.clone();
+
+        thread::spawn(move || {
+            let (progress, bridge) = forward_progress(tx.clone());
+            let found = apps::installed_apps(&layout, &*host, Some(progress), Some(cancel_scan));
+            let _ = bridge.join();
+            let _ = tx.send(ScanMessage::AppsFound(found));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Finding apps").top_level(),
+            rx,
+            cancel,
+        ));
+    }
+
+    /// Reviews the selected apps, or the focused one when none is selected.
+    fn start_review(&mut self) {
+        let Screen::Select(list) = &self.screen else {
+            return;
+        };
+        let mut chosen: Vec<_> = list
+            .scan
+            .selected_items()
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        if chosen.is_empty() {
+            chosen.extend(list.current_focused_path());
+        }
+        let selected: Vec<InstalledApp> = self
+            .installed
+            .iter()
+            .filter(|app| chosen.contains(&app.path))
+            .cloned()
+            .collect();
+        let Some(first) = selected.first() else {
+            return;
+        };
+        let headline = match selected.len() {
+            1 => format!("Finding what {} left behind", first.name),
+            count => format!("Finding what {count} apps left behind"),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_plan = cancel.clone();
+        let installed = self.installed.clone();
+        let ignore = self.ignore.clone();
+        let (layout, host) = (self.layout.clone(), self.host.clone());
+
+        thread::spawn(move || {
+            let (progress, bridge) = forward_progress(tx.clone());
+            let request = PlanRequest {
+                selected: &selected,
+                installed: &installed,
+                ignore: &ignore,
+                host: &*host,
+                layout: &layout,
+            };
+            let plan = uninstaller::build_plan(&request, Some(progress), Some(cancel_plan));
+            let _ = bridge.join();
+            let _ = tx.send(ScanMessage::Planned(plan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new(headline).top_level(),
+            rx,
+            cancel,
+        ));
+    }
+
+    /// The list on the way back is out of date once an app is gone.
+    fn show_fresh_app_list(&mut self) {
+        if matches!(self.back_stack.last(), Some(ReturnPoint::AppList(_))) {
+            self.back_stack.pop();
+        }
+        self.launch_app_scan();
     }
 
     pub fn run(&mut self) -> io::Result<()> {
@@ -208,42 +348,7 @@ impl App {
                 workspace.tick(&self.storage_cache);
             }
 
-            // Poll background removal messages
-            if let Some(ref rx) = self.removal_rx {
-                self.removal_spinner = (self.removal_spinner + 1) % 4;
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        RemovalMessage::Progress(prog) => {
-                            if let Screen::Select(ref mut select) = self.screen {
-                                select.overlay = ModalOverlay::Removing {
-                                    progress: prog,
-                                    spinner_idx: self.removal_spinner,
-                                };
-                            } else if let Screen::Analyze(ref mut analyze) = self.screen {
-                                analyze.overlay = AnalyzeOverlay::Deleting {
-                                    progress: prog,
-                                    spinner_idx: self.removal_spinner,
-                                };
-                            }
-                        }
-                        RemovalMessage::Finished(report) => {
-                            if let Screen::Select(ref mut select) = self.screen {
-                                // Deselect successfully cleaned items
-                                for group in &mut select.scan.groups {
-                                    group.items.retain(|item| !item.selected);
-                                }
-                                self.storage_cache.write().unwrap().clear();
-                                select.overlay = ModalOverlay::Outcome(report);
-                            } else if let Screen::Analyze(ref mut analyze) = self.screen {
-                                analyze.handle_removal_finished(&report);
-                                analyze.overlay = AnalyzeOverlay::Outcome(report);
-                            }
-                            self.removal_rx = None;
-                            break;
-                        }
-                    }
-                }
-            }
+            self.poll_removal();
 
             // Poll user keyboard events
             if event::poll(Duration::from_millis(50))?
@@ -271,7 +376,7 @@ impl App {
     }
 
     fn open(&mut self, screen: Screen) {
-        match &self.screen {
+        match std::mem::replace(&mut self.screen, screen) {
             Screen::Workspace(state) => self.back_stack.push(ReturnPoint::Workspace {
                 row: state.selected_index,
                 submenu_row: state.submenu_row(),
@@ -279,9 +384,11 @@ impl App {
             Screen::Preferences(state) => {
                 self.back_stack.push(ReturnPoint::Preferences(state.focus));
             }
+            Screen::Select(state) if state.scan.id == apps::LIST_ID => {
+                self.back_stack.push(ReturnPoint::AppList(Box::new(state)));
+            }
             _ => {}
         }
-        self.screen = screen;
     }
 
     fn go_back(&mut self) {
@@ -294,8 +401,48 @@ impl App {
                 state.focus = focus;
                 Screen::Preferences(state)
             }
+            Some(ReturnPoint::AppList(state)) => Screen::Select(*state),
             None => Screen::Workspace(WorkspaceState::new()),
         };
+    }
+
+    fn poll_removal(&mut self) {
+        let Some(rx) = &self.removal_rx else {
+            return;
+        };
+        self.removal_spinner = (self.removal_spinner + 1) % 4;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                RemovalMessage::Progress(prog) => {
+                    if let Screen::Select(ref mut select) = self.screen {
+                        select.overlay = ModalOverlay::Removing {
+                            progress: prog,
+                            spinner_idx: self.removal_spinner,
+                        };
+                    } else if let Screen::Analyze(ref mut analyze) = self.screen {
+                        analyze.overlay = AnalyzeOverlay::Deleting {
+                            progress: prog,
+                            spinner_idx: self.removal_spinner,
+                        };
+                    }
+                }
+                RemovalMessage::Finished(report) => {
+                    if let Screen::Select(ref mut select) = self.screen {
+                        // Deselect successfully cleaned items
+                        for group in &mut select.scan.groups {
+                            group.items.retain(|item| !item.selected);
+                        }
+                        self.storage_cache.write().unwrap().clear();
+                        select.overlay = ModalOverlay::Outcome(report);
+                    } else if let Screen::Analyze(ref mut analyze) = self.screen {
+                        analyze.handle_removal_finished(&report);
+                        analyze.overlay = AnalyzeOverlay::Outcome(report);
+                    }
+                    self.removal_rx = None;
+                    break;
+                }
+            }
+        }
     }
 
     fn poll_scan(&mut self) {
@@ -311,6 +458,17 @@ impl App {
                     }
                     ScanMessage::Failed(problem) => {
                         self.screen = Screen::Select(SelectState::unavailable("Docker", problem));
+                        break;
+                    }
+                    ScanMessage::AppsFound(found) => {
+                        let list = apps::app_scan(&found, &self.layout);
+                        self.installed = found;
+                        self.screen = Screen::Select(SelectState::with_preserved_selection(list));
+                        break;
+                    }
+                    ScanMessage::Planned(plan) => {
+                        self.screen = Screen::Select(review_state(&plan));
+                        self.plan = Some(plan);
                         break;
                     }
                     ScanMessage::Finished(scan) => {
@@ -455,6 +613,9 @@ impl App {
                     ModalOverlay::Outcome(_) => {
                         if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
                             state.close_overlay();
+                            if state.scan.id == uninstaller::PLAN_ID {
+                                self.show_fresh_app_list();
+                            }
                         }
                         return;
                     }
@@ -478,6 +639,8 @@ impl App {
                         }
                         _ => {}
                     }
+                    // The rows just changed, so the cursor could sit on a section.
+                    state.move_to_start();
                     return;
                 }
 
@@ -506,6 +669,7 @@ impl App {
                         state.is_searching = true;
                         state.search_query.clear();
                     }
+                    KeyCode::Enter if state.scan.id == apps::LIST_ID => self.start_review(),
                     KeyCode::Enter => {
                         state.open_confirmation();
                     }
@@ -756,7 +920,7 @@ impl App {
             Screen::Workspace(state) => vec![
                 HelpSection::new(
                     "Menu",
-                    vec![Hint::new("↵", "Select"), Hint::new("1-7", "Quick select")],
+                    vec![Hint::new("↵", "Select"), Hint::new("1-8", "Quick select")],
                 ),
                 general(vec![
                     navigate,
@@ -772,6 +936,11 @@ impl App {
                 general(Vec::new()),
             ],
             Screen::Select(state) => {
+                let enter = match state.scan.id.as_str() {
+                    apps::LIST_ID => "Review",
+                    uninstaller::PLAN_ID => "Uninstall",
+                    _ => "Review & clean",
+                };
                 let mut sections = vec![HelpSection::new(
                     "Select items",
                     vec![
@@ -779,7 +948,7 @@ impl App {
                         Hint::new("A", "Select all"),
                         Hint::new("N", "Select none"),
                         Hint::new("/", "Search"),
-                        Hint::new("↵", "Review & clean"),
+                        Hint::new("↵", enter),
                     ],
                 )];
                 if state.sort_order.is_some() {
@@ -860,16 +1029,39 @@ impl App {
 
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
+            let (layout, host) = (self.layout.clone(), self.host.clone());
+            let plan = self
+                .plan
+                .clone()
+                .filter(|_| select.scan.id == uninstaller::PLAN_ID)
+                .map(|mut plan| {
+                    plan.scan = select.scan.clone();
+                    plan
+                });
 
             thread::spawn(move || {
                 let tx_prog = tx.clone();
-                let report = Cleaner::remove_items_with_progress(
-                    &selected_items,
-                    &ignore,
-                    Some(move |prog| {
-                        let _ = tx_prog.send(RemovalMessage::Progress(prog));
-                    }),
-                );
+                let on_progress = move |prog| {
+                    let _ = tx_prog.send(RemovalMessage::Progress(prog));
+                };
+                let report = match plan {
+                    Some(plan) => {
+                        let host = &*host;
+                        let layout = &layout;
+                        let ignore = &ignore;
+                        Uninstaller {
+                            host,
+                            layout,
+                            ignore,
+                        }
+                        .run(&plan, on_progress)
+                    }
+                    None => Cleaner::remove_items_with_progress(
+                        &selected_items,
+                        &ignore,
+                        Some(on_progress),
+                    ),
+                };
                 let _ = tx.send(RemovalMessage::Finished(report));
             });
 
@@ -933,6 +1125,7 @@ impl App {
                 }
             }
             MainMenuChoice::DockerCleanup => self.launch_docker_scan(),
+            MainMenuChoice::UninstallApps => self.launch_app_scan(),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
@@ -1434,9 +1627,9 @@ mod tests {
     fn esc_returns_to_the_menu_row_a_screen_was_opened_from() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('5'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Char('6'), KeyCode::Esc]);
 
-        assert_main_menu(&app, 4);
+        assert_main_menu(&app, 5);
     }
 
     #[test]
@@ -1445,19 +1638,19 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Char('4'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('5'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 3);
+        assert_main_menu(&app, 4);
     }
 
     #[test]
     fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('7'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Char('8'), KeyCode::Esc]);
 
-        assert_main_menu(&app, 6);
+        assert_main_menu(&app, 7);
     }
 
     #[test]
@@ -1467,7 +1660,7 @@ mod tests {
         press(
             &mut app,
             &[
-                KeyCode::Char('6'),
+                KeyCode::Char('7'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -1483,7 +1676,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 5);
+        assert_main_menu(&app, 6);
     }
 
     #[test]
@@ -1531,14 +1724,14 @@ mod tests {
     fn protected_paths_name_preferences_only_when_opened_there() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('7'));
+        app.handle_key(KeyCode::Char('8'));
         assert!(!screen_text(&app).contains("Preferences"));
 
         press(
             &mut app,
             &[
                 KeyCode::Esc,
-                KeyCode::Char('6'),
+                KeyCode::Char('7'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -1572,6 +1765,35 @@ mod tests {
     fn project_results_are_not_shown_under_clean_caches() {
         assert!(!screen_text(&select_app(scan_with_id("purge"))).contains("Clean caches"));
         assert!(screen_text(&select_app(scan_with_id("dev"))).contains("Clean caches"));
+    }
+
+    #[test]
+    fn removing_something_that_frees_nothing_still_counts() {
+        let mut app = select_app(scan_with_id("dev"));
+        let Screen::Select(state) = &mut app.screen else {
+            panic!("expected the select screen");
+        };
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            removed_count: 1,
+            ..RemovalReport::default()
+        });
+
+        assert!(!screen_text(&app).contains("Nothing was removed"));
+    }
+
+    #[test]
+    fn the_outcome_shows_even_when_the_list_ended_up_empty() {
+        let mut app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+        let Screen::Select(state) = &mut app.screen else {
+            panic!("expected the select screen");
+        };
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            removed_count: 2,
+            freed_bytes: 2_000_000,
+            ..RemovalReport::default()
+        });
+
+        assert!(screen_text(&app).contains("Clean Complete"));
     }
 
     fn footer(app: &App) -> String {
@@ -1618,6 +1840,90 @@ mod tests {
         let app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
 
         assert_footer(&app, &["⎋  Back", "?  More"], &LIST_HINTS);
+    }
+
+    fn two_item_scan() -> CategoryScan {
+        let item = |path: &str| {
+            let mut item = ScanItem::new(path.into(), 1, false, false);
+            item.modified = None;
+            item
+        };
+        CategoryScan {
+            id: "dev".to_string(),
+            title: "List".to_string(),
+            groups: vec![
+                ToolGroup {
+                    tool: "One".to_string(),
+                    items: vec![item("/nowhere/slack")],
+                },
+                ToolGroup {
+                    tool: "Two".to_string(),
+                    items: vec![item("/nowhere/zoom"), item("/nowhere/zed")],
+                },
+            ],
+        }
+    }
+
+    fn selected_paths(app: &App) -> Vec<String> {
+        let scan = &select(app).scan;
+        let items = scan.selected_items();
+        items
+            .iter()
+            .map(|item| item.path.display().to_string())
+            .collect()
+    }
+
+    fn search(app: &mut App, text: &str) {
+        app.handle_key(KeyCode::Char('/'));
+        for letter in text.chars() {
+            app.handle_key(KeyCode::Char(letter));
+        }
+        app.handle_key(KeyCode::Enter);
+    }
+
+    #[test]
+    fn select_all_takes_only_what_the_search_shows() {
+        let mut app = select_app(two_item_scan());
+
+        search(&mut app, "slack");
+        app.handle_key(KeyCode::Char('a'));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/slack"]);
+    }
+
+    #[test]
+    fn select_none_leaves_what_the_search_hides() {
+        let mut app = select_app(two_item_scan());
+        app.handle_key(KeyCode::Char('a'));
+
+        search(&mut app, "slack");
+        app.handle_key(KeyCode::Char('n'));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/zoom", "/nowhere/zed"]);
+    }
+
+    #[test]
+    fn a_search_leaves_the_cursor_on_an_item_and_never_on_a_section() {
+        let mut app = select_app(two_item_scan());
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Down]);
+        search(&mut app, "zed");
+        app.handle_key(KeyCode::Char(' '));
+
+        assert_eq!(selected_paths(&app), ["/nowhere/zed"]);
+    }
+
+    #[test]
+    fn scrolling_a_path_never_splits_a_letter() {
+        let path = "/nowhere/Яндекс/файл";
+        let mut scan = scan_with_id("dev");
+        scan.groups[0].items[0].path = path.into();
+        let mut app = select_app(scan);
+
+        for _ in 0..5 {
+            app.handle_key(KeyCode::Right);
+            screen_text(&app);
+        }
     }
 
     #[test]
@@ -1679,7 +1985,7 @@ mod tests {
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('6'));
+        app.handle_key(KeyCode::Char('7'));
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
         app.handle_key(KeyCode::Down);
@@ -1690,13 +1996,13 @@ mod tests {
     fn a_path_list_offers_removal_only_when_it_has_paths() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('7')]);
+        press(&mut app, &[KeyCode::Char('8')]);
         assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
 
         app.handle_key(KeyCode::Esc);
         app.ignore.roots.push("/nowhere/protected".to_string());
 
-        app.handle_key(KeyCode::Char('7'));
+        app.handle_key(KeyCode::Char('8'));
         assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
     }
 
@@ -1736,7 +2042,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('5'));
+        app.handle_key(KeyCode::Char('6'));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();
@@ -1747,6 +2053,311 @@ mod tests {
 
         draw(&app, 50, 16);
         assert!(help_row(&app, "Scroll").is_some());
+    }
+
+    mod uninstall {
+        use super::*;
+        use crate::core::apps::testing::{app as sample_app, fake_app, sandbox};
+        use crate::core::host::fake::FakeHost;
+        use crate::core::leftovers::{Evidence, UninstallRole};
+        use crate::core::uninstaller::{AppPlan, PLAN_ID};
+        use tempfile::TempDir;
+
+        fn app_in_sandbox() -> (TempDir, App) {
+            let (temp, layout) = sandbox();
+            let mut app = App::new(IgnoreStore::default(), Config::default());
+            app.layout = layout;
+            app.host = Arc::new(FakeHost::default());
+            (temp, app)
+        }
+
+        fn deliver(app: &mut App, message: ScanMessage) {
+            let (tx, rx) = mpsc::channel();
+            tx.send(message).unwrap();
+            let Screen::Scanning(_, scan_rx, _) = &mut app.screen else {
+                panic!("expected the scanning screen");
+            };
+            *scan_rx = rx;
+            app.poll_scan();
+        }
+
+        fn installed(app: &App, name: &str, id: &str) -> InstalledApp {
+            let path = app
+                .layout
+                .system("Applications")
+                .join(format!("{name}.app"));
+            fake_app(&path, id, name);
+            InstalledApp {
+                path,
+                ..sample_app(name, id)
+            }
+        }
+
+        fn app_list(app: &mut App, apps: Vec<InstalledApp>) {
+            app.handle_key(KeyCode::Char('4'));
+            deliver(app, ScanMessage::AppsFound(apps));
+        }
+
+        fn plan_for(target: &InstalledApp, app: &App) -> UninstallPlan {
+            let mut bundle = ScanItem::new(target.path.clone(), 100, true, false);
+            bundle.role = Some(UninstallRole::Bundle);
+            let cache = app.layout.user("Library/Caches").join("com.acme.foo");
+            std::fs::create_dir_all(&cache).unwrap();
+            let mut leftover = ScanItem::new(cache, 50, true, false);
+            leftover.role = Some(UninstallRole::Leftover {
+                evidence: Evidence::BundleId,
+            });
+            UninstallPlan {
+                scan: CategoryScan {
+                    id: PLAN_ID.to_string(),
+                    title: "Review".to_string(),
+                    groups: vec![ToolGroup {
+                        tool: target.name.clone(),
+                        items: vec![bundle, leftover],
+                    }],
+                },
+                apps: vec![AppPlan {
+                    app: target.clone(),
+                    cask: None,
+                    login_helpers: Vec::new(),
+                    shared: false,
+                }],
+                notes: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn the_fourth_quick_key_opens_uninstall_apps() {
+            let mut state = WorkspaceState::new();
+
+            assert_eq!(
+                state.select_by_number(4),
+                Some(MainMenuChoice::UninstallApps)
+            );
+        }
+
+        #[test]
+        fn opening_uninstall_apps_searches_and_esc_returns_to_its_row() {
+            let (_temp, mut app) = app_in_sandbox();
+
+            app.handle_key(KeyCode::Char('4'));
+            assert!(matches!(app.screen, Screen::Scanning(..)));
+            assert!(screen_text(&app).contains("Finding apps"));
+            assert!(!screen_text(&app).contains("Clean caches"));
+
+            app.handle_key(KeyCode::Esc);
+            assert_main_menu(&app, 3);
+        }
+
+        #[test]
+        fn the_search_ends_in_a_table_of_apps_with_nothing_selected() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+
+            app_list(&mut app, vec![foo]);
+
+            let state = select(&app);
+            assert_eq!(state.scan.id, apps::LIST_ID);
+            assert_eq!(state.sort_order, Some(SortOrder::Size));
+            assert!(state.scan.selected_items().is_empty());
+            let text = screen_text(&app);
+            assert!(text.contains("Uninstall apps"), "{text}");
+            assert!(text.contains("LAST USED"), "{text}");
+        }
+
+        #[test]
+        fn the_list_shows_apps_by_name_and_the_section_says_where() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo Bar", "com.acme.foo");
+            let folder = foo.path.parent().unwrap().display().to_string();
+
+            app_list(&mut app, vec![foo]);
+
+            let rows = text_rows(&app);
+            let row = rows.iter().find(|row| row.contains("Foo Bar")).unwrap();
+            assert!(!row.contains(".app"), "{row}");
+            assert!(!row.contains(&folder), "{row}");
+        }
+
+        #[test]
+        fn the_dialog_button_says_uninstall() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            app.handle_key(KeyCode::Enter);
+
+            let rows = text_rows(&app);
+            assert!(
+                rows.iter().any(|row| row.contains("Cancel    Uninstall")),
+                "{rows:?}"
+            );
+        }
+
+        fn text_rows(app: &App) -> Vec<String> {
+            let (width, height) = (100, 30);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.render_screen(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect()
+        }
+
+        #[test]
+        fn enter_reviews_the_focused_app_when_nothing_is_selected() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            app_list(&mut app, vec![foo]);
+
+            assert_footer(&app, &["Review app"], &[]);
+            app.handle_key(KeyCode::Enter);
+
+            assert!(matches!(app.screen, Screen::Scanning(..)));
+            assert!(screen_text(&app).contains("Foo"));
+        }
+
+        #[test]
+        fn esc_during_the_search_for_leftovers_returns_to_the_list_as_it_was() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let bar = installed(&app, "Bar", "com.acme.bar");
+            app_list(&mut app, vec![foo, bar]);
+            app.handle_key(KeyCode::Char(' '));
+            assert_footer(&app, &["Review 1 app"], &[]);
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Esc]);
+
+            assert_eq!(select(&app).scan.id, apps::LIST_ID);
+            assert_eq!(select(&app).scan.selected_items().len(), 1);
+        }
+
+        #[test]
+        fn the_review_keeps_its_selection_and_esc_returns_to_the_list() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            assert_eq!(select(&app).scan.id, PLAN_ID);
+            assert_eq!(select(&app).scan.selected_items().len(), 2);
+            assert_footer(&app, &["Uninstall 2 items"], &[]);
+            let text = screen_text(&app);
+            assert!(text.contains("Review"), "{text}");
+
+            app.handle_key(KeyCode::Esc);
+            assert_eq!(select(&app).scan.id, apps::LIST_ID);
+            app.handle_key(KeyCode::Esc);
+            assert_main_menu(&app, 3);
+        }
+
+        #[test]
+        fn a_plan_with_no_apps_shows_why() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let mut plan = plan_for(&foo, &app);
+            plan.apps.clear();
+            plan.scan.groups.clear();
+            plan.notes
+                .push("Foo needs the uninstaller from Acme".to_string());
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            let text = screen_text(&app);
+            assert!(text.contains("needs the uninstaller"), "{text}");
+        }
+
+        #[test]
+        fn removing_starts_from_cancel_and_names_the_apps() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            app.handle_key(KeyCode::Enter);
+
+            assert!(matches!(
+                select(&app).overlay,
+                ModalOverlay::Confirm(ConfirmButton::Cancel)
+            ));
+            let text = screen_text(&app);
+            assert!(text.contains("Uninstall 1 app?"), "{text}");
+        }
+
+        fn wait_for_removal(app: &mut App) {
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        #[test]
+        fn confirming_removes_the_app_and_leads_back_to_a_fresh_list() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let cache = app.layout.user("Library/Caches/com.acme.foo");
+            let bundle = foo.path.clone();
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            assert!(!bundle.exists());
+            assert!(!cache.exists());
+            let text = screen_text(&app);
+            assert!(text.contains("Uninstall Complete"), "{text}");
+
+            app.handle_key(KeyCode::Enter);
+            assert!(matches!(app.screen, Screen::Scanning(..)));
+
+            app.handle_key(KeyCode::Esc);
+            assert_main_menu(&app, 3);
+        }
+
+        #[test]
+        fn a_review_opened_from_the_command_line_runs_too() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let bundle = foo.path.clone();
+            let plan = plan_for(&foo, &app);
+            let (layout, host) = (app.layout.clone(), app.host.clone());
+            app = App::with_plan(plan, IgnoreStore::default(), Config::default());
+            app.layout = layout;
+            app.host = host;
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            assert!(!bundle.exists());
+        }
+
+        #[test]
+        fn help_names_what_enter_does_on_each_list() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+
+            assert_eq!(help_row(&app, "Review"), Some("↵"));
+
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            assert_eq!(help_row(&app, "Uninstall"), Some("↵"));
+        }
     }
 
     fn help_row(app: &App, desc: &str) -> Option<&'static str> {
