@@ -9,15 +9,21 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs};
+use crate::cli::{
+    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs, UninstallArgs,
+};
+use crate::core::apps::{self, InstalledApp};
 use crate::core::bytes::format_bytes;
 use crate::core::docker::DockerClient;
+use crate::core::host::MacHost;
+use crate::core::layout::Layout;
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
 use crate::core::sizer::DirSizer;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::sysinfo::SysInfo;
+use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 use crate::plain::PlainRunner;
 
 fn main() -> ExitCode {
@@ -56,6 +62,8 @@ fn main() -> ExitCode {
         Some(Command::Purge(ref args)) => handle_purge(args, &cli, use_plain, &ignore, &config),
 
         Some(Command::Docker) => handle_docker(&cli, use_plain, &ignore),
+
+        Some(Command::Uninstall(ref args)) => handle_uninstall(args, &cli, use_plain, &ignore),
 
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
@@ -202,6 +210,172 @@ fn process_scan_result(
                 eprintln!("TUI Error: {e}");
                 ExitCode::FAILURE
             }
+        }
+    }
+}
+
+fn handle_uninstall(
+    args: &UninstallArgs,
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+) -> ExitCode {
+    let layout = Layout::current();
+    let mut installed = apps::find_apps(&layout);
+
+    if args.names.is_empty() {
+        if cli.force {
+            eprintln!("Error: Name the apps to remove: taert uninstall <name>");
+            return ExitCode::FAILURE;
+        }
+        return pick_apps_to_uninstall(&mut installed, cli, use_plain, ignore, &layout);
+    }
+
+    let mut selected = match apps::find_by_names(&installed, &args.names) {
+        Ok(selected) => selected,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    apps::measure_apps(&mut selected, &MacHost, None, None);
+    let plan = plan_uninstall(&selected, &installed, ignore, &layout);
+    finish_uninstall(plan, cli, use_plain, ignore, &layout)
+}
+
+fn plan_uninstall(
+    selected: &[InstalledApp],
+    installed: &[InstalledApp],
+    ignore: &IgnoreStore,
+    layout: &Layout,
+) -> UninstallPlan {
+    let request = PlanRequest {
+        selected,
+        installed,
+        ignore,
+        host: &MacHost,
+        layout,
+    };
+    uninstaller::build_plan(&request, None, None)
+}
+
+fn pick_apps_to_uninstall(
+    installed: &mut [InstalledApp],
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    layout: &Layout,
+) -> ExitCode {
+    apps::measure_apps(installed, &MacHost, None, None);
+    let mut list = apps::app_scan(installed, layout);
+
+    if cli.json {
+        return match serde_json::to_string_pretty(installed) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    PlainRunner::print_scan(&list);
+    if cli.dry_run {
+        println!("\nDry run completed. No files were deleted.");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(error) = PlainRunner::prompt_selection(&mut list) {
+        eprintln!("Selection error: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let paths: Vec<&PathBuf> = list
+        .selected_items()
+        .iter()
+        .map(|item| &item.path)
+        .collect();
+    let selected: Vec<InstalledApp> = installed
+        .iter()
+        .filter(|app| paths.contains(&&app.path))
+        .cloned()
+        .collect();
+    if selected.is_empty() {
+        println!("\nNothing selected for removal.");
+        return ExitCode::SUCCESS;
+    }
+    let plan = plan_uninstall(&selected, installed, ignore, layout);
+    finish_uninstall(plan, cli, use_plain, ignore, layout)
+}
+
+fn run_uninstall(plan: &UninstallPlan, ignore: &IgnoreStore, layout: &Layout) -> ExitCode {
+    let report = Uninstaller {
+        host: &MacHost,
+        layout,
+        ignore,
+    }
+    .run(plan, |_| {});
+    PlainRunner::print_report("Uninstall", &report);
+    if report.failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn finish_uninstall(
+    mut plan: UninstallPlan,
+    cli: &Cli,
+    _use_plain: bool,
+    ignore: &IgnoreStore,
+    layout: &Layout,
+) -> ExitCode {
+    if plan.apps.is_empty() {
+        for note in &plan.notes {
+            eprintln!("Error: {note}");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    if cli.json {
+        return match serde_json::to_string_pretty(&plan) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if cli.force {
+        return run_uninstall(&plan, ignore, layout);
+    }
+
+    PlainRunner::print_scan(&plan.scan);
+    PlainRunner::print_notes(&plan.notes);
+    if cli.dry_run {
+        println!("\nDry run completed. No files were deleted.");
+        return ExitCode::SUCCESS;
+    }
+
+    if let Err(error) = PlainRunner::prompt_selection(&mut plan.scan) {
+        eprintln!("Selection error: {error}");
+        return ExitCode::FAILURE;
+    }
+    match PlainRunner::prompt_confirm(&plan.scan) {
+        Ok(true) => run_uninstall(&plan, ignore, layout),
+        Ok(false) => {
+            println!("Operation cancelled.");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Confirmation error: {error}");
+            ExitCode::FAILURE
         }
     }
 }

@@ -132,6 +132,8 @@ pub mod fake {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    type Effect = Box<dyn Fn() + Send>;
+
     /// Answers commands by the start of their line and records what ran.
     #[derive(Default)]
     pub struct FakeHost {
@@ -139,8 +141,8 @@ pub mod fake {
         pub replies: Mutex<Vec<(String, VecDeque<Output>)>>,
         pub admin_scripts: Mutex<Vec<String>>,
         pub admin_result: Mutex<Option<String>>,
-        pub admin_effect: Mutex<Option<Box<dyn Fn() + Send>>>,
-        pub run_effects: Mutex<Vec<(String, Box<dyn Fn() + Send>)>>,
+        pub admin_effect: Mutex<Option<Effect>>,
+        pub run_effects: Mutex<Vec<(String, Effect)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
     }
 

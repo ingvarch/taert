@@ -240,17 +240,12 @@ fn read_app(path: &Path, root: &Path) -> Option<InstalledApp> {
         return None;
     }
 
-    let measured = if path.is_symlink() {
-        fs::canonicalize(path).ok()?
-    } else {
-        path.to_path_buf()
-    };
     Some(InstalledApp {
         name: path.file_stem()?.to_string_lossy().into_owned(),
         path: path.to_path_buf(),
         bundle_id,
         executable: text(&info, "CFBundleExecutable"),
-        size_bytes: DirSizer::size_of(&measured),
+        size_bytes: 0,
         last_used: None,
     })
 }
@@ -291,19 +286,8 @@ pub fn bundle_id_of(bundle: &Path) -> Option<String> {
     text(&read_info(bundle)?, "CFBundleIdentifier").filter(|id| is_reverse_dns(id))
 }
 
-/// Finds apps. Sizes take the longest, so progress goes out as each one is measured.
-pub fn installed_apps(
-    layout: &Layout,
-    host: &dyn Host,
-    progress: Option<Sender<ScanProgressEvent>>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Vec<InstalledApp> {
-    let cancelled = || {
-        cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-    };
-
+/// Finds apps without measuring them, which takes a moment and no more.
+pub fn find_apps(layout: &Layout) -> Vec<InstalledApp> {
     let mut bundles = Vec::new();
     for root in layout.app_roots() {
         let mut found = Vec::new();
@@ -313,24 +297,61 @@ pub fn installed_apps(
 
     let mut apps: Vec<InstalledApp> = bundles
         .par_iter()
-        .filter_map(|(root, path)| {
-            if cancelled() {
-                return None;
-            }
-            if let Some(tx) = &progress {
-                let _ = tx.send(ScanProgressEvent::ScanningPath(prettify_path(path)));
-            }
-            let app = read_app(path, root)?;
-            if let Some(tx) = &progress {
-                let bytes = app.size_bytes;
-                let _ = tx.send(ScanProgressEvent::ItemFound { bytes });
-            }
-            Some(app)
-        })
+        .filter_map(|(root, path)| read_app(path, root))
         .collect();
-
     apps.sort_by_key(|app| app.name.to_lowercase());
-    last_used_dates(host, &mut apps);
+    apps
+}
+
+fn measure(app: &mut InstalledApp) {
+    let target = if app.path.is_symlink() {
+        fs::canonicalize(&app.path).unwrap_or_else(|_| app.path.clone())
+    } else {
+        app.path.clone()
+    };
+    app.size_bytes = DirSizer::size_of(&target);
+}
+
+/// Adds sizes and dates. Sizes take the longest, so progress goes out for each app.
+pub fn measure_apps(
+    apps: &mut [InstalledApp],
+    host: &dyn Host,
+    progress: Option<Sender<ScanProgressEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+) {
+    let cancelled = || {
+        cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    };
+    apps.par_iter_mut().for_each(|app| {
+        if cancelled() {
+            return;
+        }
+        if let Some(tx) = &progress {
+            let _ = tx.send(ScanProgressEvent::ScanningPath(prettify_path(&app.path)));
+        }
+        measure(app);
+        if let Some(tx) = &progress {
+            let bytes = app.size_bytes;
+            let _ = tx.send(ScanProgressEvent::ItemFound { bytes });
+        }
+    });
+    last_used_dates(host, apps);
+}
+
+/// Every app with its size and last use.
+pub fn installed_apps(
+    layout: &Layout,
+    host: &dyn Host,
+    progress: Option<Sender<ScanProgressEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Vec<InstalledApp> {
+    let mut apps = find_apps(layout);
+    measure_apps(&mut apps, host, progress, cancel.clone());
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Vec::new();
+    }
     apps
 }
 

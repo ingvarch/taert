@@ -152,9 +152,14 @@ impl PlainRunner {
     pub fn execute_clean(scan: &CategoryScan, ignore: &IgnoreStore) -> RemovalReport {
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
         let report = Cleaner::remove_items(&items, ignore);
+        Self::print_report("Clean", &report);
+        report
+    }
 
+    /// Print what a removal did, then anything that went wrong or needs attention.
+    pub fn print_report(action: &str, report: &RemovalReport) {
         println!(
-            "\nClean complete: removed {} items, freed {}.",
+            "\n{action} complete: removed {} items, freed {}.",
             report.removed_count,
             format_bytes(report.freed_bytes)
         );
@@ -166,6 +171,15 @@ impl PlainRunner {
             }
         }
 
-        report
+        Self::print_notes(&report.notes);
+    }
+
+    pub fn print_notes(notes: &[String]) {
+        if !notes.is_empty() {
+            println!();
+        }
+        for note in notes {
+            println!("Note: {note}");
+        }
     }
 }
