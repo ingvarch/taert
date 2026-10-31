@@ -4,13 +4,14 @@
 use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
 use super::components::empty::EmptyState;
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
 use super::components::list::{ListRow, path_spans};
 use super::components::modal::Modal;
@@ -214,38 +215,60 @@ pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, t
         chunks[0],
     );
 
-    if state.items.is_empty() {
-        let (empty_title, empty_msg) = match state.kind {
-            PathListKind::ProtectedPaths => ("No protected paths", "Press A to add a path."),
-            PathListKind::ProjectFolders => ("No project folders", "Press A to add a folder."),
-        };
-        EmptyState::new(theme.g.folder, empty_title, empty_msg).render(frame, chunks[1], theme);
-    } else {
-        let list_area_height = chunks[1].height as usize;
-        let scroll_offset = if state.items.len() > list_area_height && list_area_height > 0 {
-            let half = list_area_height / 2;
-            let max_offset = state.items.len().saturating_sub(list_area_height);
+    let frame_w = chunks[1].width as usize;
+    let row_width = frame_w.saturating_sub(FRAME_SIDES);
+    let frame_rows = (chunks[1].height as usize).saturating_sub(FRAME_ROWS);
+    let color = theme.p.teal;
+
+    let mut lines = Vec::new();
+    if !state.items.is_empty() {
+        let scroll_offset = if state.items.len() > frame_rows && frame_rows > 0 {
+            let half = frame_rows / 2;
+            let max_offset = state.items.len().saturating_sub(frame_rows);
             state.selected_index.saturating_sub(half).min(max_offset)
         } else {
             0
         };
 
-        let mut lines = Vec::new();
         for (idx, path_str) in state
             .items
             .iter()
             .enumerate()
             .skip(scroll_offset)
-            .take(list_area_height)
+            .take(frame_rows)
         {
             let is_selected = idx == state.selected_index;
-            let max_path_len = (chunks[1].width as usize).saturating_sub(8);
+            let max_path_len = row_width.saturating_sub(8);
             let row = ListRow::new(path_spans(Path::new(path_str), max_path_len, theme))
                 .leading(Span::styled(theme.g.folder, theme.footnote()))
                 .selected(is_selected);
-            lines.push(row.render_line(chunks[1].width as usize, theme));
+            lines.push(row.render_line(row_width, theme));
         }
-        frame.render_widget(Paragraph::new(lines), chunks[1]);
+    }
+
+    let framed_list = card(
+        state.title(),
+        Vec::new(),
+        lines,
+        frame_w,
+        frame_rows,
+        color,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(framed_list), chunks[1]);
+
+    if state.items.is_empty() {
+        let (empty_title, empty_msg) = match state.kind {
+            PathListKind::ProtectedPaths => ("No protected paths", "Press A to add a path."),
+            PathListKind::ProjectFolders => ("No project folders", "Press A to add a folder."),
+        };
+        let inside = Rect {
+            x: chunks[1].x + FRAME_SIDES as u16 / 2,
+            y: chunks[1].y + 1,
+            width: row_width as u16,
+            height: frame_rows as u16,
+        };
+        EmptyState::new(theme.g.folder, empty_title, empty_msg).render(frame, inside, theme);
     }
 
     // Action row

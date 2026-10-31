@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use super::text::fit_width;
 use crate::ui::theme::Theme;
 
 /// A border and a space on each side.
@@ -11,7 +12,7 @@ pub const FRAME_SIDES: usize = 4;
 /// The top and bottom borders.
 pub const FRAME_ROWS: usize = 2;
 
-fn frame_style(color: Color) -> Style {
+pub fn frame_style(color: Color) -> Style {
     Style::default().fg(color).add_modifier(Modifier::DIM)
 }
 
@@ -28,8 +29,15 @@ pub fn frame_top(
     let detail_w: usize = detail.iter().map(|span| span.content.width()).sum();
     // Detail adds itself and the spaces around it, otherwise the rule runs to the corner.
     let detail_room = if detail.is_empty() { 0 } else { detail_w + 2 };
-    // "╭─ ", the space after the title, and "─╮".
-    let fixed = 3 + title.width() + 1 + detail_room + 2;
+    // "╭─ ", the space after the title, a piece of rule, and "─╮".
+    let chrome = 3 + 1 + 1 + 2;
+    let title_room = width.saturating_sub(chrome + detail_room);
+    let title = if title.width() > title_room {
+        fit_width(title, title_room).trim_end().to_string()
+    } else {
+        title.to_string()
+    };
+    let fixed = chrome - 1 + title.width() + detail_room;
     let note = if fixed + 2 + note.width() < width {
         note
     } else {
@@ -43,7 +51,7 @@ pub fn frame_top(
     let mut spans = vec![
         Span::styled(format!("{}{line} ", theme.g.frame_top_left), border),
         Span::styled(
-            title.to_string(),
+            title,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ];
@@ -87,6 +95,28 @@ pub fn framed(line: Line<'static>, width: usize, color: Color, theme: &Theme) ->
     spans.push(Span::raw(pad));
     spans.push(Span::styled(format!(" {}", theme.g.frame_vertical), border));
     Line::from(spans)
+}
+
+/// A whole frame around `body`, `rows` tall inside so it holds its size however little it shows.
+pub fn card(
+    title: &str,
+    detail: Vec<Span<'static>>,
+    mut body: Vec<Line<'static>>,
+    width: usize,
+    rows: usize,
+    color: Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    body.resize(rows.max(body.len()), Line::default());
+
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let mut lines = vec![frame_top(title, "", detail, width, color, theme)];
+    lines.extend(
+        body.into_iter()
+            .map(|line| framed(line, inner, color, theme)),
+    );
+    lines.push(frame_bottom(width, color, theme));
+    lines
 }
 
 #[cfg(test)]
@@ -135,6 +165,30 @@ mod tests {
         let line = framed(Line::from("hi"), 6, Color::Reset, &theme);
 
         assert_eq!(text(&line), "│ hi     │");
+    }
+
+    #[test]
+    fn a_card_wraps_its_rows_and_pads_to_a_fixed_height() {
+        let theme = Theme::with_env(UiEnv::default());
+        let body = vec![Line::from("one")];
+
+        let lines = card("Title", Vec::new(), body, 16, 3, Color::Reset, &theme);
+
+        assert_eq!(lines.len(), 5);
+        assert!(lines.iter().all(|line| line.width() == 16));
+        assert_eq!(text(&lines[1]), "│ one          │");
+        assert_eq!(text(&lines[3]), "│              │");
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_fit_the_frame() {
+        let theme = Theme::with_env(UiEnv::default());
+        let title = "a title much longer than the frame";
+
+        let line = frame_top(title, "", Vec::new(), 20, Color::Reset, &theme);
+
+        assert_eq!(line.width(), 20);
+        assert!(text(&line).contains('…'), "{}", text(&line));
     }
 
     #[test]

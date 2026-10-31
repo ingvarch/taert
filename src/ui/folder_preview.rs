@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use ratatui::text::{Line, Span};
 
 use super::analyze::{AnalyzeState, ChildItem, FolderSnapshot, SortOrder, StorageCache};
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::gauge::bar;
-use super::components::list::render_section_header;
+use super::components::list::SIZE_W;
 use super::components::text::{fit_width, plural};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
@@ -22,8 +23,6 @@ use crate::core::stores::IgnoreStore;
 
 // Keeps a selection that only passes through a folder from measuring it.
 const SETTLE: Duration = Duration::from_millis(150);
-const INDENT: &str = "  ";
-const SIZE_W: usize = 9;
 const MIN_BAR_W: usize = 8;
 const MAX_BAR_W: usize = 30;
 
@@ -145,7 +144,7 @@ pub fn folder_rows(
     let children = &snapshot.children;
     let total = snapshot.total_bytes.max(1) as f64;
     let bar_w = (width / 4).clamp(MIN_BAR_W, MAX_BAR_W);
-    let name_w = width.saturating_sub(INDENT.len() + 2 + 1 + bar_w + 1 + SIZE_W);
+    let name_w = width.saturating_sub(2 + 1 + bar_w + 1 + SIZE_W);
     let hidden = children.len().saturating_sub(rows);
     let shown = if hidden > 0 {
         rows.saturating_sub(1)
@@ -159,10 +158,7 @@ pub fn folder_rows(
         .map(|item| {
             let name = format!("{}{}", item.name, item.suffix());
             let mut spans = vec![
-                Span::styled(
-                    format!("{INDENT}{} ", item_icon(item, theme)),
-                    theme.callout(),
-                ),
+                Span::styled(format!("{} ", item_icon(item, theme)), theme.callout()),
                 Span::styled(fit_width(&name, name_w), theme.body()),
                 Span::raw(" "),
             ];
@@ -178,7 +174,7 @@ pub fn folder_rows(
 
     if hidden > 0 && rows > 0 {
         lines.push(Line::from(Span::styled(
-            format!("{INDENT}and {} more", children.len() - shown),
+            format!("and {} more", children.len() - shown),
             theme.footnote(),
         )));
     }
@@ -194,70 +190,63 @@ pub fn preview_lines(
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let size = format_bytes(item.size_bytes);
-    let title = format!("{}{}", item.name, item.suffix());
-    let title_w = width.saturating_sub(INDENT.len() + 2 + size.len() + 1);
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let title = format!("{} {}{}", item_icon(item, theme), item.name, item.suffix());
+    let size = Span::styled(format_bytes(item.size_bytes), theme.size(item.size_bytes));
     let share = item.size_bytes as f64 / parent_bytes.max(1) as f64 * 100.0;
     let path = prettify_path(&item.path);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{INDENT}{} ", item_icon(item, theme)),
-                theme.accent_text(),
-            ),
-            Span::styled(fit_width(&title, title_w), theme.headline()),
-            Span::styled(format!(" {size}"), theme.size(item.size_bytes)),
-        ]),
+    let about = vec![
         Line::from(Span::styled(
             format!(
-                "{INDENT}{share:.1}% of this folder · Created {}",
+                "{share:.1}% of this folder · Created {}",
                 format_system_time_opt(item.created)
             ),
             theme.callout(),
         )),
         Line::from(Span::styled(
-            format!(
-                "{INDENT}{}",
-                middle_truncate(&path, width.saturating_sub(INDENT.len()))
-            ),
+            middle_truncate(&path, inner),
             theme.footnote(),
         )),
     ];
+    let mut lines = card(&title, vec![size], about, width, 0, theme.p.teal, theme);
 
     if !item.is_dir || item.is_package {
         return lines;
     }
 
-    lines.push(Line::default());
-    match preview.snapshot_of(&item.path) {
-        Some(snapshot) if snapshot.children.is_empty() => {
-            lines.push(render_section_header("Contents", None, width, theme));
-            lines.push(Line::from(Span::styled(
-                format!("{INDENT}Empty folder or no accessible files"),
+    let rows = height.saturating_sub(lines.len() + 1 + FRAME_ROWS);
+    let (detail, body) = match preview.snapshot_of(&item.path) {
+        Some(snapshot) if snapshot.children.is_empty() => (
+            Vec::new(),
+            vec![Line::from(Span::styled(
+                "Empty folder or no accessible files",
                 theme.callout(),
-            )));
-        }
+            ))],
+        ),
         Some(snapshot) => {
             let count = plural(snapshot.children.len(), "item", "items");
-            lines.push(render_section_header(
-                "Contents",
-                Some(&count),
-                width,
-                theme,
-            ));
-            let rows = height.saturating_sub(lines.len());
-            lines.extend(folder_rows(snapshot, width, rows, theme));
+            (
+                vec![Span::styled(count, theme.footnote())],
+                folder_rows(snapshot, inner, rows, theme),
+            )
         }
-        None => {
-            lines.push(render_section_header("Contents", None, width, theme));
-            lines.push(Line::from(Span::styled(
-                format!("{INDENT}Measuring…"),
-                theme.footnote(),
-            )));
-        }
-    }
+        None => (
+            Vec::new(),
+            vec![Line::from(Span::styled("Measuring…", theme.footnote()))],
+        ),
+    };
 
+    lines.push(Line::default());
+    lines.extend(card(
+        "Contents",
+        detail,
+        body,
+        width,
+        rows,
+        theme.p.accent,
+        theme,
+    ));
     lines
 }
 

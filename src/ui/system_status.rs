@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::components::chrome::AppChrome;
 use super::components::columns::side_by_side;
-use super::components::frame::{FRAME_ROWS, FRAME_SIDES, frame_bottom, frame_top, framed};
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::gauge::{chart, legend_grid, segmented_bar, sparkline};
 use super::components::hints::Hint;
 use super::components::text::fit_width;
@@ -218,15 +218,7 @@ impl Card {
 
         top.resize(top_rows.max(top.len()), Line::default());
         top.extend(charts);
-
-        let width = inner_w + FRAME_SIDES;
-        let mut lines = vec![frame_top(title, "", detail, width, color, theme)];
-        lines.extend(
-            top.into_iter()
-                .map(|line| framed(line, inner_w, color, theme)),
-        );
-        lines.push(frame_bottom(width, color, theme));
-        lines
+        card(title, detail, top, inner_w + FRAME_SIDES, 0, color, theme)
     }
 }
 

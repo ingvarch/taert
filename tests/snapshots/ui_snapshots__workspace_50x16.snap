@@ -6,15 +6,15 @@ expression: output
 ──────────────────────────────────────────────────
    Your Mac, crystal clean.
 
-     CLEANUP
-   ▌ ✧ Clean caches                            ›
-        Choose tools and individual paths to rem
-     ◇ Project cleanup                         ›
-     ▦ Docker cleanup                          ›
-
-     INSPECT
-     ◔ Explore storage                         ›
-     ▤ System status                           ›
-
+   ╭─ Cleanup ─────────────────────────────────╮
+   │ ▌ ✧ Clean caches                        › │
+   │      Choose tools and individual paths to r
+   │   ◇ Project cleanup                     › │
+   │   ▦ Docker cleanup                      › │
+   ╰───────────────────────────────────────────╯
+   ╭─ Inspect ─────────────────────────────────╮
+   │   ◔ Explore storage                     › │
+   │   ▤ System status                       › │
+   ╰───────────────────────────────────────────╯
 ──────────────────────────────────────────────────
   ?  Help                                Open  ↵

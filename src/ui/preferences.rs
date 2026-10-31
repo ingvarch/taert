@@ -6,8 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::components::chrome::AppChrome;
+use super::components::frame::{FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ListRow, render_section_header};
+use super::components::list::ListRow;
 use super::components::text::plural;
 use super::components::toast::Toast;
 use super::theme::Theme;
@@ -108,12 +109,10 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
         .toast(toast.as_ref());
 
     let content_rect = chrome.render(frame, theme);
-    let width = content_rect.width as usize;
+    let frame_w = content_rect.width as usize;
+    let width = frame_w.saturating_sub(FRAME_SIDES);
 
-    let mut lines = Vec::new();
-
-    // 1. CLEANUP Section
-    lines.push(render_section_header("CLEANUP", None, width, theme));
+    let mut cleanup = Vec::new();
 
     let age_focused = state.focus == PreferencesFocus::AgeThreshold;
     let is_first = state.older_than_days <= *AGE_PRESETS.first().unwrap();
@@ -137,18 +136,15 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
     ))
     .selected(age_focused);
 
-    lines.push(age_row.render_line(width, theme));
+    cleanup.push(age_row.render_line(width, theme));
 
     // Preset slider track if age is focused and regular/wide width
     if age_focused && width >= 60 {
-        lines.push(render_presets_slider(state.older_than_days, width, theme));
-        lines.push(render_presets_labels(width, theme));
+        cleanup.push(render_presets_slider(state.older_than_days, width, theme));
+        cleanup.push(render_presets_labels(width, theme));
     }
 
-    lines.push(Line::from(""));
-
-    // 2. LOCATIONS Section
-    lines.push(render_section_header("LOCATIONS", None, width, theme));
+    let mut locations = Vec::new();
 
     let folders_focused = state.focus == PreferencesFocus::ProjectFolders;
     let folders_row = ListRow::new(vec![Span::styled("Project folders", theme.body())])
@@ -158,7 +154,7 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
         ))
         .chevron(true)
         .selected(folders_focused);
-    lines.push(folders_row.render_line(width, theme));
+    locations.push(folders_row.render_line(width, theme));
 
     let paths_focused = state.focus == PreferencesFocus::ProtectedPaths;
     let paths_row = ListRow::new(vec![Span::styled("Protected paths", theme.body())])
@@ -168,7 +164,27 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
         ))
         .chevron(true)
         .selected(paths_focused);
-    lines.push(paths_row.render_line(width, theme));
+    locations.push(paths_row.render_line(width, theme));
+
+    let mut lines = card(
+        "Cleanup",
+        Vec::new(),
+        cleanup,
+        frame_w,
+        0,
+        theme.p.accent,
+        theme,
+    );
+    lines.push(Line::default());
+    lines.extend(card(
+        "Locations",
+        Vec::new(),
+        locations,
+        frame_w,
+        0,
+        theme.p.teal,
+        theme,
+    ));
 
     frame.render_widget(Paragraph::new(lines), content_rect);
 }

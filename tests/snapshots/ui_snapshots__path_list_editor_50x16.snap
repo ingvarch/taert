@@ -6,14 +6,14 @@ expression: output
 ──────────────────────────────────────────────────
    Paths excluded from all cleaning and purge sc
 
-   ▌ ▸ /Users/test/Documents/Secret
-     ▸ /Users/test/Projects/keep-this
-
-
-
-
-
-
+   ╭─ Protected paths ─────────────────────────╮
+   │ ▌ ▸ /Users/test/Documents/Secret          │
+   │   ▸ /Users/test/Projects/keep-this        │
+   │                                           │
+   │                                           │
+   │                                           │
+   │                                           │
+   ╰───────────────────────────────────────────╯
      + Add path (a)    − Remove selected (d)
 
 ──────────────────────────────────────────────────

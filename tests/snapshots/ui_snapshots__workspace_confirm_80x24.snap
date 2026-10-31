@@ -6,20 +6,20 @@ expression: output
 ────────────────────────────────────────────────────────────────────────────────
    Your Mac, crystal clean.
 
-     CLEANUP
-   ▌ ✧ Clean caches                                                          ›
-        Choose tools and individual paths to remove
-     ◇ Pr╭────────────────────────────────────────────────────────────╮      ›
-     ▦ Do│ Explore your home folder?                                  │      ›
-         │                                                            │
-     INSP│ Measuring every folder can take a few minutes.             │
-     ◔ Ex│                                                            │      ›
-     ▤ Sy│                                                            │      ›
-         │                                           Cancel    Start  │
-     SETT│                                    Enter select   Esc back │
-     ⌥ Pr╰────────────────────────────────────────────────────────────╯      ›
-     ◈ Protected paths                                                       ›
-
+   ╭─ Cleanup ───────────────────────────────────────────────────────────────╮
+   │ ▌ ✧ Clean caches                                                      › │
+   │      Choose tools and individual paths to remove                        │
+   │   ◇ ╭────────────────────────────────────────────────────────────╮    › │
+   │   ▦ │ Explore your home folder?                                  │    › │
+   ╰─────│                                                            │──────╯
+   ╭─ Ins│ Measuring every folder can take a few minutes.             │──────╮
+   │   ◔ │                                                            │    › │
+   │   ▤ │                                                            │    › │
+   ╰─────│                                           Cancel    Start  │──────╯
+   ╭─ Set│                                    Enter select   Esc back │──────╮
+   │   ⌥ ╰────────────────────────────────────────────────────────────╯    › │
+   │   ◈ Protected paths                                                   › │
+   ╰─────────────────────────────────────────────────────────────────────────╯
 
 
 

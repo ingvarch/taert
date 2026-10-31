@@ -4,33 +4,33 @@ expression: output
 ---
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-     CLEANUP                        │
-   ▌ ✧ Clean caches                 │    ✧  Clean caches
-     ◇ Project cleanup              │
-     ▦ Docker cleanup               │    Choose tools and individual paths to remove.
-                                    │
-     INSPECT                        │    Includes developer caches, user junk, AI tool caches
-     ◔ Explore storage              │    and the Trash. You'll review every item before
-     ▤ System status                │    anything is removed.
-                                    │
-     SETTINGS                       │    ↵ Open
-     ⌥ Preferences                  │
-     ◈ Protected paths              │    ╭─ Storage ──────────────────────────────────────────── 118.6 GB available ─╮
-                                    │    │ Macintosh HD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────── 375.8 GB of 494.4 GB │
-                                    │    │ Time Machine ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───   1.85 TB of 2.00 TB │
-                                    │    │ ● Used     375.8 GB   ● Managed    5.7 GB                                 │
-                                    │    │ ● Free     118.6 GB                                                       │
-                                    │    ╰───────────────────────────────────────────────────────────────────────────╯
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
-                                    │
+   ╭─ Cleanup ──────────────────────╮  ╭─ ✧  Clean caches ───────────────────────────────────────────────────────────╮
+   │ ▌ ✧ Clean caches             › │  │ Choose tools and individual paths to remove.                                │
+   │   ◇ Project cleanup          › │  │                                                                             │
+   │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches                        │
+   ╰────────────────────────────────╯  │ and the Trash. You'll review every item before                              │
+   ╭─ Inspect ──────────────────────╮  │ anything is removed.                                                        │
+   │   ◔ Explore storage          › │  │                                                                             │
+   │   ▤ System status            › │  │ ↵ Open                                                                      │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╭─ Settings ─────────────────────╮
+   │   ⌥ Preferences              › │  ╭─ Storage ────────────────────────────────────────────── 118.6 GB available ─╮
+   │   ◈ Protected paths          › │  │ Macintosh HD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────── 375.8 GB of 494.4 GB │
+   ╰────────────────────────────────╯  │ Time Machine ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───   1.85 TB of 2.00 TB │
+                                       │ ● Used     375.8 GB   ● Managed    5.7 GB                                   │
+                                       │ ● Free     118.6 GB                                                         │
+                                       ╰─────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ?  More                                                                                          Open  ↵

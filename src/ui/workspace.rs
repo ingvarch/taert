@@ -6,17 +6,17 @@ use std::sync::{Arc, RwLock};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
-use super::components::frame::{FRAME_ROWS, FRAME_SIDES, frame_bottom, frame_top, framed};
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ListRow, render_section_header};
+use super::components::list::ListRow;
 use super::components::modal::Modal;
 use super::env::ColorDepth;
 use super::folder_preview::folder_rows;
@@ -29,7 +29,8 @@ use crate::core::safety::Safety;
 use crate::core::sysinfo::SysInfo;
 
 const SPLIT_MIN_WIDTH: u16 = 100;
-const DETAIL_GAP: u16 = 3;
+const SIDEBAR_WIDTH: u16 = 34;
+const PANE_GAP: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -43,9 +44,9 @@ pub enum MainMenuChoice {
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 3] = [
-    ("CLEANUP", &[0, 1, 2]),
-    ("INSPECT", &[3, 4]),
-    ("SETTINGS", &[5, 6]),
+    ("Cleanup", &[0, 1, 2]),
+    ("Inspect", &[3, 4]),
+    ("Settings", &[5, 6]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,48 +352,53 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
     }
 }
 
+fn section_color(title: &str, theme: &Theme) -> Color {
+    match title {
+        "Cleanup" => theme.p.accent,
+        "Inspect" => theme.p.teal,
+        _ => theme.p.purple,
+    }
+}
+
+fn menu_row(state: &WorkspaceState, index: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let (choice, title, _, _) = &state.items[index];
+    let is_selected = index == state.selected_index;
+
+    let icon_style = if is_selected {
+        theme.accent_text().add_modifier(Modifier::BOLD)
+    } else {
+        theme.callout()
+    };
+
+    ListRow::new(vec![Span::styled(title.to_string(), theme.body())])
+        .leading(Span::styled(
+            menu_icon(*choice, theme).to_string(),
+            icon_style,
+        ))
+        .chevron(true)
+        .selected(is_selected)
+        .render_line(width, theme)
+}
+
 fn render_regular_menu(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
-    let mut lines = Vec::new();
+    let width = area.width as usize;
+    let inner = width.saturating_sub(FRAME_SIDES);
 
-    // Subtitle
-    lines.push(Line::from(vec![Span::styled(
-        "Your Mac, crystal clean.",
-        theme.callout(),
-    )]));
-    lines.push(Line::from(""));
+    let mut lines = vec![
+        Line::from(Span::styled("Your Mac, crystal clean.", theme.callout())),
+        Line::from(""),
+    ];
 
-    for (sec_title, indices) in MENU_SECTIONS {
-        lines.push(render_section_header(
-            sec_title,
-            None,
-            area.width as usize,
-            theme,
-        ));
-
+    for (title, indices) in MENU_SECTIONS {
+        let mut rows = Vec::new();
         for &i in indices {
-            let (choice, title, desc, _) = &state.items[i];
-            let is_selected = i == state.selected_index;
-            let icon = menu_icon(*choice, theme);
-
-            let icon_style = if is_selected {
-                theme.accent_text().add_modifier(Modifier::BOLD)
-            } else {
-                theme.callout()
-            };
-
-            let row = ListRow::new(vec![Span::styled(*title, theme.body())])
-                .leading(Span::styled(icon, icon_style))
-                .chevron(true)
-                .selected(is_selected);
-
-            lines.push(row.render_line(area.width as usize, theme));
-
-            if is_selected {
-                let desc_row = render_desc_line(desc, area.width as usize, theme);
-                lines.push(desc_row);
+            rows.push(menu_row(state, i, inner, theme));
+            if i == state.selected_index {
+                rows.push(render_desc_line(state.items[i].2, inner, theme));
             }
         }
-        lines.push(Line::from(""));
+        let color = section_color(title, theme);
+        lines.extend(card(title, Vec::new(), rows, width, 0, color, theme));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
@@ -427,104 +433,59 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(34),
-            Constraint::Length(1),
+            Constraint::Length(SIDEBAR_WIDTH),
+            Constraint::Length(PANE_GAP),
             Constraint::Min(40),
         ])
         .split(area);
 
-    // Left Sidebar
-    let mut sidebar_lines = Vec::new();
-    for (sec_title, indices) in MENU_SECTIONS {
-        sidebar_lines.push(render_section_header(
-            sec_title,
-            None,
-            chunks[0].width as usize,
-            theme,
-        ));
-
-        for &i in indices {
-            let (choice, title, _, _) = &state.items[i];
-            let is_selected = i == state.selected_index;
-            let icon = menu_icon(*choice, theme);
-
-            let icon_style = if is_selected {
-                theme.accent_text().add_modifier(Modifier::BOLD)
-            } else {
-                theme.callout()
-            };
-
-            let row = ListRow::new(vec![Span::styled(*title, theme.body())])
-                .leading(Span::styled(icon, icon_style))
-                .chevron(true)
-                .selected(is_selected);
-
-            sidebar_lines.push(row.render_line(chunks[0].width as usize, theme));
+    let width = chunks[0].width as usize;
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let mut sidebar = Vec::new();
+    let mut detail_color = theme.p.accent;
+    for (title, indices) in MENU_SECTIONS {
+        let color = section_color(title, theme);
+        if indices.contains(&state.selected_index) {
+            detail_color = color;
         }
-        sidebar_lines.push(Line::from(""));
+        let rows = indices
+            .iter()
+            .map(|&i| menu_row(state, i, inner, theme))
+            .collect();
+        sidebar.extend(card(title, Vec::new(), rows, width, 0, color, theme));
     }
-    frame.render_widget(Paragraph::new(sidebar_lines), chunks[0]);
+    frame.render_widget(Paragraph::new(sidebar), chunks[0]);
 
-    // Vertical Divider
-    let divider = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(theme.separator());
-    frame.render_widget(divider, chunks[0]);
+    let (choice, title, _, long_desc) = &state.items[state.selected_index];
 
-    // Right Detail Pane
-    let sel = state.selected_index;
-    let (choice, title, _, long_desc) = &state.items[sel];
-    let icon = menu_icon(*choice, theme);
-
-    let mut detail_lines = Vec::new();
-    detail_lines.push(Line::from(""));
-    detail_lines.push(Line::from(vec![
-        Span::styled(
-            format!("{icon}  "),
-            theme.accent_text().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(*title, theme.headline()),
-    ]));
-    detail_lines.push(Line::from(""));
-
-    for line in long_desc.lines() {
-        detail_lines.push(Line::from(vec![Span::styled(
-            line.to_string(),
-            theme.callout(),
-        )]));
-    }
-
-    detail_lines.push(Line::from(""));
-    detail_lines.push(Line::from(vec![Span::styled(
+    let mut about: Vec<Line<'static>> = long_desc
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), theme.callout())))
+        .collect();
+    about.push(Line::default());
+    about.push(Line::from(Span::styled(
         format!("{} Open", theme.g.key_enter),
         theme.headline(),
-    )]));
+    )));
 
-    let detail_rect = Rect {
-        x: chunks[2].x + DETAIL_GAP,
-        y: chunks[2].y,
-        width: chunks[2].width.saturating_sub(DETAIL_GAP),
-        height: chunks[2].height,
-    };
+    let pane = chunks[2];
+    let pane_w = pane.width as usize;
+    let heading = format!("{}  {title}", menu_icon(*choice, theme));
+    let mut lines = card(&heading, Vec::new(), about, pane_w, 0, detail_color, theme);
 
-    // The panels line up with the text above them, after a blank line.
-    let detail_rows = detail_lines.len() as u16 + 1;
-    frame.render_widget(Paragraph::new(detail_lines), detail_rect);
-
-    let data_rect = Rect {
-        x: detail_rect.x,
-        y: detail_rect.y + detail_rows,
-        width: detail_rect.width,
-        height: detail_rect.height.saturating_sub(detail_rows),
-    };
+    let used = lines.len() + 1;
     let data = detail_data(
         state,
         *choice,
-        data_rect.width as usize,
-        data_rect.height as usize,
+        pane_w,
+        (pane.height as usize).saturating_sub(used),
         theme,
     );
-    frame.render_widget(Paragraph::new(data), data_rect);
+    if !data.is_empty() {
+        lines.push(Line::default());
+        lines.extend(data);
+    }
+    frame.render_widget(Paragraph::new(lines), pane);
 }
 
 fn detail_data(
@@ -547,17 +508,12 @@ fn detail_data(
             lines.push(Line::default());
             match &state.largest {
                 Some(snapshot) => {
-                    let color = theme.p.accent;
-                    let inner = width.saturating_sub(FRAME_SIDES);
                     let rows = height.saturating_sub(lines.len() + FRAME_ROWS);
+                    let inner = width.saturating_sub(FRAME_SIDES);
+                    let items = folder_rows(snapshot, inner, rows, theme);
+                    let color = theme.p.teal;
                     let title = "Largest in home folder";
-                    lines.push(frame_top(title, "", Vec::new(), width, color, theme));
-                    lines.extend(
-                        folder_rows(snapshot, inner, rows, theme)
-                            .into_iter()
-                            .map(|row| framed(row, inner, color, theme)),
-                    );
-                    lines.push(frame_bottom(width, color, theme));
+                    lines.extend(card(title, Vec::new(), items, width, 0, color, theme));
                 }
                 None => lines.push(Line::from(Span::styled(
                     "Open Explore storage to see the largest items in your home folder.",
@@ -580,13 +536,10 @@ fn render_submenu_content(
     selected: usize,
     theme: &Theme,
 ) {
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![Span::styled(
-        "Scan first. Choose what to remove afterward.",
-        theme.callout(),
-    )]));
-    lines.push(Line::from(""));
+    let width = area.width as usize;
+    let inner = width.saturating_sub(FRAME_SIDES);
 
+    let mut rows = Vec::new();
     for (i, (subcat, title, desc)) in state.clean_options.iter().enumerate() {
         let is_selected = i == selected;
         let icon = match subcat {
@@ -611,13 +564,29 @@ fn render_submenu_content(
             row = row.detail(Span::styled("Recommended", theme.footnote()));
         }
 
-        lines.push(row.render_line(area.width as usize, theme));
+        rows.push(row.render_line(inner, theme));
 
         if is_selected {
-            let desc_row = render_desc_line(desc, area.width as usize, theme);
-            lines.push(desc_row);
+            rows.push(render_desc_line(desc, inner, theme));
         }
     }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Scan first. Choose what to remove afterward.",
+            theme.callout(),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(card(
+        "Clean caches",
+        Vec::new(),
+        rows,
+        width,
+        0,
+        theme.p.accent,
+        theme,
+    ));
 
     frame.render_widget(Paragraph::new(lines), area);
 }

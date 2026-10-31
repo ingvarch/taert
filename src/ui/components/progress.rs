@@ -1,13 +1,18 @@
 //! Progress card view component.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::gauge::bar;
 use crate::core::path_utils::middle_truncate;
 use crate::ui::theme::Theme;
+
+const CARD_WIDTH: u16 = 76;
+const BODY_ROWS: usize = 6;
+const PERCENT_W: usize = 6;
 
 pub struct ProgressView<'a> {
     pub spinner: &'a str,
@@ -57,88 +62,84 @@ impl<'a> ProgressView<'a> {
         self
     }
 
+    /// Draws a card in the middle of the window, within the rows of `area`.
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let total_lines = 8;
-        if area.height < total_lines as u16 {
+        let height = BODY_ROWS as u16 + FRAME_ROWS as u16;
+        if area.height < height {
             return;
         }
 
-        let top_pad = (area.height as usize).saturating_sub(total_lines) / 2;
+        let window = frame.area();
+        let width = CARD_WIDTH.min(area.width);
+        let rect = Rect {
+            x: window.x + (window.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
 
-        let mut lines = Vec::new();
-        for _ in 0..top_pad {
-            lines.push(Line::from(""));
-        }
-
-        // Row 1: Spinner + headline
-        let spin_char = if theme.env.reduce_motion {
+        let inner = (width as usize).saturating_sub(FRAME_SIDES);
+        let spinner = if theme.env.reduce_motion {
             theme.g.bullet
         } else {
             self.spinner
         };
-        lines.push(
-            Line::from(vec![
-                Span::styled(format!("{spin_char}  "), theme.accent_text()),
-                Span::styled(self.headline, theme.headline()),
-            ])
-            .alignment(Alignment::Center),
+        let title = format!("{spinner}  {}", self.headline);
+        let lines = card(
+            &title,
+            Vec::new(),
+            self.body(inner, theme),
+            width as usize,
+            BODY_ROWS,
+            theme.p.accent,
+            theme,
         );
 
-        // Row 2: Step info
-        if let Some(step) = self.step_info {
-            lines.push(
-                Line::from(vec![Span::styled(step, theme.callout())]).alignment(Alignment::Center),
-            );
-        } else {
-            lines.push(Line::from(""));
-        }
+        frame.render_widget(Paragraph::new(lines), rect);
+    }
 
-        lines.push(Line::from(""));
+    fn body(&self, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let step = self.step_info.unwrap_or_default();
+        let step = Line::from(Span::styled(middle_truncate(step, inner), theme.callout()));
 
-        // Row 3: Bar (if fraction available)
-        if let Some(frac) = self.fraction {
-            let bar_w = 46u16.min(area.width.saturating_sub(16));
-            let bar_spans = bar(frac, bar_w, theme.p.accent, theme);
-            let percent_str = format!("  {:>3.0}%", frac * 100.0);
-            let mut row = bar_spans;
-            row.push(Span::styled(percent_str, theme.footnote()));
-            lines.push(Line::from(row).alignment(Alignment::Center));
-        } else {
-            lines.push(Line::from(""));
-        }
-
-        lines.push(Line::from(""));
-
-        // Row 4: Current path
-        if let Some(p) = self.current_path {
-            let max_w = (area.width as usize).saturating_sub(12);
-            let trunc = middle_truncate(p, max_w);
-            lines.push(
-                Line::from(vec![Span::styled(trunc, theme.callout())]).alignment(Alignment::Center),
-            );
-        } else {
-            lines.push(Line::from(""));
-        }
-
-        // Row 5: Counters & Elapsed time
-        let mut foot_spans = Vec::new();
-        if let Some(cnt) = self.counter_info {
-            foot_spans.push(Span::styled(cnt, theme.body()));
-        }
-        if let Some(sec) = self.elapsed_seconds {
-            if !foot_spans.is_empty() {
-                foot_spans.push(Span::styled("  ·  ", theme.footnote()));
+        let progress = match self.fraction {
+            Some(fraction) => {
+                let bar_w = inner.saturating_sub(PERCENT_W);
+                let mut row = bar(fraction, bar_w as u16, theme.p.accent, theme);
+                row.push(Span::styled(
+                    format!("{:>PERCENT_W$}", format!("{:.0}%", fraction * 100.0)),
+                    theme.footnote(),
+                ));
+                Line::from(row)
             }
-            let mins = sec / 60;
-            let rem_s = sec % 60;
-            foot_spans.push(Span::styled(format!("{mins}:{rem_s:02}"), theme.footnote()));
+            None => Line::default(),
+        };
+
+        let path = self.current_path.unwrap_or_default();
+        let path = Line::from(Span::styled(middle_truncate(path, inner), theme.callout()));
+
+        let mut footer = Vec::new();
+        if let Some(counter) = self.counter_info {
+            footer.push(Span::styled(counter.to_string(), theme.body()));
+        }
+        if let Some(seconds) = self.elapsed_seconds {
+            if !footer.is_empty() {
+                footer.push(Span::styled("  ·  ", theme.footnote()));
+            }
+            footer.push(Span::styled(
+                format!("{}:{:02}", seconds / 60, seconds % 60),
+                theme.footnote(),
+            ));
         }
 
-        if !foot_spans.is_empty() {
-            lines.push(Line::from(foot_spans).alignment(Alignment::Center));
-        }
-
-        frame.render_widget(Paragraph::new(lines), area);
+        vec![
+            step,
+            Line::default(),
+            progress,
+            Line::default(),
+            path,
+            Line::from(footer),
+        ]
     }
 }
 
