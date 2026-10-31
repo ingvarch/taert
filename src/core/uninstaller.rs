@@ -740,6 +740,8 @@ struct Tally<F> {
     total: usize,
     progress: F,
     removed_paths: Vec<PathBuf>,
+    /// Why root was refused. One answer holds for the whole run.
+    root_refusal: Option<String>,
 }
 
 impl<F: FnMut(RemovalProgress)> Tally<F> {
@@ -812,6 +814,7 @@ impl Uninstaller<'_> {
             total: plan.scan.selected_items().len(),
             progress,
             removed_paths: Vec::new(),
+            root_refusal: None,
         };
 
         let mut jobs = self.sort_out(plan);
@@ -1246,7 +1249,10 @@ impl Uninstaller<'_> {
             }
         }
 
-        let refusal = self.host.run_admin(&script, ADMIN_PROMPT).err();
+        if tally.root_refusal.is_none() {
+            tally.root_refusal = self.host.run_admin(&script, ADMIN_PROMPT).err();
+        }
+        let refusal = tally.root_refusal.clone();
         let because = |fallback: &str| refusal.clone().unwrap_or_else(|| fallback.to_string());
 
         for job in jobs.iter_mut().filter(|job| job.in_root_script) {
@@ -2971,6 +2977,43 @@ mod run_tests {
         unlock_folder(&helpers);
         assert_eq!(seen, [1, 2, 3, 4]);
         assert_eq!(report.removed_count, 4);
+    }
+
+    #[test]
+    fn a_refused_password_is_never_asked_for_again() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mine = layout.user("Applications/Mine.app");
+        fake_app(&mine, "com.other.mine", "Mine");
+        let target = InstalledApp {
+            path: mine.clone(),
+            ..app("Mine", "com.other.mine")
+        };
+        let helpers = layout.system("Library/PrivilegedHelperTools");
+        let foo_helper = file(helpers.join("com.acme.foo.helper"));
+        let mine_helper = file(helpers.join("com.other.mine.helper"));
+        let plan = plans_of(vec![
+            (foo.clone(), vec![leftover(&foo_helper)]),
+            (target, vec![leftover(&mine_helper)]),
+        ]);
+        let host = FakeHost::default();
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+        lock_folder(&helpers);
+
+        let report = run(&plan, &host, &layout);
+
+        unlock_folder(&helpers);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+        assert!(foo.path.exists());
+        assert!(mine_helper.exists());
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.path == mine_helper),
+            "{:?}",
+            report.failures
+        );
     }
 
     #[test]
