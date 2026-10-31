@@ -107,6 +107,7 @@ taert/
 │           ├── chrome.rs       # App header bar, breadcrumbs, and status
 │           ├── columns.rs      # Places two stacks of lines side by side
 │           ├── empty.rs        # Empty state with icons and helpful callouts
+│           ├── frame.rs        # Rounded frames drawn line by line
 │           ├── gauge.rs        # Proportional bar gauges, charts, sparklines, and legends
 │           ├── help.rs         # Modal keyboard shortcuts help sheet
 │           ├── hints.rs        # Bottom keybinding hints and primary action badge

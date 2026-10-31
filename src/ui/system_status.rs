@@ -8,12 +8,13 @@ use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use super::components::chrome::AppChrome;
 use super::components::columns::side_by_side;
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::{chart, legend_grid, segmented_bar, sparkline};
 use super::components::hints::Hint;
-use super::components::list::render_section_header_spans;
 use super::components::text::fit_width;
 use super::theme::Theme;
 use crate::core::bytes::{format_bytes, format_memory_bytes};
@@ -27,17 +28,22 @@ const HISTORY_LEN: usize = 240;
 const TWO_COLUMNS_MIN_WIDTH: usize = 100;
 const THREE_COLUMNS_MIN_WIDTH: usize = 170;
 const COLUMN_GAP: usize = 4;
-const INDENT: usize = 2;
 const MIN_GRAPH_WIDTH: usize = 6;
 const MAX_NAME_WIDTH: usize = 16;
-const MIN_PROCESS_ROWS: usize = 5;
-// Two lists, each with a full set of rows, a blank line and a header between them.
-const TWO_LISTS_MIN_ROWS: usize = 2 * MIN_PROCESS_ROWS + 2;
+// A frame around the fewest rows a process list shows.
+const MIN_LIST_HEIGHT: usize = 5 + FRAME_ROWS;
+// Two such frames and the blank line between them.
+const TWO_LISTS_MIN_ROWS: usize = 2 * MIN_LIST_HEIGHT + 1;
 const MAX_CHART_ROWS: usize = 24;
+// CPU and memory in the upper panels share a height, as do network and storage below,
+// so three charts stack in a column. A single column stacks all six.
+const PAIRED_CHARTS: usize = 3;
+const STACKED_CHARTS: usize = 6;
 // Keeps idle traffic flat instead of letting a few bytes fill the graph.
 const MIN_RATE_SCALE: f64 = 100_000.0;
 const BUSY_PROCESS_PERCENT: f64 = 200.0;
 const MEASURING: &str = "Measuring…";
+const UNKNOWN: &str = "—";
 
 #[derive(Debug, Default)]
 pub struct History {
@@ -191,162 +197,229 @@ pub fn render_system_status(frame: &mut Frame, state: &SystemStatusState, theme:
     frame.render_widget(Paragraph::new(visible_lines), content_rect);
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Panel {
-    Cpu,
-    Memory,
-    Storage,
-    Power,
-    Processes,
-    Network,
+/// A titled panel. Panels side by side give `top` the same height to line up their charts.
+struct Card {
+    title: &'static str,
+    detail: Vec<Span<'static>>,
+    color: Color,
+    top: Vec<Line<'static>>,
+    charts: Vec<Line<'static>>,
 }
 
-impl Panel {
-    fn charts(self) -> usize {
-        match self {
-            Panel::Memory => 1,
-            Panel::Cpu | Panel::Storage | Panel::Network => 2,
-            Panel::Power | Panel::Processes => 0,
-        }
+impl Card {
+    fn lines(self, inner_w: usize, top_rows: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let Self {
+            title,
+            detail,
+            color,
+            mut top,
+            charts,
+        } = self;
+
+        top.resize(top_rows.max(top.len()), Line::default());
+        top.extend(charts);
+
+        let width = inner_w + FRAME_SIDES;
+        let mut lines = vec![frame_top(title, "", detail, width, color, theme)];
+        lines.extend(
+            top.into_iter()
+                .map(|line| framed(line, inner_w, color, theme)),
+        );
+        lines.push(frame_bottom(width, color, theme));
+        lines
     }
 }
 
-const ONE_COLUMN: &[&[Panel]] = &[&[
-    Panel::Cpu,
-    Panel::Memory,
-    Panel::Storage,
-    Panel::Power,
-    Panel::Processes,
-    Panel::Network,
-]];
-const TWO_COLUMNS: &[&[Panel]] = &[
-    &[Panel::Cpu, Panel::Network, Panel::Power],
-    &[Panel::Memory, Panel::Storage, Panel::Processes],
-];
-const THREE_COLUMNS: &[&[Panel]] = &[
-    &[Panel::Cpu, Panel::Network],
-    &[Panel::Memory, Panel::Storage],
-    &[Panel::Power, Panel::Processes],
-];
-const LOAD_STACKED: &[&[Panel]] = &[&[Panel::Cpu, Panel::Memory]];
-const LOAD_SIDE_BY_SIDE: &[&[Panel]] = &[&[Panel::Cpu], &[Panel::Memory]];
+// A chart taller than one row needs a caption of its own.
+fn chart_height(rows: usize) -> usize {
+    if rows >= 3 {
+        (rows - 1).min(MAX_CHART_ROWS)
+    } else {
+        1
+    }
+}
 
-/// The rows each chart and the process lists get from the height of the window.
-#[derive(Clone, Copy)]
-struct Room {
-    chart_rows: usize,
-    process_rows: usize,
+/// Rows for the one chart of the upper panels and each of the two in the lower panels.
+fn chart_rows(spare: usize) -> (usize, usize) {
+    let lower = chart_height(spare / PAIRED_CHARTS);
+    if lower == 1 {
+        return (1, 1);
+    }
+    let upper = spare.saturating_sub(2 * (lower + 1));
+    (chart_height(upper), lower)
+}
+
+fn stacked(cards: Vec<Vec<Line<'static>>>) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for card in cards {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(card);
+    }
+    lines
 }
 
 struct Dashboard<'a> {
     state: &'a SystemStatusState,
+    inner_w: usize,
     panel_w: usize,
     theme: &'a Theme,
 }
 
 impl Dashboard<'_> {
-    fn panel(&self, panel: Panel, room: Room) -> Vec<Line<'static>> {
-        let Self {
-            state,
-            panel_w: width,
-            theme,
-        } = *self;
-        let live = &state.status.live;
-        let charts = room.chart_rows;
-
-        match panel {
-            Panel::Cpu => cpu_panel(state, width, charts, theme),
-            Panel::Memory => memory_panel(state, width, charts, theme),
-            Panel::Storage => disk_panel(state, width, charts, theme),
-            Panel::Power => live
-                .power
-                .as_ref()
-                .map_or_else(Vec::new, |power| power_panel(power, width, theme)),
-            Panel::Processes => processes_panel(live, width, room.process_rows, theme),
-            Panel::Network => network_panel(state, width, charts, theme),
-        }
+    fn cpu(&self, charts: usize) -> Card {
+        cpu_card(self.state, self.inner_w, charts, self.theme)
     }
 
-    fn column(&self, panels: &[Panel], room: Room) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for panel in panels {
-            let panel = self.panel(*panel, room);
-            if !lines.is_empty() && !panel.is_empty() {
-                lines.push(Line::default());
+    fn memory(&self, charts: usize) -> Card {
+        memory_card(self.state, self.inner_w, charts, self.theme)
+    }
+
+    fn storage(&self, charts: usize) -> Card {
+        storage_card(self.state, self.inner_w, charts, self.theme)
+    }
+
+    fn network(&self, charts: usize) -> Card {
+        network_card(self.state, self.inner_w, charts, self.theme)
+    }
+
+    fn power(&self) -> Option<Vec<Line<'static>>> {
+        let power = self.state.status.live.power.as_ref()?;
+        let card = power_card(power, self.inner_w, self.theme);
+        Some(card.lines(self.inner_w, 0, self.theme))
+    }
+
+    fn top_by_cpu(&self, height: usize) -> Vec<Line<'static>> {
+        let rows = height.saturating_sub(FRAME_ROWS);
+        let live = &self.state.status.live;
+        top_by_cpu_card(live, self.inner_w, rows, self.theme).lines(self.inner_w, rows, self.theme)
+    }
+
+    fn top_by_memory(&self, height: usize) -> Vec<Line<'static>> {
+        let rows = height.saturating_sub(FRAME_ROWS);
+        let live = &self.state.status.live;
+        top_by_memory_card(live, self.inner_w, rows, self.theme).lines(
+            self.inner_w,
+            rows,
+            self.theme,
+        )
+    }
+
+    /// CPU over Network and Memory over Storage, with every chart facing its neighbor.
+    fn paired(&self, height: usize) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let top_rows = |a: Card, b: Card| a.top.len().max(b.top.len());
+        let upper_top = top_rows(self.cpu(1), self.memory(1));
+        let lower_top = top_rows(self.network(1), self.storage(1));
+        let fixed = upper_top + lower_top + 2 * FRAME_ROWS + 1;
+        let (upper, lower) = chart_rows(height.saturating_sub(fixed));
+
+        let (w, theme) = (self.inner_w, self.theme);
+        let left = stacked(vec![
+            self.cpu(upper).lines(w, upper_top, theme),
+            self.network(lower).lines(w, lower_top, theme),
+        ]);
+        let right = stacked(vec![
+            self.memory(upper).lines(w, upper_top, theme),
+            self.storage(lower).lines(w, lower_top, theme),
+        ]);
+        (left, right)
+    }
+
+    fn beside(&self, left: Vec<Line<'static>>, right: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        side_by_side(left, self.panel_w, COLUMN_GAP, right)
+    }
+
+    // One list takes the room until both can show a full set of rows.
+    fn process_lists(&self, height: usize) -> Vec<Line<'static>> {
+        if height < TWO_LISTS_MIN_ROWS {
+            return self.top_by_cpu(height);
+        }
+        let upper = height.saturating_sub(1) / 2;
+        let lower = height.saturating_sub(upper + 1);
+        stacked(vec![self.top_by_cpu(upper), self.top_by_memory(lower)])
+    }
+
+    fn three_columns(&self, height: usize) -> Vec<Line<'static>> {
+        let (left, right) = self.paired(height);
+        let total = left.len();
+
+        let side = match self.power() {
+            Some(power) => {
+                let rest = total.saturating_sub(power.len() + 1).max(MIN_LIST_HEIGHT);
+                stacked(vec![power, self.process_lists(rest)])
             }
-            lines.extend(panel);
-        }
-        lines
-    }
-
-    // A chart taller than one row needs a caption, so the first step costs more than the rest.
-    fn chart_rows(&self, panels: &[Panel], height: usize) -> usize {
-        let room = Room {
-            chart_rows: 2,
-            process_rows: MIN_PROCESS_ROWS,
+            None => self.process_lists(total.max(MIN_LIST_HEIGHT)),
         };
-        let charts: usize = panels.iter().map(|panel| panel.charts()).sum();
-        let tall = self.column(panels, room).len();
 
-        if charts == 0 {
-            MAX_CHART_ROWS
-        } else if tall > height {
-            1
-        } else {
-            (2 + (height - tall) / charts).min(MAX_CHART_ROWS)
-        }
+        let panels = self.beside(left, right);
+        let left_w = 2 * self.panel_w + COLUMN_GAP;
+        side_by_side(panels, left_w, COLUMN_GAP, side)
     }
 
-    fn process_rows(&self, panels: &[Panel], chart_rows: usize, height: usize) -> usize {
-        let others: Vec<Panel> = panels
-            .iter()
-            .copied()
-            .filter(|panel| *panel != Panel::Processes)
-            .collect();
-        let room = Room {
-            chart_rows,
-            process_rows: MIN_PROCESS_ROWS,
+    fn two_columns(&self, height: usize) -> Vec<Line<'static>> {
+        let reserved = (height / 3).max(MIN_LIST_HEIGHT);
+        let (left, right) = self.paired(height.saturating_sub(reserved + 1));
+        let rest = height.saturating_sub(left.len() + 1).max(MIN_LIST_HEIGHT);
+
+        let beside_list = match self.power() {
+            Some(power) => {
+                let spare = rest.saturating_sub(power.len() + 1);
+                if spare >= MIN_LIST_HEIGHT {
+                    stacked(vec![power, self.top_by_memory(spare)])
+                } else {
+                    let card = self.state.status.live.power.as_ref().map(|power| {
+                        power_card(power, self.inner_w, self.theme).lines(
+                            self.inner_w,
+                            rest.saturating_sub(FRAME_ROWS),
+                            self.theme,
+                        )
+                    });
+                    card.unwrap_or_default()
+                }
+            }
+            None => self.top_by_memory(rest),
         };
-        let above = self.column(&others, room).len();
 
-        // A blank line and the header of the panel.
-        height.saturating_sub(above + 2).max(MIN_PROCESS_ROWS)
+        stacked(vec![
+            self.beside(left, right),
+            self.beside(beside_list, self.top_by_cpu(rest)),
+        ])
     }
 
-    fn room(&self, panels: &[Panel], height: usize) -> Room {
-        let chart_rows = self.chart_rows(panels, height);
-        Room {
-            chart_rows,
-            process_rows: self.process_rows(panels, chart_rows, height),
-        }
+    fn one_column(&self, height: usize) -> Vec<Line<'static>> {
+        let (w, theme) = (self.inner_w, self.theme);
+        let cards = |charts: usize| {
+            let mut cards = vec![
+                self.cpu(charts).lines(w, 0, theme),
+                self.memory(charts).lines(w, 0, theme),
+                self.storage(charts).lines(w, 0, theme),
+            ];
+            cards.extend(self.power());
+            cards.push(self.top_by_cpu(MIN_LIST_HEIGHT));
+            cards.push(self.top_by_memory(MIN_LIST_HEIGHT));
+            cards.push(self.network(charts).lines(w, 0, theme));
+            stacked(cards)
+        };
+
+        let spare = height.saturating_sub(cards(1).len());
+        cards(chart_height(spare / STACKED_CHARTS + 1))
     }
 }
 
-fn columns_lines(
-    state: &SystemStatusState,
-    columns: &[&[Panel]],
+fn dashboard<'a>(
+    state: &'a SystemStatusState,
     width: usize,
-    height: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let panel_w = (width - (columns.len() - 1) * COLUMN_GAP) / columns.len();
-    let dashboard = Dashboard {
+    columns: usize,
+    theme: &'a Theme,
+) -> Dashboard<'a> {
+    let panel_w = width.saturating_sub((columns - 1) * COLUMN_GAP) / columns;
+    Dashboard {
         state,
+        inner_w: panel_w.saturating_sub(FRAME_SIDES),
         panel_w,
         theme,
-    };
-
-    let mut lines = Vec::new();
-    for (i, column) in columns.iter().enumerate() {
-        let column = dashboard.column(column, dashboard.room(column, height));
-        lines = if i == 0 {
-            column
-        } else {
-            let left_w = i * (panel_w + COLUMN_GAP) - COLUMN_GAP;
-            side_by_side(lines, left_w, COLUMN_GAP, column)
-        };
     }
-    lines
 }
 
 /// CPU and memory for the main menu.
@@ -356,12 +429,24 @@ pub fn load_summary(
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let columns = if width >= TWO_COLUMNS_MIN_WIDTH {
-        LOAD_SIDE_BY_SIDE
+    let columns = if width >= TWO_COLUMNS_MIN_WIDTH { 2 } else { 1 };
+    let cards = dashboard(state, width, columns, theme);
+    let w = cards.inner_w;
+    let top = cards.cpu(1).top.len().max(cards.memory(1).top.len());
+
+    if columns == 2 {
+        let charts = chart_height(height.saturating_sub(top + FRAME_ROWS));
+        let left = cards.cpu(charts).lines(w, top, theme);
+        let right = cards.memory(charts).lines(w, top, theme);
+        cards.beside(left, right)
     } else {
-        LOAD_STACKED
-    };
-    columns_lines(state, columns, width, height, theme)
+        let spare = height.saturating_sub(2 * (top + FRAME_ROWS) + 1);
+        let charts = chart_height(spare / 2);
+        stacked(vec![
+            cards.cpu(charts).lines(w, top, theme),
+            cards.memory(charts).lines(w, top, theme),
+        ])
+    }
 }
 
 /// Disk capacity for the main menu. Speeds need the sampler, which runs on demand.
@@ -370,7 +455,10 @@ pub fn storage_summary(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    capacity_panel(state, width, theme).0
+    let inner_w = width.saturating_sub(FRAME_SIDES);
+    capacity_card(state, inner_w, theme)
+        .0
+        .lines(inner_w, 0, theme)
 }
 
 fn content_lines(
@@ -379,27 +467,23 @@ fn content_lines(
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let columns = if width >= THREE_COLUMNS_MIN_WIDTH {
-        THREE_COLUMNS
-    } else if width >= TWO_COLUMNS_MIN_WIDTH {
-        TWO_COLUMNS
-    } else {
-        ONE_COLUMN
-    };
-
     let mut lines = summary_lines(state, width, theme);
     // The blank lines around the panels and the footnote.
     let available = height.saturating_sub(lines.len() + 3);
-    let panels = columns_lines(state, columns, width, available, theme);
+
+    let panels = if width >= THREE_COLUMNS_MIN_WIDTH {
+        dashboard(state, width, 3, theme).three_columns(available)
+    } else if width >= TWO_COLUMNS_MIN_WIDTH {
+        dashboard(state, width, 2, theme).two_columns(available)
+    } else {
+        dashboard(state, width, 1, theme).one_column(available)
+    };
 
     lines.push(Line::default());
     lines.extend(panels);
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        format!(
-            "{}Managed space may include purgeable files and isn't counted as free.",
-            indent()
-        ),
+        "Managed space may include purgeable files and isn't counted as free.",
         theme.footnote(),
     )));
 
@@ -424,13 +508,13 @@ fn summary_lines(state: &SystemStatusState, width: usize, theme: &Theme) -> Vec<
     parts.push(format!("up {}", format_uptime(machine.uptime_seconds)));
 
     let mut lines = vec![Line::from(Span::styled(
-        format!("{}{model}", indent()),
+        model.to_string(),
         theme.headline(),
     ))];
     lines.extend(
-        wrap_parts(&parts, width.saturating_sub(INDENT))
+        wrap_parts(&parts, width)
             .into_iter()
-            .map(|text| Line::from(Span::styled(format!("{}{text}", indent()), theme.callout()))),
+            .map(|text| Line::from(Span::styled(text, theme.callout()))),
     );
     lines
 }
@@ -468,10 +552,6 @@ fn format_minutes(minutes: i64) -> String {
     } else {
         format!("{minutes}m")
     }
-}
-
-fn indent() -> String {
-    " ".repeat(INDENT)
 }
 
 fn percent(value: f32) -> String {
@@ -523,24 +603,12 @@ fn status_spans(color: Color, text: impl Into<String>, theme: &Theme) -> Vec<Spa
     ]
 }
 
-fn panel_header(
-    title: &str,
-    detail: Vec<Span<'static>>,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    render_section_header_spans(title, detail, width, theme)
-}
-
 fn detail_text(text: impl Into<String>, theme: &Theme) -> Vec<Span<'static>> {
     vec![Span::styled(text.into(), theme.callout())]
 }
 
 fn info_line(parts: &[String], theme: &Theme) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("{}{}", indent(), parts.join(" · ")),
-        theme.callout(),
-    ))
+    Line::from(Span::styled(parts.join(" · "), theme.callout()))
 }
 
 /// Rows of a panel: a label, a graph that takes the spare width, and a value on the right.
@@ -553,16 +621,13 @@ struct Rows<'t> {
 
 impl Rows<'_> {
     fn graph_width(&self) -> usize {
-        let fixed = INDENT + self.label_w + 1 + 1 + self.value_w;
+        let fixed = self.label_w + 1 + 1 + self.value_w;
         self.width.saturating_sub(fixed).max(MIN_GRAPH_WIDTH)
     }
 
     fn row(&self, label: &str, graph: Vec<Span<'static>>, value: &str) -> Line<'static> {
         let label = fit_width(label, self.label_w);
-        let mut spans = vec![Span::styled(
-            format!("{}{label} ", indent()),
-            self.theme.callout(),
-        )];
+        let mut spans = vec![Span::styled(format!("{label} "), self.theme.callout())];
         spans.extend(graph);
         spans.push(Span::styled(
             format!(" {value:>width$}", width = self.value_w),
@@ -593,11 +658,9 @@ impl Rows<'_> {
     }
 
     fn caption(&self, label: &str, value: &str) -> Line<'static> {
-        let pad = self
-            .width
-            .saturating_sub(INDENT + label.len() + value.len());
+        let pad = self.width.saturating_sub(label.len() + value.width());
         Line::from(vec![
-            Span::styled(format!("{}{label}", indent()), self.theme.callout()),
+            Span::styled(label.to_string(), self.theme.callout()),
             Span::raw(" ".repeat(pad)),
             Span::styled(value.to_string(), self.theme.body()),
         ])
@@ -617,13 +680,12 @@ impl Rows<'_> {
             return vec![self.trend(label, series, max, color, value)];
         }
 
-        let width = self.width.saturating_sub(INDENT);
         let area = Style::default().bg(self.theme.p.fill);
         let mut lines = vec![self.caption(label, value)];
         lines.extend(
-            chart(series, width, chart_rows, max, color, self.theme)
+            chart(series, self.width, chart_rows, max, color, self.theme)
                 .into_iter()
-                .map(|row| Line::from(vec![Span::raw(indent()), row.patch_style(area)])),
+                .map(|row| Line::from(row.patch_style(area))),
         );
         lines
     }
@@ -631,7 +693,7 @@ impl Rows<'_> {
     fn waiting(&self, label: &str) -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                format!("{}{} ", indent(), fit_width(label, self.label_w)),
+                format!("{} ", fit_width(label, self.label_w)),
                 self.theme.callout(),
             ),
             Span::styled(MEASURING, self.theme.footnote()),
@@ -639,12 +701,7 @@ impl Rows<'_> {
     }
 }
 
-fn cpu_panel(
-    state: &SystemStatusState,
-    width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn cpu_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
     let live = &state.status.live;
     let cpu = &live.cpu;
 
@@ -661,67 +718,48 @@ fn cpu_panel(
         value_w: 6,
         theme,
     };
-    let mut lines = vec![panel_header(
-        "CPU",
-        detail_text(detail.join(" · "), theme),
-        width,
-        theme,
-    )];
 
-    lines.push(match cpu.usage_percent {
-        Some(usage) => {
-            let fraction = usage as f64 / 100.0;
-            rows.bar(
-                "Usage",
-                fraction,
-                load_color(fraction, theme),
-                &percent(usage),
-            )
-        }
-        None => rows.waiting("Usage"),
-    });
-
-    if let Some(usage) = live.gpu.as_ref().and_then(|g| g.usage_percent) {
+    let usage_bar = |label, usage: f32| {
         let fraction = usage as f64 / 100.0;
-        lines.push(rows.bar(
-            "GPU",
+        rows.bar(
+            label,
             fraction,
             load_color(fraction, theme),
             &percent(usage),
-        ));
-    }
+        )
+    };
+    let usage = match cpu.usage_percent {
+        Some(usage) => usage_bar("Usage", usage),
+        None => rows.waiting("Usage"),
+    };
+    let gpu = match live.gpu.as_ref().and_then(|g| g.usage_percent) {
+        Some(usage) => usage_bar("GPU", usage),
+        None => rows.caption("GPU", UNKNOWN),
+    };
+    let cores = if cpu.core_percents.is_empty() {
+        rows.caption("Cores", UNKNOWN)
+    } else {
+        rows.row(
+            "Cores",
+            core_strip(cpu.core_percents.as_slice(), cpu.efficiency_cores, theme),
+            "",
+        )
+    };
 
-    if !cpu.core_percents.is_empty() {
-        if chart_rows < 2 {
-            lines.push(rows.row(
-                "Cores",
-                core_strip(cpu.core_percents.as_slice(), cpu.efficiency_cores, theme),
-                "",
-            ));
-        } else {
-            lines.push(rows.caption("Cores", ""));
-            lines.extend(core_chart(
-                cpu.core_percents.as_slice(),
-                cpu.efficiency_cores,
-                width.saturating_sub(INDENT),
-                chart_rows,
-                theme,
-            ));
-        }
-    }
-
-    if !state.history.cpu.is_empty() {
-        lines.extend(rows.series(
+    Card {
+        title: "CPU",
+        detail: detail_text(detail.join(" · "), theme),
+        color: theme.p.accent,
+        top: vec![usage, gpu, cores],
+        charts: rows.series(
             "History",
             &state.history.cpu,
             100.0,
             theme.p.accent,
             "",
             chart_rows,
-        ));
+        ),
     }
-
-    lines
 }
 
 fn core_strip(percents: &[f32], efficiency: usize, theme: &Theme) -> Vec<Span<'static>> {
@@ -749,51 +787,7 @@ fn core_strip(percents: &[f32], efficiency: usize, theme: &Theme) -> Vec<Span<'s
     spans
 }
 
-fn core_chart(
-    percents: &[f32],
-    efficiency: usize,
-    width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let cell = (width / percents.len()).max(1);
-    let bar_w = cell.saturating_sub(1).max(1);
-    let gap = " ".repeat(cell - bar_w);
-    let rest = " ".repeat(width.saturating_sub(cell * percents.len()));
-    let area = Style::default().bg(theme.p.fill);
-
-    let bars: Vec<Vec<Span<'static>>> = percents
-        .iter()
-        .enumerate()
-        .map(|(core, percent)| {
-            let color = if core < efficiency {
-                theme.p.teal
-            } else {
-                theme.p.accent
-            };
-            chart(&[*percent as f64], 1, chart_rows, 100.0, color, theme)
-        })
-        .collect();
-
-    (0..chart_rows)
-        .map(|row| {
-            let mut spans = vec![Span::raw(indent())];
-            for bar in &bars {
-                let text = format!("{}{gap}", bar[row].content.repeat(bar_w));
-                spans.push(Span::styled(text, bar[row].style.patch(area)));
-            }
-            spans.push(Span::styled(rest.clone(), area));
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn memory_panel(
-    state: &SystemStatusState,
-    width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn memory_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
     let mem = &state.status.memory;
     let (pressure, color) = match mem.pressure {
         Some(MemoryPressureLevel::Normal) | None => ("Normal", theme.p.green),
@@ -803,7 +797,6 @@ fn memory_panel(
 
     let mut detail = detail_text("Pressure  ", theme);
     detail.extend(status_spans(color, pressure, theme));
-    let mut lines = vec![panel_header("Memory", detail, width, theme)];
 
     let total = mem.total_bytes.max(1) as f64;
     let share = |bytes: u64| bytes as f64 / total;
@@ -814,11 +807,12 @@ fn memory_panel(
     );
     let rows = Rows {
         width,
-        label_w: 4,
+        label_w: 7,
         value_w: value.len(),
         theme,
     };
-    lines.push(rows.segments(
+
+    let mut top = vec![rows.segments(
         "Used",
         &[
             (share(mem.app_bytes), theme.p.accent),
@@ -827,9 +821,8 @@ fn memory_panel(
             (share(mem.cached_bytes), theme.p.gray),
         ],
         &value,
-    ));
-
-    lines.extend(legend_grid(
+    )];
+    top.extend(legend_grid(
         &[
             ("App", format_memory_bytes(mem.app_bytes), theme.p.accent),
             (
@@ -858,30 +851,32 @@ fn memory_panel(
                 theme.p.quaternary,
             ),
         ],
-        INDENT,
+        0,
         width,
         theme,
     ));
 
-    if chart_rows > 1 && !state.history.memory.is_empty() {
-        lines.extend(rows.series(
+    Card {
+        title: "Memory",
+        detail,
+        color: theme.p.purple,
+        top,
+        charts: rows.series(
             "History",
             &state.history.memory,
             100.0,
             theme.p.gray,
             "",
             chart_rows,
-        ));
+        ),
     }
-
-    lines
 }
 
-fn capacity_panel<'t>(
+fn capacity_card<'t>(
     state: &SystemStatusState,
     width: usize,
     theme: &'t Theme,
-) -> (Vec<Line<'static>>, Rows<'t>) {
+) -> (Card, Rows<'t>) {
     let storage = &state.status.storage;
     let live = &state.status.live;
 
@@ -914,81 +909,74 @@ fn capacity_panel<'t>(
         theme,
     };
 
-    let mut lines = vec![panel_header(
-        "Storage",
-        detail_text(
-            format!("{} available", format_bytes(storage.available_bytes)),
-            theme,
-        ),
-        width,
-        theme,
-    )];
-
     let total = storage.total_bytes.max(1) as f64;
     let used_fraction = boot_used as f64 / total;
-    lines.push(rows.segments(
+    let mut top = vec![rows.segments(
         boot_name,
         &[
             (used_fraction, disk_color(storage.free_fraction(), theme)),
             (storage.managed_bytes as f64 / total, theme.p.gray),
         ],
         &boot_value,
-    ));
+    )];
     for ((name, used, value), volume) in external.iter().zip(&live.volumes) {
         let fraction = *used as f64 / volume.total_bytes.max(1) as f64;
-        lines.push(rows.bar(name, fraction, disk_color(1.0 - fraction, theme), value));
+        top.push(rows.bar(name, fraction, disk_color(1.0 - fraction, theme), value));
     }
 
-    lines.extend(legend_grid(
+    top.extend(legend_grid(
         &[
             ("Used", format_bytes(boot_used), theme.p.accent),
             ("Managed", format_bytes(storage.managed_bytes), theme.p.gray),
             ("Free", format_bytes(storage.free_bytes), theme.p.quaternary),
         ],
-        INDENT,
+        0,
         width,
         theme,
     ));
 
-    (lines, rows)
+    let card = Card {
+        title: "Storage",
+        detail: detail_text(
+            format!("{} available", format_bytes(storage.available_bytes)),
+            theme,
+        ),
+        color: theme.p.orange,
+        top,
+        charts: Vec::new(),
+    };
+    (card, rows)
 }
 
-fn disk_panel(
-    state: &SystemStatusState,
-    width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn storage_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
     let history = &state.history;
-    let (mut lines, rows) = capacity_panel(state, width, theme);
+    let (mut card, rows) = capacity_card(state, width, theme);
 
-    match &state.status.live.disk_io {
-        Some(io) => {
-            let scale = rate_scale(&[&history.read, &history.write]);
-            lines.extend(rows.series(
-                "Read",
-                &history.read,
-                scale,
-                theme.p.teal,
-                &rate(io.read_per_sec),
-                chart_rows,
-            ));
-            lines.extend(rows.series(
-                "Write",
-                &history.write,
-                scale,
-                theme.p.purple,
-                &rate(io.write_per_sec),
-                chart_rows,
-            ));
-        }
-        None => lines.push(rows.waiting("Speed")),
-    }
+    let io = state.status.live.disk_io.as_ref();
+    let read = io.map_or(UNKNOWN.to_string(), |io| rate(io.read_per_sec));
+    let write = io.map_or(UNKNOWN.to_string(), |io| rate(io.write_per_sec));
+    let scale = rate_scale(&[&history.read, &history.write]);
 
-    lines
+    card.charts = rows.series(
+        "Read",
+        &history.read,
+        scale,
+        theme.p.teal,
+        &read,
+        chart_rows,
+    );
+    card.charts.extend(rows.series(
+        "Write",
+        &history.write,
+        scale,
+        theme.p.purple,
+        &write,
+        chart_rows,
+    ));
+    card
 }
 
-fn power_panel(power: &PowerStatus, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn power_card(power: &PowerStatus, width: usize, theme: &Theme) -> Card {
     let minutes = power.minutes_left.map(format_minutes);
     let (source, color) = match (power.source, minutes) {
         (PowerSource::Battery, Some(left)) => (format!("On battery, {left} left"), theme.p.yellow),
@@ -1004,12 +992,6 @@ fn power_panel(power: &PowerStatus, width: usize, theme: &Theme) -> Vec<Line<'st
         value_w: 4,
         theme,
     };
-    let mut lines = vec![panel_header(
-        "Power",
-        status_spans(color, source, theme),
-        width,
-        theme,
-    )];
 
     let charge = power.charge_percent;
     let charge_color = match charge {
@@ -1017,12 +999,12 @@ fn power_panel(power: &PowerStatus, width: usize, theme: &Theme) -> Vec<Line<'st
         11..=20 => theme.p.yellow,
         _ => theme.p.green,
     };
-    lines.push(rows.bar(
+    let mut top = vec![rows.bar(
         "Charge",
         charge as f64 / 100.0,
         charge_color,
         &format!("{charge}%"),
-    ));
+    )];
 
     if let Some(health) = power.health_percent {
         let color = if health >= 80 {
@@ -1030,7 +1012,7 @@ fn power_panel(power: &PowerStatus, width: usize, theme: &Theme) -> Vec<Line<'st
         } else {
             theme.p.yellow
         };
-        lines.push(rows.bar(
+        top.push(rows.bar(
             "Health",
             health as f64 / 100.0,
             color,
@@ -1048,10 +1030,25 @@ fn power_panel(power: &PowerStatus, width: usize, theme: &Theme) -> Vec<Line<'st
     );
     facts.extend(power.draw_watts.map(|watts| format!("{watts:.1} W draw")));
     if !facts.is_empty() {
-        lines.push(info_line(&facts, theme));
+        top.push(info_line(&facts, theme));
     }
 
-    lines
+    Card {
+        title: "Power",
+        detail: status_spans(color, source, theme),
+        color: theme.p.green,
+        top,
+        charts: Vec::new(),
+    }
+}
+
+fn process_rows(width: usize, theme: &Theme) -> Rows<'_> {
+    Rows {
+        width,
+        label_w: MAX_NAME_WIDTH,
+        value_w: 17,
+        theme,
+    }
 }
 
 fn process_row(rows: &Rows, process: &ProcessStatus, fraction: f64, color: Color) -> Line<'static> {
@@ -1063,130 +1060,121 @@ fn process_row(rows: &Rows, process: &ProcessStatus, fraction: f64, color: Color
     rows.bar(&process.name, fraction, color, &value)
 }
 
-fn processes_panel(
-    live: &LiveStatus,
-    width: usize,
-    list_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let rows = Rows {
-        width,
-        label_w: MAX_NAME_WIDTH,
-        value_w: 17,
-        theme,
-    };
+fn top_by_cpu_card(live: &LiveStatus, width: usize, list_rows: usize, theme: &Theme) -> Card {
+    let rows = process_rows(width, theme);
     let busy: Vec<&ProcessStatus> = live
         .processes
         .iter()
         .filter(|process| process.cpu_percent > 0.0)
         .collect();
 
-    let by_memory = &live.memory_processes;
-    let two_lists = list_rows >= TWO_LISTS_MIN_ROWS && !by_memory.is_empty();
-    let shared_rows = list_rows.saturating_sub(2);
-    let cpu_rows = if two_lists {
-        busy.len().min(shared_rows / 2)
-    } else {
-        list_rows
-    };
-
-    let mut lines = vec![panel_header(
-        "Processes",
-        detail_text("Top by CPU", theme),
-        width,
-        theme,
-    )];
-
-    if busy.is_empty() {
-        lines.push(rows.waiting("Top"));
-    }
-
     // Bars compare the processes with each other, and a full core is the least they span.
     let peak = busy.iter().map(|p| p.cpu_percent as f64);
     let scale = peak.fold(100.0, f64::max);
-    for process in busy.iter().take(cpu_rows) {
-        let cpu = process.cpu_percent as f64;
-        let color = load_color(cpu / BUSY_PROCESS_PERCENT, theme);
-        lines.push(process_row(&rows, process, cpu / scale, color));
+    let mut top: Vec<Line<'static>> = busy
+        .iter()
+        .take(list_rows)
+        .map(|process| {
+            let cpu = process.cpu_percent as f64;
+            let color = load_color(cpu / BUSY_PROCESS_PERCENT, theme);
+            process_row(&rows, process, cpu / scale, color)
+        })
+        .collect();
+    if top.is_empty() {
+        top.push(rows.waiting("Top"));
     }
 
-    if two_lists {
-        lines.push(Line::default());
-        lines.push(panel_header(
-            "Processes",
-            detail_text("Top by memory", theme),
-            width,
-            theme,
-        ));
-
-        let peak = by_memory.iter().map(|p| p.memory_bytes).max().unwrap_or(0);
-        let scale = peak.max(1) as f64;
-        for process in by_memory.iter().take(shared_rows - cpu_rows) {
-            let fraction = process.memory_bytes as f64 / scale;
-            lines.push(process_row(&rows, process, fraction, theme.p.accent));
-        }
+    Card {
+        title: "Top by CPU",
+        detail: Vec::new(),
+        color: theme.p.accent,
+        top,
+        charts: Vec::new(),
     }
-
-    lines
 }
 
-fn network_panel(
-    state: &SystemStatusState,
-    width: usize,
-    chart_rows: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn top_by_memory_card(live: &LiveStatus, width: usize, list_rows: usize, theme: &Theme) -> Card {
+    let rows = process_rows(width, theme);
+    let processes = &live.memory_processes;
+
+    let peak = processes.iter().map(|p| p.memory_bytes).max().unwrap_or(0);
+    let scale = peak.max(1) as f64;
+    let mut top: Vec<Line<'static>> = processes
+        .iter()
+        .take(list_rows)
+        .map(|process| {
+            let fraction = process.memory_bytes as f64 / scale;
+            process_row(&rows, process, fraction, theme.p.purple)
+        })
+        .collect();
+    if top.is_empty() {
+        top.push(rows.waiting("Top"));
+    }
+
+    Card {
+        title: "Top by memory",
+        detail: Vec::new(),
+        color: theme.p.purple,
+        top,
+        charts: Vec::new(),
+    }
+}
+
+fn network_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
     let network = &state.status.live.network;
     let history = &state.history;
 
-    let local = network.local.as_ref();
-    let detail = local.map_or("Offline".to_string(), |l| {
-        format!("{} {}", l.interface, l.address)
-    });
     let rows = Rows {
         width,
         label_w: 6,
         value_w: 10,
         theme,
     };
-    let mut lines = vec![panel_header(
-        "Network",
-        detail_text(detail, theme),
-        width,
-        theme,
-    )];
 
-    match (network.down_per_sec, network.up_per_sec) {
-        (Some(down), Some(up)) => {
-            let scale = rate_scale(&[&history.down, &history.up]);
-            lines.extend(rows.series(
-                "Down",
-                &history.down,
-                scale,
-                theme.p.accent,
-                &rate(down),
-                chart_rows,
-            ));
-            lines.extend(rows.series(
-                "Up",
-                &history.up,
-                scale,
-                theme.p.teal,
-                &rate(up),
-                chart_rows,
-            ));
-        }
-        _ => lines.push(rows.waiting("Speed")),
+    let local = network.local.as_ref();
+    let status = if local.is_some() {
+        status_spans(theme.p.green, "Connected", theme)
+    } else {
+        status_spans(theme.p.quaternary, "Offline", theme)
+    };
+    let tunnel = network
+        .tunnel
+        .as_ref()
+        .map_or("None".to_string(), |tunnel| {
+            format!("{} {}", tunnel.interface, tunnel.address)
+        });
+    let top = vec![
+        rows.caption("Interface", local.map_or(UNKNOWN, |l| l.interface.as_str())),
+        rows.caption("Address", local.map_or(UNKNOWN, |l| l.address.as_str())),
+        rows.caption("Tunnel", &tunnel),
+    ];
+
+    let speed = |value: Option<f64>| value.map_or(UNKNOWN.to_string(), rate);
+    let scale = rate_scale(&[&history.down, &history.up]);
+    let mut charts = rows.series(
+        "Down",
+        &history.down,
+        scale,
+        theme.p.accent,
+        &speed(network.down_per_sec),
+        chart_rows,
+    );
+    charts.extend(rows.series(
+        "Up",
+        &history.up,
+        scale,
+        theme.p.teal,
+        &speed(network.up_per_sec),
+        chart_rows,
+    ));
+
+    Card {
+        title: "Network",
+        detail: status,
+        color: theme.p.teal,
+        top,
+        charts,
     }
-
-    if let Some(tunnel) = &network.tunnel {
-        lines.push(info_line(
-            &[format!("Tunnel {} {}", tunnel.interface, tunnel.address)],
-            theme,
-        ));
-    }
-
-    lines
 }
 
 #[cfg(test)]
@@ -1200,6 +1188,7 @@ mod tests {
     use crate::core::profiler::{DetailedMemoryStatus, DetailedStorageStatus, MachineInfo};
     use crate::core::telemetry::{
         CpuStatus, DiskIo, GpuStatus, LiveStatus, NetworkStatus, PowerSource, PowerStatus,
+        VolumeStatus,
     };
     use crate::ui::env::UiEnv;
 
@@ -1331,15 +1320,31 @@ mod tests {
             .unwrap_or_else(|| panic!("{text} is not on the screen:\n{}", rows.join("\n")))
     }
 
+    fn all(rows: &[String], text: &str) -> Vec<(usize, usize)> {
+        rows.iter()
+            .enumerate()
+            .flat_map(|(y, row)| {
+                row.match_indices(text)
+                    .map(move |(i, _)| (row[..i].chars().count(), y))
+            })
+            .collect()
+    }
+
+    fn cell(rows: &[String], x: usize, y: usize) -> Option<char> {
+        rows[y].chars().nth(x)
+    }
+
+    const LAYOUTS: [(u16, u16); 3] = [(205, 85), (205, 60), (120, 40)];
+
     #[test]
     fn wide_windows_show_the_panels_in_two_columns() {
         let rows = render(&SystemStatusState::with_status(measured_status()), 120, 40);
 
         let (cpu_x, cpu_y) = find(&rows, "CPU");
-        let (memory_x, memory_y) = find(&rows, "MEMORY");
+        let (memory_x, memory_y) = find(&rows, "Memory");
         assert_eq!(cpu_y, memory_y);
         assert!(cpu_x < memory_x);
-        for panel in ["STORAGE", "POWER", "PROCESSES", "NETWORK"] {
+        for panel in ["Storage", "Power", "Top by CPU", "Network"] {
             find(&rows, panel);
         }
     }
@@ -1349,8 +1354,8 @@ mod tests {
         let rows = render(&busy_state(), 205, 60);
 
         let (cpu_x, cpu_y) = find(&rows, "CPU");
-        let (memory_x, memory_y) = find(&rows, "MEMORY");
-        let (power_x, power_y) = find(&rows, "POWER");
+        let (memory_x, memory_y) = find(&rows, "Memory");
+        let (power_x, power_y) = find(&rows, "Power");
         assert_eq!((cpu_y, cpu_y), (memory_y, power_y));
         assert!(cpu_x < memory_x && memory_x < power_x);
     }
@@ -1359,9 +1364,173 @@ mod tests {
     fn panels_keep_their_column_all_the_way_down() {
         let rows = render(&busy_state(), 205, 60);
 
-        assert_eq!(find(&rows, "CPU").0, find(&rows, "NETWORK").0);
-        assert_eq!(find(&rows, "MEMORY").0, find(&rows, "STORAGE").0);
-        assert_eq!(find(&rows, "POWER").0, find(&rows, "PROCESSES").0);
+        assert_eq!(find(&rows, "╭─ CPU").0, find(&rows, "╭─ Network").0);
+        assert_eq!(find(&rows, "╭─ Memory").0, find(&rows, "╭─ Storage").0);
+        assert_eq!(find(&rows, "╭─ Power").0, find(&rows, "╭─ Top by CPU").0);
+    }
+
+    #[test]
+    fn every_panel_sits_in_a_frame() {
+        let state = busy_state();
+
+        for (width, height) in [(205, 85), (120, 40), (80, 90)] {
+            let rows = render(&state, width, height);
+            for title in ["CPU", "Memory", "Storage", "Network", "Power", "Top by CPU"] {
+                find(&rows, &format!("╭─ {title}"));
+            }
+            let (tops, bottoms) = (all(&rows, "╭").len(), all(&rows, "╰").len());
+            assert_eq!(tops, bottoms, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn panels_are_tinted_by_what_they_show() {
+        let theme = Theme::with_env(UiEnv::default());
+        let colors = [
+            ("CPU", theme.p.accent),
+            ("Memory", theme.p.purple),
+            ("Storage", theme.p.orange),
+            ("Network", theme.p.teal),
+            ("Power", theme.p.green),
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(205, 60)).unwrap();
+        let state = busy_state();
+        terminal
+            .draw(|f| render_system_status(f, &state, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = render(&state, 205, 60);
+
+        for (title, color) in colors {
+            let (x, y) = find(&rows, &format!("─ {title}"));
+            assert_eq!(buffer[(x as u16 + 2, y as u16)].fg, color, "{title}");
+        }
+    }
+
+    #[test]
+    fn cpu_and_memory_history_start_on_the_same_row() {
+        let state = busy_state();
+
+        for (width, height) in LAYOUTS {
+            let rows = render(&state, width, height);
+            let history = all(&rows, "History");
+            assert_eq!(history.len(), 2, "{width}x{height}");
+            assert_eq!(history[0].1, history[1].1, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn network_and_storage_face_each_other() {
+        let state = busy_state();
+
+        for (width, height) in LAYOUTS {
+            let rows = render(&state, width, height);
+            let at = |text| find(&rows, text).1;
+            assert_eq!(at("╭─ Network"), at("╭─ Storage"), "{width}x{height}");
+            assert_eq!(at("Down"), at("Read"), "{width}x{height}");
+            assert_eq!(at("Up  "), at("Write"), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn extra_volumes_keep_network_and_storage_facing_each_other() {
+        let mut state = busy_state();
+        state.status.live.volumes = (0..3)
+            .map(|i| VolumeStatus {
+                name: format!("Backup {i}"),
+                total_bytes: 2 * GB,
+                available_bytes: GB,
+            })
+            .collect();
+
+        let rows = render(&state, 205, 60);
+
+        let at = |text| find(&rows, text).1;
+        assert_eq!(at("Down"), at("Read"));
+        assert_eq!(at("Up  "), at("Write"));
+    }
+
+    #[test]
+    fn charts_side_by_side_have_the_same_height() {
+        let rows = render(&busy_state(), 205, 85);
+        let at = |text| find(&rows, text).1;
+
+        assert_eq!(at("Up  ") - at("Down"), at("Write") - at("Read"));
+        assert!(at("Up  ") - at("Down") > 5, "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn all_columns_end_on_the_same_row() {
+        let state = busy_state();
+
+        for (width, height) in LAYOUTS {
+            let rows = render(&state, width, height);
+            let bottoms = all(&rows, "╰");
+            let last = bottoms.iter().map(|(_, y)| *y).max().unwrap();
+            let columns: Vec<_> = bottoms.iter().filter(|(_, y)| *y == last).collect();
+            let wanted = if width >= 175 { 3 } else { 2 };
+            assert_eq!(
+                columns.len(),
+                wanted,
+                "{width}x{height}\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn the_cores_stay_on_one_row_above_the_history() {
+        let rows = render(&busy_state(), 205, 85);
+
+        let (_, cores) = find(&rows, "Cores");
+        let (_, history) = find(&rows, "History");
+        assert!(history > cores, "{}", rows.join("\n"));
+        assert!(history - cores <= 2, "{}", rows.join("\n"));
+        assert!(rows[cores].contains('▇'), "{}", rows[cores]);
+    }
+
+    fn with_processes(busy: usize) -> SystemStatusState {
+        let mut state = busy_state();
+        state.status.live.processes = (0..busy)
+            .map(|i| process(format!("cpu-{i}"), 10.0))
+            .collect();
+        state
+    }
+
+    #[test]
+    fn a_process_list_keeps_its_size_however_few_processes_run() {
+        for (width, height) in LAYOUTS {
+            let top_of_memory = |busy| {
+                let rows = render(&with_processes(busy), width, height);
+                find(&rows, "Top by memory")
+            };
+            assert_eq!(top_of_memory(40), top_of_memory(2), "{width}x{height}");
+            assert_eq!(top_of_memory(40), top_of_memory(0), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn the_two_process_lists_share_the_column_evenly() {
+        let rows = render(&busy_state(), 205, 85);
+
+        let shown = |text: &str| all(&rows, text).len();
+        let difference = shown("cpu-").abs_diff(shown("ram-"));
+        assert!(difference <= 1, "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn the_layout_stays_put_when_the_measurements_arrive() {
+        let mut waiting = SystemStatusState::with_status(measuring_status());
+        waiting.status.live.power = measured_status().live.power;
+
+        for (width, height) in LAYOUTS {
+            let first = render(&waiting, width, height);
+            let later = render(&busy_state(), width, height);
+            for title in ["╭─ CPU", "╭─ Network", "╭─ Storage", "╭─ Top by memory"]
+            {
+                assert_eq!(find(&first, title), find(&later, title), "{title}");
+            }
+        }
     }
 
     #[test]
@@ -1372,57 +1541,6 @@ mod tests {
         };
 
         assert!(chart_rows(85) > chart_rows(45), "{}", chart_rows(85));
-    }
-
-    #[test]
-    fn columns_end_on_nearly_the_same_row() {
-        let rows = render(&busy_state(), 205, 85);
-        let columns = [
-            (0, find(&rows, "MEMORY").0 - 1),
-            (find(&rows, "MEMORY").0, find(&rows, "POWER").0 - 1),
-            (find(&rows, "POWER").0, 205),
-        ];
-
-        let bottoms: Vec<usize> = columns
-            .iter()
-            .map(|(from, to)| {
-                rows[..rows.len() - 4]
-                    .iter()
-                    .rposition(|row| {
-                        let cells = row.chars().skip(*from).take(to - from);
-                        cells.collect::<String>().trim() != ""
-                    })
-                    .unwrap()
-            })
-            .collect();
-
-        let spread = bottoms.iter().max().unwrap() - bottoms.iter().min().unwrap();
-        assert!(spread <= 3, "{bottoms:?}\n{}", rows.join("\n"));
-    }
-
-    #[test]
-    fn a_tall_cpu_panel_draws_a_bar_for_each_core() {
-        let rows = render(&busy_state(), 205, 60);
-
-        let memory_x = find(&rows, "MEMORY").0;
-        let left_column = |row: &String| row.chars().take(memory_x - 1).collect::<String>();
-        let (_, caption_y) = find(&rows, "Cores");
-        let history_y = rows
-            .iter()
-            .position(|row| left_column(row).contains("History"))
-            .unwrap();
-        let cells: Vec<usize> = rows[caption_y + 1..history_y]
-            .iter()
-            .map(|row| {
-                left_column(row)
-                    .matches(|c: char| !c.is_whitespace())
-                    .count()
-            })
-            .collect();
-
-        // Two cores share 62 cells, and only the busy one rises above the bottom rows.
-        assert_eq!(cells.last(), Some(&60), "{cells:?}");
-        assert!(cells.contains(&30), "{cells:?}");
     }
 
     #[test]
@@ -1469,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn room_below_the_busy_processes_opens_top_by_memory() {
+    fn a_tall_window_also_lists_top_by_memory() {
         let tall = render(&busy_state(), 205, 85).join("\n");
         let short = render(&busy_state(), 120, 24).join("\n");
 
@@ -1489,22 +1607,15 @@ mod tests {
     }
 
     #[test]
-    fn a_chart_stays_inside_its_column() {
+    fn a_chart_stays_inside_its_frame() {
         let rows = render(&busy_state(), 205, 60);
 
-        let memory_x = find(&rows, "MEMORY").0;
-        let (_, network_y) = find(&rows, "NETWORK");
-        let chart = &rows[network_y - 2];
-        let last_cell = chart
-            .chars()
-            .take(memory_x)
-            .collect::<String>()
-            .trim_end()
-            .chars()
-            .count();
-
-        assert!(last_cell > memory_x - COLUMN_GAP - 3, "{chart}");
-        assert_eq!(chart.chars().nth(memory_x - 1), Some(' '), "{chart}");
+        let memory_x = find(&rows, "╭─ Memory").0;
+        let right_border = memory_x - COLUMN_GAP - 1;
+        let (_, history_y) = find(&rows, "History");
+        for y in history_y..history_y + 4 {
+            assert_eq!(cell(&rows, right_border, y), Some('│'), "{}", rows[y]);
+        }
     }
 
     #[test]
@@ -1512,7 +1623,7 @@ mod tests {
         let rows = render(&SystemStatusState::with_status(measured_status()), 80, 60);
 
         let (cpu_x, cpu_y) = find(&rows, "CPU");
-        let (memory_x, memory_y) = find(&rows, "MEMORY");
+        let (memory_x, memory_y) = find(&rows, "Memory");
         assert_eq!(cpu_x, memory_x);
         assert!(cpu_y < memory_y);
     }
@@ -1524,8 +1635,8 @@ mod tests {
 
         let rows = render(&SystemStatusState::with_status(status), 120, 40);
 
-        assert!(!rows.join("\n").contains("POWER"));
-        find(&rows, "NETWORK");
+        assert!(!rows.join("\n").contains("Power"));
+        find(&rows, "Network");
     }
 
     #[test]

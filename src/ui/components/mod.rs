@@ -4,6 +4,7 @@ pub mod button;
 pub mod chrome;
 pub mod columns;
 pub mod empty;
+pub mod frame;
 pub mod gauge;
 pub mod help;
 pub mod hints;

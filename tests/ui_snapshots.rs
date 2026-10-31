@@ -485,7 +485,7 @@ fn cleanup_rows_show_how_full_the_disk_is() {
     for row in [CLEAN_CACHES, PROJECT_CLEANUP] {
         let output = home_screen(&home_state(row), 120, 32);
 
-        assert!(output.contains("STORAGE"), "{output}");
+        assert!(output.contains("Storage"), "{output}");
         assert!(output.contains("Macintosh HD"), "{output}");
     }
 }
@@ -503,8 +503,8 @@ fn the_status_row_shows_cpu_and_memory() {
     let output = home_screen(&home_state(SYSTEM_STATUS), 120, 32);
 
     assert!(output.contains("CPU"), "{output}");
-    assert!(output.contains("MEMORY"), "{output}");
-    assert!(!output.contains("PROCESSES"), "{output}");
+    assert!(output.contains("Memory"), "{output}");
+    assert!(!output.contains("Top by"), "{output}");
 }
 
 #[test]
@@ -512,7 +512,7 @@ fn the_status_row_fits_a_large_window_in_two_columns() {
     let output = home_screen(&home_state(SYSTEM_STATUS), 205, 60);
 
     let row = output.lines().find(|line| line.contains("CPU")).unwrap();
-    assert!(row.contains("MEMORY"), "{output}");
+    assert!(row.contains("Memory"), "{output}");
     assert!(body_rows(&output).iter().any(|row| row.contains('█')));
 }
 
@@ -526,7 +526,7 @@ fn the_explore_row_lists_the_largest_items_once_home_is_measured() {
 
     let after = home_screen(&state, 120, 32);
     assert!(after.contains("file.bin"), "{after}");
-    assert!(after.contains("LARGEST"), "{after}");
+    assert!(after.contains("Largest in home folder"), "{after}");
     assert!(!after.contains("Open Explore storage"), "{after}");
 }
 
@@ -534,7 +534,7 @@ fn the_explore_row_lists_the_largest_items_once_home_is_measured() {
 fn other_rows_keep_only_their_description() {
     let output = home_screen(&home_state(PREFERENCES), 120, 32);
 
-    assert!(!output.contains("STORAGE"), "{output}");
+    assert!(!output.contains("Storage"), "{output}");
     assert!(!output.contains("CPU"), "{output}");
 }
 
@@ -542,7 +542,7 @@ fn other_rows_keep_only_their_description() {
 fn a_narrow_main_menu_shows_no_data() {
     let output = home_screen(&home_state(CLEAN_CACHES), 80, 24);
 
-    assert!(!output.contains("STORAGE"), "{output}");
+    assert!(!output.contains("Storage"), "{output}");
 }
 
 #[test]
