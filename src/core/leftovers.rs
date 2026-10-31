@@ -960,7 +960,7 @@ impl<'a> Finder<'a> {
         let is_top_level_app = |relative: &&str| {
             let parts: Vec<&str> = relative.split('/').collect();
             let is_app = |part: &&str| part.to_ascii_lowercase().ends_with(".app");
-            parts.last().is_some_and(&is_app) && !parts[..parts.len() - 1].iter().any(is_app)
+            parts.last().is_some_and(is_app) && !parts[..parts.len() - 1].iter().any(is_app)
         };
         let holds_another_app = listing
             .stdout
