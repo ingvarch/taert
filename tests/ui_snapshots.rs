@@ -248,6 +248,50 @@ fn snapshot_select() {
     }
 }
 
+fn browser_caches_scan() -> CategoryScan {
+    let mut safari = ScanItem::new(
+        PathBuf::from("/Users/test/Library/Caches/com.apple.Safari"),
+        1_100_000_000,
+        true,
+        false,
+    );
+    safari.also = vec![ScanItem::new(
+        PathBuf::from("/Users/test/Library/Containers/com.apple.Safari/Data/Library/Caches"),
+        200_000_000,
+        true,
+        false,
+    )];
+    let chrome = ScanItem::new(
+        PathBuf::from("/Users/test/Library/Caches/Google/Chrome"),
+        2_400_000_000,
+        false,
+        false,
+    );
+    CategoryScan {
+        notes: vec![
+            "Firefox keeps a cache that macOS hides from this terminal. \
+             Give the terminal Full Disk Access in System Settings to include it."
+                .to_string(),
+        ],
+        id: "junk".to_string(),
+        title: "System Junk".to_string(),
+        groups: vec![ToolGroup {
+            tool: "Browser caches".to_string(),
+            items: vec![chrome, safari],
+        }],
+    }
+}
+
+#[test]
+fn snapshot_browser_caches_with_a_note() {
+    let state = SelectState::new(browser_caches_scan());
+    let theme = snapshot_theme();
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert_snapshot!(format!("select_browser_caches_{label}"), output);
+    }
+}
+
 #[test]
 fn snapshot_review() {
     let theme = snapshot_theme();

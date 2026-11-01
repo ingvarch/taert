@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Clean caches › System Junk                                                             0 of 2 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Browser caches ───────────────────────────────────────────────────────────────────────────── 2 items · 3.5 GB ─╮
+   │ ▌ ○ /Users/test/Library/Caches/Google/Chrome                                ━━━━━━━━━━━━─────  68.6%     2.4 GB │
+   │   ○ /Users/test/Library/Caches/com.apple.Safari +1 folder                   ━━━━━────────────  31.4%     1.1 GB │
+   ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   Firefox keeps a cache that macOS hides from this terminal. Give the terminal Full Disk Access in System Settings to
+   include it.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ␣  Select    A  All    N  None    /  Search    ↑↓  Move    ⎋  Back    ?  More                        Review items  ↵

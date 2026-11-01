@@ -385,6 +385,13 @@ fn a_row_of_two_folders_says_it_holds_one_more() {
 }
 
 #[test]
+fn a_narrow_screen_cuts_the_path_and_keeps_the_folder_count() {
+    let state = SelectState::new(scan_with_a_row_of_two_folders());
+    let text = render_text(&state, 50, 16);
+    assert!(text.contains("+1 folder"), "{text}");
+}
+
+#[test]
 fn search_finds_a_row_by_its_second_folder() {
     let mut state = SelectState::new(scan_with_a_row_of_two_folders());
     state.search_query = "containers/second".to_string();

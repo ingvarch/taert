@@ -18,7 +18,7 @@ use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ColumnTitles, ListRow, SIZE_W, more_folders, path_spans};
+use super::components::list::{ColumnTitles, ListRow, SIZE_W, row_path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::theme::Theme;
@@ -595,7 +595,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     theme.body(),
                 )]
             } else if let Some(path) = &row.full_path {
-                let mut spans = path_spans(path, row_width.saturating_sub(20), theme);
+                let max_len = row_width.saturating_sub(20);
+                let mut spans = row_path_spans(path, row.more_folders, max_len, theme);
                 if is_focused && state.path_scroll > 0 {
                     let rest: String = prettify_path(path)
                         .chars()
@@ -605,7 +606,6 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                         spans = vec![Span::styled(rest, theme.body())];
                     }
                 }
-                spans.extend(more_folders(row.more_folders, theme));
                 spans
             } else {
                 vec![Span::styled(&row.display_path, theme.body())]
