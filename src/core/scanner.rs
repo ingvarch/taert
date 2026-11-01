@@ -70,6 +70,12 @@ impl ScanItem {
     pub fn folders(&self) -> impl Iterator<Item = &Self> {
         std::iter::once(self).chain(&self.also)
     }
+
+    /// `size_bytes` without the folders in `also`.
+    pub fn own_bytes(&self) -> u64 {
+        let also: u64 = self.also.iter().map(|folder| folder.size_bytes).sum();
+        self.size_bytes.saturating_sub(also)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
