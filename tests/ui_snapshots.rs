@@ -517,6 +517,15 @@ fn snapshot_analyze() {
 }
 
 #[test]
+fn snapshot_analyze_confirmation() {
+    let theme = snapshot_theme();
+    let mut state = sample_analyze();
+    state.open_delete_confirmation();
+    let output = render_to_string(100, 30, |f| render_analyze(f, &state, &theme));
+    assert_snapshot!("analyze_confirm_delete_100x30", output);
+}
+
+#[test]
 fn snapshot_system_status() {
     let theme = snapshot_theme();
     let state = status_with_history();
@@ -992,7 +1001,8 @@ fn snapshot_uninstall_outcome() {
     let mut state = SelectState::with_preserved_selection(uninstall_plan());
     state.overlay = ModalOverlay::Outcome(RemovalReport {
         removed_count: 5,
-        freed_bytes: 1_800_000_000,
+        freed_bytes: 0,
+        trashed_bytes: 1_800_000_000,
         failures: vec![RemovalFailure {
             path: PathBuf::from("/Library/LaunchDaemons/us.zoom.ZoomDaemon.plist"),
             error: "The administrator password was not given".to_string(),

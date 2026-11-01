@@ -51,7 +51,8 @@ const PREVIEW_GAP: u16 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalyzeConfirmButton {
     Cancel,
-    Delete,
+    DeletePermanently,
+    MoveToTrash,
 }
 
 #[derive(Debug, Clone)]
@@ -327,7 +328,7 @@ impl AnalyzeState {
         if !items.is_empty() {
             self.overlay = AnalyzeOverlay::ConfirmDelete {
                 items,
-                button: AnalyzeConfirmButton::Cancel,
+                button: AnalyzeConfirmButton::MoveToTrash,
             };
         }
     }
@@ -1125,7 +1126,8 @@ fn render_analyze_confirm_dialog(
     theme: &Theme,
 ) {
     let cancel_focused = focus_btn == AnalyzeConfirmButton::Cancel;
-    let delete_focused = focus_btn == AnalyzeConfirmButton::Delete;
+    let perm_focused = focus_btn == AnalyzeConfirmButton::DeletePermanently;
+    let trash_focused = focus_btn == AnalyzeConfirmButton::MoveToTrash;
 
     let (title, message_lines) = if items.len() == 1 {
         let item = &items[0];
@@ -1133,7 +1135,7 @@ fn render_analyze_confirm_dialog(
         let title = format!("Delete {}?", item.name);
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Permanently delete ", theme.body()),
+                Span::styled("Delete ", theme.body()),
                 Span::styled(pretty, theme.headline()),
                 Span::styled(
                     format!(" ({})?", format_bytes(item.size_bytes)),
@@ -1141,7 +1143,7 @@ fn render_analyze_confirm_dialog(
                 ),
             ]),
             Line::from(Span::styled(
-                "This action cannot be undone.",
+                "Move to the Trash to recover later, or delete permanently to free space immediately.",
                 theme.callout(),
             )),
         ];
@@ -1159,12 +1161,12 @@ fn render_analyze_confirm_dialog(
         let title = format!("Delete {count} items?");
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("Permanently delete ", theme.body()),
+                Span::styled("Delete ", theme.body()),
                 Span::styled(format!("{count} items"), theme.headline()),
                 Span::styled(format!(" ({})?", format_bytes(total_bytes)), theme.body()),
             ]),
             Line::from(Span::styled(
-                "This action cannot be undone.",
+                "Move to the Trash to recover later, or delete permanently to free space immediately.",
                 theme.callout(),
             )),
         ];
@@ -1182,11 +1184,28 @@ fn render_analyze_confirm_dialog(
         (title, lines)
     };
 
+    let cancel_label = if cancel_focused {
+        "Cancel (↵)"
+    } else {
+        "Cancel (esc)"
+    };
+    let perm_label = if perm_focused {
+        "Delete Permanently (↵)"
+    } else {
+        "Delete Permanently"
+    };
+    let trash_label = if trash_focused {
+        "Move to Trash (↵)"
+    } else {
+        "Move to Trash"
+    };
+
     Modal::new(&title)
         .message(message_lines)
         .buttons(vec![
-            Button::new("Cancel (esc)").focused(cancel_focused),
-            Button::destructive("Delete (↵)").focused(delete_focused),
+            Button::new(cancel_label).focused(cancel_focused),
+            Button::destructive(perm_label).focused(perm_focused),
+            Button::primary(trash_label).focused(trash_focused),
         ])
         .render(frame, frame.area(), theme);
 }
@@ -1241,22 +1260,33 @@ fn render_analyze_deleting_dialog(
 }
 
 fn render_analyze_outcome_dialog(frame: &mut Frame, report: &RemovalReport, theme: &Theme) {
-    let title = if report.freed_bytes > 0 {
+    let title = if report.removed_count > 0 {
         "Deletion Complete"
     } else {
         "Nothing was deleted"
     };
 
-    let mut message = vec![Line::from(vec![
-        Span::styled(format_bytes(report.freed_bytes), theme.success()),
-        Span::styled(
-            format!(
-                " freed · {} items permanently deleted.",
-                report.removed_count
+    let mut message = Vec::new();
+    if report.trashed_bytes > 0 {
+        message.push(Line::from(vec![
+            Span::styled("Moved ", theme.body()),
+            Span::styled(format_bytes(report.trashed_bytes), theme.success()),
+            Span::styled(
+                " to the Trash. Empty it to get the space back.",
+                theme.body(),
             ),
-            theme.body(),
-        ),
-    ])];
+        ]));
+    }
+    if report.freed_bytes > 0 {
+        message.push(Line::from(vec![
+            Span::styled("Removed ", theme.body()),
+            Span::styled(format_bytes(report.freed_bytes), theme.success()),
+            Span::styled(" permanently.", theme.body()),
+        ]));
+    }
+    if report.trashed_bytes == 0 && report.freed_bytes == 0 {
+        message.push(Line::from(vec![Span::styled("0 B freed.", theme.body())]));
+    }
 
     if !report.failures.is_empty() {
         message.push(Line::from(""));
@@ -1483,7 +1513,8 @@ mod tests {
         let rendered = format!("{buffer:?}");
         assert!(rendered.contains("Delete file1.bin?"));
         assert!(rendered.contains("Cancel"));
-        assert!(rendered.contains("Delete"));
+        assert!(rendered.contains("Move to Trash"));
+        assert!(rendered.contains("Delete Permanently"));
     }
 
     fn screen(state: &AnalyzeState, width: u16, height: u16) -> String {

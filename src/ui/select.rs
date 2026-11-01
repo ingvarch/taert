@@ -24,7 +24,7 @@ use super::components::text::plural;
 use super::theme::Theme;
 use crate::core::apps;
 use crate::core::bytes::format_bytes;
-use crate::core::cleaner::{RemovalProgress, RemovalReport};
+use crate::core::cleaner::{RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::leftovers::UninstallRole;
@@ -62,6 +62,7 @@ pub struct SelectState {
     /// Told before the removal starts.
     pub notes: Vec<String>,
     pub asks_password: bool,
+    pub permanent: bool,
 }
 
 const BAR_MIN_WIDTH: usize = 100;
@@ -137,9 +138,15 @@ impl SelectState {
             sort_order,
             notes,
             asks_password: false,
+            permanent: false,
         };
         state.move_to_start();
         state
+    }
+
+    pub fn with_permanent(mut self, permanent: bool) -> Self {
+        self.permanent = permanent;
+        self
     }
 
     /// Sorts inside each section and keeps the cursor on its item.
@@ -633,6 +640,19 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     .created
                     .map_or("—".to_string(), |time| format_age(time, now));
                 list_row = list_row.meta(Span::styled(format!("{age:<AGE_W$}"), theme.footnote()));
+            } else if state.scan.id == uninstaller::PLAN_ID
+                && let Some(i_idx) = row.item_index
+                && let Some(item) = state
+                    .scan
+                    .groups
+                    .get(row.group_index)
+                    .and_then(|g| g.items.get(i_idx))
+            {
+                let dest = match item_removal_mode(item, &state.scan.id, state.permanent) {
+                    RemovalMode::Trash => "(Trash)",
+                    RemovalMode::Permanent => "(Permanent)",
+                };
+                list_row = list_row.meta(Span::styled(dest, theme.footnote()));
             }
 
             if let Some(f) = frac
@@ -809,10 +829,32 @@ fn render_confirmation_dialog(
         format!("Remove {count} {noun}?")
     };
 
-    let msg = format!(
-        "{} will be permanently deleted. This cannot be undone.",
-        format_bytes(state.scan.total_selected_bytes())
-    );
+    let total_bytes = state.scan.total_selected_bytes();
+    let selected = state.scan.selected_items();
+    let trashed_count = selected
+        .iter()
+        .filter(|item| {
+            item_removal_mode(item, &state.scan.id, state.permanent) == RemovalMode::Trash
+        })
+        .count();
+    let perm_count = selected.len().saturating_sub(trashed_count);
+
+    let msg = if trashed_count > 0 && perm_count == 0 {
+        format!(
+            "{} will be moved to the Trash. Empty it to get the space back.",
+            format_bytes(total_bytes)
+        )
+    } else if trashed_count > 0 && perm_count > 0 {
+        format!(
+            "Personal files and apps ({}) will be moved to the Trash. System files will be permanently deleted.",
+            format_bytes(total_bytes)
+        )
+    } else {
+        format!(
+            "{} will be permanently deleted. This cannot be undone.",
+            format_bytes(total_bytes)
+        )
+    };
 
     let mut message = vec![Line::from(msg)];
     let (path_width, _) = Modal::message_size(frame.area());
@@ -925,16 +967,33 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, 
         (false, _) => "Nothing was removed",
     };
 
-    let mut message = vec![Line::from(vec![
-        Span::styled(format_bytes(report.freed_bytes), theme.success()),
-        Span::styled(
+    let mut message = Vec::new();
+    if report.trashed_bytes > 0 {
+        message.push(Line::from(vec![
+            Span::styled("Moved ", theme.body()),
+            Span::styled(format_bytes(report.trashed_bytes), theme.success()),
+            Span::styled(
+                " to the Trash. Empty it to get the space back.",
+                theme.body(),
+            ),
+        ]));
+    }
+    if report.freed_bytes > 0 {
+        message.push(Line::from(vec![
+            Span::styled("Removed ", theme.body()),
+            Span::styled(format_bytes(report.freed_bytes), theme.success()),
+            Span::styled(" permanently.", theme.body()),
+        ]));
+    }
+    if report.trashed_bytes == 0 && report.freed_bytes == 0 {
+        message.push(Line::from(vec![Span::styled(
             format!(
-                " freed across {}",
+                "0 B freed across {}",
                 plural(report.removed_count, "item", "items")
             ),
             theme.body(),
-        ),
-    ])];
+        )]));
+    }
 
     if !report.failures.is_empty() {
         message.push(Line::from(""));

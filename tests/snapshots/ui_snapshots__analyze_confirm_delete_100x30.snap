@@ -1,0 +1,33 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Explore › Users › test › Documents                                      4.1 KB  ·  2 items
+────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Documents ─────────────────────────────────────────────────────────────────────────────────╮
+   │     NAME                                                      CREATED              SIZE ↓   │
+   │ ▌ ○ · file.bin                                                —                    4.1 KB   │
+   │   ○ ▸ subdir/                                                 —                       0 B › │
+   │                                                                                             │
+   │                                                                                             │
+   │               ╭────────────────────────────────────────────────────────────╮                │
+   │               │ Delete file.bin?                                           │                │
+   │               │                                                            │                │
+   │               │ Delete /Users/test/Documents/file.bin (4.1 KB)?            │                │
+   │               │ Move to the Trash to recover later, or delete              │                │
+   │               │ permanently to free space immediately.                     │                │
+   │               │                                                            │                │
+   │               │ Warning: Protected path: path does not exist               │                │
+   │               │                                                            │                │
+   │               │                                                            │                │
+   │               │   Cancel (esc)    Delete Permanently    Move to Trash (↵)  │                │
+   │               │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │                │
+   │               ╰────────────────────────────────────────────────────────────╯                │
+   │                                                                                             │
+   │                                                                                             │
+   │                                                                                             │
+   │                                                                                             │
+   │                                                                                             │
+   │                                                                                             │
+   ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────

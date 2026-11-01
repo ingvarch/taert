@@ -77,6 +77,14 @@ These rules keep it from removing the wrong thing:
 
 Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
 
+## Trash vs Permanent Removal
+
+Items slated for removal are classified via `cleaner::item_removal_mode`:
+- **Personal files and user apps**: user app bundles and leftovers in home folders (`~/Library`, `~/.config`, etc.) move to the Trash by default via `NSFileManager` (`Host::trash`). In Explore Storage (`taert analyze`), users can choose between "Move to Trash" (default) and "Delete Permanently".
+- **Permanent removal**: caches and logs (`taert clean`), build artifacts (`taert purge`), Docker objects (`taert docker`), emptying the Trash, root files (`/Library/...`), and items with `contents_only = true` are permanently deleted.
+- **`--permanent` override**: passing `--permanent` forces permanent deletion across all subcommands, bypassing the Trash.
+- **Reporting**: outcomes and progress report both `trashed_bytes` ("Moved X to the Trash. Empty it to get the space back.") and `freed_bytes` ("Removed Y permanently.").
+
 ## Startup and Background Items
 
 [`startup.rs`](../src/core/startup.rs) manages launchd services (user agents, system agents, daemons) and classic login items:

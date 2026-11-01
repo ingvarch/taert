@@ -3,7 +3,8 @@
 use std::io::{self, BufRead, Write};
 
 use crate::core::bytes::format_bytes;
-use crate::core::cleaner::{Cleaner, RemovalReport};
+use crate::core::cleaner::{Cleaner, RemovalMode, RemovalReport, item_removal_mode};
+use crate::core::host::MacHost;
 use crate::core::scanner::CategoryScan;
 use crate::core::stores::IgnoreStore;
 
@@ -12,10 +13,18 @@ pub struct PlainRunner;
 impl PlainRunner {
     /// Print scan results in human-readable plain text format.
     pub fn print_scan(scan: &CategoryScan) {
-        print!("{}", Self::scan_text(scan));
+        Self::print_scan_with_options(scan, false);
     }
 
-    fn scan_text(scan: &CategoryScan) -> String {
+    pub fn print_scan_with_options(scan: &CategoryScan, permanent: bool) {
+        print!("{}", Self::scan_text_with_options(scan, permanent));
+    }
+
+    pub fn scan_text(scan: &CategoryScan) -> String {
+        Self::scan_text_with_options(scan, false)
+    }
+
+    pub fn scan_text_with_options(scan: &CategoryScan, permanent: bool) -> String {
         let mut text = format!("\n=== {} ===\n", scan.title);
         if scan.groups.is_empty() {
             text.push_str("No items found.\n");
@@ -28,15 +37,29 @@ impl PlainRunner {
             text.push_str(&format!("\n[{}]\n", group.tool));
             for item in &group.items {
                 let status_mark = if item.selected { "[x]" } else { "[ ]" };
+                let dest = match item_removal_mode(item, &scan.id, permanent) {
+                    RemovalMode::Trash => " (Trash)",
+                    RemovalMode::Permanent => " (Permanent)",
+                };
                 text.push_str(&format!(
-                    "  {:3}. {} {:>9}  {}\n",
+                    "  {:3}. {} {:>9}  {}{}\n",
                     index,
                     status_mark,
                     format_bytes(item.size_bytes),
-                    item.path.display()
+                    item.path.display(),
+                    dest
                 ));
                 for folder in &item.also {
-                    text.push_str(&format!("{:22}{}\n", "", folder.path.display()));
+                    let folder_dest = match item_removal_mode(folder, &scan.id, permanent) {
+                        RemovalMode::Trash => " (Trash)",
+                        RemovalMode::Permanent => " (Permanent)",
+                    };
+                    text.push_str(&format!(
+                        "{:22}{}{}\n",
+                        "",
+                        folder.path.display(),
+                        folder_dest
+                    ));
                 }
                 index += 1;
             }
@@ -164,18 +187,30 @@ impl PlainRunner {
     /// Execute cleaning and print results
     pub fn execute_clean(scan: &CategoryScan, ignore: &IgnoreStore) -> RemovalReport {
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        let report = Cleaner::remove_items(&items, ignore);
+        let report = Cleaner::new(&MacHost, RemovalMode::Permanent).remove_items(&items, ignore);
         Self::print_report("Clean", &report);
         report
     }
 
     /// Print what a removal did, then anything that went wrong or needs attention.
     pub fn print_report(action: &str, report: &RemovalReport) {
-        println!(
-            "\n{action} complete: removed {} items, freed {}.",
-            report.removed_count,
-            format_bytes(report.freed_bytes)
-        );
+        println!("\n{action} complete:");
+        if report.trashed_bytes > 0 {
+            println!(
+                "Moved {} to the Trash. Empty it to get the space back.",
+                format_bytes(report.trashed_bytes)
+            );
+        }
+        if report.freed_bytes > 0 {
+            println!("Removed {} permanently.", format_bytes(report.freed_bytes));
+        }
+        if report.trashed_bytes == 0 && report.freed_bytes == 0 {
+            if report.removed_count > 0 {
+                println!("Removed {} items.", report.removed_count);
+            } else {
+                println!("Nothing was removed.");
+            }
+        }
 
         if !report.failures.is_empty() {
             eprintln!("\nEncountered {} error(s):", report.failures.len());

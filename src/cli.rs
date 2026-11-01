@@ -26,9 +26,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Non-interactive unattended mode: permanently delete default selected items
+    /// Non-interactive unattended mode: delete default selected items without prompt
     #[arg(long, global = true)]
     pub force: bool,
+
+    /// Delete files and apps permanently instead of moving them to the Trash
+    #[arg(long, global = true)]
+    pub permanent: bool,
 }
 
 #[derive(Debug, Subcommand)]

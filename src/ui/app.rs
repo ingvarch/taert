@@ -36,7 +36,7 @@ use super::workspace::{
 };
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
-use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
+use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport};
 use crate::core::docker;
 use crate::core::doctor;
 use crate::core::host::{Host, MacHost};
@@ -127,6 +127,8 @@ pub struct App {
     pub installed: Vec<InstalledApp>,
     /// The plan shown for review. Its selection lives in the select screen.
     pub plan: Option<UninstallPlan>,
+    /// Delete permanently instead of moving to the Trash
+    pub permanent: bool,
 }
 
 impl App {
@@ -146,7 +148,16 @@ impl App {
             host: Arc::new(MacHost),
             installed: Vec::new(),
             plan: None,
+            permanent: false,
         }
+    }
+
+    pub fn with_permanent(mut self, permanent: bool) -> Self {
+        self.permanent = permanent;
+        if let Screen::Select(ref mut select) = self.screen {
+            select.permanent = permanent;
+        }
+        self
     }
 
     pub fn new_startup(ignore: IgnoreStore, config: Config, include_all: bool) -> Self {
@@ -200,6 +211,7 @@ impl App {
             host: Arc::new(MacHost),
             installed: Vec::new(),
             plan: None,
+            permanent: false,
         }
     }
 
@@ -224,6 +236,7 @@ impl App {
             host: Arc::new(MacHost),
             installed: Vec::new(),
             plan: None,
+            permanent: false,
         }
     }
 
@@ -510,11 +523,15 @@ impl App {
                     ScanMessage::AppsFound(found) => {
                         let list = apps::app_scan(&found, &self.layout);
                         self.installed = found;
-                        self.screen = Screen::Select(SelectState::with_preserved_selection(list));
+                        self.screen = Screen::Select(
+                            SelectState::with_preserved_selection(list)
+                                .with_permanent(self.permanent),
+                        );
                         break;
                     }
                     ScanMessage::Planned(plan) => {
-                        self.screen = Screen::Select(review_state(&plan));
+                        self.screen =
+                            Screen::Select(review_state(&plan).with_permanent(self.permanent));
                         self.plan = Some(plan);
                         break;
                     }
@@ -524,7 +541,7 @@ impl App {
                         } else {
                             SelectState::new(scan)
                         };
-                        self.screen = Screen::Select(state);
+                        self.screen = Screen::Select(state.with_permanent(self.permanent));
                         break;
                     }
                 }
@@ -758,13 +775,15 @@ impl App {
                         // Confirm deletion!
                         let items: Vec<_> =
                             state.scan.selected_items().into_iter().cloned().collect();
-                        let report = Cleaner::remove_items(&items, &self.ignore);
+                        let report = Cleaner::new(&*self.host, RemovalMode::Permanent)
+                            .remove_items(&items, &self.ignore);
                         state.report = Some(report);
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen = Screen::Select(SelectState::with_preserved_selection(
-                            state.scan.clone(),
-                        ));
+                        self.screen = Screen::Select(
+                            SelectState::with_preserved_selection(state.scan.clone())
+                                .with_permanent(self.permanent),
+                        );
                     }
                     _ => {}
                 }
@@ -792,25 +811,49 @@ impl App {
                 match state.overlay {
                     AnalyzeOverlay::ConfirmDelete { ref mut button, .. } => {
                         match code {
-                            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                            KeyCode::Left | KeyCode::BackTab => {
                                 *button = match button {
-                                    AnalyzeConfirmButton::Cancel => AnalyzeConfirmButton::Delete,
-                                    AnalyzeConfirmButton::Delete => AnalyzeConfirmButton::Cancel,
+                                    AnalyzeConfirmButton::Cancel => {
+                                        AnalyzeConfirmButton::MoveToTrash
+                                    }
+                                    AnalyzeConfirmButton::DeletePermanently => {
+                                        AnalyzeConfirmButton::Cancel
+                                    }
+                                    AnalyzeConfirmButton::MoveToTrash => {
+                                        AnalyzeConfirmButton::DeletePermanently
+                                    }
+                                };
+                            }
+                            KeyCode::Right | KeyCode::Tab => {
+                                *button = match button {
+                                    AnalyzeConfirmButton::Cancel => {
+                                        AnalyzeConfirmButton::DeletePermanently
+                                    }
+                                    AnalyzeConfirmButton::DeletePermanently => {
+                                        AnalyzeConfirmButton::MoveToTrash
+                                    }
+                                    AnalyzeConfirmButton::MoveToTrash => {
+                                        AnalyzeConfirmButton::Cancel
+                                    }
                                 };
                             }
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 state.overlay = AnalyzeOverlay::None;
                             }
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                self.start_analyze_removal();
+                                self.start_analyze_removal(RemovalMode::Trash);
                             }
-                            KeyCode::Enter => {
-                                if *button == AnalyzeConfirmButton::Delete {
-                                    self.start_analyze_removal();
-                                } else {
+                            KeyCode::Enter => match *button {
+                                AnalyzeConfirmButton::MoveToTrash => {
+                                    self.start_analyze_removal(RemovalMode::Trash);
+                                }
+                                AnalyzeConfirmButton::DeletePermanently => {
+                                    self.start_analyze_removal(RemovalMode::Permanent);
+                                }
+                                AnalyzeConfirmButton::Cancel => {
                                     state.overlay = AnalyzeOverlay::None;
                                 }
-                            }
+                            },
                             _ => {}
                         }
                         return;
@@ -1284,7 +1327,8 @@ impl App {
 
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
-            let (layout, host) = (self.layout.clone(), self.host.clone());
+            let (layout, host, permanent) =
+                (self.layout.clone(), self.host.clone(), self.permanent);
             let plan = self
                 .plan
                 .clone()
@@ -1304,18 +1348,21 @@ impl App {
                         let host = &*host;
                         let layout = &layout;
                         let ignore = &ignore;
+                        let mode = if permanent {
+                            RemovalMode::Permanent
+                        } else {
+                            RemovalMode::Trash
+                        };
                         Uninstaller {
                             host,
                             layout,
                             ignore,
+                            mode,
                         }
                         .run(&plan, on_progress)
                     }
-                    None => Cleaner::remove_items_with_progress(
-                        &selected_items,
-                        &ignore,
-                        Some(on_progress),
-                    ),
+                    None => Cleaner::new(&*host, RemovalMode::Permanent)
+                        .remove_items_with_progress(&selected_items, &ignore, Some(on_progress)),
                 };
                 let _ = tx.send(RemovalMessage::Finished(report));
             });
@@ -1324,7 +1371,10 @@ impl App {
         }
     }
 
-    fn start_analyze_removal(&mut self) {
+    fn start_analyze_removal(&mut self, mut mode: RemovalMode) {
+        if self.permanent {
+            mode = RemovalMode::Permanent;
+        }
         if let Screen::Analyze(ref mut analyze) = self.screen {
             let items_to_remove = analyze.items_to_delete();
             if items_to_remove.is_empty() {
@@ -1349,10 +1399,11 @@ impl App {
 
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
+            let host = self.host.clone();
 
             thread::spawn(move || {
                 let tx_prog = tx.clone();
-                let report = Cleaner::remove_items_with_progress(
+                let report = Cleaner::new(&*host, mode).remove_items_with_progress(
                     &scan_items,
                     &ignore,
                     Some(move |prog| {
@@ -2339,7 +2390,9 @@ mod tests {
             let (temp, layout) = sandbox();
             let mut app = App::new(IgnoreStore::default(), Config::default());
             app.layout = layout;
-            app.host = Arc::new(FakeHost::default());
+            let host = FakeHost::default();
+            host.simulate_trash();
+            app.host = Arc::new(host);
             (temp, app)
         }
 

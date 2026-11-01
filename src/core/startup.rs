@@ -11,8 +11,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::apps::{self, InstalledApp};
-use super::cleaner::Cleaner;
-use super::host::{Host, shell_quote};
+use super::cleaner::{Cleaner, RemovalMode};
+use super::host::{Host, MacHost, shell_quote};
 use super::layout::Layout;
 use super::safety::Safety;
 use super::scanner::ScanItem;
@@ -909,7 +909,8 @@ pub fn remove_broken_plist(item: &StartupItem, ignore: &IgnoreStore) -> Result<(
         return Err("Only user launch agents can be removed".to_string());
     }
     let scan_item = ScanItem::new(plist.clone(), 0, false, false);
-    Cleaner::remove_verified(&scan_item, |p| Safety::can_remove(p, ignore))
+    Cleaner::new(&MacHost, RemovalMode::Permanent)
+        .remove_verified(&scan_item, |p| Safety::can_remove(p, ignore))
         .map_err(|e| e.to_string())
 }
 

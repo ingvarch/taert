@@ -5,12 +5,12 @@ expression: select_screen(&state)
  taert › Uninstall apps › Review                                                             5 of 6 selected  ·  1.8 GB
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Zoom  Homebrew cask zoom ─────────────────────────────────────────────────────────────────── 6 items · 1.8 GB ─╮
-   │ ▌ ● /Applications/Zoom.app                                                  ━━━──────────────  17.2%   310.0 MB │
-   │   ● /Users/test/Library/Application Support/zoom.us                         ━━━━━━━━━━━━━────  77.8%     1.4 GB │
-   │   ● /Users/test/Library/Caches/us.zoom.xos                                  ━────────────────   5.0%    90.0 MB │
-   │   ● /Users/test/Library/Preferences/us.zoom.xos.plist                       ─────────────────  <0.1%     4.1 KB │
-   │   ● /Library/LaunchDaemons/us.zoom.ZoomDaemon.plist                         ─────────────────  <0.1%     4.1 KB │
-   │   ○ /Users/test/.config/zoom                                                ─────────────────  <0.1%     4.1 KB │
+   │ ▌ ● /Applications/Zoom.app                                         (Trash)  ━━━──────────────  17.2%   310.0 MB │
+   │   ● /Users/test/Library/Application Support/zoom.us                (Trash)  ━━━━━━━━━━━━━────  77.8%     1.4 GB │
+   │   ● /Users/test/Library/Caches/us.zoom.xos                         (Trash)  ━────────────────   5.0%    90.0 MB │
+   │   ● /Users/test/Library/Preferences/us.zoom.xos.plist              (Trash)  ─────────────────  <0.1%     4.1 KB │
+   │   ● /Library/LaunchDaemons/us.zoom.ZoomDaemon.plist            (Permanent)  ─────────────────  <0.1%     4.1 KB │
+   │   ○ /Users/test/.config/zoom                                       (Trash)  ─────────────────  <0.1%     4.1 KB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
