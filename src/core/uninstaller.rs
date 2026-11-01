@@ -21,7 +21,7 @@ use super::apps::{
     official_uninstaller,
 };
 use super::cleaner::{Cleaner, RemovalFailure, RemovalProgress, RemovalReport};
-use super::host::{Host, shell_quote};
+use super::host::{Host, Output, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
     Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary, vendor_token,
@@ -573,14 +573,13 @@ fn in_folder_named(path: &Path, folder: &str) -> bool {
         .is_some_and(|name| name == folder)
 }
 
-/// Every process as pid, parent pid, and program path.
-pub(crate) fn process_table(host: &dyn Host) -> Vec<(u32, u32, String)> {
-    checked_process_table(host).unwrap_or_default()
+fn list_processes(host: &dyn Host) -> Output {
+    host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT)
 }
 
 /// The process table, or `None` when `ps` failed and the list cannot be trusted.
 pub(crate) fn checked_process_table(host: &dyn Host) -> Option<Vec<(u32, u32, String)>> {
-    let listing = host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
+    let listing = list_processes(host);
     listing.ok.then(|| parse_process_table(&listing.stdout))
 }
 
@@ -1079,7 +1078,8 @@ impl Uninstaller<'_> {
     /// Finds processes by where their program lives, which a name cannot spoof.
     fn running(&self, plan: &AppPlan) -> Running {
         let folders = program_folders(plan);
-        let table = process_table(self.host);
+        // Whatever `ps` printed before it failed still names processes to stop.
+        let table = parse_process_table(&list_processes(self.host).stdout);
         let lineage = own_lineage(&table);
         let inside = table
             .iter()
@@ -2383,6 +2383,21 @@ mod run_tests {
         let host = FakeHost::default();
         for _ in 0..=CHECKS_BEFORE_SIGNALS {
             host.reply(PS, &running(&foo.path, 4242));
+        }
+        host.reply(PS, "");
+
+        run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        assert_eq!(*host.signals.lock().unwrap(), [(4242, libc::SIGTERM)]);
+    }
+
+    #[test]
+    fn an_app_is_still_stopped_when_ps_lists_it_and_then_fails() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        for _ in 0..=CHECKS_BEFORE_SIGNALS {
+            host.fail_after_printing(PS, &running(&foo.path, 4242));
         }
         host.reply(PS, "");
 

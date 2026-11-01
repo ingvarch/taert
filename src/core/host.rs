@@ -178,6 +178,18 @@ pub mod fake {
             );
         }
 
+        /// A command that prints `stdout` and still reports failure.
+        pub fn fail_after_printing(&self, command: &str, stdout: &str) {
+            self.push(
+                command,
+                Output {
+                    ok: false,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                },
+            );
+        }
+
         fn push(&self, command: &str, output: Output) {
             let mut replies = self.replies.lock().unwrap();
             match replies.iter_mut().find(|(known, _)| known == command) {
