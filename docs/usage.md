@@ -180,15 +180,44 @@ taert analyze ~/Downloads
 taert analyze ~/Downloads --plain
 ```
 
-### System Health & RAM Pressure (`taert optimize`)
+### Diagnose Slowdowns & Battery Drain (`taert doctor`)
+
+Answers "why is my Mac slow, hot, or draining its battery?" with named causes and evidence. `taert doctor` watches the Mac for a few seconds, lists what stands out, and suggests one action for each finding.
+
+The tone stays factual. There is no health score, no red counters, and no claim to speed anything up. If nothing stands out, it says so and lists what was checked.
 
 ```bash
-# View factual RAM pressure and APFS disk status
-taert optimize
+# 10 second check
+taert doctor
+
+# Longer check, catches intermittent background activity
+taert doctor --seconds 60
+
+# Plain text table for scripts or redirected output
+taert doctor --plain
 
 # Machine-readable JSON output
-taert optimize --json
+taert doctor --json
 ```
+
+#### Checks and Findings
+
+- **Sustained CPU**: Detects processes using over 80% of a core across every sample of the observation window. A process spiking in only a single sample is not flagged.
+- **System work**: Explains known macOS background processes instead of blaming them:
+  - `mds_stores` & `mdworker_shared`: Spotlight indexing files.
+  - `backupd`: Time Machine backing up files.
+  - `photoanalysisd` & `mediaanalysisd`: Photos analyzing library in the background.
+  - `softwareupdated`: macOS downloading or preparing updates.
+  - `kernel_task`: macOS throttling CPU cycles to help cool down.
+  - `WindowServer`: Display compositor rendering graphics or external displays.
+- **Background energy & wakeups**: Catches background processes high on energy or wakeups per second while CPU usage appears low.
+- **Memory & Swap**: Checks memory pressure and active swap growth, listing the largest memory-consuming processes.
+- **Low disk space**: Warns when APFS available space drops below 10% (critical below 5%) and suggests Explore Storage (`taert analyze`).
+- **Sleep blockers**: Detects power assertions (`PreventUserIdleSystemSleep`, `PreventUserIdleDisplaySleep`, `PreventSystemSleep`) held for over 10 minutes. Ignores display sleep assertions from `powerd` and `UserIsActive`.
+- **Wake reasons**: Gathers wake events from the last 24 hours, grouping by reason (e.g. `wifibt`) and reporting frequent wakeups or wake requests.
+- **Thermal throttling**: Detects thermal or performance warnings recorded by the system.
+- **Network traffic**: Highlights background processes transferring data above 1 MB/s over the observation window.
+- **Broken startup items**: Flags launch agents or daemons whose target executable files no longer exist.
 
 ### Startup Items (`taert startup`)
 

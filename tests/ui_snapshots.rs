@@ -11,6 +11,7 @@ use taert::core::apps;
 use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
+use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::leftovers::{Evidence, UninstallRole};
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
@@ -24,6 +25,7 @@ use taert::core::telemetry::{
 };
 use taert::core::uninstaller;
 use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
+use taert::ui::doctor::{DoctorScreenState, render_doctor};
 use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::preferences::{PreferencesState, render_preferences};
@@ -309,6 +311,62 @@ fn snapshot_startup_items() {
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_startup(f, &state, &theme));
         assert_snapshot!(format!("startup_{label}"), output);
+    }
+}
+
+#[test]
+fn snapshot_doctor() {
+    let theme = snapshot_theme();
+    let report = DoctorReport {
+        seconds: 10,
+        findings: vec![
+            Finding {
+                id: "sustained_cpu".to_string(),
+                severity: FindingSeverity::Warning,
+                title: "node is using 190% CPU".to_string(),
+                evidence: "pid 4123, for the whole check".to_string(),
+                action: "Quit it if you don't need it.".to_string(),
+                action_target: Some(FindingAction::KillProcess {
+                    pid: 4123,
+                    name: "node".to_string(),
+                }),
+            },
+            Finding {
+                id: "sleep_blocker".to_string(),
+                severity: FindingSeverity::Warning,
+                title: "Something is keeping the Mac awake".to_string(),
+                evidence: "caffeinate has held PreventUserIdleSystemSleep for 02:14:09".to_string(),
+                action: "Quit it to let the Mac sleep.".to_string(),
+                action_target: Some(FindingAction::KillProcess {
+                    pid: 70001,
+                    name: "caffeinate".to_string(),
+                }),
+            },
+            Finding {
+                id: "wake_reasons".to_string(),
+                severity: FindingSeverity::Notice,
+                title: "The Mac woke 14 times in the last 24 hours".to_string(),
+                evidence: "12 times for wifibt".to_string(),
+                action: "Network features can wake the Mac while it sleeps.".to_string(),
+                action_target: None,
+            },
+        ],
+        checks: vec![
+            CheckResult::ok("sustained_cpu"),
+            CheckResult::ok("energy"),
+            CheckResult::ok("memory"),
+            CheckResult::ok("disk_space"),
+            CheckResult::ok("sleep_blockers"),
+            CheckResult::ok("wake_reasons"),
+            CheckResult::ok("heat"),
+            CheckResult::ok("network"),
+            CheckResult::ok("startup"),
+        ],
+    };
+    let state = DoctorScreenState::new_done(report);
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_doctor(f, &state, &theme));
+        assert_snapshot!(format!("doctor_{label}"), output);
     }
 }
 
@@ -622,10 +680,11 @@ const CLEAN_CACHES: usize = 0;
 const PROJECT_CLEANUP: usize = 1;
 const DOCKER_CLEANUP: usize = 2;
 const _UNINSTALL_APPS: usize = 3;
-const _STARTUP_ITEMS: usize = 4;
-const EXPLORE_STORAGE: usize = 5;
-const SYSTEM_STATUS: usize = 6;
-const PREFERENCES: usize = 7;
+const _DOCTOR: usize = 4;
+const _STARTUP_ITEMS: usize = 5;
+const EXPLORE_STORAGE: usize = 6;
+const SYSTEM_STATUS: usize = 7;
+const PREFERENCES: usize = 8;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {

@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Optimize › Doctor                                                                                   3 findings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Findings ──────────────────────────────────────────────────╮  ╭─ Details ──────────────────────────────────────╮
+   │ ▌ ! node is using 190% CPU                                › │  │ Warning · sustained_cpu                        │
+   │   ! Something is keeping the Mac awake                    › │  │                                                │
+   │   ● The Mac woke 14 times in the last 24 hours            › │  │ node is using 190% CPU                         │
+   ╰─────────────────────────────────────────────────────────────╯  │                                                │
+                                                                    │ Evidence:                                      │
+                                                                    │   pid 4123, for the whole check                │
+                                                                    │                                                │
+                                                                    │ Suggested Action:                              │
+                                                                    │   Quit it if you don't need it.                │
+                                                                    │                                                │
+                                                                    │ Press Enter to take action.                    │
+                                                                    ╰────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↵  Action    ↑↓  Navigate    r  Recheck    ⎋  Back

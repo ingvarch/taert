@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Optimize › Doctor                                           3 findings
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ Findings ──────────────────────────────────────────────────────────────╮
+   │ ▌ ! node is using 190% CPU                                            › │
+   │   ! Something is keeping the Mac awake                                › │
+   │   ● The Mac woke 14 times in the last 24 hours                        › │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ↵  Action    ↑↓  Navigate    r  Recheck    ⎋  Back

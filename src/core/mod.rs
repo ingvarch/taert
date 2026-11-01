@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod cleaner;
 pub mod date_utils;
 pub mod docker;
+pub mod doctor;
 pub mod host;
 pub mod iokit;
 pub mod layout;

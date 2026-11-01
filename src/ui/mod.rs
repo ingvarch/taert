@@ -1,6 +1,7 @@
 pub mod analyze;
 pub mod app;
 pub mod components;
+pub mod doctor;
 pub mod env;
 pub mod folder_preview;
 pub mod glyphs;
