@@ -20,13 +20,24 @@ fn test_cli_help() {
 }
 
 #[test]
-fn test_cli_optimize_json() {
+fn test_cli_doctor_json() {
     let mut cmd = Command::cargo_bin("taert").unwrap();
-    cmd.args(["optimize", "--json"])
+    cmd.args(["doctor", "--seconds", "2", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"memory\""))
-        .stdout(predicate::str::contains("\"total_bytes\""));
+        .stdout(predicate::str::contains("\"seconds\": 2"))
+        .stdout(predicate::str::contains("\"findings\":"))
+        .stdout(predicate::str::contains("\"checks\":"));
+}
+
+#[test]
+fn test_cli_doctor_plain() {
+    let mut cmd = Command::cargo_bin("taert").unwrap();
+    cmd.args(["doctor", "--seconds", "2", "--plain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Checked for 2 seconds."))
+        .stdout(predicate::str::contains("normal."));
 }
 
 #[test]

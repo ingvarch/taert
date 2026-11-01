@@ -10,12 +10,13 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::{
-    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs, StartupArgs,
-    UninstallArgs,
+    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, DoctorArgs, IgnoreAction, PurgeArgs,
+    StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::docker::DockerClient;
+use crate::core::doctor;
 use crate::core::host::MacHost;
 use crate::core::layout::Layout;
 use crate::core::purger::Purger;
@@ -24,7 +25,6 @@ use crate::core::scanner::{CategoryScan, CategoryScanner};
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
-use crate::core::sysinfo::SysInfo;
 use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 use crate::plain::PlainRunner;
 
@@ -71,7 +71,7 @@ fn main() -> ExitCode {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
         }
 
-        Some(Command::Optimize) => handle_optimize(&cli),
+        Some(Command::Doctor(ref args)) => handle_doctor(args, &cli, use_plain, &ignore, &config),
 
         Some(Command::Startup(ref args)) => handle_startup(args, &cli, use_plain, &ignore, &config),
 
@@ -465,38 +465,44 @@ fn handle_analyze(path: PathBuf, depth: usize, cli: &Cli, use_plain: bool) -> Ex
     ExitCode::SUCCESS
 }
 
-fn handle_optimize(cli: &Cli) -> ExitCode {
-    let status = SysInfo::current_status();
+fn handle_doctor(
+    args: &DoctorArgs,
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    config: &Config,
+) -> ExitCode {
+    let host = MacHost;
+    let layout = Layout::current();
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&status).unwrap());
-        return ExitCode::SUCCESS;
+        let snapshot = doctor::collect(&host, args.seconds, &layout, ignore);
+        let report = doctor::diagnose(&snapshot);
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("JSON serialization error: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else if use_plain {
+        let snapshot = doctor::collect(&host, args.seconds, &layout, ignore);
+        let report = doctor::diagnose(&snapshot);
+        doctor::print_plain_report(&report);
+        ExitCode::SUCCESS
+    } else {
+        let mut app = ui::app::App::new_doctor(ignore.clone(), config.clone(), args.seconds);
+        match app.run() {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("TUI Error: {e}");
+                ExitCode::FAILURE
+            }
+        }
     }
-
-    println!("=== System Storage & Memory ===");
-    println!(
-        "Memory: {} / {} used",
-        crate::core::bytes::format_memory_bytes(status.memory.used_bytes),
-        crate::core::bytes::format_memory_bytes(status.memory.total_bytes)
-    );
-    if status.memory.swap_total_bytes > 0 {
-        println!(
-            "Swap:   {} / {} used",
-            crate::core::bytes::format_memory_bytes(status.memory.swap_used_bytes),
-            crate::core::bytes::format_memory_bytes(status.memory.swap_total_bytes)
-        );
-    }
-
-    if let Some(disk) = status.main_disk {
-        println!(
-            "Disk ({}): {} available / {} total",
-            disk.mount_point,
-            format_bytes(disk.available_bytes),
-            format_bytes(disk.total_bytes)
-        );
-    }
-
-    ExitCode::SUCCESS
 }
 
 fn handle_ignore(action: IgnoreAction, ignore: &IgnoreStore) -> ExitCode {

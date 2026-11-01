@@ -48,8 +48,8 @@ pub enum Command {
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
 
-    /// Display memory and APFS storage status
-    Optimize,
+    /// Explain what is slowing the Mac down
+    Doctor(DoctorArgs),
 
     /// Review and switch off login and background items
     Startup(StartupArgs),
@@ -108,6 +108,13 @@ pub struct AnalyzeArgs {
     /// Maximum folder depth to display in plain mode
     #[arg(long, default_value = "1")]
     pub depth: usize,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct DoctorArgs {
+    /// Number of seconds to watch system activity
+    #[arg(short, long, default_value_t = 10)]
+    pub seconds: u64,
 }
 
 #[derive(Debug, Args)]

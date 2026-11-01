@@ -19,6 +19,7 @@ use ratatui::{Frame, Terminal};
 use super::analyze::{
     AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, SortOrder, render_analyze,
 };
+use super::doctor::{DoctorActionConfirm, DoctorScreenState, render_doctor};
 use super::path_list_editor::{
     PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
 };
@@ -37,6 +38,7 @@ use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalProgress, RemovalReport};
 use crate::core::docker;
+use crate::core::doctor;
 use crate::core::host::{Host, MacHost};
 use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
@@ -56,6 +58,7 @@ pub enum Screen {
     Analyze(Box<AnalyzeState>),
     SystemStatus(Box<SystemStatusState>),
     Startup(StartupScreenState),
+    Doctor(DoctorScreenState),
     Preferences(PreferencesState),
     PathListEditor(PathListEditorState),
 }
@@ -158,6 +161,27 @@ impl App {
             scan.items,
             include_all,
         )));
+    }
+
+    pub fn new_doctor(ignore: IgnoreStore, config: Config, seconds: u64) -> Self {
+        let mut app = Self::new(ignore, config);
+        app.open_doctor(seconds);
+        app
+    }
+
+    pub fn open_doctor(&mut self, seconds: u64) {
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        let layout = self.layout.clone();
+        let ignore = self.ignore.clone();
+
+        thread::spawn(move || {
+            let snapshot = doctor::collect(&*host, seconds, &layout, &ignore);
+            let report = doctor::diagnose(&snapshot);
+            let _ = tx.send(report);
+        });
+
+        self.open(Screen::Doctor(DoctorScreenState::new_checking(seconds, rx)));
     }
 
     pub fn with_select(scan: CategoryScan, ignore: IgnoreStore, config: Config) -> Self {
@@ -361,6 +385,10 @@ impl App {
                 status.tick();
             }
 
+            if let Screen::Doctor(ref mut doctor) = self.screen {
+                doctor.check_receiver();
+            }
+
             if let Screen::Workspace(ref mut workspace) = self.screen {
                 workspace.tick(&self.storage_cache);
             }
@@ -388,6 +416,7 @@ impl App {
             Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
             Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
             Screen::Startup(state) => render_startup(frame, state, &self.theme),
+            Screen::Doctor(state) => render_doctor(frame, state, &self.theme),
             Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
             Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
         }
@@ -578,10 +607,11 @@ impl App {
                     KeyCode::PageDown | KeyCode::End => state.move_to_end(),
                     KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
                     KeyCode::Char(c) if c.is_ascii_digit() => {
-                        if let Some(digit) = c.to_digit(10)
-                            && let Some(choice) = state.select_by_number(digit as usize)
-                        {
-                            self.handle_main_menu_choice(choice);
+                        if let Some(digit) = c.to_digit(10) {
+                            let num = if digit == 0 { 10 } else { digit as usize };
+                            if let Some(choice) = state.select_by_number(num) {
+                                self.handle_main_menu_choice(choice);
+                            }
                         }
                     }
                     KeyCode::Enter => {
@@ -955,6 +985,81 @@ impl App {
                 }
             }
 
+            Screen::Doctor(state) => {
+                if state.confirm.is_some() {
+                    match code {
+                        KeyCode::Enter => {
+                            if state.confirm_button == 1 {
+                                state.cancel_confirm();
+                            } else if let Some(action) = state.confirm.take() {
+                                match action {
+                                    DoctorActionConfirm::QuitApp {
+                                        name, bundle_id, ..
+                                    } => {
+                                        let target = bundle_id.unwrap_or(name);
+                                        let script =
+                                            format!("tell application \"{target}\" to quit");
+                                        let _ = self.host.run(
+                                            "/usr/bin/osascript",
+                                            &["-e", &script],
+                                            Duration::from_secs(3),
+                                        );
+                                        state.remove_selected_finding();
+                                    }
+                                    DoctorActionConfirm::KillProcess { pid, .. } => {
+                                        self.host.signal(pid, libc::SIGTERM);
+                                        state.remove_selected_finding();
+                                    }
+                                    DoctorActionConfirm::DisableStartupItem { item } => {
+                                        let _ = startup::disable_item(
+                                            &*self.host,
+                                            &self.layout,
+                                            &self.ignore,
+                                            &item,
+                                            false,
+                                        );
+                                        state.remove_selected_finding();
+                                    }
+                                    DoctorActionConfirm::ExploreStorage => {
+                                        let home = Safety::home_dir();
+                                        self.open(Screen::Analyze(Box::new(
+                                            AnalyzeState::with_cache(
+                                                home,
+                                                self.ignore.clone(),
+                                                self.storage_cache.clone(),
+                                            ),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                            state.toggle_confirm_button();
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                            state.cancel_confirm();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                        KeyCode::Down | KeyCode::Char('j') => state.next(),
+                        KeyCode::PageUp => state.page_up(),
+                        KeyCode::PageDown => state.page_down(),
+                        KeyCode::Home | KeyCode::Char('g') => state.move_to_start(),
+                        KeyCode::End | KeyCode::Char('G') => state.move_to_end(),
+                        KeyCode::Enter => state.request_action(),
+                        KeyCode::Char('r') => {
+                            let sec = state.seconds;
+                            self.open_doctor(sec);
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
+                        _ => {}
+                    }
+                }
+            }
+
             Screen::Preferences(state) => match code {
                 KeyCode::Up | KeyCode::Char('k') => state.previous(),
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
@@ -1045,20 +1150,29 @@ impl App {
         };
 
         match &self.screen {
-            Screen::Workspace(state) => vec![
-                HelpSection::new(
-                    "Menu",
-                    vec![Hint::new("↵", "Select"), Hint::new("1-9", "Quick select")],
-                ),
-                general(vec![
-                    navigate,
-                    if state.submenu_row().is_some() {
-                        back
-                    } else {
-                        Hint::new("⎋ / q", "Quit")
-                    },
-                ]),
-            ],
+            Screen::Workspace(state) => {
+                let quick_key = match state.items.len() {
+                    10 => "1-10",
+                    _ => "1-9",
+                };
+                vec![
+                    HelpSection::new(
+                        "Menu",
+                        vec![
+                            Hint::new("↵", "Select"),
+                            Hint::new(quick_key, "Quick select"),
+                        ],
+                    ),
+                    general(vec![
+                        navigate,
+                        if state.submenu_row().is_some() {
+                            back
+                        } else {
+                            Hint::new("⎋ / q", "Quit")
+                        },
+                    ]),
+                ]
+            }
             Screen::Scanning(_, _, _) => vec![
                 HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
                 general(Vec::new()),
@@ -1116,6 +1230,15 @@ impl App {
             Screen::Startup(_) => vec![HelpSection::new(
                 "Startup items",
                 vec![Hint::new("␣", "Toggle service"), navigate, back],
+            )],
+            Screen::Doctor(_) => vec![HelpSection::new(
+                "Doctor",
+                vec![
+                    Hint::new("↵", "Action"),
+                    Hint::new("r", "Recheck"),
+                    navigate,
+                    back,
+                ],
             )],
             Screen::Preferences(_) => vec![
                 HelpSection::new(
@@ -1258,6 +1381,7 @@ impl App {
             }
             MainMenuChoice::DockerCleanup => self.launch_docker_scan(),
             MainMenuChoice::UninstallApps => self.launch_app_scan(),
+            MainMenuChoice::Doctor => self.open_doctor(10),
             MainMenuChoice::StartupItems => self.open_startup(false),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
@@ -1510,6 +1634,23 @@ mod tests {
         assert_eq!(
             state.select_by_number(3),
             Some(MainMenuChoice::DockerCleanup)
+        );
+    }
+
+    #[test]
+    fn the_fifth_quick_key_opens_doctor() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(state.select_by_number(5), Some(MainMenuChoice::Doctor));
+    }
+
+    #[test]
+    fn the_sixth_quick_key_opens_startup_items() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(
+            state.select_by_number(6),
+            Some(MainMenuChoice::StartupItems)
         );
     }
 
@@ -1768,19 +1909,19 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Char('6'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('7'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 5);
+        assert_main_menu(&app, 6);
     }
 
     #[test]
     fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('9'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Char('0'), KeyCode::Esc]);
 
-        assert_main_menu(&app, 8);
+        assert_main_menu(&app, 9);
     }
 
     #[test]
@@ -1790,7 +1931,7 @@ mod tests {
         press(
             &mut app,
             &[
-                KeyCode::Char('8'),
+                KeyCode::Char('9'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -1806,7 +1947,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 7);
+        assert_main_menu(&app, 8);
     }
 
     #[test]
@@ -1854,14 +1995,14 @@ mod tests {
     fn protected_paths_name_preferences_only_when_opened_there() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('9'));
+        app.handle_key(KeyCode::Char('0'));
         assert!(!screen_text(&app).contains("Preferences"));
 
         press(
             &mut app,
             &[
                 KeyCode::Esc,
-                KeyCode::Char('8'),
+                KeyCode::Char('9'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2116,7 +2257,7 @@ mod tests {
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('8'));
+        app.handle_key(KeyCode::Char('9'));
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
         app.handle_key(KeyCode::Down);
@@ -2127,13 +2268,13 @@ mod tests {
     fn a_path_list_offers_removal_only_when_it_has_paths() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('9')]);
+        press(&mut app, &[KeyCode::Char('0')]);
         assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
 
         app.handle_key(KeyCode::Esc);
         app.ignore.roots.push("/nowhere/protected".to_string());
 
-        app.handle_key(KeyCode::Char('9'));
+        app.handle_key(KeyCode::Char('0'));
         assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
     }
 
@@ -2173,7 +2314,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('7'));
+        app.handle_key(KeyCode::Char('8'));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();

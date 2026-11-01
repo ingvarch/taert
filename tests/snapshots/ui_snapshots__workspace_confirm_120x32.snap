@@ -11,17 +11,17 @@ expression: output
    │   ⌦ Uninstall apps           › │  │ and the Trash. You'll review every item before                              │
    ╰────────────────────────────────╯  │ anything is removed.                                                        │
    ╭─ Optimize ─────────────────────╮  │                                                                             │
-   │   ▲ Startup items            › │  │ ↵ Open                                                                      │
-   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
-   ╭─ Inspect ───────────────╭────────────────────────────────────────────────────────────╮
-   │   ◔ Explore storage     │ Explore your home folder?                                  │───── 118.6 GB available ─╮
-   │   ▤ System status       │                                                            │──── 375.8 GB of 494.4 GB │
-   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   │   ✚ Doctor                   › │  │ ↵ Open                                                                      │
+   │   ▲ Startup items            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╰─────────────────────────╭────────────────────────────────────────────────────────────╮
+   ╭─ Inspect ───────────────│ Explore your home folder?                                  │───── 118.6 GB available ─╮
+   │   ◔ Explore storage     │                                                            │──── 375.8 GB of 494.4 GB │
+   │   ▤ System status       │ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   ╰─────────────────────────│                                                            │                          │
    ╭─ Settings ──────────────│                                                            │                          │
-   │   ⌥ Preferences         │                                                            │                          │
-   │   ◈ Protected paths     │                                           Cancel    Start  │──────────────────────────╯
-   ╰─────────────────────────│                                    Enter select   Esc back │
-                             ╰────────────────────────────────────────────────────────────╯
+   │   ⌥ Preferences         │                                           Cancel    Start  │──────────────────────────╯
+   │   ◈ Protected paths     │                                    Enter select   Esc back │
+   ╰─────────────────────────╰────────────────────────────────────────────────────────────╯
 
 
 

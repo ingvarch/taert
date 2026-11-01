@@ -1,5 +1,5 @@
 //! macOS system and disk info reporting.
-//! Reports factual memory pressure and APFS disk space without misleading claims.
+//! Reports factual APFS disk space without misleading claims.
 
 use std::mem::MaybeUninit;
 use std::path::Path;
@@ -14,39 +14,9 @@ pub struct DiskUsage {
     pub available_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryUsage {
-    pub total_bytes: u64,
-    pub used_bytes: u64,
-    pub swap_total_bytes: u64,
-    pub swap_used_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemStatus {
-    pub memory: MemoryUsage,
-    pub main_disk: Option<DiskUsage>,
-}
-
 pub struct SysInfo;
 
 impl SysInfo {
-    pub fn current_status() -> SystemStatus {
-        let mut sys = sysinfo::System::new_all();
-        sys.refresh_memory();
-
-        let memory = MemoryUsage {
-            total_bytes: sys.total_memory(),
-            used_bytes: sys.used_memory(),
-            swap_total_bytes: sys.total_swap(),
-            swap_used_bytes: sys.used_swap(),
-        };
-
-        let main_disk = Self::disk_usage(Path::new("/"));
-
-        SystemStatus { memory, main_disk }
-    }
-
     pub fn disk_usage(path: &Path) -> Option<DiskUsage> {
         let path_str = path.to_str()?;
         let c_path = std::ffi::CString::new(path_str).ok()?;
@@ -78,11 +48,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_system_status() {
-        let status = SysInfo::current_status();
-        assert!(status.memory.total_bytes > 0);
-        assert!(status.main_disk.is_some());
-        let disk = status.main_disk.unwrap();
+    fn test_disk_usage() {
+        let disk = SysInfo::disk_usage(Path::new("/")).expect("root disk usage");
         assert!(disk.total_bytes > 0);
+        assert_eq!(disk.mount_point, "/");
     }
 }

@@ -2,7 +2,7 @@
 //! Main menu + Clean Caches Submenu + Start Confirmations.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use ratatui::Frame;
@@ -39,18 +39,19 @@ pub enum MainMenuChoice {
     ProjectCleanup, // 2
     DockerCleanup,  // 3
     UninstallApps,  // 4
-    StartupItems,   // 5
-    ExploreStorage, // 6
-    SystemStatus,   // 7
-    Preferences,    // 8
-    ProtectedPaths, // 9
+    Doctor,         // 5
+    StartupItems,   // 6
+    ExploreStorage, // 7
+    SystemStatus,   // 8
+    Preferences,    // 9
+    ProtectedPaths, // 10
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3]),
-    ("Optimize", &[4]),
-    ("Inspect", &[5, 6]),
-    ("Settings", &[7, 8]),
+    ("Optimize", &[4, 5]),
+    ("Inspect", &[6, 7]),
+    ("Settings", &[8, 9]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +96,7 @@ impl Default for WorkspaceState {
 
 impl WorkspaceState {
     pub fn new() -> Self {
-        let disk_status = SysInfo::current_status().main_disk.map(|d| {
+        let disk_status = SysInfo::disk_usage(Path::new("/")).map(|d| {
             let free_fraction = if d.total_bytes > 0 {
                 d.available_bytes as f64 / d.total_bytes as f64
             } else {
@@ -143,6 +144,12 @@ impl WorkspaceState {
                     "Uninstall apps",
                     "Remove apps with everything they left behind",
                     "Remove an app together with its settings, caches, login\nitems and background helpers. You'll review every file\nbefore anything is removed.",
+                ),
+                (
+                    MainMenuChoice::Doctor,
+                    "Doctor",
+                    "Explain what is slowing the Mac down",
+                    "Watch the Mac for a few seconds to find what is slow,\nhot, or draining battery. Lists named causes and evidence,\nand suggests what to do. Changes nothing on its own.",
                 ),
                 (
                     MainMenuChoice::StartupItems,
@@ -377,6 +384,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
         MainMenuChoice::DockerCleanup => theme.g.icon_docker,
         MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
+        MainMenuChoice::Doctor => theme.g.icon_doctor,
         MainMenuChoice::StartupItems => theme.g.icon_startup,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
@@ -558,6 +566,7 @@ fn detail_data(
         }
         MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
         MainMenuChoice::DockerCleanup
+        | MainMenuChoice::Doctor
         | MainMenuChoice::StartupItems
         | MainMenuChoice::Preferences
         | MainMenuChoice::ProtectedPaths => Vec::new(),
