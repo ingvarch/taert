@@ -321,12 +321,16 @@ mod tests {
     use crate::core::apps::testing::sandbox;
     use crate::core::cleaner::Cleaner;
     use crate::core::host::fake::FakeHost;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     fn fill(layout: &Layout, relative: &str) -> PathBuf {
         let folder = layout.user(relative);
         fs::create_dir_all(&folder).unwrap();
-        fs::write(folder.join("data"), vec![1_u8; 8192]).unwrap();
+        let file = fs::File::create(folder.join("data")).unwrap();
+        (&file).write_all(&[1_u8; 8192]).unwrap();
+        // APFS counts no blocks for a file until it writes them out.
+        file.sync_all().unwrap();
         folder
     }
 
