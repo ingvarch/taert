@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use super::path_utils::{expand_tilde, prettify_path};
 use super::scanner::{CategoryScan, ScanItem, ToolGroup};
-use super::sizer::{DirSizer, walk_parallelism};
+use super::sizer::DirSizer;
 use super::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "purge";
@@ -153,8 +153,9 @@ impl Purger {
             }
 
             let artifact_names_filter = artifact_names.clone();
+            // Serial, so it holds no pool: a walk on one would keep `size_of` below waiting.
             let walker = jwalk::WalkDir::new(root)
-                .parallelism(walk_parallelism())
+                .parallelism(jwalk::Parallelism::Serial)
                 .skip_hidden(false)
                 .follow_links(false)
                 .max_depth(8)
@@ -260,16 +261,24 @@ impl Purger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::core::sizer::testing::BusyPool;
+    use std::sync::mpsc;
+    use std::thread;
+    use tempfile::{TempDir, tempdir};
 
-    #[test]
-    fn test_purge_discovers_artifacts() {
+    fn project_with_target() -> TempDir {
         let temp = tempdir().unwrap();
         let project_dir = temp.path().join("my-rust-project");
         let target_dir = project_dir.join("target");
         fs::create_dir_all(&target_dir).unwrap();
         fs::write(project_dir.join("Cargo.toml"), "[package]").unwrap();
         fs::write(target_dir.join("binary"), b"123456").unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_purge_discovers_artifacts() {
+        let temp = project_with_target();
 
         let ignore = IgnoreStore::default();
         let scan = Purger::scan_projects(temp.path(), 0, &[], &ignore);
@@ -278,5 +287,35 @@ mod tests {
         assert_eq!(scan.groups[0].tool, "my-rust-project");
         assert_eq!(scan.groups[0].items.len(), 1);
         assert!(scan.groups[0].items[0].size_bytes > 0);
+    }
+
+    #[test]
+    fn a_scan_finds_its_rows_while_every_global_pool_thread_is_busy() {
+        let temp = project_with_target();
+
+        let busy = BusyPool::global();
+        let scan = Purger::scan_projects(temp.path(), 0, &[], &IgnoreStore::default());
+        drop(busy);
+
+        assert_eq!(scan.groups.len(), 1);
+    }
+
+    #[test]
+    fn the_walk_does_not_wait_for_the_pool_that_measures_folders() {
+        let temp = project_with_target();
+        let root = temp.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+
+        let busy = BusyPool::walks();
+        let scan = thread::spawn(move || {
+            let ignore = IgnoreStore::default();
+            Purger::scan_multiple_roots(&[root], 0, &[], &ignore, Some(tx), None)
+        });
+        let walked = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(10)).ok())
+            .any(|event| matches!(event, PurgeScanEvent::Walking(_)));
+        drop(busy);
+
+        assert!(walked, "no folder walked while the measuring pool was busy");
+        assert_eq!(scan.join().unwrap().groups.len(), 1);
     }
 }
