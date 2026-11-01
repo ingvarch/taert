@@ -35,6 +35,9 @@ pub struct ScanItem {
     pub docker: Option<DockerObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<UninstallRole>,
+    /// More folders of this row. `size_bytes` covers them, and they go with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<ScanItem>,
 }
 
 impl ScanItem {
@@ -50,7 +53,22 @@ impl ScanItem {
             identity,
             docker: None,
             role: None,
+            also: Vec::new(),
         }
+    }
+
+    /// One row out of several folders. The first one names it.
+    fn from_folders(folders: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut folders = folders.into_iter();
+        let mut row = folders.next()?;
+        row.also = folders.collect();
+        row.size_bytes += row.also.iter().map(|folder| folder.size_bytes).sum::<u64>();
+        Some(row)
+    }
+
+    /// This row's own folder and the ones that go with it.
+    pub fn folders(&self) -> impl Iterator<Item = &Self> {
+        std::iter::once(self).chain(&self.also)
     }
 }
 
@@ -136,7 +154,7 @@ pub struct ScanContext<'a> {
 
 pub struct CategoryScanner;
 
-type Rows = Vec<(PathBuf, bool)>;
+type Rows = Vec<(Vec<PathBuf>, bool)>;
 
 fn is_cancelled(flag: &Option<Arc<AtomicBool>>) -> bool {
     flag.as_ref()
@@ -162,6 +180,33 @@ fn contents_of(paths: &[PathBuf], ignore: &IgnoreStore) -> Vec<PathBuf> {
     expanded
 }
 
+/// One folder of a row, unless it is gone, not safe to remove, or next to empty.
+fn scan_folder(
+    path: PathBuf,
+    selected: bool,
+    ignore: &IgnoreStore,
+    progress_tx: &Option<Sender<ScanProgressEvent>>,
+) -> Option<ScanItem> {
+    if !path.exists() {
+        return None;
+    }
+
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ScanProgressEvent::ScanningPath(prettify_path(&path)));
+    }
+
+    if Safety::has_symlink_component(&path)
+        || Safety::is_cloud_or_dataless(&path)
+        || Safety::is_ignored_or_protected(&path, ignore)
+        || Safety::can_remove(&path, ignore).is_err()
+    {
+        return None;
+    }
+
+    let size = DirSizer::size_of(&path);
+    (size >= 1024).then(|| ScanItem::new(path, size, selected, false))
+}
+
 /// Sizes the rows that are safe to remove and groups them under one tool name.
 fn scan_group(
     tool: String,
@@ -176,31 +221,21 @@ fn scan_group(
 
     let items: Vec<ScanItem> = rows
         .into_par_iter()
-        .filter_map(|(path, selected)| {
-            if is_cancelled(cancel) || !path.exists() {
+        .filter_map(|(paths, selected)| {
+            if is_cancelled(cancel) {
                 return None;
             }
 
+            let folders = paths
+                .into_iter()
+                .filter_map(|path| scan_folder(path, selected, ignore, progress_tx));
+            let row = ScanItem::from_folders(folders)?;
             if let Some(tx) = progress_tx {
-                let _ = tx.send(ScanProgressEvent::ScanningPath(prettify_path(&path)));
+                let _ = tx.send(ScanProgressEvent::ItemFound {
+                    bytes: row.size_bytes,
+                });
             }
-
-            if Safety::has_symlink_component(&path)
-                || Safety::is_cloud_or_dataless(&path)
-                || Safety::is_ignored_or_protected(&path, ignore)
-                || Safety::can_remove(&path, ignore).is_err()
-            {
-                return None;
-            }
-
-            let size = DirSizer::size_of(&path);
-            if size < 1024 {
-                return None;
-            }
-            if let Some(tx) = progress_tx {
-                let _ = tx.send(ScanProgressEvent::ItemFound { bytes: size });
-            }
-            Some(ScanItem::new(path, size, selected, false))
+            Some(row)
         })
         .collect();
 
@@ -260,7 +295,7 @@ impl CategoryScanner {
                 };
                 let rows = paths
                     .into_iter()
-                    .map(|path| (path, target.selected_by_default))
+                    .map(|path| (vec![path], target.selected_by_default))
                     .collect();
                 scan_group(target.tool, rows, ignore, &progress_tx, &cancel)
             })
@@ -279,7 +314,7 @@ impl CategoryScanner {
                 let rows = group
                     .rows
                     .into_iter()
-                    .map(|row| (row.path, row.selected))
+                    .map(|row| (row.paths, row.selected))
                     .collect();
                 if let Some(mut scanned) =
                     scan_group(group.tool.to_string(), rows, ignore, &progress_tx, &cancel)
@@ -435,6 +470,77 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(chrome.exists());
         assert!(!firefox.exists());
+    }
+
+    fn paths_of(item: &ScanItem) -> Vec<&PathBuf> {
+        item.folders().map(|folder| &folder.path).collect()
+    }
+
+    #[test]
+    fn a_browser_with_two_folders_is_one_row_with_their_size() {
+        let (_temp, layout) = sandbox();
+        let outer = fill(&layout, "Library/Caches/com.apple.Safari");
+        let container = fill(
+            &layout,
+            "Library/Containers/com.apple.Safari/Data/Library/Caches",
+        );
+        let scan = junk(&layout, &FakeHost::idle(), &IgnoreStore::default());
+        let found = rows(&scan, app_caches::BROWSER_CACHES);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(paths_of(found[0]), [&outer, &container]);
+        assert_eq!(
+            found[0].size_bytes,
+            DirSizer::size_of(&outer) + DirSizer::size_of(&container)
+        );
+    }
+
+    #[test]
+    fn an_ignored_folder_leaves_the_row_and_the_other_stays() {
+        let (_temp, layout) = sandbox();
+        let outer = fill(&layout, "Library/Caches/com.apple.Safari");
+        let container = fill(
+            &layout,
+            "Library/Containers/com.apple.Safari/Data/Library/Caches",
+        );
+        let ignore = IgnoreStore::new(vec![container.display().to_string()]);
+        let scan = junk(&layout, &FakeHost::idle(), &ignore);
+        let found = rows(&scan, app_caches::BROWSER_CACHES);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(paths_of(found[0]), [&outer]);
+    }
+
+    #[test]
+    fn removing_a_browser_row_takes_both_folders() {
+        let (_temp, layout) = sandbox();
+        let outer = fill(&layout, "Library/Caches/com.apple.Safari");
+        let container = fill(
+            &layout,
+            "Library/Containers/com.apple.Safari/Data/Library/Caches",
+        );
+        let ignore = IgnoreStore::default();
+        let scan = junk(&layout, &FakeHost::idle(), &ignore);
+        let row = rows(&scan, app_caches::BROWSER_CACHES)[0].clone();
+        let report = Cleaner::remove_items(std::slice::from_ref(&row), &ignore);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, row.size_bytes);
+        assert!(!outer.exists());
+        assert!(!container.exists());
+    }
+
+    #[test]
+    fn a_link_in_the_caches_folder_never_becomes_a_row() {
+        let (_temp, layout) = sandbox();
+        let precious = fill(&layout, "Documents/precious");
+        let caches = layout.user("Library/Caches");
+        fs::create_dir_all(&caches).unwrap();
+        let link = caches.join("com.acme.link");
+        std::os::unix::fs::symlink(&precious, &link).unwrap();
+        let kept = fill(&layout, "Library/Caches/com.acme.kept");
+        let scan = junk(&layout, &FakeHost::idle(), &IgnoreStore::default());
+        let found = rows(&scan, app_caches::APP_CACHES);
+        assert!(found.iter().all(|item| item.path != link), "{found:?}");
+        assert!(found.iter().any(|item| item.path == kept), "{found:?}");
     }
 
     #[test]

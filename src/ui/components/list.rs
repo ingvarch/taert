@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::ui::analyze::SortOrder;
+use crate::ui::components::text::plural;
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
@@ -312,6 +313,16 @@ pub fn path_spans(path: &Path, max_len: usize, theme: &Theme) -> Vec<Span<'stati
     } else {
         vec![Span::styled(truncated, theme.body())]
     }
+}
+
+/// Says how many more folders a row holds besides the path it shows.
+pub fn more_folders(count: usize, theme: &Theme) -> Option<Span<'static>> {
+    (count > 0).then(|| {
+        Span::styled(
+            format!(" +{}", plural(count, "folder", "folders")),
+            theme.footnote(),
+        )
+    })
 }
 
 pub fn render_section_header_spans(

@@ -69,6 +69,7 @@ impl ScanItem {
             identity: None,
             docker: Some(object),
             role: None,
+            also: Vec::new(),
         }
     }
 

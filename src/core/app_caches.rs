@@ -10,7 +10,6 @@ use rayon::prelude::*;
 use super::apps::{InstalledApp, find_apps};
 use super::host::Host;
 use super::layout::Layout;
-use super::path_utils::prettify_path;
 use super::uninstaller::checked_process_table;
 
 pub const APP_CACHES: &str = "App caches";
@@ -21,7 +20,7 @@ const STALE_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheRow {
-    pub path: PathBuf,
+    pub paths: Vec<PathBuf>,
     pub selected: bool,
 }
 
@@ -204,7 +203,10 @@ fn app_cache_group(
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let running = running.app_with_id(apps, &[&name]);
             let selected = starts_selected(!changed_since(&path, cutoff), running);
-            CacheRow { path, selected }
+            CacheRow {
+                paths: vec![path],
+                selected,
+            }
         })
         .collect();
     CacheGroup {
@@ -221,24 +223,27 @@ fn browser_group(
 ) -> CacheGroup {
     let mut rows = Vec::new();
     for browser in BROWSERS {
-        let running = running.browser(browser, apps);
+        let mut paths = Vec::new();
+        let mut refused = false;
         for relative in browser.caches {
             let path = layout.user(relative);
             match fs::read_dir(&path) {
-                Ok(_) => rows.push(CacheRow {
-                    path,
-                    selected: starts_selected(true, running),
-                }),
-                Err(error) if error.kind() == ErrorKind::PermissionDenied => {
-                    notes.push(format!(
-                        "{} keeps a cache that macOS hides from this terminal ({}). \
-                         Give the terminal Full Disk Access in System Settings to include it.",
-                        browser.name,
-                        prettify_path(&path),
-                    ));
-                }
-                Err(_) => {}
+                Ok(_) => paths.push(path),
+                Err(error) => refused |= error.kind() == ErrorKind::PermissionDenied,
             }
+        }
+        if refused {
+            notes.push(format!(
+                "{} keeps a cache that macOS hides from this terminal. \
+                 Give the terminal Full Disk Access in System Settings to include it.",
+                browser.name,
+            ));
+        }
+        if !paths.is_empty() {
+            rows.push(CacheRow {
+                paths,
+                selected: starts_selected(true, running.browser(browser, apps)),
+            });
         }
     }
     CacheGroup {
@@ -314,7 +319,7 @@ mod tests {
 
     fn row<'a>(rows: &'a [CacheRow], path: &PathBuf) -> &'a CacheRow {
         rows.iter()
-            .find(|row| &row.path == path)
+            .find(|row| row.paths.contains(path))
             .unwrap_or_else(|| panic!("no row for {}: {rows:?}", path.display()))
     }
 
@@ -387,7 +392,10 @@ mod tests {
         let other = cache(&layout, "com.acme.other", 90);
         let plan = plan_for(&layout, &FakeHost::idle(), std::slice::from_ref(&covered));
         let rows = group(&plan, APP_CACHES);
-        assert!(rows.iter().all(|row| row.path != covered), "{rows:?}");
+        assert!(
+            rows.iter().all(|row| !row.paths.contains(&covered)),
+            "{rows:?}"
+        );
         row(rows, &other);
     }
 
@@ -398,7 +406,10 @@ mod tests {
         let parent = inner.parent().unwrap().to_path_buf();
         let plan = plan_for(&layout, &FakeHost::idle(), &[inner]);
         let rows = group(&plan, APP_CACHES);
-        assert!(rows.iter().all(|row| row.path != parent), "{rows:?}");
+        assert!(
+            rows.iter().all(|row| !row.paths.contains(&parent)),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -414,7 +425,10 @@ mod tests {
         }
         let kept = cache(&layout, "com.acme.kept", 90);
         let plan = plan_for(&layout, &FakeHost::idle(), &[]);
-        let paths: Vec<_> = group(&plan, APP_CACHES).iter().map(|r| &r.path).collect();
+        let paths: Vec<_> = group(&plan, APP_CACHES)
+            .iter()
+            .flat_map(|r| &r.paths)
+            .collect();
         assert_eq!(paths, [&kept]);
     }
 
@@ -528,13 +542,18 @@ mod tests {
         assert!(!row(group(&plan, BROWSER_CACHES), &firefox).selected);
     }
 
-    #[test]
-    fn safari_has_a_row_for_each_of_its_two_folders() {
-        let (_temp, layout) = sandbox();
-        let outer = cache(&layout, "com.apple.Safari", 90);
+    fn safari_container(layout: &Layout) -> PathBuf {
         let container = layout.user("Library/Containers/com.apple.Safari/Data/Library/Caches");
         fs::create_dir_all(&container).unwrap();
         fs::write(container.join("data"), vec![0_u8; 4096]).unwrap();
+        container
+    }
+
+    #[test]
+    fn safari_has_one_row_with_both_of_its_folders() {
+        let (_temp, layout) = sandbox();
+        let outer = cache(&layout, "com.apple.Safari", 90);
+        let container = safari_container(&layout);
         let host = FakeHost::default();
         running(
             &host,
@@ -542,8 +561,48 @@ mod tests {
         );
         let plan = plan_for(&layout, &host, &[]);
         let rows = group(&plan, BROWSER_CACHES);
-        assert!(!row(rows, &outer).selected);
-        assert!(!row(rows, &container).selected);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].paths, [outer, container]);
+        assert!(!rows[0].selected);
+    }
+
+    #[test]
+    fn arc_has_one_row_with_both_of_its_folders() {
+        let (_temp, layout) = sandbox();
+        let id_folder = cache(&layout, "company.thebrowser.Browser", 90);
+        let named_folder = cache(&layout, "Arc", 90);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        let rows = group(&plan, BROWSER_CACHES);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].paths, [id_folder, named_folder]);
+    }
+
+    #[test]
+    fn a_refused_folder_leaves_the_other_one_in_the_row() {
+        let (_temp, layout) = sandbox();
+        let outer = cache(&layout, "com.apple.Safari", 90);
+        let container = safari_container(&layout);
+        fs::set_permissions(&container, fs::Permissions::from_mode(0o000)).unwrap();
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        fs::set_permissions(&container, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(group(&plan, BROWSER_CACHES)[0].paths, [outer]);
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+    }
+
+    #[test]
+    fn a_browser_gets_one_note_when_both_folders_are_refused() {
+        let (_temp, layout) = sandbox();
+        let outer = cache(&layout, "com.apple.Safari", 90);
+        let container = safari_container(&layout);
+        for folder in [&outer, &container] {
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        for folder in [&outer, &container] {
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(group(&plan, BROWSER_CACHES).is_empty());
     }
 
     #[test]
@@ -659,6 +718,7 @@ mod tests {
         let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         let rows: Vec<_> = plan.groups.iter().flat_map(|g| &g.rows).collect();
         assert!(!rows.is_empty());
-        assert!(rows.iter().all(|row| !row.path.starts_with(&support)));
+        let inside = |path: &PathBuf| path.starts_with(&support);
+        assert!(rows.iter().all(|row| !row.paths.iter().any(inside)));
     }
 }

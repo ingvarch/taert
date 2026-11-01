@@ -350,6 +350,46 @@ fn render_text(state: &SelectState, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+fn scan_with_a_row_of_two_folders() -> CategoryScan {
+    let mut scan = sample_scan();
+    scan.groups[0].items[0].also = vec![ScanItem::new(
+        PathBuf::from("/Users/test/Library/Containers/second"),
+        5_000_000,
+        true,
+        false,
+    )];
+    scan
+}
+
+#[test]
+fn a_row_of_two_folders_says_it_holds_one_more() {
+    let state = SelectState::new(scan_with_a_row_of_two_folders());
+    let text = render_text(&state, 100, 30);
+    assert!(text.contains("+1 folder"), "{text}");
+}
+
+#[test]
+fn search_finds_a_row_by_its_second_folder() {
+    let mut state = SelectState::new(scan_with_a_row_of_two_folders());
+    state.search_query = "containers/second".to_string();
+    let found: Vec<_> = state
+        .flattened_rows()
+        .into_iter()
+        .filter(|row| row.is_item())
+        .collect();
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
+fn the_review_screen_says_a_row_holds_one_more_folder() {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let state = ReviewState::new(scan_with_a_row_of_two_folders());
+    let theme = Theme::new();
+    terminal.draw(|f| render_review(f, &state, &theme)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(format!("{buffer:?}").contains("+1 folder"));
+}
+
 #[test]
 fn a_note_shows_on_the_list_without_opening_the_dialog() {
     let mut scan = sample_scan();

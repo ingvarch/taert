@@ -35,6 +35,9 @@ impl PlainRunner {
                     format_bytes(item.size_bytes),
                     item.path.display()
                 ));
+                for folder in &item.also {
+                    text.push_str(&format!("{:22}{}\n", "", folder.path.display()));
+                }
                 index += 1;
             }
         }
@@ -139,6 +142,9 @@ impl PlainRunner {
                 format_bytes(item.size_bytes),
                 item.path.display()
             );
+            for folder in &item.also {
+                println!("{:15}{}", "", folder.path.display());
+            }
         }
 
         println!(
@@ -198,6 +204,8 @@ impl PlainRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::scanner::{ScanItem, ToolGroup};
+    use std::path::PathBuf;
 
     fn scan_with_note() -> CategoryScan {
         CategoryScan {
@@ -206,6 +214,20 @@ mod tests {
             groups: Vec::new(),
             notes: vec!["Safari needs Full Disk Access.".to_string()],
         }
+    }
+
+    #[test]
+    fn a_row_prints_every_folder_it_holds() {
+        let mut row = ScanItem::new(PathBuf::from("/first"), 3000, true, false);
+        row.also = vec![ScanItem::new(PathBuf::from("/second"), 1000, true, false)];
+        let mut scan = scan_with_note();
+        scan.groups.push(ToolGroup {
+            tool: "Browser caches".to_string(),
+            items: vec![row],
+        });
+        let text = PlainRunner::scan_text(&scan);
+        assert!(text.contains("/first"), "{text}");
+        assert!(text.contains("/second"), "{text}");
     }
 
     #[test]

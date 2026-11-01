@@ -18,7 +18,7 @@ use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ColumnTitles, ListRow, SIZE_W, path_spans};
+use super::components::list::{ColumnTitles, ListRow, SIZE_W, more_folders, path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::theme::Theme;
@@ -91,6 +91,7 @@ pub struct FlattenedRow {
     pub full_path: Option<PathBuf>,
     pub item_count: usize,
     pub created: Option<SystemTime>,
+    pub more_folders: usize,
 }
 
 impl FlattenedRow {
@@ -171,15 +172,15 @@ impl SelectState {
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| {
-                    if self.search_query.is_empty() {
-                        true
-                    } else {
-                        item.path
+                    let query = self.search_query.to_lowercase();
+                    item.folders().any(|folder| {
+                        folder
+                            .path
                             .display()
                             .to_string()
                             .to_lowercase()
-                            .contains(&self.search_query.to_lowercase())
-                    }
+                            .contains(&query)
+                    })
                 })
                 .collect();
 
@@ -199,6 +200,7 @@ impl SelectState {
                 full_path: None,
                 item_count: 0,
                 created: None,
+                more_folders: 0,
             };
 
             if !rows.is_empty() {
@@ -222,6 +224,7 @@ impl SelectState {
                 full_path: None,
                 item_count: matching_items.len(),
                 created: None,
+                more_folders: 0,
             });
 
             if self.sort_order.is_some() {
@@ -247,6 +250,7 @@ impl SelectState {
                     full_path: Some(item.path.clone()),
                     item_count: 0,
                     created: item.modified,
+                    more_folders: item.also.len(),
                 });
             }
 
@@ -601,6 +605,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                         spans = vec![Span::styled(rest, theme.body())];
                     }
                 }
+                spans.extend(more_folders(row.more_folders, theme));
                 spans
             } else {
                 vec![Span::styled(&row.display_path, theme.body())]

@@ -133,19 +133,12 @@ impl Cleaner {
                 continue;
             }
 
-            let checked = Self::remove_verified(item, |path| Safety::can_remove(path, ignore));
-            match checked {
-                Ok(()) => {
-                    report.removed_count += 1;
-                    report.freed_bytes = report.freed_bytes.saturating_add(item.size_bytes);
-                }
-                Err(err) => {
-                    report.failures.push(RemovalFailure {
-                        path: item.path.clone(),
-                        error: err.to_string(),
-                    });
-                }
+            let failures = Self::remove_row(item, ignore);
+            if failures.is_empty() {
+                report.removed_count += 1;
+                report.freed_bytes = report.freed_bytes.saturating_add(item.size_bytes);
             }
+            report.failures.extend(failures);
         }
 
         // Images share layers, so only the daemon knows what a removal really freed.
@@ -159,6 +152,25 @@ impl Cleaner {
         report.freed_bytes = report.freed_bytes.saturating_add(docker_freed);
 
         report
+    }
+
+    /// Checks every folder of a row before the first one goes.
+    fn remove_row(item: &ScanItem, ignore: &IgnoreStore) -> Vec<RemovalFailure> {
+        let check = |path: &Path| Safety::can_remove(path, ignore);
+        let failure = |folder: &ScanItem, error: ItemRemovalError| RemovalFailure {
+            path: folder.path.clone(),
+            error: error.to_string(),
+        };
+        let refused: Vec<RemovalFailure> = item
+            .folders()
+            .filter_map(|folder| Some(failure(folder, Self::verify(folder, check).err()?)))
+            .collect();
+        if !refused.is_empty() {
+            return refused;
+        }
+        item.folders()
+            .filter_map(|folder| Some(failure(folder, Self::remove_verified(folder, check).err()?)))
+            .collect()
     }
 
     /// Runs the safety rule, confirms the path is the one scanned, and removes it.
@@ -420,6 +432,46 @@ mod tests {
         assert!(target.exists());
         assert!(error.to_string().contains("Safety check failed"));
         assert!(!error.is_permission_denied());
+    }
+
+    fn row_of_two_folders(root: &Path) -> (ScanItem, PathBuf, PathBuf) {
+        let (first, second) = (root.join("first"), root.join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let mut row = ScanItem::new(first.clone(), 7, true, false);
+        row.also = vec![ScanItem::new(second.clone(), 3, true, false)];
+        (row, first, second)
+    }
+
+    #[test]
+    fn a_row_of_two_folders_goes_whole_and_counts_once() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.removed_count, 1);
+        assert!(!first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn a_row_stays_whole_when_a_later_folder_was_replaced() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+        fs::remove_dir(&second).unwrap();
+        fs::write(&second, b"something else").unwrap();
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        assert_eq!(report.removed_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, second);
+        assert!(first.exists());
+        assert!(second.exists());
     }
 
     #[test]
