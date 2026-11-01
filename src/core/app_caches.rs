@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 
-use super::apps::find_apps;
+use super::apps::{InstalledApp, find_apps};
 use super::host::Host;
 use super::layout::Layout;
 use super::path_utils::prettify_path;
@@ -39,14 +39,18 @@ pub struct CachePlan {
 
 struct Browser {
     name: &'static str,
-    bundle: &'static str,
+    /// Apps that write to `caches`. Safari has none: `find_apps` leaves out macOS apps.
+    ids: &'static [&'static str],
+    /// Bundle names, for a browser that runs from outside the app folders, and for Safari.
+    bundles: &'static [&'static str],
     caches: &'static [&'static str],
 }
 
 const BROWSERS: &[Browser] = &[
     Browser {
         name: "Safari",
-        bundle: "Safari.app",
+        ids: &[],
+        bundles: &["Safari.app"],
         caches: &[
             "Library/Caches/com.apple.Safari",
             "Library/Containers/com.apple.Safari/Data/Library/Caches",
@@ -54,27 +58,40 @@ const BROWSERS: &[Browser] = &[
     },
     Browser {
         name: "Chrome",
-        bundle: "Google Chrome.app",
+        ids: &["com.google.Chrome"],
+        bundles: &["Google Chrome.app"],
         caches: &["Library/Caches/Google/Chrome"],
     },
     Browser {
         name: "Edge",
-        bundle: "Microsoft Edge.app",
+        ids: &["com.microsoft.edgemac"],
+        bundles: &["Microsoft Edge.app"],
         caches: &["Library/Caches/Microsoft Edge"],
     },
     Browser {
         name: "Brave",
-        bundle: "Brave Browser.app",
+        ids: &["com.brave.Browser"],
+        bundles: &["Brave Browser.app"],
         caches: &["Library/Caches/BraveSoftware/Brave-Browser"],
     },
     Browser {
         name: "Firefox",
-        bundle: "Firefox.app",
+        ids: &[
+            "org.mozilla.firefox",
+            "org.mozilla.nightly",
+            "org.mozilla.firefoxdeveloperedition",
+        ],
+        bundles: &[
+            "Firefox.app",
+            "Firefox Nightly.app",
+            "Firefox Developer Edition.app",
+        ],
         caches: &["Library/Caches/Firefox"],
     },
     Browser {
         name: "Arc",
-        bundle: "Arc.app",
+        ids: &["company.thebrowser.Browser"],
+        bundles: &["Arc.app"],
         caches: &[
             "Library/Caches/company.thebrowser.Browser",
             "Library/Caches/Arc",
@@ -91,16 +108,24 @@ type Processes = [(u32, u32, String)];
 struct Running<'a>(Option<&'a Processes>);
 
 impl Running<'_> {
-    fn unknown(&self) -> bool {
-        self.0.is_none()
+    fn app_with_id(&self, apps: &[InstalledApp], ids: &[&str]) -> bool {
+        let has_id = |app: &&InstalledApp| {
+            app.bundle_id
+                .as_deref()
+                .is_some_and(|id| ids.iter().any(|known| id.eq_ignore_ascii_case(known)))
+        };
+        self.0.is_none_or(|table| {
+            apps.iter()
+                .filter(has_id)
+                .any(|app| runs_inside(table, &app.path))
+        })
     }
 
-    fn app(&self, bundle: &Path) -> bool {
-        self.0.is_none_or(|table| runs_inside(table, bundle))
-    }
-
-    fn bundle_named(&self, bundle: &str) -> bool {
-        self.0.is_none_or(|table| runs_bundle_named(table, bundle))
+    fn browser(&self, browser: &Browser, apps: &[InstalledApp]) -> bool {
+        self.app_with_id(apps, browser.ids)
+            || self
+                .0
+                .is_some_and(|table| runs_bundle_named(table, browser.bundles))
     }
 }
 
@@ -136,11 +161,11 @@ fn runs_inside(processes: &Processes, bundle: &Path) -> bool {
     })
 }
 
-fn runs_bundle_named(processes: &Processes, bundle: &str) -> bool {
+fn runs_bundle_named(processes: &Processes, bundles: &[&str]) -> bool {
     processes.iter().any(|(_, _, program)| {
         Path::new(program)
             .components()
-            .any(|part| part.as_os_str() == bundle)
+            .any(|part| bundles.iter().any(|bundle| part.as_os_str() == *bundle))
     })
 }
 
@@ -155,10 +180,10 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 fn app_cache_group(
     layout: &Layout,
     running: &Running,
+    apps: &[InstalledApp],
     covered: &[PathBuf],
     now: SystemTime,
 ) -> CacheGroup {
-    let apps = find_apps(layout);
     let cutoff = now - STALE_AFTER;
     let Ok(entries) = fs::read_dir(layout.user(CACHES)) else {
         return CacheGroup {
@@ -176,17 +201,8 @@ fn app_cache_group(
     let rows = candidates
         .into_par_iter()
         .map(|path| {
-            let name = path.file_name().map(|name| name.to_string_lossy());
-            let running = running.unknown()
-                || apps
-                    .iter()
-                    .filter(|app| {
-                        app.bundle_id
-                            .as_deref()
-                            .zip(name.as_deref())
-                            .is_some_and(|(id, name)| id.eq_ignore_ascii_case(name))
-                    })
-                    .any(|app| running.app(&app.path));
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let running = running.app_with_id(apps, &[&name]);
             let selected = starts_selected(!changed_since(&path, cutoff), running);
             CacheRow { path, selected }
         })
@@ -197,10 +213,15 @@ fn app_cache_group(
     }
 }
 
-fn browser_group(layout: &Layout, running: &Running, notes: &mut Vec<String>) -> CacheGroup {
+fn browser_group(
+    layout: &Layout,
+    running: &Running,
+    apps: &[InstalledApp],
+    notes: &mut Vec<String>,
+) -> CacheGroup {
     let mut rows = Vec::new();
     for browser in BROWSERS {
-        let running = running.bundle_named(browser.bundle);
+        let running = running.browser(browser, apps);
         for relative in browser.caches {
             let path = layout.user(relative);
             match fs::read_dir(&path) {
@@ -236,7 +257,8 @@ pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime
             "taert could not list the running programs, so no cache starts selected.".to_string(),
         );
     }
-    let browsers = browser_group(layout, &running, &mut notes);
+    let apps = find_apps(layout);
+    let browsers = browser_group(layout, &running, &apps, &mut notes);
 
     let mut covered = named.to_vec();
     covered.extend(
@@ -245,9 +267,9 @@ pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime
             .flat_map(|browser| browser.caches)
             .map(|relative| layout.user(relative)),
     );
-    let apps = app_cache_group(layout, &running, &covered, now);
+    let app_rows = app_cache_group(layout, &running, &apps, &covered, now);
 
-    let groups = [apps, browsers]
+    let groups = [app_rows, browsers]
         .into_iter()
         .filter(|group| !group.rows.is_empty())
         .collect();
@@ -434,6 +456,76 @@ mod tests {
         let rows = group(&plan, BROWSER_CACHES);
         assert!(!row(rows, &chrome).selected);
         assert!(row(rows, &firefox).selected);
+    }
+
+    fn running_app(layout: &Layout, bundle: &str, id: &str, executable: &str) -> FakeHost {
+        let app = layout.system("Applications").join(bundle);
+        fake_app(&app, id, executable);
+        let host = FakeHost::default();
+        running(
+            &host,
+            &format!("{}/Contents/MacOS/{executable}", app.display()),
+        );
+        host
+    }
+
+    #[test]
+    fn every_firefox_channel_keeps_the_cache_they_share_unselected() {
+        for (bundle, id) in [
+            ("Firefox.app", "org.mozilla.firefox"),
+            ("Firefox Nightly.app", "org.mozilla.nightly"),
+            (
+                "Firefox Developer Edition.app",
+                "org.mozilla.firefoxdeveloperedition",
+            ),
+        ] {
+            let (_temp, layout) = sandbox();
+            let firefox = cache(&layout, "Firefox", 90);
+            let host = running_app(&layout, bundle, id, "firefox");
+            let plan = plan_for(&layout, &host, &[]);
+            assert!(
+                !row(group(&plan, BROWSER_CACHES), &firefox).selected,
+                "{bundle}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_browser_counts_as_running_by_its_bundle_id() {
+        let (_temp, layout) = sandbox();
+        let chrome = cache(&layout, "Google/Chrome", 90);
+        let firefox = cache(&layout, "Firefox", 90);
+        let host = running_app(&layout, "Chrome.app", "com.google.Chrome", "Google Chrome");
+        let plan = plan_for(&layout, &host, &[]);
+        let rows = group(&plan, BROWSER_CACHES);
+        assert!(!row(rows, &chrome).selected);
+        assert!(row(rows, &firefox).selected);
+    }
+
+    #[test]
+    fn a_renamed_browser_that_is_closed_starts_selected() {
+        let (_temp, layout) = sandbox();
+        let chrome = cache(&layout, "Google/Chrome", 90);
+        fake_app(
+            &layout.system("Applications/Chrome.app"),
+            "com.google.Chrome",
+            "Google Chrome",
+        );
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        assert!(row(group(&plan, BROWSER_CACHES), &chrome).selected);
+    }
+
+    #[test]
+    fn a_firefox_channel_outside_the_app_folders_counts_as_running() {
+        let (_temp, layout) = sandbox();
+        let firefox = cache(&layout, "Firefox", 90);
+        let host = FakeHost::default();
+        running(
+            &host,
+            "/Users/me/Downloads/Firefox Nightly.app/Contents/MacOS/firefox",
+        );
+        let plan = plan_for(&layout, &host, &[]);
+        assert!(!row(group(&plan, BROWSER_CACHES), &firefox).selected);
     }
 
     #[test]

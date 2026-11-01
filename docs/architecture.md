@@ -52,7 +52,7 @@ The freed size comes from the daemon's totals before and after, because images s
 [`app_caches.rs`](../src/core/app_caches.rs) adds two groups to the `junk` scan. App caches are the entries of `~/Library/Caches` one level deep. Browser caches are fixed paths per browser. Neither group walks `Application Support`, so profiles are never rows.
 
 - **No double counting**: an entry that a named target covers, or that is the parent of one, is left out. So are `com.apple.*`, `CloudKit`, and `FamilyCircle`.
-- **Selection**: `starts_selected(stale, running)` decides. Stale means nothing in the tree changed for 30 days, and anything unreadable counts as changed. Running comes from one process table per scan: an app cache matches its app by bundle id, a browser by its bundle name in the program path.
+- **Selection**: `starts_selected(stale, running)` decides. Stale means nothing in the tree changed for 30 days, and anything unreadable counts as changed. Running comes from one process table per scan. An app cache matches its app by bundle id from `find_apps`, and so does a browser. A browser's bundle name in the program path counts too, because `find_apps` leaves out Safari and copies outside the app folders.
 - **Refused reads**: when macOS refuses a browser folder, the scan carries a note that names Full Disk Access.
 - **Safety**: rows go through the same checks as every other row, and `Cleaner` verifies identity before removal.
 
