@@ -39,6 +39,7 @@ impl PlainRunner {
             format_bytes(scan.total_all_bytes()),
             format_bytes(scan.total_selected_bytes())
         );
+        Self::print_notes(&scan.notes);
     }
 
     /// Allow interactive selection in terminal line mode (e.g. "1, 3-5, all, none")

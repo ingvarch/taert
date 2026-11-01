@@ -56,6 +56,7 @@ fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
 
 fn sample_scan() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: "test".to_string(),
         title: "Test Scan".to_string(),
         groups: vec![ToolGroup {
@@ -605,6 +606,7 @@ fn docker_scan() -> CategoryScan {
         tags: tags.iter().map(|tag| tag.to_string()).collect(),
     };
     CategoryScan {
+        notes: Vec::new(),
         id: "docker".to_string(),
         title: "Docker".to_string(),
         groups: vec![
@@ -670,6 +672,7 @@ fn app_row(path: &str, size: u64, used: Option<SystemTime>) -> ScanItem {
 
 fn app_list() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: apps::LIST_ID.to_string(),
         title: "Uninstall apps".to_string(),
         groups: vec![
@@ -708,6 +711,7 @@ fn uninstall_plan() -> CategoryScan {
         evidence: Evidence::Name,
     };
     CategoryScan {
+        notes: Vec::new(),
         id: uninstaller::PLAN_ID.to_string(),
         title: "Review".to_string(),
         groups: vec![ToolGroup {
@@ -845,6 +849,7 @@ fn an_unreachable_docker_explains_itself() {
 #[test]
 fn a_docker_with_nothing_unused_says_so_in_its_own_words() {
     let scan = CategoryScan {
+        notes: Vec::new(),
         groups: Vec::new(),
         ..docker_scan()
     };

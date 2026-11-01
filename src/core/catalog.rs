@@ -283,6 +283,15 @@ impl Catalog {
         vec![Target::contents_only("Trash", paths)]
     }
 
+    /// Every path a `dev`, `junk`, or `ai` target covers.
+    pub fn named_paths() -> Vec<PathBuf> {
+        [Self::dev(), Self::junk(), Self::ai()]
+            .into_iter()
+            .flatten()
+            .flat_map(|target| target.paths)
+            .collect()
+    }
+
     pub fn targets_for(category: &str) -> Vec<Target> {
         match category {
             "dev" => Self::dev(),
@@ -305,5 +314,18 @@ mod tests {
         for t in &targets {
             assert!(!t.paths.is_empty());
         }
+    }
+
+    #[test]
+    fn named_paths_hold_the_paths_of_dev_junk_and_ai() {
+        let named = Catalog::named_paths();
+        for path in [
+            "Library/Caches/Homebrew",
+            "Library/Logs",
+            "Library/Caches/ollama",
+        ] {
+            assert!(named.contains(&Catalog::h(path)), "{path}");
+        }
+        assert!(!named.contains(&Catalog::h(".Trash")));
     }
 }

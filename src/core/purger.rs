@@ -248,6 +248,7 @@ impl Purger {
         groups.sort_by(|a, b| a.tool.cmp(&b.tool));
 
         CategoryScan {
+            notes: Vec::new(),
             id: SCAN_ID.to_string(),
             title: "Project Artifacts".to_string(),
             groups,

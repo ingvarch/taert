@@ -14,7 +14,7 @@ taert
 
 - **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Explore Storage, System Status, and Preferences. Keys `1` to `8` open a row directly.
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup items, disk usage and the largest items of your home folder for Explore Storage, and live CPU and memory for System Status. The main menu, System Status, Explore Storage, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
-- **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash.
+- **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. An app cache starts selected when nothing in it changed for 30 days and its app is not running. A browser cache starts selected when the browser is not running. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. Safari keeps part of its cache in a container that needs Full Disk Access for your terminal. Without it, taert skips that folder and tells you.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and safe deletion via `D` or `Backspace`.
 - **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights.
@@ -56,7 +56,7 @@ Every action can run directly from the command line without launching the full T
 # Scan developer caches (Xcode, Cargo, CocoaPods, Homebrew, Gradle)
 taert clean dev
 
-# Scan system junk, crash reports, and user logs
+# Scan system junk, user logs, app caches, and browser caches
 taert clean junk
 
 # Scan AI tool model and artifact caches

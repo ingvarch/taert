@@ -1248,6 +1248,7 @@ impl App {
             ];
             let total = categories.len();
             let mut groups = Vec::new();
+            let mut notes = Vec::new();
 
             for (idx, (id, title)) in categories.iter().enumerate() {
                 if cancel_clone.load(Ordering::Relaxed) {
@@ -1277,9 +1278,11 @@ impl App {
                 );
                 let _ = bridge_handle.join();
                 groups.extend(scan.groups);
+                notes.extend(scan.notes);
             }
 
             let scan = CategoryScan {
+                notes,
                 id: "clean".to_string(),
                 title: "All Caches".to_string(),
                 groups,
@@ -1395,6 +1398,7 @@ mod tests {
         let mut item = ScanItem::new("/nowhere/a".into(), 1, true, false);
         item.modified = None;
         CategoryScan {
+            notes: Vec::new(),
             id: id.to_string(),
             title: "List".to_string(),
             groups: vec![ToolGroup {
@@ -1544,6 +1548,7 @@ mod tests {
 
     fn empty_scan() -> CategoryScan {
         CategoryScan {
+            notes: Vec::new(),
             id: "ai".to_string(),
             title: "AI Tool Caches".to_string(),
             groups: Vec::new(),
@@ -1849,6 +1854,7 @@ mod tests {
             item
         };
         CategoryScan {
+            notes: Vec::new(),
             id: "dev".to_string(),
             title: "List".to_string(),
             groups: vec![
@@ -2109,6 +2115,7 @@ mod tests {
             });
             UninstallPlan {
                 scan: CategoryScan {
+                    notes: Vec::new(),
                     id: PLAN_ID.to_string(),
                     title: "Review".to_string(),
                     groups: vec![ToolGroup {

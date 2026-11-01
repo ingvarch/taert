@@ -112,6 +112,7 @@ impl SelectState {
     /// A scan that could not run, with the reason to show instead of a list.
     pub fn unavailable(title: &str, problem: String) -> Self {
         let mut state = Self::new(CategoryScan {
+            notes: Vec::new(),
             id: SCAN_ID.to_string(),
             title: title.to_string(),
             groups: Vec::new(),
@@ -123,6 +124,7 @@ impl SelectState {
     pub fn with_preserved_selection(scan: CategoryScan) -> Self {
         let is_table = scan.id == SCAN_ID || scan.id == apps::LIST_ID;
         let sort_order = is_table.then(SortOrder::default);
+        let notes = scan.notes.clone();
         let mut state = Self {
             scan,
             focused_index: 0,
@@ -132,7 +134,7 @@ impl SelectState {
             overlay: ModalOverlay::None,
             problem: None,
             sort_order,
-            notes: Vec::new(),
+            notes,
             asks_password: false,
         };
         state.move_to_start();

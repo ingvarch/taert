@@ -10,6 +10,7 @@ use taert::ui::workspace::{WorkspaceState, render_workspace};
 
 fn sample_scan() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: "test".to_string(),
         title: "Test Scan".to_string(),
         groups: vec![ToolGroup {
@@ -324,4 +325,12 @@ fn test_render_progress_screen_with_live_folders() {
     assert!(rendered.contains("~/Repos/ingvarch/taert/target"));
     assert!(rendered.contains("Found 1 item · 50.0 MB"));
     assert!(rendered.contains("Cancel"));
+}
+
+#[test]
+fn select_state_carries_the_notes_of_a_scan() {
+    let mut scan = sample_scan();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let state = SelectState::new(scan);
+    assert_eq!(state.notes, ["Safari needs Full Disk Access."]);
 }

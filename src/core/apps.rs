@@ -398,6 +398,7 @@ pub fn app_scan(apps: &[InstalledApp], layout: &Layout) -> CategoryScan {
         .collect();
 
     CategoryScan {
+        notes: Vec::new(),
         id: LIST_ID.to_string(),
         title: "Uninstall apps".to_string(),
         groups,

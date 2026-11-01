@@ -377,6 +377,7 @@ pub fn build_plan(
     };
     let mut plan = UninstallPlan {
         scan: CategoryScan {
+            notes: Vec::new(),
             id: PLAN_ID.to_string(),
             title: "Review".to_string(),
             groups: Vec::new(),
@@ -570,6 +571,12 @@ fn in_folder_named(path: &Path, folder: &str) -> bool {
     path.parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name == folder)
+}
+
+/// Every process as pid, parent pid, and program path.
+pub(crate) fn process_table(host: &dyn Host) -> Vec<(u32, u32, String)> {
+    let listing = host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
+    parse_process_table(&listing.stdout)
 }
 
 fn parse_process_table(table: &str) -> Vec<(u32, u32, String)> {
@@ -1067,10 +1074,7 @@ impl Uninstaller<'_> {
     /// Finds processes by where their program lives, which a name cannot spoof.
     fn running(&self, plan: &AppPlan) -> Running {
         let folders = program_folders(plan);
-        let listing = self
-            .host
-            .run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
-        let table = parse_process_table(&listing.stdout);
+        let table = process_table(self.host);
         let lineage = own_lineage(&table);
         let inside = table
             .iter()
@@ -2196,6 +2200,7 @@ mod run_tests {
     fn plans_of(apps: Vec<(InstalledApp, Vec<ScanItem>)>) -> UninstallPlan {
         let mut plan = UninstallPlan {
             scan: CategoryScan {
+                notes: Vec::new(),
                 id: PLAN_ID.to_string(),
                 title: "Review".to_string(),
                 groups: Vec::new(),
