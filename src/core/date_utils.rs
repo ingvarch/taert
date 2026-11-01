@@ -122,6 +122,28 @@ pub fn parse_rfc3339(text: &str) -> Option<SystemTime> {
         .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
+/// Formats a `SystemTime` into an RFC 3339 UTC string: "YYYY-MM-DDTHH:MM:SSZ".
+pub fn format_rfc3339(time: SystemTime) -> String {
+    if let Ok(dur) = time.duration_since(UNIX_EPOCH) {
+        let secs = dur.as_secs() as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::gmtime_r(&secs, &mut tm);
+        }
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    } else {
+        "1970-01-01T00:00:00Z".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +240,13 @@ mod tests {
         let formatted = format_date_only(time);
         assert_eq!(formatted.len(), 10);
         assert_eq!(formatted.matches('-').count(), 2);
+    }
+
+    #[test]
+    fn test_format_rfc3339() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_778_495_076);
+        let formatted = format_rfc3339(time);
+        assert_eq!(formatted, "2026-05-11T10:24:36Z");
+        assert_eq!(parse_rfc3339(&formatted), Some(time));
     }
 }

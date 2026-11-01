@@ -21,6 +21,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics
 - Doctor diagnostic command (`taert doctor`) to explain what is slowing the Mac down, heating it up, or draining battery with named causes and single actions
+- Local record of removals and changes (`taert history`) kept safely on this Mac
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, `--permanent`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 

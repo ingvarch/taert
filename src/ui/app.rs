@@ -39,6 +39,7 @@ use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport};
 use crate::core::docker;
 use crate::core::doctor;
+use crate::core::history::{HistoryLog, ItemOutcome};
 use crate::core::host::{Host, MacHost};
 use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
@@ -775,8 +776,22 @@ impl App {
                         // Confirm deletion!
                         let items: Vec<_> =
                             state.scan.selected_items().into_iter().cloned().collect();
+                        let command = match state.scan.id.as_str() {
+                            "dev" => "clean dev".to_string(),
+                            "junk" => "clean junk".to_string(),
+                            "ai" => "clean ai".to_string(),
+                            "trash" => "clean trash".to_string(),
+                            _ => "clean".to_string(),
+                        };
+                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(items.len()));
                         let report = Cleaner::new(&*self.host, RemovalMode::Permanent)
-                            .remove_items(&items, &self.ignore);
+                            .remove_items_with_callbacks(
+                                &items,
+                                &self.ignore,
+                                None::<fn(RemovalProgress)>,
+                                Some(|outcome: &ItemOutcome| session.record_item(outcome)),
+                            );
+                        session.finish();
                         state.report = Some(report);
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
@@ -1327,6 +1342,7 @@ impl App {
 
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
+            let scan_id = select.scan.id.clone();
             let (layout, host, permanent) =
                 (self.layout.clone(), self.host.clone(), self.permanent);
             let plan = self
@@ -1353,16 +1369,42 @@ impl App {
                         } else {
                             RemovalMode::Trash
                         };
-                        Uninstaller {
+                        let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
+                        let command = format!("uninstall {}", app_names.join(", "));
+                        let total = plan.scan.selected_items().len();
+                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                        let rep = Uninstaller {
                             host,
                             layout,
                             ignore,
                             mode,
                         }
-                        .run(&plan, on_progress)
+                        .run_with_outcome(&plan, on_progress, |outcome| session.record_item(outcome));
+                        session.finish();
+                        rep
                     }
-                    None => Cleaner::new(&*host, RemovalMode::Permanent)
-                        .remove_items_with_progress(&selected_items, &ignore, Some(on_progress)),
+                    None => {
+                        let command = match scan_id.as_str() {
+                            "docker" => "docker".to_string(),
+                            "purge" => "purge".to_string(),
+                            "dev" => "clean dev".to_string(),
+                            "junk" => "clean junk".to_string(),
+                            "ai" => "clean ai".to_string(),
+                            "trash" => "clean trash".to_string(),
+                            _ => "clean".to_string(),
+                        };
+                        let total = selected_items.len();
+                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                        let rep = Cleaner::new(&*host, RemovalMode::Permanent)
+                            .remove_items_with_callbacks(
+                                &selected_items,
+                                &ignore,
+                                Some(on_progress),
+                                Some(|outcome: &ItemOutcome| session.record_item(outcome)),
+                            );
+                        session.finish();
+                        rep
+                    }
                 };
                 let _ = tx.send(RemovalMessage::Finished(report));
             });
@@ -1403,13 +1445,18 @@ impl App {
 
             thread::spawn(move || {
                 let tx_prog = tx.clone();
-                let report = Cleaner::new(&*host, mode).remove_items_with_progress(
+                let command = "analyze".to_string();
+                let total = scan_items.len();
+                let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                let report = Cleaner::new(&*host, mode).remove_items_with_callbacks(
                     &scan_items,
                     &ignore,
                     Some(move |prog| {
                         let _ = tx_prog.send(RemovalMessage::Progress(prog));
                     }),
+                    Some(|outcome: &ItemOutcome| session.record_item(outcome)),
                 );
+                session.finish();
                 let _ = tx.send(RemovalMessage::Finished(report));
             });
 

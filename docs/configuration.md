@@ -9,6 +9,7 @@ taert stores user settings in standard macOS configuration directories:
 - **Settings**: `~/.config/taert/config.json`
 - **Protected Paths (Ignore List)**: `~/.config/taert/ignore.json`
 - **Project Folder Roots**: `~/.config/taert/project_folders.json`
+- **History Log**: `~/.config/taert/history.jsonl` (mode `0600`)
 
 ## Settings (`config.json`)
 
@@ -60,6 +61,7 @@ The following environment variables take precedence over configuration files:
 | `TAERT_APPEARANCE` | `dark`, `light` | Overrides detected terminal appearance for the current session |
 | `TAERT_ASCII` | `1`, `true` | Replaces Unicode glyphs with clean ASCII characters |
 | `TAERT_REDUCE_MOTION` | `1`, `true` | Disables progress spinners and animations for accessibility |
+| `TAERT_NO_HISTORY` | `1` | Turns off writing the local removal history log |
 | `NO_COLOR` | any non-empty | Disables ANSI color escapes and uses high-contrast text styles |
 
 For project architecture and safety guarantees, see [architecture.md](architecture.md).

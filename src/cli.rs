@@ -63,6 +63,9 @@ pub enum Command {
 
     /// Show current configuration and paths
     Config(ConfigArgs),
+
+    /// Keep a log of removals and show it with taert history
+    History(HistoryArgs),
 }
 
 #[derive(Debug, Args, Default)]
@@ -158,5 +161,24 @@ pub enum StartupAction {
     Enable {
         /// Label of the launchd service or name of the login item
         label: String,
+    },
+}
+
+#[derive(Debug, Args, Default)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub action: Option<HistoryAction>,
+
+    /// Limit the number of runs displayed
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryAction {
+    /// Show every item of one run
+    Show {
+        /// Identifier or prefix of the run to show
+        run: String,
     },
 }

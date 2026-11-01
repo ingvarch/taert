@@ -21,6 +21,7 @@ use super::apps::{
     official_uninstaller,
 };
 use super::cleaner::{Cleaner, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport};
+use super::history::{ItemOutcome, OutcomeKind};
 use super::host::{Host, Output, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
@@ -782,17 +783,18 @@ impl<'a> Job<'a> {
     }
 }
 
-struct Tally<F> {
+struct Tally<F, O> {
     report: RemovalReport,
     done: usize,
     total: usize,
     progress: F,
+    outcome: O,
     removed_paths: Vec<PathBuf>,
     /// Why root was refused. One answer holds for the whole run.
     root_refusal: Option<String>,
 }
 
-impl<F: FnMut(RemovalProgress)> Tally<F> {
+impl<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)> Tally<F, O> {
     fn step(&mut self, path: &Path) {
         self.done += 1;
         (self.progress)(RemovalProgress {
@@ -804,16 +806,24 @@ impl<F: FnMut(RemovalProgress)> Tally<F> {
 
     fn removed(&mut self, item: &ScanItem, mode: RemovalMode) {
         self.report.removed_count += 1;
-        match mode {
-            RemovalMode::Trash if !item.contents_only => {
-                self.report.trashed_bytes =
-                    self.report.trashed_bytes.saturating_add(item.size_bytes);
-            }
-            _ => {
-                self.report.freed_bytes = self.report.freed_bytes.saturating_add(item.size_bytes);
-            }
+        let is_trash = matches!(mode, RemovalMode::Trash) && !item.contents_only;
+        if is_trash {
+            self.report.trashed_bytes =
+                self.report.trashed_bytes.saturating_add(item.size_bytes);
+        } else {
+            self.report.freed_bytes = self.report.freed_bytes.saturating_add(item.size_bytes);
         }
         self.removed_paths.push(item.path.clone());
+        (self.outcome)(&ItemOutcome {
+            path: item.path.clone(),
+            bytes: item.size_bytes,
+            outcome: if is_trash {
+                OutcomeKind::Trashed
+            } else {
+                OutcomeKind::Removed
+            },
+            error: None,
+        });
     }
 
     fn removed_permanent(&mut self, item: &ScanItem) {
@@ -821,9 +831,16 @@ impl<F: FnMut(RemovalProgress)> Tally<F> {
     }
 
     fn failed(&mut self, path: &Path, error: impl Into<String>) {
+        let err_str = error.into();
+        (self.outcome)(&ItemOutcome {
+            path: path.to_path_buf(),
+            bytes: 0,
+            outcome: OutcomeKind::Failed,
+            error: Some(err_str.clone()),
+        });
         self.report.failures.push(RemovalFailure {
             path: path.to_path_buf(),
-            error: error.into(),
+            error: err_str,
         });
     }
 
@@ -866,6 +883,20 @@ impl Uninstaller<'_> {
         plan: &UninstallPlan,
         progress: impl FnMut(RemovalProgress),
     ) -> RemovalReport {
+        self.run_with_outcome(plan, progress, |_| {})
+    }
+
+    /// Removes what is selected in `plan`, reporting item-level outcomes to `outcome`.
+    pub fn run_with_outcome<F, O>(
+        &self,
+        plan: &UninstallPlan,
+        progress: F,
+        mut outcome: O,
+    ) -> RemovalReport
+    where
+        F: FnMut(RemovalProgress),
+        O: FnMut(&ItemOutcome),
+    {
         let mut tally = Tally {
             report: RemovalReport {
                 notes: plan.notes.clone(),
@@ -874,6 +905,7 @@ impl Uninstaller<'_> {
             done: 0,
             total: plan.scan.selected_items().len(),
             progress,
+            outcome: &mut outcome,
             removed_paths: Vec::new(),
             root_refusal: None,
         };
@@ -940,10 +972,10 @@ impl Uninstaller<'_> {
 
     /// Time passes between the review and the removal, so another copy of an
     /// app can be there by now. Its files then stay, like any app's that stays.
-    fn keep_files_for_copies<F: FnMut(RemovalProgress)>(
+    fn keep_files_for_copies<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
         &self,
         jobs: &mut [Job],
-        tally: &mut Tally<F>,
+        tally: &mut Tally<F, O>,
     ) {
         let going: Vec<PathBuf> = jobs
             .iter()
@@ -987,10 +1019,10 @@ impl Uninstaller<'_> {
     }
 
     /// A selected copy that did not go is an app that stays, for every step after.
-    fn keep_files_of_failed_copies<F: FnMut(RemovalProgress)>(
+    fn keep_files_of_failed_copies<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
         &self,
         jobs: &mut [Job],
-        tally: &mut Tally<F>,
+        tally: &mut Tally<F, O>,
     ) {
         let failed: Vec<InstalledApp> = jobs
             .iter()
@@ -1012,7 +1044,11 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn check_job<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    fn check_job<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &mut Job,
+        tally: &mut Tally<F, O>,
+    ) {
         let Some(bundle) = job.bundle else {
             return;
         };
@@ -1049,7 +1085,7 @@ impl Uninstaller<'_> {
 
     /// Everything that would hurt an app that stays, so it runs past the point
     /// where the password or Homebrew could still keep the app.
-    fn stop_app<F: FnMut(RemovalProgress)>(&self, job: &Job, tally: &mut Tally<F>) {
+    fn stop_app<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &Job, tally: &mut Tally<F, O>) {
         if job.blocked {
             return;
         }
@@ -1128,7 +1164,7 @@ impl Uninstaller<'_> {
         false
     }
 
-    fn force_stop<F: FnMut(RemovalProgress)>(&self, plan: &AppPlan, tally: &mut Tally<F>) {
+    fn force_stop<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, plan: &AppPlan, tally: &mut Tally<F, O>) {
         let name = &plan.app.name;
         let Running {
             mut pids,
@@ -1195,11 +1231,11 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn count_bundle<F: FnMut(RemovalProgress)>(
+    fn count_bundle<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
         &self,
         job: &mut Job,
         bundle: &ScanItem,
-        tally: &mut Tally<F>,
+        tally: &mut Tally<F, O>,
     ) {
         if !job.bundle_counted {
             job.bundle_counted = true;
@@ -1208,7 +1244,7 @@ impl Uninstaller<'_> {
     }
 
     /// Homebrew takes care of its own rights, so casks go before the root script.
-    fn remove_cask<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    fn remove_cask<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
         let (Some(bundle), Some(token)) = (job.pending_bundle(), job.plan.cask.as_deref()) else {
             return;
         };
@@ -1226,7 +1262,7 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_bundle<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    fn remove_bundle<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
         let Some(bundle) = job.pending_bundle() else {
             return;
         };
@@ -1245,7 +1281,7 @@ impl Uninstaller<'_> {
     }
 
     /// Drops what root must not touch.
-    fn vet_root_files<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    fn vet_root_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
         if std::mem::replace(&mut job.root_files_vetted, true) {
             return;
         }
@@ -1264,7 +1300,7 @@ impl Uninstaller<'_> {
     }
 
     /// Finds what root must do for this app, and blocks it if root must not.
-    fn vet_for_root<F: FnMut(RemovalProgress)>(&self, job: &mut Job, tally: &mut Tally<F>) {
+    fn vet_for_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
         job.in_root_script = false;
         if job.blocked {
             return;
@@ -1309,7 +1345,7 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_as_root<F: FnMut(RemovalProgress)>(&self, jobs: &mut [Job], tally: &mut Tally<F>) {
+    fn remove_as_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, jobs: &mut [Job], tally: &mut Tally<F, O>) {
         self.keep_files_of_failed_copies(jobs, tally);
         for job in jobs.iter_mut() {
             self.vet_for_root(job, tally);
@@ -1370,7 +1406,7 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_own_files<F: FnMut(RemovalProgress)>(&self, job: &Job, tally: &mut Tally<F>) {
+    fn remove_own_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &Job, tally: &mut Tally<F, O>) {
         if job.blocked {
             return;
         }
@@ -1478,7 +1514,7 @@ impl Uninstaller<'_> {
         let _ = fs::remove_file(&import);
     }
 
-    fn tidy_up<F: FnMut(RemovalProgress)>(&self, jobs: &[Job], tally: &mut Tally<F>) {
+    fn tidy_up<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, jobs: &[Job], tally: &mut Tally<F, O>) {
         let removed: Vec<&Job> = jobs.iter().filter(|job| job.bundle_done).collect();
         if !removed.is_empty() {
             self.clean_dock(&removed);
@@ -2329,6 +2365,32 @@ mod run_tests {
         });
 
         assert_eq!(seen, [(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn run_with_outcome_reports_each_item() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let cache = folder(layout.user("Library/Caches/com.acme.foo"));
+        let plan = plan_of(&foo, vec![leftover(&cache)]);
+        let host = FakeHost::default();
+        host.simulate_trash();
+        let ignore = IgnoreStore::default();
+        let mut outcomes = Vec::new();
+
+        Uninstaller {
+            host: &host,
+            layout: &layout,
+            ignore: &ignore,
+            mode: RemovalMode::Trash,
+        }
+        .run_with_outcome(&plan, |_| {}, |outcome| outcomes.push(outcome.clone()));
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].path, foo.path);
+        assert_eq!(outcomes[0].outcome, OutcomeKind::Trashed);
+        assert_eq!(outcomes[1].path, cache);
+        assert_eq!(outcomes[1].outcome, OutcomeKind::Trashed);
     }
 
     #[test]
