@@ -11,7 +11,7 @@ use super::apps::find_apps;
 use super::host::Host;
 use super::layout::Layout;
 use super::path_utils::prettify_path;
-use super::uninstaller::process_table;
+use super::uninstaller::checked_process_table;
 
 pub const APP_CACHES: &str = "App caches";
 pub const BROWSER_CACHES: &str = "Browser caches";
@@ -75,7 +75,10 @@ const BROWSERS: &[Browser] = &[
     Browser {
         name: "Arc",
         bundle: "Arc.app",
-        caches: &["Library/Caches/company.thebrowser.Browser"],
+        caches: &[
+            "Library/Caches/company.thebrowser.Browser",
+            "Library/Caches/Arc",
+        ],
     },
 ];
 
@@ -83,6 +86,23 @@ const BROWSERS: &[Browser] = &[
 const SYNC_STATE: &[&str] = &["CloudKit", "FamilyCircle"];
 
 type Processes = [(u32, u32, String)];
+
+/// What is running, or nothing known when `ps` failed. Unknown counts as running.
+struct Running<'a>(Option<&'a Processes>);
+
+impl Running<'_> {
+    fn unknown(&self) -> bool {
+        self.0.is_none()
+    }
+
+    fn app(&self, bundle: &Path) -> bool {
+        self.0.is_none_or(|table| runs_inside(table, bundle))
+    }
+
+    fn bundle_named(&self, bundle: &str) -> bool {
+        self.0.is_none_or(|table| runs_bundle_named(table, bundle))
+    }
+}
 
 /// A cache starts selected when nothing changed in it for a while and its app is not running.
 pub fn starts_selected(stale: bool, running: bool) -> bool {
@@ -109,9 +129,11 @@ fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
 }
 
 fn runs_inside(processes: &Processes, bundle: &Path) -> bool {
-    processes
-        .iter()
-        .any(|(_, _, program)| Path::new(program).starts_with(bundle))
+    let target = fs::canonicalize(bundle).ok();
+    processes.iter().any(|(_, _, program)| {
+        let program = Path::new(program);
+        program.starts_with(bundle) || target.as_ref().is_some_and(|t| program.starts_with(t))
+    })
 }
 
 fn runs_bundle_named(processes: &Processes, bundle: &str) -> bool {
@@ -132,7 +154,7 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 
 fn app_cache_group(
     layout: &Layout,
-    processes: &Processes,
+    running: &Running,
     covered: &[PathBuf],
     now: SystemTime,
 ) -> CacheGroup {
@@ -155,15 +177,16 @@ fn app_cache_group(
         .into_par_iter()
         .map(|path| {
             let name = path.file_name().map(|name| name.to_string_lossy());
-            let running = apps
-                .iter()
-                .filter(|app| {
-                    app.bundle_id
-                        .as_deref()
-                        .zip(name.as_deref())
-                        .is_some_and(|(id, name)| id.eq_ignore_ascii_case(name))
-                })
-                .any(|app| runs_inside(processes, &app.path));
+            let running = running.unknown()
+                || apps
+                    .iter()
+                    .filter(|app| {
+                        app.bundle_id
+                            .as_deref()
+                            .zip(name.as_deref())
+                            .is_some_and(|(id, name)| id.eq_ignore_ascii_case(name))
+                    })
+                    .any(|app| running.app(&app.path));
             let selected = starts_selected(!changed_since(&path, cutoff), running);
             CacheRow { path, selected }
         })
@@ -174,10 +197,10 @@ fn app_cache_group(
     }
 }
 
-fn browser_group(layout: &Layout, processes: &Processes, notes: &mut Vec<String>) -> CacheGroup {
+fn browser_group(layout: &Layout, running: &Running, notes: &mut Vec<String>) -> CacheGroup {
     let mut rows = Vec::new();
     for browser in BROWSERS {
-        let running = runs_bundle_named(processes, browser.bundle);
+        let running = running.bundle_named(browser.bundle);
         for relative in browser.caches {
             let path = layout.user(relative);
             match fs::read_dir(&path) {
@@ -205,9 +228,15 @@ fn browser_group(layout: &Layout, processes: &Processes, notes: &mut Vec<String>
 
 /// `named` lists the paths other targets already cover.
 pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime) -> CachePlan {
-    let processes = process_table(host);
+    let processes = checked_process_table(host);
+    let running = Running(processes.as_deref());
     let mut notes = Vec::new();
-    let browsers = browser_group(layout, &processes, &mut notes);
+    if processes.is_none() {
+        notes.push(
+            "taert could not list the running programs, so no cache starts selected.".to_string(),
+        );
+    }
+    let browsers = browser_group(layout, &running, &mut notes);
 
     let mut covered = named.to_vec();
     covered.extend(
@@ -216,7 +245,7 @@ pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime
             .flat_map(|browser| browser.caches)
             .map(|relative| layout.user(relative)),
     );
-    let apps = app_cache_group(layout, &processes, &covered, now);
+    let apps = app_cache_group(layout, &running, &covered, now);
 
     let groups = [apps, browsers]
         .into_iter()
@@ -279,7 +308,7 @@ mod tests {
     fn an_old_cache_of_an_unknown_app_starts_selected() {
         let (_temp, layout) = sandbox();
         let old = cache(&layout, "com.acme.old", 40);
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         assert!(row(group(&plan, APP_CACHES), &old).selected);
     }
 
@@ -287,7 +316,7 @@ mod tests {
     fn a_cache_changed_in_the_last_30_days_starts_unselected() {
         let (_temp, layout) = sandbox();
         let recent = cache(&layout, "com.acme.recent", 5);
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         assert!(!row(group(&plan, APP_CACHES), &recent).selected);
     }
 
@@ -302,7 +331,7 @@ mod tests {
         for dir in [folder.join("a/b"), folder.join("a"), folder.clone()] {
             fs::File::open(dir).unwrap().set_modified(old).unwrap();
         }
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         assert!(!row(group(&plan, APP_CACHES), &folder).selected);
     }
 
@@ -324,8 +353,7 @@ mod tests {
         let bundle = layout.system("Applications/Acme.app");
         fake_app(&bundle, "com.acme.app", "Acme");
         let old = cache(&layout, "com.acme.app", 90);
-        let host = FakeHost::default();
-        running(&host, "/usr/sbin/cfprefsd");
+        let host = FakeHost::idle();
         let plan = plan_for(&layout, &host, &[]);
         assert!(row(group(&plan, APP_CACHES), &old).selected);
     }
@@ -335,11 +363,7 @@ mod tests {
         let (_temp, layout) = sandbox();
         let covered = cache(&layout, "Homebrew", 90);
         let other = cache(&layout, "com.acme.other", 90);
-        let plan = plan_for(
-            &layout,
-            &FakeHost::default(),
-            std::slice::from_ref(&covered),
-        );
+        let plan = plan_for(&layout, &FakeHost::idle(), std::slice::from_ref(&covered));
         let rows = group(&plan, APP_CACHES);
         assert!(rows.iter().all(|row| row.path != covered), "{rows:?}");
         row(rows, &other);
@@ -350,7 +374,7 @@ mod tests {
         let (_temp, layout) = sandbox();
         let inner = cache(&layout, "Vendor/Tool", 90);
         let parent = inner.parent().unwrap().to_path_buf();
-        let plan = plan_for(&layout, &FakeHost::default(), &[inner]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[inner]);
         let rows = group(&plan, APP_CACHES);
         assert!(rows.iter().all(|row| row.path != parent), "{rows:?}");
     }
@@ -367,7 +391,7 @@ mod tests {
             cache(&layout, name, 90);
         }
         let kept = cache(&layout, "com.acme.kept", 90);
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         let paths: Vec<_> = group(&plan, APP_CACHES).iter().map(|r| &r.path).collect();
         assert_eq!(paths, [&kept]);
     }
@@ -384,7 +408,7 @@ mod tests {
         ] {
             cache(&layout, name, 90);
         }
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         assert!(group(&plan, APP_CACHES).is_empty());
     }
 
@@ -392,7 +416,7 @@ mod tests {
     fn a_closed_browser_cache_starts_selected_even_when_recent() {
         let (_temp, layout) = sandbox();
         let chrome = cache(&layout, "Google/Chrome", 0);
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         assert!(row(group(&plan, BROWSER_CACHES), &chrome).selected);
     }
 
@@ -431,24 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_profiles_are_never_rows() {
-        let (_temp, layout) = sandbox();
-        let profile = layout.user("Library/Application Support/Google/Chrome/Default");
-        fs::create_dir_all(&profile).unwrap();
-        fs::write(profile.join("Cookies"), vec![0_u8; 4096]).unwrap();
-        cache(&layout, "Google/Chrome", 90);
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
-        let all = plan.groups.iter().flat_map(|g| &g.rows);
-        assert!(all.into_iter().all(|row| !row.path.starts_with(&profile)));
-    }
-
-    #[test]
     fn a_refused_read_is_told_in_a_note() {
         let (_temp, layout) = sandbox();
         let container = layout.user("Library/Containers/com.apple.Safari/Data/Library/Caches");
         fs::create_dir_all(&container).unwrap();
         fs::set_permissions(&container, fs::Permissions::from_mode(0o000)).unwrap();
-        let plan = plan_for(&layout, &FakeHost::default(), &[]);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
         fs::set_permissions(&container, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             plan.notes
@@ -458,5 +470,103 @@ mod tests {
             plan.notes
         );
         assert!(group(&plan, BROWSER_CACHES).is_empty());
+    }
+
+    #[test]
+    fn nothing_starts_selected_when_the_process_list_fails() {
+        let (_temp, layout) = sandbox();
+        let old = cache(&layout, "com.acme.old", 90);
+        let chrome = cache(&layout, "Google/Chrome", 90);
+        let host = FakeHost::default();
+        host.fail("/bin/ps", "timed out");
+        let plan = plan_for(&layout, &host, &[]);
+        assert!(!row(group(&plan, APP_CACHES), &old).selected);
+        assert!(!row(group(&plan, BROWSER_CACHES), &chrome).selected);
+        assert!(
+            plan.notes.iter().any(|note| note.contains("running")),
+            "{:?}",
+            plan.notes
+        );
+    }
+
+    #[test]
+    fn an_app_linked_into_applications_counts_as_running_from_its_target() {
+        let (_temp, layout) = sandbox();
+        let target = layout.root.join("opt/homebrew/Caskroom/foo/1.0/Foo.app");
+        fake_app(&target, "com.foo.cask", "foo");
+        let apps_dir = layout.system("Applications");
+        fs::create_dir_all(&apps_dir).unwrap();
+        std::os::unix::fs::symlink(&target, apps_dir.join("Foo.app")).unwrap();
+        let old = cache(&layout, "com.foo.cask", 90);
+        let host = FakeHost::default();
+        running(&host, &format!("{}/Contents/MacOS/foo", target.display()));
+        let plan = plan_for(&layout, &host, &[]);
+        assert!(!row(group(&plan, APP_CACHES), &old).selected);
+    }
+
+    #[test]
+    fn arcs_own_cache_folder_is_a_browser_cache() {
+        let (_temp, layout) = sandbox();
+        let arc = cache(&layout, "Arc", 90);
+        let host = FakeHost::default();
+        running(&host, "/Applications/Arc.app/Contents/MacOS/Arc");
+        let plan = plan_for(&layout, &host, &[]);
+        assert!(!row(group(&plan, BROWSER_CACHES), &arc).selected);
+        assert!(group(&plan, APP_CACHES).is_empty());
+    }
+
+    fn stale_with_age(layout: &Layout, age: Duration, now: SystemTime) -> bool {
+        let folder = layout.user("Library/Caches/com.acme.edge");
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("data");
+        fs::write(&file, vec![0_u8; 4096]).unwrap();
+        let then = now - age;
+        fs::File::open(&file).unwrap().set_modified(then).unwrap();
+        fs::File::open(&folder).unwrap().set_modified(then).unwrap();
+        let plan = plan(layout, &FakeHost::idle(), &[], now);
+        row(group(&plan, APP_CACHES), &folder).selected
+    }
+
+    #[test]
+    fn a_cache_is_stale_from_exactly_30_days() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        let thirty = DAY * 30;
+        let (_temp, layout) = sandbox();
+        assert!(!stale_with_age(
+            &layout,
+            thirty - Duration::from_secs(1),
+            now
+        ));
+        assert!(stale_with_age(&layout, thirty, now));
+        assert!(stale_with_age(
+            &layout,
+            thirty + Duration::from_secs(1),
+            now
+        ));
+    }
+
+    #[test]
+    fn nothing_under_application_support_is_ever_a_row() {
+        let (_temp, layout) = sandbox();
+        let support = layout.user("Library/Application Support");
+        for browser in [
+            "Google/Chrome/Default",
+            "Microsoft Edge/Default",
+            "BraveSoftware/Brave-Browser/Default",
+            "Firefox/Profiles/main",
+            "Arc/User Data/Default",
+            "com.apple.Safari",
+        ] {
+            let profile = support.join(browser);
+            fs::create_dir_all(&profile).unwrap();
+            fs::write(profile.join("Cookies"), vec![0_u8; 4096]).unwrap();
+        }
+        for name in ["Google/Chrome", "Microsoft Edge", "Firefox", "Arc"] {
+            cache(&layout, name, 90);
+        }
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        let rows: Vec<_> = plan.groups.iter().flat_map(|g| &g.rows).collect();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| !row.path.starts_with(&support)));
     }
 }

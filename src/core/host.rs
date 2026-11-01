@@ -148,6 +148,13 @@ pub mod fake {
     }
 
     impl FakeHost {
+        /// A Mac where `ps` works and only the system runs.
+        pub fn idle() -> Self {
+            let host = Self::default();
+            host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+            host
+        }
+
         /// Later calls keep getting the last reply given for a command.
         pub fn reply(&self, command: &str, stdout: &str) {
             self.push(

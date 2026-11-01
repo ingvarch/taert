@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
@@ -477,6 +477,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .behind_dialog(!matches!(state.overlay, ModalOverlay::None));
 
     let content_rect = chrome.render(frame, theme);
+    let content_rect = render_notes(frame, content_rect, &state.scan.notes, theme);
 
     if total_count == 0 {
         render_nothing_to_show(frame, content_rect, state, theme);
@@ -643,6 +644,33 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     frame.render_widget(Paragraph::new(list_lines), list_rect);
 
     render_overlay(frame, state, theme);
+}
+
+/// Draws the notes at the bottom and returns the area left above them.
+fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) -> Rect {
+    let width = usize::from(area.width).max(1);
+    let wanted: usize = notes
+        .iter()
+        .map(|note| note.chars().count().div_ceil(width))
+        .sum();
+    let height = wanted.min(usize::from(area.height / 3)) as u16;
+    if height == 0 {
+        return area;
+    }
+    let lines: Vec<Line> = notes
+        .iter()
+        .map(|note| Line::from(Span::styled(note.clone(), theme.callout())))
+        .collect();
+    let notes_area = Rect {
+        y: area.y + area.height - height,
+        height,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), notes_area);
+    Rect {
+        height: area.height - height,
+        ..area
+    }
 }
 
 fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {

@@ -127,7 +127,16 @@ impl DirSizer {
         let mut direct_bytes: HashMap<PathBuf, u64> = HashMap::new();
         let mut direct_files: HashMap<PathBuf, usize> = HashMap::new();
 
+        // A walk that needs the pool it already runs on gives up as busy and reports 0 bytes.
+        let parallelism = if rayon::current_thread_index().is_some() {
+            jwalk::Parallelism::Serial
+        } else {
+            jwalk::Parallelism::RayonDefaultPool {
+                busy_timeout: std::time::Duration::from_secs(1),
+            }
+        };
         let walker = jwalk::WalkDir::new(path)
+            .parallelism(parallelism)
             .skip_hidden(false)
             .follow_links(false)
             .process_read_dir(|_, _, _, children| {
@@ -257,5 +266,20 @@ mod tests {
         let measurement = DirSizer::measure(&dir);
         assert!(measurement.bytes > 0);
         assert_eq!(measurement.status, MeasurementStatus::Complete);
+    }
+
+    #[test]
+    fn a_walk_inside_a_one_thread_pool_still_counts_every_file() {
+        let temp = tempdir().unwrap();
+        let nested = temp.path().join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("f"), vec![1_u8; 8192]).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let measurement = pool.install(|| DirSizer::measure(temp.path()));
+        assert_eq!(measurement.status, MeasurementStatus::Complete);
+        assert!(measurement.bytes >= 8192, "{measurement:?}");
     }
 }

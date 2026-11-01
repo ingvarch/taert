@@ -271,7 +271,7 @@ impl CategoryScanner {
             let found = app_caches::plan(
                 context.layout,
                 context.host,
-                &Catalog::named_paths(),
+                &Catalog::named_paths_in(&context.layout.home),
                 SystemTime::now(),
             );
             notes = found.notes;
@@ -321,16 +321,12 @@ mod tests {
     use crate::core::apps::testing::sandbox;
     use crate::core::cleaner::Cleaner;
     use crate::core::host::fake::FakeHost;
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     fn fill(layout: &Layout, relative: &str) -> PathBuf {
         let folder = layout.user(relative);
         fs::create_dir_all(&folder).unwrap();
-        let file = fs::File::create(folder.join("data")).unwrap();
-        (&file).write_all(&[1_u8; 8192]).unwrap();
-        // APFS counts no blocks for a file until it writes them out.
-        file.sync_all().unwrap();
+        fs::write(folder.join("data"), [1_u8; 8192]).unwrap();
         folder
     }
 
@@ -359,7 +355,7 @@ mod tests {
         let (_temp, layout) = sandbox();
         let app = fill(&layout, "Library/Caches/com.acme.app");
         let chrome = fill(&layout, "Library/Caches/Google/Chrome");
-        let scan = junk(&layout, &FakeHost::default(), &IgnoreStore::default());
+        let scan = junk(&layout, &FakeHost::idle(), &IgnoreStore::default());
         assert!(
             rows(&scan, app_caches::APP_CACHES)
                 .iter()
@@ -379,7 +375,7 @@ mod tests {
         let scan = CategoryScanner::scan_with(
             &ScanContext {
                 layout: &layout,
-                host: &FakeHost::default(),
+                host: &FakeHost::idle(),
             },
             "ai",
             "AI",
@@ -397,7 +393,7 @@ mod tests {
         let ignored = fill(&layout, "Library/Caches/com.acme.ignored");
         let kept = fill(&layout, "Library/Caches/com.acme.kept");
         let ignore = IgnoreStore::new(vec![ignored.display().to_string()]);
-        let scan = junk(&layout, &FakeHost::default(), &ignore);
+        let scan = junk(&layout, &FakeHost::idle(), &ignore);
         let found = rows(&scan, app_caches::APP_CACHES);
         assert!(found.iter().all(|item| item.path != ignored));
         assert!(found.iter().any(|item| item.path == kept));
@@ -409,7 +405,7 @@ mod tests {
         let container = layout.user("Library/Containers/com.apple.Safari/Data/Library/Caches");
         fs::create_dir_all(&container).unwrap();
         fs::set_permissions(&container, fs::Permissions::from_mode(0o000)).unwrap();
-        let scan = junk(&layout, &FakeHost::default(), &IgnoreStore::default());
+        let scan = junk(&layout, &FakeHost::idle(), &IgnoreStore::default());
         fs::set_permissions(&container, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             scan.notes
@@ -439,5 +435,31 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(chrome.exists());
         assert!(!firefox.exists());
+    }
+
+    #[test]
+    fn a_folder_a_named_target_covers_is_listed_once() {
+        let (_temp, layout) = sandbox();
+        let homebrew = fill(&layout, "Library/Caches/Homebrew");
+        let scan = junk(&layout, &FakeHost::idle(), &IgnoreStore::default());
+        let found = rows(&scan, app_caches::APP_CACHES);
+        assert!(found.iter().all(|item| item.path != homebrew), "{found:?}");
+    }
+
+    #[test]
+    fn every_cache_is_listed_when_rows_outnumber_the_threads() {
+        let (_temp, layout) = sandbox();
+        let folders: Vec<PathBuf> = (0..8)
+            .map(|n| fill(&layout, &format!("Library/Caches/com.acme.app{n}")))
+            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let scan = pool.install(|| junk(&layout, &FakeHost::idle(), &IgnoreStore::default()));
+        let found = rows(&scan, app_caches::APP_CACHES);
+        for folder in &folders {
+            assert!(found.iter().any(|item| &item.path == folder), "{folder:?}");
+        }
     }
 }

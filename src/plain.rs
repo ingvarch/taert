@@ -12,34 +12,40 @@ pub struct PlainRunner;
 impl PlainRunner {
     /// Print scan results in human-readable plain text format.
     pub fn print_scan(scan: &CategoryScan) {
-        println!("\n=== {} ===", scan.title);
+        print!("{}", Self::scan_text(scan));
+    }
+
+    fn scan_text(scan: &CategoryScan) -> String {
+        let mut text = format!("\n=== {} ===\n", scan.title);
         if scan.groups.is_empty() {
-            println!("No items found.");
-            return;
+            text.push_str("No items found.\n");
+            text.push_str(&Self::notes_text(&scan.notes));
+            return text;
         }
 
         let mut index = 1;
         for group in &scan.groups {
-            println!("\n[{}]", group.tool);
+            text.push_str(&format!("\n[{}]\n", group.tool));
             for item in &group.items {
                 let status_mark = if item.selected { "[x]" } else { "[ ]" };
-                println!(
-                    "  {:3}. {} {:>9}  {}",
+                text.push_str(&format!(
+                    "  {:3}. {} {:>9}  {}\n",
                     index,
                     status_mark,
                     format_bytes(item.size_bytes),
                     item.path.display()
-                );
+                ));
                 index += 1;
             }
         }
 
-        println!(
-            "\nTotal found: {}  |  Selected by default: {}",
+        text.push_str(&format!(
+            "\nTotal found: {}  |  Selected by default: {}\n",
             format_bytes(scan.total_all_bytes()),
             format_bytes(scan.total_selected_bytes())
-        );
-        Self::print_notes(&scan.notes);
+        ));
+        text.push_str(&Self::notes_text(&scan.notes));
+        text
     }
 
     /// Allow interactive selection in terminal line mode (e.g. "1, 3-5, all, none")
@@ -152,7 +158,8 @@ impl PlainRunner {
     /// Execute cleaning and print results
     pub fn execute_clean(scan: &CategoryScan, ignore: &IgnoreStore) -> RemovalReport {
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        let report = Cleaner::remove_items(&items, ignore);
+        let mut report = Cleaner::remove_items(&items, ignore);
+        report.notes.extend(scan.notes.iter().cloned());
         Self::print_report("Clean", &report);
         report
     }
@@ -176,11 +183,43 @@ impl PlainRunner {
     }
 
     pub fn print_notes(notes: &[String]) {
-        if !notes.is_empty() {
-            println!();
+        print!("{}", Self::notes_text(notes));
+    }
+
+    fn notes_text(notes: &[String]) -> String {
+        if notes.is_empty() {
+            return String::new();
         }
-        for note in notes {
-            println!("Note: {note}");
+        let lines: String = notes.iter().map(|note| format!("Note: {note}\n")).collect();
+        format!("\n{lines}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan_with_note() -> CategoryScan {
+        CategoryScan {
+            id: "junk".to_string(),
+            title: "System Junk".to_string(),
+            groups: Vec::new(),
+            notes: vec!["Safari needs Full Disk Access.".to_string()],
         }
+    }
+
+    #[test]
+    fn a_scan_with_no_rows_still_prints_its_notes() {
+        let text = PlainRunner::scan_text(&scan_with_note());
+        assert!(
+            text.contains("Note: Safari needs Full Disk Access."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_forced_clean_reports_the_notes_of_the_scan() {
+        let report = PlainRunner::execute_clean(&scan_with_note(), &IgnoreStore::default());
+        assert_eq!(report.notes, ["Safari needs Full Disk Access."]);
     }
 }

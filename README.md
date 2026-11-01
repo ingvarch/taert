@@ -15,7 +15,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Interactive storage browser with streaming progress, selection, deletion, and tree-aggregating cache
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
-- App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of running apps
+- App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of browsers and apps it sees running
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags

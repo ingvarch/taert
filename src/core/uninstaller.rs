@@ -575,8 +575,13 @@ fn in_folder_named(path: &Path, folder: &str) -> bool {
 
 /// Every process as pid, parent pid, and program path.
 pub(crate) fn process_table(host: &dyn Host) -> Vec<(u32, u32, String)> {
+    checked_process_table(host).unwrap_or_default()
+}
+
+/// The process table, or `None` when `ps` failed and the list cannot be trusted.
+pub(crate) fn checked_process_table(host: &dyn Host) -> Option<Vec<(u32, u32, String)>> {
     let listing = host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
-    parse_process_table(&listing.stdout)
+    listing.ok.then(|| parse_process_table(&listing.stdout))
 }
 
 fn parse_process_table(table: &str) -> Vec<(u32, u32, String)> {

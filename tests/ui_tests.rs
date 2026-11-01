@@ -334,3 +334,35 @@ fn select_state_carries_the_notes_of_a_scan() {
     let state = SelectState::new(scan);
     assert_eq!(state.notes, ["Safari needs Full Disk Access."]);
 }
+
+fn render_text(state: &SelectState, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let theme = Theme::new();
+    terminal.draw(|f| render_select(f, state, &theme)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_note_shows_on_the_list_without_opening_the_dialog() {
+    let mut scan = sample_scan();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let text = render_text(&SelectState::new(scan), 100, 30);
+    assert!(text.contains("Safari needs Full Disk Access."), "{text}");
+}
+
+#[test]
+fn a_note_shows_when_the_scan_found_no_rows() {
+    let mut scan = sample_scan();
+    scan.groups.clear();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let text = render_text(&SelectState::new(scan), 100, 30);
+    assert!(text.contains("Safari needs Full Disk Access."), "{text}");
+}

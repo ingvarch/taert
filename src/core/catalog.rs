@@ -1,6 +1,6 @@
 //! Target catalog for known caches and junk locations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::safety::Safety;
 
@@ -289,6 +289,18 @@ impl Catalog {
             .into_iter()
             .flatten()
             .flat_map(|target| target.paths)
+            .collect()
+    }
+
+    /// The same paths with `home` in place of the real home folder.
+    pub fn named_paths_in(home: &Path) -> Vec<PathBuf> {
+        let real = Safety::home_dir();
+        Self::named_paths()
+            .into_iter()
+            .map(|path| match path.strip_prefix(&real) {
+                Ok(rest) => home.join(rest),
+                Err(_) => path,
+            })
             .collect()
     }
 
