@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::ui::analyze::SortOrder;
+use crate::ui::components::text::plural;
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
@@ -312,6 +313,23 @@ pub fn path_spans(path: &Path, max_len: usize, theme: &Theme) -> Vec<Span<'stati
     } else {
         vec![Span::styled(truncated, theme.body())]
     }
+}
+
+/// A row's path and how many more folders it holds. A long path gives way to the count.
+pub fn row_path_spans(
+    path: &Path,
+    more_folders: usize,
+    max_len: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let count = (more_folders > 0).then(|| {
+        let count = plural(more_folders, "folder", "folders");
+        Span::styled(format!(" +{count}"), theme.footnote())
+    });
+    let count_width = count.as_ref().map_or(0, |span| span.content.width());
+    let mut spans = path_spans(path, max_len.saturating_sub(count_width), theme);
+    spans.extend(count);
+    spans
 }
 
 pub fn render_section_header_spans(

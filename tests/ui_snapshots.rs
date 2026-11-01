@@ -56,6 +56,7 @@ fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
 
 fn sample_scan() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: "test".to_string(),
         title: "Test Scan".to_string(),
         groups: vec![ToolGroup {
@@ -244,6 +245,72 @@ fn snapshot_select() {
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
         assert_snapshot!(format!("select_{label}"), output);
+    }
+}
+
+fn browser_caches_scan() -> CategoryScan {
+    let mut safari = ScanItem::new(
+        PathBuf::from("/Users/test/Library/Caches/com.apple.Safari"),
+        1_100_000_000,
+        true,
+        false,
+    );
+    safari.also = vec![ScanItem::new(
+        PathBuf::from("/Users/test/Library/Containers/com.apple.Safari/Data/Library/Caches"),
+        200_000_000,
+        true,
+        false,
+    )];
+    let chrome = ScanItem::new(
+        PathBuf::from("/Users/test/Library/Caches/Google/Chrome"),
+        2_400_000_000,
+        false,
+        false,
+    );
+    CategoryScan {
+        notes: vec![
+            "Firefox keeps a cache that macOS hides from this terminal. \
+             Give the terminal Full Disk Access in System Settings to include it."
+                .to_string(),
+        ],
+        id: "junk".to_string(),
+        title: "System Junk".to_string(),
+        groups: vec![ToolGroup {
+            tool: "Browser caches".to_string(),
+            items: vec![chrome, safari],
+        }],
+    }
+}
+
+#[test]
+fn snapshot_browser_caches_with_a_note() {
+    let state = SelectState::new(browser_caches_scan());
+    let theme = snapshot_theme();
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert_snapshot!(format!("select_browser_caches_{label}"), output);
+    }
+}
+
+#[test]
+fn snapshot_confirming_a_row_of_two_folders() {
+    let mut state = SelectState::with_preserved_selection(browser_caches_scan());
+    state.open_confirmation();
+    let theme = snapshot_theme();
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert_snapshot!(format!("select_browser_caches_confirm_{label}"), output);
+    }
+}
+
+#[test]
+fn the_confirmation_keeps_the_end_of_a_long_path() {
+    let mut state = SelectState::with_preserved_selection(browser_caches_scan());
+    state.open_confirmation();
+    let theme = snapshot_theme();
+    for &(w, h, _) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert!(output.contains("Data/Library/Caches"), "{output}");
     }
 }
 
@@ -569,12 +636,17 @@ fn the_sampler_runs_only_while_the_status_row_is_highlighted() {
 
 #[test]
 fn the_explore_row_picks_up_a_measured_home_folder() {
-    let home = taert::core::safety::Safety::home_dir();
+    // A temporary folder: the snapshot expires when its folder changes, and a real home changes.
+    let home = tempfile::tempdir().unwrap();
     let cache = Arc::new(RwLock::new(StorageCache::new()));
     let mut snapshot = sample_analyze().levels.pop().unwrap().snapshot;
-    snapshot.path = home.clone();
-    cache.write().unwrap().put_snapshot(home, snapshot);
+    snapshot.path = home.path().to_path_buf();
+    cache
+        .write()
+        .unwrap()
+        .put_snapshot(home.path().to_path_buf(), snapshot);
     let mut state = home_state(EXPLORE_STORAGE);
+    state.home = home.path().to_path_buf();
 
     state.tick(&cache);
 
@@ -605,6 +677,7 @@ fn docker_scan() -> CategoryScan {
         tags: tags.iter().map(|tag| tag.to_string()).collect(),
     };
     CategoryScan {
+        notes: Vec::new(),
         id: "docker".to_string(),
         title: "Docker".to_string(),
         groups: vec![
@@ -670,6 +743,7 @@ fn app_row(path: &str, size: u64, used: Option<SystemTime>) -> ScanItem {
 
 fn app_list() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: apps::LIST_ID.to_string(),
         title: "Uninstall apps".to_string(),
         groups: vec![
@@ -708,6 +782,7 @@ fn uninstall_plan() -> CategoryScan {
         evidence: Evidence::Name,
     };
     CategoryScan {
+        notes: Vec::new(),
         id: uninstaller::PLAN_ID.to_string(),
         title: "Review".to_string(),
         groups: vec![ToolGroup {
@@ -845,6 +920,7 @@ fn an_unreachable_docker_explains_itself() {
 #[test]
 fn a_docker_with_nothing_unused_says_so_in_its_own_words() {
     let scan = CategoryScan {
+        notes: Vec::new(),
         groups: Vec::new(),
         ..docker_scan()
     };

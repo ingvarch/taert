@@ -7,12 +7,27 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use super::cache::StorageCache;
 use super::safety::{FileIdentity, Safety};
+
+/// Walks get their own pool. On rayon's global pool, a walk gives up after a second of other
+/// `par_iter` work and the folder reads as empty. A walk holds every thread of this pool until it
+/// ends, so a measure started from inside a parallel walk waits for that walk.
+fn walk_parallelism() -> jwalk::Parallelism {
+    static POOL: LazyLock<Option<Arc<rayon::ThreadPool>>> =
+        LazyLock::new(|| rayon::ThreadPoolBuilder::new().build().ok().map(Arc::new));
+    match POOL.as_ref() {
+        Some(pool) => jwalk::Parallelism::RayonExistingPool {
+            pool: pool.clone(),
+            busy_timeout: None,
+        },
+        None => jwalk::Parallelism::Serial,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +143,7 @@ impl DirSizer {
         let mut direct_files: HashMap<PathBuf, usize> = HashMap::new();
 
         let walker = jwalk::WalkDir::new(path)
+            .parallelism(walk_parallelism())
             .skip_hidden(false)
             .follow_links(false)
             .process_read_dir(|_, _, _, children| {
@@ -225,7 +241,50 @@ impl DirSizer {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::time::Duration;
+
+    /// Every thread of a pool stays busy until this drops.
+    pub struct BusyPool(Arc<AtomicBool>);
+
+    impl BusyPool {
+        fn on(threads: usize, spawn: impl Fn(Box<dyn FnOnce() + Send>)) -> Self {
+            let busy = Self(Arc::default());
+            for _ in 0..threads {
+                let done = busy.0.clone();
+                spawn(Box::new(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }));
+            }
+            busy
+        }
+
+        pub fn global() -> Self {
+            Self::on(rayon::current_num_threads(), rayon::spawn)
+        }
+
+        /// The pool `DirSizer` measures on.
+        pub fn walks() -> Self {
+            let jwalk::Parallelism::RayonExistingPool { pool, .. } = walk_parallelism() else {
+                panic!("no walk pool");
+            };
+            Self::on(pool.current_num_threads(), |job| pool.spawn(job))
+        }
+    }
+
+    impl Drop for BusyPool {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::testing::BusyPool;
     use super::*;
     use std::io::Write;
     use tempfile::tempdir;
@@ -257,5 +316,33 @@ mod tests {
         let measurement = DirSizer::measure(&dir);
         assert!(measurement.bytes > 0);
         assert_eq!(measurement.status, MeasurementStatus::Complete);
+    }
+
+    #[test]
+    fn a_walk_finishes_while_every_global_pool_thread_is_busy() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("f"), vec![1_u8; 8192]).unwrap();
+
+        let busy = BusyPool::global();
+        let measurement = DirSizer::measure(temp.path());
+        drop(busy);
+
+        assert_eq!(measurement.status, MeasurementStatus::Complete);
+        assert!(measurement.bytes >= 8192, "{measurement:?}");
+    }
+
+    #[test]
+    fn a_walk_inside_a_one_thread_pool_still_counts_every_file() {
+        let temp = tempdir().unwrap();
+        let nested = temp.path().join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("f"), vec![1_u8; 8192]).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let measurement = pool.install(|| DirSizer::measure(temp.path()));
+        assert_eq!(measurement.status, MeasurementStatus::Complete);
+        assert!(measurement.bytes >= 8192, "{measurement:?}");
     }
 }

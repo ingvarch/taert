@@ -1247,7 +1247,7 @@ impl App {
                 ("trash", "Trash"),
             ];
             let total = categories.len();
-            let mut groups = Vec::new();
+            let mut scans = Vec::new();
 
             for (idx, (id, title)) in categories.iter().enumerate() {
                 if cancel_clone.load(Ordering::Relaxed) {
@@ -1268,22 +1268,17 @@ impl App {
                     }
                 });
 
-                let scan = CategoryScanner::scan(
+                scans.push(CategoryScanner::scan(
                     id,
                     title,
                     &ignore,
                     Some(prog_tx),
                     Some(Arc::clone(&cancel_clone)),
-                );
+                ));
                 let _ = bridge_handle.join();
-                groups.extend(scan.groups);
             }
 
-            let scan = CategoryScan {
-                id: "clean".to_string(),
-                title: "All Caches".to_string(),
-                groups,
-            };
+            let scan = CategoryScan::combined("All Caches", scans);
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
@@ -1395,6 +1390,7 @@ mod tests {
         let mut item = ScanItem::new("/nowhere/a".into(), 1, true, false);
         item.modified = None;
         CategoryScan {
+            notes: Vec::new(),
             id: id.to_string(),
             title: "List".to_string(),
             groups: vec![ToolGroup {
@@ -1544,6 +1540,7 @@ mod tests {
 
     fn empty_scan() -> CategoryScan {
         CategoryScan {
+            notes: Vec::new(),
             id: "ai".to_string(),
             title: "AI Tool Caches".to_string(),
             groups: Vec::new(),
@@ -1849,6 +1846,7 @@ mod tests {
             item
         };
         CategoryScan {
+            notes: Vec::new(),
             id: "dev".to_string(),
             title: "List".to_string(),
             groups: vec![
@@ -2109,6 +2107,7 @@ mod tests {
             });
             UninstallPlan {
                 scan: CategoryScan {
+                    notes: Vec::new(),
                     id: PLAN_ID.to_string(),
                     title: "Review".to_string(),
                     groups: vec![ToolGroup {

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
@@ -18,7 +18,7 @@ use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ColumnTitles, ListRow, SIZE_W, path_spans};
+use super::components::list::{ColumnTitles, ListRow, SIZE_W, row_path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::theme::Theme;
@@ -28,7 +28,7 @@ use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::leftovers::UninstallRole;
-use crate::core::path_utils::prettify_path;
+use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use crate::core::uninstaller;
@@ -91,6 +91,7 @@ pub struct FlattenedRow {
     pub full_path: Option<PathBuf>,
     pub item_count: usize,
     pub created: Option<SystemTime>,
+    pub more_folders: usize,
 }
 
 impl FlattenedRow {
@@ -112,6 +113,7 @@ impl SelectState {
     /// A scan that could not run, with the reason to show instead of a list.
     pub fn unavailable(title: &str, problem: String) -> Self {
         let mut state = Self::new(CategoryScan {
+            notes: Vec::new(),
             id: SCAN_ID.to_string(),
             title: title.to_string(),
             groups: Vec::new(),
@@ -123,6 +125,7 @@ impl SelectState {
     pub fn with_preserved_selection(scan: CategoryScan) -> Self {
         let is_table = scan.id == SCAN_ID || scan.id == apps::LIST_ID;
         let sort_order = is_table.then(SortOrder::default);
+        let notes = scan.notes.clone();
         let mut state = Self {
             scan,
             focused_index: 0,
@@ -132,7 +135,7 @@ impl SelectState {
             overlay: ModalOverlay::None,
             problem: None,
             sort_order,
-            notes: Vec::new(),
+            notes,
             asks_password: false,
         };
         state.move_to_start();
@@ -169,15 +172,15 @@ impl SelectState {
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| {
-                    if self.search_query.is_empty() {
-                        true
-                    } else {
-                        item.path
+                    let query = self.search_query.to_lowercase();
+                    item.folders().any(|folder| {
+                        folder
+                            .path
                             .display()
                             .to_string()
                             .to_lowercase()
-                            .contains(&self.search_query.to_lowercase())
-                    }
+                            .contains(&query)
+                    })
                 })
                 .collect();
 
@@ -197,6 +200,7 @@ impl SelectState {
                 full_path: None,
                 item_count: 0,
                 created: None,
+                more_folders: 0,
             };
 
             if !rows.is_empty() {
@@ -220,6 +224,7 @@ impl SelectState {
                 full_path: None,
                 item_count: matching_items.len(),
                 created: None,
+                more_folders: 0,
             });
 
             if self.sort_order.is_some() {
@@ -245,6 +250,7 @@ impl SelectState {
                     full_path: Some(item.path.clone()),
                     item_count: 0,
                     created: item.modified,
+                    more_folders: item.also.len(),
                 });
             }
 
@@ -475,6 +481,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .behind_dialog(!matches!(state.overlay, ModalOverlay::None));
 
     let content_rect = chrome.render(frame, theme);
+    let content_rect = render_notes(frame, content_rect, &state.scan.notes, theme);
 
     if total_count == 0 {
         render_nothing_to_show(frame, content_rect, state, theme);
@@ -588,7 +595,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     theme.body(),
                 )]
             } else if let Some(path) = &row.full_path {
-                let mut spans = path_spans(path, row_width.saturating_sub(20), theme);
+                let max_len = row_width.saturating_sub(20);
+                let mut spans = row_path_spans(path, row.more_folders, max_len, theme);
                 if is_focused && state.path_scroll > 0 {
                     let rest: String = prettify_path(path)
                         .chars()
@@ -641,6 +649,31 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     frame.render_widget(Paragraph::new(list_lines), list_rect);
 
     render_overlay(frame, state, theme);
+}
+
+/// Draws the notes at the bottom and returns the area left above them.
+fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) -> Rect {
+    let lines: Vec<Line> = notes
+        .iter()
+        .map(|note| Line::from(Span::styled(note.clone(), theme.callout())))
+        .collect();
+    let text = Paragraph::new(lines).wrap(Wrap { trim: true });
+    let height = text
+        .line_count(area.width)
+        .min(usize::from(area.height / 2)) as u16;
+    if height == 0 {
+        return area;
+    }
+    let notes_area = Rect {
+        y: area.y + area.height - height,
+        height,
+        ..area
+    };
+    frame.render_widget(text, notes_area);
+    Rect {
+        height: area.height - height,
+        ..area
+    }
 }
 
 fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
@@ -782,6 +815,15 @@ fn render_confirmation_dialog(
     );
 
     let mut message = vec![Line::from(msg)];
+    let (path_width, _) = Modal::message_size(frame.area());
+    let selected = state.scan.selected_items();
+    for folder in selected.into_iter().flat_map(|item| &item.also) {
+        let path = middle_truncate(&prettify_path(&folder.path), path_width);
+        message.push(Line::from(Span::styled(
+            format!("Also removes {path}"),
+            theme.callout(),
+        )));
+    }
     let volumes = state
         .scan
         .selected_items()

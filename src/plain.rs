@@ -12,33 +12,43 @@ pub struct PlainRunner;
 impl PlainRunner {
     /// Print scan results in human-readable plain text format.
     pub fn print_scan(scan: &CategoryScan) {
-        println!("\n=== {} ===", scan.title);
+        print!("{}", Self::scan_text(scan));
+    }
+
+    fn scan_text(scan: &CategoryScan) -> String {
+        let mut text = format!("\n=== {} ===\n", scan.title);
         if scan.groups.is_empty() {
-            println!("No items found.");
-            return;
+            text.push_str("No items found.\n");
+            text.push_str(&Self::notes_text(&scan.notes));
+            return text;
         }
 
         let mut index = 1;
         for group in &scan.groups {
-            println!("\n[{}]", group.tool);
+            text.push_str(&format!("\n[{}]\n", group.tool));
             for item in &group.items {
                 let status_mark = if item.selected { "[x]" } else { "[ ]" };
-                println!(
-                    "  {:3}. {} {:>9}  {}",
+                text.push_str(&format!(
+                    "  {:3}. {} {:>9}  {}\n",
                     index,
                     status_mark,
                     format_bytes(item.size_bytes),
                     item.path.display()
-                );
+                ));
+                for folder in &item.also {
+                    text.push_str(&format!("{:22}{}\n", "", folder.path.display()));
+                }
                 index += 1;
             }
         }
 
-        println!(
-            "\nTotal found: {}  |  Selected by default: {}",
+        text.push_str(&format!(
+            "\nTotal found: {}  |  Selected by default: {}\n",
             format_bytes(scan.total_all_bytes()),
             format_bytes(scan.total_selected_bytes())
-        );
+        ));
+        text.push_str(&Self::notes_text(&scan.notes));
+        text
     }
 
     /// Allow interactive selection in terminal line mode (e.g. "1, 3-5, all, none")
@@ -132,6 +142,9 @@ impl PlainRunner {
                 format_bytes(item.size_bytes),
                 item.path.display()
             );
+            for folder in &item.also {
+                println!("{:15}{}", "", folder.path.display());
+            }
         }
 
         println!(
@@ -175,11 +188,53 @@ impl PlainRunner {
     }
 
     pub fn print_notes(notes: &[String]) {
-        if !notes.is_empty() {
-            println!();
+        print!("{}", Self::notes_text(notes));
+    }
+
+    fn notes_text(notes: &[String]) -> String {
+        if notes.is_empty() {
+            return String::new();
         }
-        for note in notes {
-            println!("Note: {note}");
+        let lines: String = notes.iter().map(|note| format!("Note: {note}\n")).collect();
+        format!("\n{lines}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::scanner::{ScanItem, ToolGroup};
+    use std::path::PathBuf;
+
+    fn scan_with_note() -> CategoryScan {
+        CategoryScan {
+            id: "junk".to_string(),
+            title: "System Junk".to_string(),
+            groups: Vec::new(),
+            notes: vec!["Safari needs Full Disk Access.".to_string()],
         }
+    }
+
+    #[test]
+    fn a_row_prints_every_folder_it_holds() {
+        let mut row = ScanItem::new(PathBuf::from("/first"), 3000, true, false);
+        row.also = vec![ScanItem::new(PathBuf::from("/second"), 1000, true, false)];
+        let mut scan = scan_with_note();
+        scan.groups.push(ToolGroup {
+            tool: "Browser caches".to_string(),
+            items: vec![row],
+        });
+        let text = PlainRunner::scan_text(&scan);
+        assert!(text.contains("/first"), "{text}");
+        assert!(text.contains("/second"), "{text}");
+    }
+
+    #[test]
+    fn a_scan_with_no_rows_still_prints_its_notes() {
+        let text = PlainRunner::scan_text(&scan_with_note());
+        assert!(
+            text.contains("Note: Safari needs Full Disk Access."),
+            "{text}"
+        );
     }
 }

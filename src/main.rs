@@ -91,17 +91,11 @@ fn handle_clean(args: &CleanArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreSto
         ],
     };
 
-    let mut combined_groups = Vec::new();
-    for (cat_id, cat_title) in categories {
-        let scan = CategoryScanner::scan(cat_id, cat_title, ignore, None, None);
-        combined_groups.extend(scan.groups);
-    }
-
-    let mut scan = CategoryScan {
-        id: "clean".to_string(),
-        title: "Clean Review".to_string(),
-        groups: combined_groups,
-    };
+    let scans = categories
+        .into_iter()
+        .map(|(id, title)| CategoryScanner::scan(id, title, ignore, None, None))
+        .collect();
+    let mut scan = CategoryScan::combined("Clean Review", scans);
 
     process_scan_result(&mut scan, cli, use_plain, ignore)
 }
@@ -167,6 +161,7 @@ fn process_scan_result(
     // 3. Force mode: unattended cleanup of default-selected items
     if cli.force {
         let report = PlainRunner::execute_clean(scan, ignore);
+        PlainRunner::print_notes(&scan.notes);
         return if report.failures.is_empty() {
             ExitCode::SUCCESS
         } else {

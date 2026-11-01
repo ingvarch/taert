@@ -1,6 +1,6 @@
 //! Target catalog for known caches and junk locations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::safety::Safety;
 
@@ -283,6 +283,27 @@ impl Catalog {
         vec![Target::contents_only("Trash", paths)]
     }
 
+    /// Every path a `dev`, `junk`, or `ai` target covers.
+    pub fn named_paths() -> Vec<PathBuf> {
+        [Self::dev(), Self::junk(), Self::ai()]
+            .into_iter()
+            .flatten()
+            .flat_map(|target| target.paths)
+            .collect()
+    }
+
+    /// The same paths with `home` in place of the real home folder.
+    pub fn named_paths_in(home: &Path) -> Vec<PathBuf> {
+        let real = Safety::home_dir();
+        Self::named_paths()
+            .into_iter()
+            .map(|path| match path.strip_prefix(&real) {
+                Ok(rest) => home.join(rest),
+                Err(_) => path,
+            })
+            .collect()
+    }
+
     pub fn targets_for(category: &str) -> Vec<Target> {
         match category {
             "dev" => Self::dev(),
@@ -305,5 +326,18 @@ mod tests {
         for t in &targets {
             assert!(!t.paths.is_empty());
         }
+    }
+
+    #[test]
+    fn named_paths_hold_the_paths_of_dev_junk_and_ai() {
+        let named = Catalog::named_paths();
+        for path in [
+            "Library/Caches/Homebrew",
+            "Library/Logs",
+            "Library/Caches/ollama",
+        ] {
+            assert!(named.contains(&Catalog::h(path)), "{path}");
+        }
+        assert!(!named.contains(&Catalog::h(".Trash")));
     }
 }

@@ -133,19 +133,7 @@ impl Cleaner {
                 continue;
             }
 
-            let checked = Self::remove_verified(item, |path| Safety::can_remove(path, ignore));
-            match checked {
-                Ok(()) => {
-                    report.removed_count += 1;
-                    report.freed_bytes = report.freed_bytes.saturating_add(item.size_bytes);
-                }
-                Err(err) => {
-                    report.failures.push(RemovalFailure {
-                        path: item.path.clone(),
-                        error: err.to_string(),
-                    });
-                }
-            }
+            Self::remove_row(item, ignore, &mut report);
         }
 
         // Images share layers, so only the daemon knows what a removal really freed.
@@ -159,6 +147,34 @@ impl Cleaner {
         report.freed_bytes = report.freed_bytes.saturating_add(docker_freed);
 
         report
+    }
+
+    /// Checks every folder of a row before the first one goes, then counts what went.
+    fn remove_row(item: &ScanItem, ignore: &IgnoreStore, report: &mut RemovalReport) {
+        let check = |path: &Path| Safety::can_remove(path, ignore);
+        let failure = |folder: &ScanItem, error: ItemRemovalError| RemovalFailure {
+            path: folder.path.clone(),
+            error: error.to_string(),
+        };
+        let refused: Vec<RemovalFailure> = item
+            .folders()
+            .filter_map(|folder| Some(failure(folder, Self::verify(folder, check).err()?)))
+            .collect();
+        if !refused.is_empty() {
+            report.failures.extend(refused);
+            return;
+        }
+        let mut any_went = false;
+        for folder in item.folders() {
+            match Self::remove_verified(folder, check) {
+                Ok(()) => {
+                    any_went = true;
+                    report.freed_bytes = report.freed_bytes.saturating_add(folder.own_bytes());
+                }
+                Err(error) => report.failures.push(failure(folder, error)),
+            }
+        }
+        report.removed_count += usize::from(any_went);
     }
 
     /// Runs the safety rule, confirms the path is the one scanned, and removes it.
@@ -222,6 +238,7 @@ mod tests {
     use super::*;
     use crate::core::docker::DockerObject;
     use std::cell::{Cell, RefCell};
+    use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
     use tempfile::tempdir;
 
@@ -422,6 +439,111 @@ mod tests {
         assert!(!error.is_permission_denied());
     }
 
+    fn row_of_two_folders(root: &Path) -> (ScanItem, PathBuf, PathBuf) {
+        let (first, second) = (root.join("first"), root.join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let mut row = ScanItem::new(first.clone(), 10, true, false);
+        row.also = vec![ScanItem::new(second.clone(), 3, true, false)];
+        (row, first, second)
+    }
+
+    /// `remove_dir_all` fails on `folder`, because nothing can leave this subfolder.
+    fn lock_inside(folder: &Path) -> PathBuf {
+        let locked = folder.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("data"), b"x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        locked
+    }
+
+    fn unlock(locked: &Path) {
+        fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_row_of_two_folders_goes_whole_and_counts_once() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, 10);
+        assert!(!first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn a_row_counts_its_first_folder_when_the_second_fails_during_removal() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+        let locked = lock_inside(&second);
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        unlock(&locked);
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, 7);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, second);
+        assert!(!first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn a_row_counts_its_second_folder_when_the_first_fails_during_removal() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+        let locked = lock_inside(&first);
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        unlock(&locked);
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, 3);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, first);
+        assert!(first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn a_row_counts_nothing_when_every_folder_fails_during_removal() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+        let locks = [lock_inside(&first), lock_inside(&second)];
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        locks.iter().for_each(|locked| unlock(locked));
+        assert_eq!(report.removed_count, 0);
+        assert_eq!(report.freed_bytes, 0);
+        assert_eq!(report.failures.len(), 2);
+    }
+
+    #[test]
+    fn a_row_stays_whole_when_a_later_folder_was_replaced() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (row, first, second) = row_of_two_folders(&root);
+        fs::remove_dir(&second).unwrap();
+        fs::write(&second, b"something else").unwrap();
+
+        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+
+        assert_eq!(report.removed_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, second);
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
     #[test]
     fn a_path_replaced_since_the_scan_stays() {
         let temp = tempdir().unwrap();
@@ -440,7 +562,6 @@ mod tests {
 
     #[test]
     fn a_folder_the_user_cannot_write_is_a_permission_error() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempdir().unwrap();
         let parent = temp.path().join("locked");
         let target = parent.join("data");

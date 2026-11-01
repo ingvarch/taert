@@ -21,7 +21,7 @@ use super::apps::{
     official_uninstaller,
 };
 use super::cleaner::{Cleaner, RemovalFailure, RemovalProgress, RemovalReport};
-use super::host::{Host, shell_quote};
+use super::host::{Host, Output, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
     Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary, vendor_token,
@@ -377,6 +377,7 @@ pub fn build_plan(
     };
     let mut plan = UninstallPlan {
         scan: CategoryScan {
+            notes: Vec::new(),
             id: PLAN_ID.to_string(),
             title: "Review".to_string(),
             groups: Vec::new(),
@@ -556,7 +557,7 @@ fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
     folders
 }
 
-fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
+pub(crate) fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
     folders
         .iter()
         .any(|folder| Path::new(program).starts_with(folder))
@@ -570,6 +571,16 @@ fn in_folder_named(path: &Path, folder: &str) -> bool {
     path.parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name == folder)
+}
+
+fn list_processes(host: &dyn Host) -> Output {
+    host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT)
+}
+
+/// The process table, or `None` when `ps` failed and the list cannot be trusted.
+pub(crate) fn checked_process_table(host: &dyn Host) -> Option<Vec<(u32, u32, String)>> {
+    let listing = list_processes(host);
+    listing.ok.then(|| parse_process_table(&listing.stdout))
 }
 
 fn parse_process_table(table: &str) -> Vec<(u32, u32, String)> {
@@ -1067,10 +1078,8 @@ impl Uninstaller<'_> {
     /// Finds processes by where their program lives, which a name cannot spoof.
     fn running(&self, plan: &AppPlan) -> Running {
         let folders = program_folders(plan);
-        let listing = self
-            .host
-            .run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT);
-        let table = parse_process_table(&listing.stdout);
+        // Whatever `ps` printed before it failed still names processes to stop.
+        let table = parse_process_table(&list_processes(self.host).stdout);
         let lineage = own_lineage(&table);
         let inside = table
             .iter()
@@ -2196,6 +2205,7 @@ mod run_tests {
     fn plans_of(apps: Vec<(InstalledApp, Vec<ScanItem>)>) -> UninstallPlan {
         let mut plan = UninstallPlan {
             scan: CategoryScan {
+                notes: Vec::new(),
                 id: PLAN_ID.to_string(),
                 title: "Review".to_string(),
                 groups: Vec::new(),
@@ -2373,6 +2383,21 @@ mod run_tests {
         let host = FakeHost::default();
         for _ in 0..=CHECKS_BEFORE_SIGNALS {
             host.reply(PS, &running(&foo.path, 4242));
+        }
+        host.reply(PS, "");
+
+        run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        assert_eq!(*host.signals.lock().unwrap(), [(4242, libc::SIGTERM)]);
+    }
+
+    #[test]
+    fn an_app_is_still_stopped_when_ps_lists_it_and_then_fails() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        for _ in 0..=CHECKS_BEFORE_SIGNALS {
+            host.fail_after_printing(PS, &running(&foo.path, 4242));
         }
         host.reply(PS, "");
 

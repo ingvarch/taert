@@ -69,6 +69,7 @@ impl ScanItem {
             identity: None,
             docker: Some(object),
             role: None,
+            also: Vec::new(),
         }
     }
 
@@ -228,6 +229,7 @@ pub fn unused_objects(
     .collect();
 
     Ok(CategoryScan {
+        notes: Vec::new(),
         id: SCAN_ID.to_string(),
         title: "Docker".to_string(),
         groups,

@@ -10,6 +10,7 @@ use taert::ui::workspace::{WorkspaceState, render_workspace};
 
 fn sample_scan() -> CategoryScan {
     CategoryScan {
+        notes: Vec::new(),
         id: "test".to_string(),
         title: "Test Scan".to_string(),
         groups: vec![ToolGroup {
@@ -77,6 +78,22 @@ fn test_render_workspace_clean_submenu() {
     assert!(rendered_text.contains("User junk"));
     assert!(rendered_text.contains("AI tools"));
     assert!(rendered_text.contains("Trash"));
+}
+
+#[test]
+fn the_user_junk_row_says_it_holds_app_and_browser_caches() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let state = WorkspaceState::at(0, Some(2));
+    let theme = Theme::new();
+    terminal
+        .draw(|f| render_workspace(f, &state, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = (0..30)
+        .flat_map(|y| (0..100).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol())
+        .collect();
+    assert!(text.contains("Logs, Xcode files, app and browser caches"));
 }
 
 #[test]
@@ -324,4 +341,155 @@ fn test_render_progress_screen_with_live_folders() {
     assert!(rendered.contains("~/Repos/ingvarch/taert/target"));
     assert!(rendered.contains("Found 1 item · 50.0 MB"));
     assert!(rendered.contains("Cancel"));
+}
+
+#[test]
+fn select_state_carries_the_notes_of_a_scan() {
+    let mut scan = sample_scan();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let state = SelectState::new(scan);
+    assert_eq!(state.notes, ["Safari needs Full Disk Access."]);
+}
+
+fn render_text(state: &SelectState, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let theme = Theme::new();
+    terminal.draw(|f| render_select(f, state, &theme)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn scan_with_a_row_of_two_folders() -> CategoryScan {
+    let mut scan = sample_scan();
+    scan.groups[0].items[0].also = vec![ScanItem::new(
+        PathBuf::from("/Users/test/Library/Containers/second"),
+        5_000_000,
+        true,
+        false,
+    )];
+    scan
+}
+
+#[test]
+fn a_row_of_two_folders_says_it_holds_one_more() {
+    let state = SelectState::new(scan_with_a_row_of_two_folders());
+    let text = render_text(&state, 100, 30);
+    assert!(text.contains("+1 folder"), "{text}");
+}
+
+#[test]
+fn a_narrow_screen_cuts_the_path_and_keeps_the_folder_count() {
+    let state = SelectState::new(scan_with_a_row_of_two_folders());
+    let text = render_text(&state, 50, 16);
+    assert!(text.contains("+1 folder"), "{text}");
+}
+
+#[test]
+fn search_finds_a_row_by_its_second_folder() {
+    let mut state = SelectState::new(scan_with_a_row_of_two_folders());
+    state.search_query = "containers/second".to_string();
+    let found: Vec<_> = state
+        .flattened_rows()
+        .into_iter()
+        .filter(|row| row.is_item())
+        .collect();
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
+fn the_review_screen_names_every_folder_of_a_row() {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    let state = ReviewState::new(scan_with_a_row_of_two_folders());
+    let theme = Theme::new();
+    terminal.draw(|f| render_review(f, &state, &theme)).unwrap();
+    let text = format!("{:?}", terminal.backend().buffer());
+    assert!(text.contains("/.cargo/registry/cache"), "{text}");
+    assert!(text.contains("Library/Containers/second"), "{text}");
+}
+
+#[test]
+fn the_confirmation_names_the_second_folder_of_a_selected_row() {
+    let mut state = SelectState::with_preserved_selection(scan_with_a_row_of_two_folders());
+    state.open_confirmation();
+    let text = render_text(&state, 100, 30);
+    assert!(text.contains("Also removes"), "{text}");
+    assert!(text.contains("Library/Containers/second"), "{text}");
+}
+
+#[test]
+fn the_confirmation_leaves_out_the_folders_of_a_row_not_selected() {
+    let mut scan = scan_with_a_row_of_two_folders();
+    scan.groups[0].items[0].selected = false;
+    scan.groups[0].items[1].selected = true;
+    let mut state = SelectState::with_preserved_selection(scan);
+    state.open_confirmation();
+    let text = render_text(&state, 100, 30);
+    assert!(!text.contains("Also removes"), "{text}");
+}
+
+#[test]
+fn a_note_shows_on_the_list_without_opening_the_dialog() {
+    let mut scan = sample_scan();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let text = render_text(&SelectState::new(scan), 100, 30);
+    assert!(text.contains("Safari needs Full Disk Access."), "{text}");
+}
+
+const LONG_NOTES: [&str; 2] = [
+    "Safari keeps a cache that macOS hides from this terminal \
+     (~/Library/Caches/com.apple.Safari). \
+     Give the terminal Full Disk Access in System Settings to include it.",
+    "Safari keeps a cache that macOS hides from this terminal \
+     (~/Library/Containers/com.apple.Safari/Data/Library/Caches). \
+     Give the terminal Full Disk Access in System Settings to include it.",
+];
+
+fn without_spaces(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+fn assert_notes_fit(rows_found: bool) {
+    for height in [24, 30, 40, 50] {
+        for width in 60..=160 {
+            let mut scan = sample_scan();
+            if !rows_found {
+                scan.groups.clear();
+            }
+            scan.notes = LONG_NOTES.map(String::from).to_vec();
+            let text = without_spaces(&render_text(&SelectState::new(scan), width, height));
+            for note in LONG_NOTES {
+                let note = without_spaces(note);
+                assert!(
+                    text.contains(&note),
+                    "{width}x{height} lost: {note}\n{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn long_notes_show_whole_at_every_width() {
+    assert_notes_fit(true);
+}
+
+#[test]
+fn long_notes_show_whole_when_the_scan_found_no_rows() {
+    assert_notes_fit(false);
+}
+
+#[test]
+fn a_note_shows_when_the_scan_found_no_rows() {
+    let mut scan = sample_scan();
+    scan.groups.clear();
+    scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
+    let text = render_text(&SelectState::new(scan), 100, 30);
+    assert!(text.contains("Safari needs Full Disk Access."), "{text}");
 }

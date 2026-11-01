@@ -47,6 +47,15 @@ The freed size comes from the daemon's totals before and after, because images s
 
 `bollard` stays pinned to 0.19. Versions 0.20 and newer read `/system/df` only in the API 1.52 shape, and a daemon on an older API then comes back empty with no error. Daemons answer an API 1.49 client in the older shape, including Docker 29 and newer.
 
+## App and Browser Caches
+
+[`app_caches.rs`](../src/core/app_caches.rs) adds two groups to the `junk` scan. App caches are the entries of `~/Library/Caches` one level deep. Browser caches are fixed paths per browser, one row each. A browser with two folders keeps the second in `ScanItem::also`, and `Cleaner` checks both before either goes. If one fails during the removal itself, the report counts the row with the bytes of the folder that went, and lists the one that failed. Neither group walks `Application Support`, so profiles are never rows.
+
+- **No double counting**: an entry that a named target covers, or that is the parent of one, is left out. So are `com.apple.*`, `CloudKit`, and `FamilyCircle`.
+- **Selection**: `starts_selected(stale, running)` decides. Stale means nothing in the tree changed for 30 days, and anything unreadable counts as changed. Running comes from one process table per scan. An app cache matches its app by bundle id from `find_apps`, and so does a browser. Any program inside a bundle matched this way counts. `find_apps` leaves out Safari and copies outside the app folders, so a bundle with the browser's name counts too. For those bundles only a program in `Contents/MacOS` counts, because `SafariLinkExtension` runs from inside Safari's bundle while Safari is closed.
+- **Refused reads**: when macOS refuses a browser folder, the scan carries one note per browser that names Full Disk Access.
+- **Safety**: rows go through the same checks as every other row, and `Cleaner` verifies identity before removal.
+
 ## Uninstalling Apps
 
 An uninstall has two steps, so nothing is removed before you have seen it:
