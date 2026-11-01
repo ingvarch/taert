@@ -81,6 +81,22 @@ fn test_render_workspace_clean_submenu() {
 }
 
 #[test]
+fn the_user_junk_row_says_it_holds_app_and_browser_caches() {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let state = WorkspaceState::at(0, Some(2));
+    let theme = Theme::new();
+    terminal
+        .draw(|f| render_workspace(f, &state, &theme))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = (0..30)
+        .flat_map(|y| (0..100).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol())
+        .collect();
+    assert!(text.contains("Logs, Xcode files, app and browser caches"));
+}
+
+#[test]
 fn test_render_workspace_confirm_dialog() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -396,6 +412,49 @@ fn a_note_shows_on_the_list_without_opening_the_dialog() {
     scan.notes = vec!["Safari needs Full Disk Access.".to_string()];
     let text = render_text(&SelectState::new(scan), 100, 30);
     assert!(text.contains("Safari needs Full Disk Access."), "{text}");
+}
+
+const LONG_NOTES: [&str; 2] = [
+    "Safari keeps a cache that macOS hides from this terminal \
+     (~/Library/Caches/com.apple.Safari). \
+     Give the terminal Full Disk Access in System Settings to include it.",
+    "Safari keeps a cache that macOS hides from this terminal \
+     (~/Library/Containers/com.apple.Safari/Data/Library/Caches). \
+     Give the terminal Full Disk Access in System Settings to include it.",
+];
+
+fn without_spaces(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+fn assert_notes_fit(rows_found: bool) {
+    for height in [24, 30, 40, 50] {
+        for width in 60..=160 {
+            let mut scan = sample_scan();
+            if !rows_found {
+                scan.groups.clear();
+            }
+            scan.notes = LONG_NOTES.map(String::from).to_vec();
+            let text = without_spaces(&render_text(&SelectState::new(scan), width, height));
+            for note in LONG_NOTES {
+                let note = without_spaces(note);
+                assert!(
+                    text.contains(&note),
+                    "{width}x{height} lost: {note}\n{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn long_notes_show_whole_at_every_width() {
+    assert_notes_fit(true);
+}
+
+#[test]
+fn long_notes_show_whole_when_the_scan_found_no_rows() {
+    assert_notes_fit(false);
 }
 
 #[test]

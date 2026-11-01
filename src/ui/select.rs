@@ -653,25 +653,23 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 
 /// Draws the notes at the bottom and returns the area left above them.
 fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) -> Rect {
-    let width = usize::from(area.width).max(1);
-    let wanted: usize = notes
-        .iter()
-        .map(|note| note.chars().count().div_ceil(width))
-        .sum();
-    let height = wanted.min(usize::from(area.height / 3)) as u16;
-    if height == 0 {
-        return area;
-    }
     let lines: Vec<Line> = notes
         .iter()
         .map(|note| Line::from(Span::styled(note.clone(), theme.callout())))
         .collect();
+    let text = Paragraph::new(lines).wrap(Wrap { trim: true });
+    let height = text
+        .line_count(area.width)
+        .min(usize::from(area.height / 2)) as u16;
+    if height == 0 {
+        return area;
+    }
     let notes_area = Rect {
         y: area.y + area.height - height,
         height,
         ..area
     };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), notes_area);
+    frame.render_widget(text, notes_area);
     Rect {
         height: area.height - height,
         ..area
