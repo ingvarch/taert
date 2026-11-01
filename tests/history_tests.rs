@@ -1,7 +1,7 @@
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn taert(home: &TempDir) -> Command {
@@ -114,7 +114,10 @@ fn dry_run_writes_nothing() {
         .success();
 
     let history_file = home_path.join(".config/taert/history.jsonl");
-    assert!(!history_file.exists(), "--dry-run should not create history file");
+    assert!(
+        !history_file.exists(),
+        "--dry-run should not create history file"
+    );
 }
 
 #[test]
@@ -128,12 +131,13 @@ fn no_history_env_writes_nothing() {
 
     let mut cmd = taert(&home);
     cmd.env("TAERT_NO_HISTORY", "1");
-    cmd.args(["clean", "dev", "--force"])
-        .assert()
-        .success();
+    cmd.args(["clean", "dev", "--force"]).assert().success();
 
     let history_file = home_path.join(".config/taert/history.jsonl");
-    assert!(!history_file.exists(), "TAERT_NO_HISTORY=1 should not write history");
+    assert!(
+        !history_file.exists(),
+        "TAERT_NO_HISTORY=1 should not write history"
+    );
 }
 
 #[test]
@@ -250,8 +254,14 @@ fn taert_clean_junk_never_lists_history_log() {
         .clone();
     let stdout = String::from_utf8(output).unwrap();
 
-    assert!(!stdout.contains("history.jsonl"), "clean junk must never list history.jsonl");
-    assert!(!stdout.contains(".config"), "clean junk must never list ~/.config");
+    assert!(
+        !stdout.contains("history.jsonl"),
+        "clean junk must never list history.jsonl"
+    );
+    assert!(
+        !stdout.contains(".config"),
+        "clean junk must never list ~/.config"
+    );
 }
 
 #[test]
@@ -279,7 +289,9 @@ fn unwritable_log_warns_and_cleanup_finishes() {
         .assert()
         .success();
 
-    assert.stderr(predicate::str::contains("Warning: could not write to history log"));
+    assert.stderr(predicate::str::contains(
+        "Warning: could not write to history log",
+    ));
 
     // Restore permissions so TempDir can clean up
     let _ = fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o755));

@@ -808,8 +808,7 @@ impl<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)> Tally<F, O> {
         self.report.removed_count += 1;
         let is_trash = matches!(mode, RemovalMode::Trash) && !item.contents_only;
         if is_trash {
-            self.report.trashed_bytes =
-                self.report.trashed_bytes.saturating_add(item.size_bytes);
+            self.report.trashed_bytes = self.report.trashed_bytes.saturating_add(item.size_bytes);
         } else {
             self.report.freed_bytes = self.report.freed_bytes.saturating_add(item.size_bytes);
         }
@@ -1085,7 +1084,11 @@ impl Uninstaller<'_> {
 
     /// Everything that would hurt an app that stays, so it runs past the point
     /// where the password or Homebrew could still keep the app.
-    fn stop_app<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &Job, tally: &mut Tally<F, O>) {
+    fn stop_app<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &Job,
+        tally: &mut Tally<F, O>,
+    ) {
         if job.blocked {
             return;
         }
@@ -1164,7 +1167,11 @@ impl Uninstaller<'_> {
         false
     }
 
-    fn force_stop<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, plan: &AppPlan, tally: &mut Tally<F, O>) {
+    fn force_stop<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        plan: &AppPlan,
+        tally: &mut Tally<F, O>,
+    ) {
         let name = &plan.app.name;
         let Running {
             mut pids,
@@ -1244,7 +1251,11 @@ impl Uninstaller<'_> {
     }
 
     /// Homebrew takes care of its own rights, so casks go before the root script.
-    fn remove_cask<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
+    fn remove_cask<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &mut Job,
+        tally: &mut Tally<F, O>,
+    ) {
         let (Some(bundle), Some(token)) = (job.pending_bundle(), job.plan.cask.as_deref()) else {
             return;
         };
@@ -1262,7 +1273,11 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_bundle<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
+    fn remove_bundle<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &mut Job,
+        tally: &mut Tally<F, O>,
+    ) {
         let Some(bundle) = job.pending_bundle() else {
             return;
         };
@@ -1281,7 +1296,11 @@ impl Uninstaller<'_> {
     }
 
     /// Drops what root must not touch.
-    fn vet_root_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
+    fn vet_root_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &mut Job,
+        tally: &mut Tally<F, O>,
+    ) {
         if std::mem::replace(&mut job.root_files_vetted, true) {
             return;
         }
@@ -1300,7 +1319,11 @@ impl Uninstaller<'_> {
     }
 
     /// Finds what root must do for this app, and blocks it if root must not.
-    fn vet_for_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &mut Job, tally: &mut Tally<F, O>) {
+    fn vet_for_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &mut Job,
+        tally: &mut Tally<F, O>,
+    ) {
         job.in_root_script = false;
         if job.blocked {
             return;
@@ -1345,7 +1368,11 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_as_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, jobs: &mut [Job], tally: &mut Tally<F, O>) {
+    fn remove_as_root<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        jobs: &mut [Job],
+        tally: &mut Tally<F, O>,
+    ) {
         self.keep_files_of_failed_copies(jobs, tally);
         for job in jobs.iter_mut() {
             self.vet_for_root(job, tally);
@@ -1406,7 +1433,11 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_own_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, job: &Job, tally: &mut Tally<F, O>) {
+    fn remove_own_files<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        job: &Job,
+        tally: &mut Tally<F, O>,
+    ) {
         if job.blocked {
             return;
         }
@@ -1514,7 +1545,11 @@ impl Uninstaller<'_> {
         let _ = fs::remove_file(&import);
     }
 
-    fn tidy_up<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(&self, jobs: &[Job], tally: &mut Tally<F, O>) {
+    fn tidy_up<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)>(
+        &self,
+        jobs: &[Job],
+        tally: &mut Tally<F, O>,
+    ) {
         let removed: Vec<&Job> = jobs.iter().filter(|job| job.bundle_done).collect();
         if !removed.is_empty() {
             self.clean_dock(&removed);

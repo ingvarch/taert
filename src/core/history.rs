@@ -148,11 +148,19 @@ impl RunRecord {
             }
             if !removed.is_empty() {
                 let bytes: u64 = removed.iter().map(|i| i.bytes).sum();
-                parts.push(format!("removed {}, {}", removed.len(), format_bytes(bytes)));
+                parts.push(format!(
+                    "removed {}, {}",
+                    removed.len(),
+                    format_bytes(bytes)
+                ));
             }
             if !changed.is_empty() {
                 let bytes: u64 = changed.iter().map(|i| i.bytes).sum();
-                parts.push(format!("changed {}, {}", changed.len(), format_bytes(bytes)));
+                parts.push(format!(
+                    "changed {}, {}",
+                    changed.len(),
+                    format_bytes(bytes)
+                ));
             }
             if !failed.is_empty() {
                 parts.push(format!("{} failed", failed.len()));
@@ -433,11 +441,11 @@ impl HistoryLog {
                 .ok()
                 .and_then(|val| val.get("run").and_then(|r| r.as_str()).map(String::from));
 
-            if let Some(ref id) = run_id {
-                if !seen_runs.contains(id) {
-                    seen_runs.insert(id.clone());
-                    run_order.push_back(id.clone());
-                }
+            if let Some(ref id) = run_id
+                && !seen_runs.contains(id)
+            {
+                seen_runs.insert(id.clone());
+                run_order.push_back(id.clone());
             }
 
             lines_with_run.push((run_id, line));
@@ -524,10 +532,10 @@ impl HistorySession {
             error: outcome.error.clone(),
         };
 
-        if let Ok(line) = serde_json::to_string(&event) {
-            if let Err(e) = writeln!(file, "{line}").and_then(|_| file.flush()) {
-                self.warn(&format!("could not write to history log: {e}"));
-            }
+        if let Ok(line) = serde_json::to_string(&event)
+            && let Err(e) = writeln!(file, "{line}").and_then(|_| file.flush())
+        {
+            self.warn(&format!("could not write to history log: {e}"));
         }
     }
 
@@ -635,7 +643,7 @@ mod tests {
         let run = &runs[0];
         assert_eq!(run.command, "clean dev");
         assert_eq!(run.mode, "force");
-        assert_eq!(run.completed, true);
+        assert!(run.completed);
         assert_eq!(run.items.len(), 2);
         assert_eq!(run.items[0].outcome, OutcomeKind::Removed);
         assert_eq!(run.items[1].outcome, OutcomeKind::Failed);
@@ -695,7 +703,7 @@ another corrupted line!
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run, "run1");
         assert_eq!(runs[0].items.len(), 1);
-        assert_eq!(runs[0].completed, true);
+        assert!(runs[0].completed);
     }
 
     #[test]
