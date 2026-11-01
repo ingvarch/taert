@@ -84,17 +84,12 @@ mod clean {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, SystemTime};
     use tempfile::{TempDir, tempdir};
 
     const SAFARI: &str = "Library/Caches/com.apple.Safari";
     const SAFARI_CONTAINER: &str = "Library/Containers/com.apple.Safari/Data/Library/Caches";
     const CHROME: &str = "Library/Caches/Google/Chrome";
-    // A real Chrome or Safari keeps its own row out of `--force`, whatever taert sees of
-    // the fixture. Edge is the browser least likely to run where these tests run.
-    const EDGE: &str = "Library/Caches/Microsoft Edge";
-    const EDGE_ID: &str = "com.microsoft.edgemac";
     const FULL_DISK_ACCESS: &str = "Full Disk Access";
 
     fn fill(home: &TempDir, relative: &str) -> PathBuf {
@@ -125,38 +120,6 @@ mod clean {
     impl Drop for Refused {
         fn drop(&mut self) {
             let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-        }
-    }
-
-    /// A copy of `sleep` inside an app bundle, so `ps` lists that app as running.
-    struct RunningApp(Child);
-
-    impl RunningApp {
-        fn start(bundle: &Path, id: &str) -> Self {
-            let program = bundle.join("Contents/MacOS/run");
-            fs::create_dir_all(program.parent().unwrap()).unwrap();
-            fs::copy("/bin/sleep", &program).unwrap();
-            let plist = format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>{id}</string>
-<key>CFBundleExecutable</key><string>run</string>
-</dict></plist>"#
-            );
-            fs::write(bundle.join("Contents/Info.plist"), plist).unwrap();
-            let child = Command::new(&program)
-                .arg("120")
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap();
-            Self(child)
-        }
-    }
-
-    impl Drop for RunningApp {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
         }
     }
 
@@ -232,17 +195,14 @@ mod clean {
         assert_eq!(row["also"][0]["path"].as_str(), container.to_str());
     }
 
-    fn applications(home: &TempDir) -> PathBuf {
-        home.path().canonicalize().unwrap().join("Applications")
-    }
-
+    // Running apps are covered in app_caches.rs and scanner.rs through the fake host.
+    // Starting a program from a fake bundle here makes macOS report the app as damaged.
     #[test]
-    fn force_leaves_a_running_browsers_cache_and_removes_a_stale_app_cache() {
+    fn force_removes_a_stale_app_cache_and_leaves_a_recent_one() {
         let home = tempdir().unwrap();
-        let edge = fill(&home, EDGE);
         let stale = fill(&home, "Library/Caches/com.acme.stale");
         age(&stale, 90);
-        let _edge = RunningApp::start(&applications(&home).join("Renamed.app"), EDGE_ID);
+        let recent = fill(&home, "Library/Caches/com.acme.recent");
 
         taert(&home)
             .args(["clean", "junk", "--force"])
@@ -250,23 +210,8 @@ mod clean {
             .success()
             .stdout(predicate::str::contains("Clean complete"));
 
-        assert!(edge.join("data").exists());
         assert!(!stale.exists());
-    }
-
-    #[test]
-    fn force_leaves_the_cache_of_a_running_app() {
-        let home = tempdir().unwrap();
-        let cache = fill(&home, "Library/Caches/com.acme.running");
-        age(&cache, 90);
-        let _app = RunningApp::start(&applications(&home).join("Acme.app"), "com.acme.running");
-
-        taert(&home)
-            .args(["clean", "junk", "--force"])
-            .assert()
-            .success();
-
-        assert!(cache.join("data").exists());
+        assert!(recent.join("data").exists());
     }
 
     #[test]
