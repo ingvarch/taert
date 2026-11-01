@@ -783,7 +783,11 @@ impl App {
                             "trash" => "clean trash".to_string(),
                             _ => "clean".to_string(),
                         };
-                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(items.len()));
+                        let session = HistoryLog::default_log().start_run(
+                            &command,
+                            "interactive",
+                            Some(items.len()),
+                        );
                         let report = Cleaner::new(&*self.host, RemovalMode::Permanent)
                             .remove_items_with_callbacks(
                                 &items,
@@ -1369,17 +1373,24 @@ impl App {
                         } else {
                             RemovalMode::Trash
                         };
-                        let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
+                        let app_names: Vec<_> =
+                            plan.apps.iter().map(|a| a.app.name.as_str()).collect();
                         let command = format!("uninstall {}", app_names.join(", "));
                         let total = plan.scan.selected_items().len();
-                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                        let session = HistoryLog::default_log().start_run(
+                            &command,
+                            "interactive",
+                            Some(total),
+                        );
                         let rep = Uninstaller {
                             host,
                             layout,
                             ignore,
                             mode,
                         }
-                        .run_with_outcome(&plan, on_progress, |outcome| session.record_item(outcome));
+                        .run_with_outcome(&plan, on_progress, |outcome| {
+                            session.record_item(outcome)
+                        });
                         session.finish();
                         rep
                     }
@@ -1394,7 +1405,11 @@ impl App {
                             _ => "clean".to_string(),
                         };
                         let total = selected_items.len();
-                        let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                        let session = HistoryLog::default_log().start_run(
+                            &command,
+                            "interactive",
+                            Some(total),
+                        );
                         let rep = Cleaner::new(&*host, RemovalMode::Permanent)
                             .remove_items_with_callbacks(
                                 &selected_items,
@@ -1447,7 +1462,8 @@ impl App {
                 let tx_prog = tx.clone();
                 let command = "analyze".to_string();
                 let total = scan_items.len();
-                let session = HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                let session =
+                    HistoryLog::default_log().start_run(&command, "interactive", Some(total));
                 let report = Cleaner::new(&*host, mode).remove_items_with_callbacks(
                     &scan_items,
                     &ignore,

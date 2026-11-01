@@ -3,7 +3,9 @@
 use std::io::{self, BufRead, Write};
 
 use crate::core::bytes::format_bytes;
-use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
+use crate::core::cleaner::{
+    Cleaner, RemovalMode, RemovalProgress, RemovalReport, item_removal_mode,
+};
 use crate::core::history::ItemOutcome;
 use crate::core::host::MacHost;
 use crate::core::scanner::CategoryScan;

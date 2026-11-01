@@ -307,8 +307,7 @@ impl<'a> Cleaner<'a> {
                     let is_trash = self.mode == RemovalMode::Trash && !folder.contents_only;
                     let bytes = folder.own_bytes();
                     if is_trash {
-                        report.trashed_bytes =
-                            report.trashed_bytes.saturating_add(bytes);
+                        report.trashed_bytes = report.trashed_bytes.saturating_add(bytes);
                     } else {
                         report.freed_bytes = report.freed_bytes.saturating_add(bytes);
                     }
