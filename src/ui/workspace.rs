@@ -177,7 +177,7 @@ impl WorkspaceState {
                 (
                     CleanSubcategory::UserJunk,
                     "User junk",
-                    "Logs and generated Xcode files",
+                    "Logs, Xcode files, app and browser caches",
                 ),
                 (
                     CleanSubcategory::AiTools,
