@@ -10,16 +10,19 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::{
-    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, DoctorArgs, IgnoreAction, PurgeArgs,
-    StartupArgs, UninstallArgs,
+    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, DoctorArgs, HistoryAction, HistoryArgs,
+    IgnoreAction, PurgeArgs, StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::RemovalMode;
+use crate::core::date_utils::{format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
+use crate::core::history::{HistoryLog, ItemOutcome};
 use crate::core::host::MacHost;
 use crate::core::layout::Layout;
+use crate::core::path_utils::prettify_path;
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
@@ -79,6 +82,8 @@ fn main() -> ExitCode {
         Some(Command::Ignore(args)) => handle_ignore(args.action, &ignore),
 
         Some(Command::Config(ref args)) => handle_config(args, &config),
+
+        Some(Command::History(ref args)) => handle_history(args, &cli),
     }
 }
 
@@ -96,13 +101,21 @@ fn handle_clean(args: &CleanArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreSto
         ],
     };
 
+    let command = match args.category {
+        Some(CleanCategory::Dev) => "clean dev",
+        Some(CleanCategory::Junk) => "clean junk",
+        Some(CleanCategory::Ai) => "clean ai",
+        Some(CleanCategory::Trash) => "clean trash",
+        None => "clean",
+    };
+
     let scans = categories
         .into_iter()
         .map(|(id, title)| CategoryScanner::scan(id, title, ignore, None, None))
         .collect();
     let mut scan = CategoryScan::combined("Clean Review", scans);
 
-    process_scan_result(&mut scan, cli, use_plain, ignore)
+    process_scan_result(&mut scan, cli, use_plain, ignore, command)
 }
 
 fn handle_purge(
@@ -120,15 +133,16 @@ fn handle_purge(
         }
     };
 
+    let command = format!("purge {}", prettify_path(&scan_root));
     let older_than = args.older_than.unwrap_or(config.older_than_days);
     let mut scan = Purger::scan_projects(&scan_root, older_than, &config.extra_artifacts, ignore);
 
-    process_scan_result(&mut scan, cli, use_plain, ignore)
+    process_scan_result(&mut scan, cli, use_plain, ignore, &command)
 }
 
 fn handle_docker(cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
     match DockerClient::connect().and_then(|client| client.scan()) {
-        Ok(mut scan) => process_scan_result(&mut scan, cli, use_plain, ignore),
+        Ok(mut scan) => process_scan_result(&mut scan, cli, use_plain, ignore, "docker"),
         Err(error) => {
             eprintln!("Error: {error}");
             ExitCode::FAILURE
@@ -141,6 +155,7 @@ fn process_scan_result(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
+    command: &str,
 ) -> ExitCode {
     // 1. JSON mode: output JSON and exit immediately without modifying files
     if cli.json {
@@ -165,7 +180,14 @@ fn process_scan_result(
 
     // 3. Force mode: unattended cleanup of default-selected items
     if cli.force {
-        let report = PlainRunner::execute_clean(scan, ignore);
+        let total = scan.selected_items().len();
+        let session = HistoryLog::default_log().start_run(command, "force", Some(total));
+        let report = PlainRunner::execute_clean_with_callbacks(
+            scan,
+            ignore,
+            Some(|outcome: &ItemOutcome| session.record_item(outcome)),
+        );
+        session.finish();
         PlainRunner::print_notes(&scan.notes);
         return if report.failures.is_empty() {
             ExitCode::SUCCESS
@@ -184,7 +206,15 @@ fn process_scan_result(
 
         match PlainRunner::prompt_confirm(scan) {
             Ok(true) => {
-                let report = PlainRunner::execute_clean(scan, ignore);
+                let total = scan.selected_items().len();
+                let session =
+                    HistoryLog::default_log().start_run(command, "interactive", Some(total));
+                let report = PlainRunner::execute_clean_with_callbacks(
+                    scan,
+                    ignore,
+                    Some(|outcome: &ItemOutcome| session.record_item(outcome)),
+                );
+                session.finish();
                 if report.failures.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -344,13 +374,19 @@ fn run_uninstall(
     } else {
         RemovalMode::Trash
     };
+    let run_mode = if cli.force { "force" } else { "interactive" };
+    let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
+    let command = format!("uninstall {}", app_names.join(", "));
+    let total = plan.scan.selected_items().len();
+    let session = HistoryLog::default_log().start_run(&command, run_mode, Some(total));
     let report = Uninstaller {
         host: &MacHost,
         layout,
         ignore,
         mode,
     }
-    .run(plan, |_| {});
+    .run_with_outcome(plan, |_| {}, |outcome| session.record_item(outcome));
+    session.finish();
     PlainRunner::print_report("Uninstall", &report);
     if report.failures.is_empty() {
         ExitCode::SUCCESS
@@ -719,6 +755,118 @@ fn handle_startup(
                 eprintln!("TUI Error: {e}");
                 ExitCode::FAILURE
             }
+        }
+    }
+}
+
+fn handle_history(args: &HistoryArgs, cli: &Cli) -> ExitCode {
+    let log = HistoryLog::default_log();
+    let mut runs = match log.load_runs() {
+        Ok(runs) => runs,
+        Err(err) => {
+            eprintln!("Error reading history: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Some(HistoryAction::Show { ref run }) = args.action {
+        // Find matching run: exact match first, then unique prefix match
+        let matched = if let Some(exact) = runs.iter().find(|r| r.run == *run) {
+            Some(exact.clone())
+        } else {
+            let prefixes: Vec<_> = runs.iter().filter(|r| r.run.starts_with(run)).collect();
+            if prefixes.len() == 1 {
+                Some(prefixes[0].clone())
+            } else if prefixes.len() > 1 {
+                eprintln!("Error: Ambiguous run ID '{run}'. Matching runs:");
+                for r in prefixes {
+                    eprintln!("  {}", r.run);
+                }
+                return ExitCode::FAILURE;
+            } else {
+                None
+            }
+        };
+
+        let Some(run_record) = matched else {
+            eprintln!("Error: Run '{run}' not found");
+            return ExitCode::FAILURE;
+        };
+
+        if cli.json {
+            match serde_json::to_string_pretty(&run_record) {
+                Ok(json) => {
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("Failed to serialize JSON: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        } else {
+            println!("Run:     {}", run_record.run);
+            let date_str = if let Some(time) = parse_rfc3339(&run_record.at) {
+                format_system_time(time)
+            } else {
+                run_record.at.clone()
+            };
+            println!("Date:    {date_str}");
+            println!("Command: {}", run_record.command);
+            println!("Mode:    {}", run_record.mode);
+            let status = if run_record.is_interrupted() {
+                "interrupted"
+            } else {
+                "completed"
+            };
+            println!("Status:  {status}");
+            println!();
+            if run_record.items.is_empty() {
+                println!("No items recorded.");
+            } else {
+                for item in &run_record.items {
+                    let err_suffix = if let Some(ref err) = item.error {
+                        format!(": {err}")
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {:<9} {:>9}  {}{}",
+                        item.outcome.to_string(),
+                        format_bytes(item.bytes),
+                        item.path,
+                        err_suffix
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+    } else {
+        // Newest run first
+        runs.reverse();
+        if let Some(limit) = args.limit {
+            runs.truncate(limit);
+        }
+
+        if cli.json {
+            match serde_json::to_string_pretty(&runs) {
+                Ok(json) => {
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("Failed to serialize JSON: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        } else if runs.is_empty() {
+            println!("No history found.");
+            ExitCode::SUCCESS
+        } else {
+            for run in &runs {
+                println!("{}", run.format_line());
+            }
+            ExitCode::SUCCESS
         }
     }
 }

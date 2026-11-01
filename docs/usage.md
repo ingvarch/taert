@@ -246,6 +246,37 @@ taert startup disable com.example.service --dry-run
 
 When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
 
+### Removal History (`taert history`)
+
+Keep a local record of what taert removed or changed, so you can always answer "what happened to that file?".
+
+```bash
+# View recent cleanup runs (newest run first)
+taert history
+
+# Limit the number of runs shown
+taert history --limit 20
+
+# Output structured JSON with items for automation
+taert history --json
+
+# Inspect every item removed or changed in a specific run
+taert history show 20261101-134000-4123
+```
+
+Example history summary:
+
+```text
+2026-11-01 13:40  clean dev        force        removed 12, 8.1 GB
+2026-10-28 09:12  uninstall Foo    interactive  trash 14, 2.3 GB, 1 failed
+2026-10-27 22:03  purge ~/Projects interactive  interrupted after 3 of 9
+```
+
+- **Format & Location**: Stored as line-delimited JSON at `~/.config/taert/history.jsonl` with permissions `0600`. Because `~/.config` is protected by the safety engine, no cleanup can ever touch or delete this file.
+- **Interrupted runs**: Events are logged as they happen. An interrupted cleanup or process kill leaves a readable trail showing what completed before the interruption.
+- **Bounded size**: Keeps the last 1,000 runs automatically.
+- **Overrides**: `--dry-run` writes nothing to the log. Set `TAERT_NO_HISTORY=1` to disable recording completely.
+
 ### Trash & Permanent Deletion
 
 By default, taert moves personal files and user apps to macOS Trash instead of deleting them immediately:

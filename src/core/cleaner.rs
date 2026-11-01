@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::docker::{DockerClient, DockerRemover};
+use super::history::{ItemOutcome, OutcomeKind};
 use super::host::Host;
 use super::safety::{FileIdentity, Safety, SafetyError};
 use super::scanner::ScanItem;
@@ -130,18 +131,62 @@ impl<'a> Cleaner<'a> {
     where
         F: FnMut(RemovalProgress),
     {
-        self.remove_with(items, ignore, progress_cb, connect_docker)
+        self.remove_with_callbacks(
+            items,
+            ignore,
+            progress_cb,
+            None::<fn(&ItemOutcome)>,
+            connect_docker,
+        )
     }
 
-    fn remove_with<F, C>(
+    /// Remove selected items, reporting progress and item-level outcomes via callbacks.
+    pub fn remove_items_with_callbacks<F, O>(
         &self,
         items: &[ScanItem],
         ignore: &IgnoreStore,
-        mut progress_cb: Option<F>,
+        progress_cb: Option<F>,
+        outcome_cb: Option<O>,
+    ) -> RemovalReport
+    where
+        F: FnMut(RemovalProgress),
+        O: FnMut(&ItemOutcome),
+    {
+        self.remove_with_callbacks(items, ignore, progress_cb, outcome_cb, connect_docker)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_with<F, C>(
+        &self,
+        items: &[ScanItem],
+        ignore: &IgnoreStore,
+        progress_cb: Option<F>,
         connect: C,
     ) -> RemovalReport
     where
         F: FnMut(RemovalProgress),
+        C: FnOnce() -> Result<Box<dyn DockerRemover>, String>,
+    {
+        self.remove_with_callbacks(
+            items,
+            ignore,
+            progress_cb,
+            None::<fn(&ItemOutcome)>,
+            connect,
+        )
+    }
+
+    fn remove_with_callbacks<F, O, C>(
+        &self,
+        items: &[ScanItem],
+        ignore: &IgnoreStore,
+        mut progress_cb: Option<F>,
+        mut outcome_cb: Option<O>,
+        connect: C,
+    ) -> RemovalReport
+    where
+        F: FnMut(RemovalProgress),
+        O: FnMut(&ItemOutcome),
         C: FnOnce() -> Result<Box<dyn DockerRemover>, String>,
     {
         let mut report = RemovalReport::default();
@@ -180,16 +225,34 @@ impl<'a> Cleaner<'a> {
                     Ok(()) => {
                         report.removed_count += 1;
                         docker_listed_bytes = docker_listed_bytes.saturating_add(item.size_bytes);
+                        if let Some(ref mut cb) = outcome_cb {
+                            cb(&ItemOutcome {
+                                path: item.path.clone(),
+                                bytes: item.size_bytes,
+                                outcome: OutcomeKind::Removed,
+                                error: None,
+                            });
+                        }
                     }
-                    Err(error) => report.failures.push(RemovalFailure {
-                        path: item.path.clone(),
-                        error,
-                    }),
+                    Err(error) => {
+                        if let Some(ref mut cb) = outcome_cb {
+                            cb(&ItemOutcome {
+                                path: item.path.clone(),
+                                bytes: 0,
+                                outcome: OutcomeKind::Failed,
+                                error: Some(error.clone()),
+                            });
+                        }
+                        report.failures.push(RemovalFailure {
+                            path: item.path.clone(),
+                            error,
+                        });
+                    }
                 }
                 continue;
             }
 
-            self.remove_row(item, ignore, &mut report);
+            self.remove_row(item, ignore, &mut report, outcome_cb.as_mut());
         }
 
         // Images share layers, so only the daemon knows what a removal really freed.
@@ -206,7 +269,13 @@ impl<'a> Cleaner<'a> {
     }
 
     /// Checks every folder of a row before the first one goes, then counts what went.
-    fn remove_row(&self, item: &ScanItem, ignore: &IgnoreStore, report: &mut RemovalReport) {
+    fn remove_row<O: FnMut(&ItemOutcome)>(
+        &self,
+        item: &ScanItem,
+        ignore: &IgnoreStore,
+        report: &mut RemovalReport,
+        mut outcome_cb: Option<&mut O>,
+    ) {
         let check = |path: &Path| Safety::can_remove(path, ignore);
         let failure = |folder: &ScanItem, error: ItemRemovalError| RemovalFailure {
             path: folder.path.clone(),
@@ -217,6 +286,16 @@ impl<'a> Cleaner<'a> {
             .filter_map(|folder| Some(failure(folder, Self::verify(folder, check).err()?)))
             .collect();
         if !refused.is_empty() {
+            for f in &refused {
+                if let Some(ref mut cb) = outcome_cb {
+                    cb(&ItemOutcome {
+                        path: f.path.clone(),
+                        bytes: 0,
+                        outcome: OutcomeKind::Failed,
+                        error: Some(f.error.clone()),
+                    });
+                }
+            }
             report.failures.extend(refused);
             return;
         }
@@ -225,14 +304,39 @@ impl<'a> Cleaner<'a> {
             match self.remove_verified(folder, check) {
                 Ok(()) => {
                     any_went = true;
-                    if self.mode == RemovalMode::Trash && !folder.contents_only {
+                    let is_trash = self.mode == RemovalMode::Trash && !folder.contents_only;
+                    let bytes = folder.own_bytes();
+                    if is_trash {
                         report.trashed_bytes =
-                            report.trashed_bytes.saturating_add(folder.own_bytes());
+                            report.trashed_bytes.saturating_add(bytes);
                     } else {
-                        report.freed_bytes = report.freed_bytes.saturating_add(folder.own_bytes());
+                        report.freed_bytes = report.freed_bytes.saturating_add(bytes);
+                    }
+                    if let Some(ref mut cb) = outcome_cb {
+                        cb(&ItemOutcome {
+                            path: folder.path.clone(),
+                            bytes,
+                            outcome: if is_trash {
+                                OutcomeKind::Trashed
+                            } else {
+                                OutcomeKind::Removed
+                            },
+                            error: None,
+                        });
                     }
                 }
-                Err(error) => report.failures.push(failure(folder, error)),
+                Err(error) => {
+                    let fail = failure(folder, error);
+                    if let Some(ref mut cb) = outcome_cb {
+                        cb(&ItemOutcome {
+                            path: fail.path.clone(),
+                            bytes: 0,
+                            outcome: OutcomeKind::Failed,
+                            error: Some(fail.error.clone()),
+                        });
+                    }
+                    report.failures.push(fail);
+                }
             }
         }
         report.removed_count += usize::from(any_went);
@@ -802,5 +906,29 @@ mod tests {
             item_removal_mode(&root_item, "uninstall", false),
             RemovalMode::Permanent
         );
+    }
+
+    #[test]
+    fn outcome_callback_receives_each_item() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("file.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let item = ScanItem::new(file_path.clone(), 5, true, false);
+        let mut outcomes = Vec::new();
+
+        let cleaner = cleaner();
+        cleaner.remove_items_with_callbacks(
+            &[item],
+            &IgnoreStore::default(),
+            None::<fn(RemovalProgress)>,
+            Some(|outcome: &ItemOutcome| {
+                outcomes.push(outcome.clone());
+            }),
+        );
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].path, file_path);
+        assert_eq!(outcomes[0].outcome, OutcomeKind::Removed);
     }
 }

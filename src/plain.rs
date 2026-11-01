@@ -3,7 +3,8 @@
 use std::io::{self, BufRead, Write};
 
 use crate::core::bytes::format_bytes;
-use crate::core::cleaner::{Cleaner, RemovalMode, RemovalReport, item_removal_mode};
+use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
+use crate::core::history::ItemOutcome;
 use crate::core::host::MacHost;
 use crate::core::scanner::CategoryScan;
 use crate::core::stores::IgnoreStore;
@@ -186,8 +187,25 @@ impl PlainRunner {
 
     /// Execute cleaning and print results
     pub fn execute_clean(scan: &CategoryScan, ignore: &IgnoreStore) -> RemovalReport {
+        Self::execute_clean_with_callbacks(scan, ignore, None::<fn(&ItemOutcome)>)
+    }
+
+    /// Execute cleaning with outcome callback and print results
+    pub fn execute_clean_with_callbacks<O>(
+        scan: &CategoryScan,
+        ignore: &IgnoreStore,
+        outcome_cb: Option<O>,
+    ) -> RemovalReport
+    where
+        O: FnMut(&ItemOutcome),
+    {
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        let report = Cleaner::new(&MacHost, RemovalMode::Permanent).remove_items(&items, ignore);
+        let report = Cleaner::new(&MacHost, RemovalMode::Permanent).remove_items_with_callbacks(
+            &items,
+            ignore,
+            None::<fn(RemovalProgress)>,
+            outcome_cb,
+        );
         Self::print_report("Clean", &report);
         report
     }
