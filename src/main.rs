@@ -91,20 +91,11 @@ fn handle_clean(args: &CleanArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreSto
         ],
     };
 
-    let mut combined_groups = Vec::new();
-    let mut combined_notes = Vec::new();
-    for (cat_id, cat_title) in categories {
-        let scan = CategoryScanner::scan(cat_id, cat_title, ignore, None, None);
-        combined_groups.extend(scan.groups);
-        combined_notes.extend(scan.notes);
-    }
-
-    let mut scan = CategoryScan {
-        notes: combined_notes,
-        id: "clean".to_string(),
-        title: "Clean Review".to_string(),
-        groups: combined_groups,
-    };
+    let scans = categories
+        .into_iter()
+        .map(|(id, title)| CategoryScanner::scan(id, title, ignore, None, None))
+        .collect();
+    let mut scan = CategoryScan::combined("Clean Review", scans);
 
     process_scan_result(&mut scan, cli, use_plain, ignore)
 }

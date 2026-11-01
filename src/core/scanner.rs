@@ -103,6 +103,22 @@ pub struct CategoryScan {
 }
 
 impl CategoryScan {
+    /// One list out of several category scans, with their notes.
+    pub fn combined(title: &str, scans: Vec<CategoryScan>) -> Self {
+        let mut groups = Vec::new();
+        let mut notes = Vec::new();
+        for scan in scans {
+            groups.extend(scan.groups);
+            notes.extend(scan.notes);
+        }
+        Self {
+            id: "clean".to_string(),
+            title: title.to_string(),
+            groups,
+            notes,
+        }
+    }
+
     pub fn total_selected_bytes(&self) -> u64 {
         self.groups.iter().map(|g| g.total_selected_bytes()).sum()
     }
@@ -383,6 +399,28 @@ mod tests {
             .filter(|group| group.tool == tool)
             .flat_map(|group| &group.items)
             .collect()
+    }
+
+    #[test]
+    fn combined_scans_keep_every_group_and_note() {
+        let scan = |tool: &str, note: &str| CategoryScan {
+            id: tool.to_string(),
+            title: tool.to_string(),
+            groups: vec![ToolGroup {
+                tool: tool.to_string(),
+                items: Vec::new(),
+            }],
+            notes: vec![note.to_string()],
+        };
+        let combined = CategoryScan::combined(
+            "All Caches",
+            vec![scan("dev", "first"), scan("junk", "second")],
+        );
+        assert_eq!(combined.id, "clean");
+        assert_eq!(combined.title, "All Caches");
+        let tools: Vec<_> = combined.groups.iter().map(|g| g.tool.as_str()).collect();
+        assert_eq!(tools, ["dev", "junk"]);
+        assert_eq!(combined.notes, ["first", "second"]);
     }
 
     #[test]

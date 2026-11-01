@@ -1247,8 +1247,7 @@ impl App {
                 ("trash", "Trash"),
             ];
             let total = categories.len();
-            let mut groups = Vec::new();
-            let mut notes = Vec::new();
+            let mut scans = Vec::new();
 
             for (idx, (id, title)) in categories.iter().enumerate() {
                 if cancel_clone.load(Ordering::Relaxed) {
@@ -1269,24 +1268,17 @@ impl App {
                     }
                 });
 
-                let scan = CategoryScanner::scan(
+                scans.push(CategoryScanner::scan(
                     id,
                     title,
                     &ignore,
                     Some(prog_tx),
                     Some(Arc::clone(&cancel_clone)),
-                );
+                ));
                 let _ = bridge_handle.join();
-                groups.extend(scan.groups);
-                notes.extend(scan.notes);
             }
 
-            let scan = CategoryScan {
-                notes,
-                id: "clean".to_string(),
-                title: "All Caches".to_string(),
-                groups,
-            };
+            let scan = CategoryScan::combined("All Caches", scans);
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
