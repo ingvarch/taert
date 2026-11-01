@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use super::path_utils::{expand_tilde, prettify_path};
 use super::scanner::{CategoryScan, ScanItem, ToolGroup};
-use super::sizer::DirSizer;
+use super::sizer::{DirSizer, walk_parallelism};
 use super::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "purge";
@@ -154,6 +154,7 @@ impl Purger {
 
             let artifact_names_filter = artifact_names.clone();
             let walker = jwalk::WalkDir::new(root)
+                .parallelism(walk_parallelism())
                 .skip_hidden(false)
                 .follow_links(false)
                 .max_depth(8)

@@ -2,6 +2,7 @@
 //! Main menu + Clean Caches Submenu + Start Confirmations.
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use ratatui::Frame;
@@ -79,6 +80,8 @@ pub struct WorkspaceState {
     pub disk_status: Option<String>,
     pub system: Option<Box<SystemStatusState>>,
     pub largest: Option<FolderSnapshot>,
+    /// The folder the Explore Storage row reports on.
+    pub home: PathBuf,
     pane_visible: Cell<bool>,
 }
 
@@ -112,6 +115,7 @@ impl WorkspaceState {
                 SystemProfiler::current_full_status(),
             ))),
             largest: None,
+            home: Safety::home_dir(),
             pane_visible: Cell::new(false),
             items: vec![
                 (
@@ -218,8 +222,7 @@ impl WorkspaceState {
         }
 
         if choice == MainMenuChoice::ExploreStorage && self.largest.is_none() {
-            let home = Safety::home_dir();
-            self.largest = cache.read().unwrap().get_snapshot(&home);
+            self.largest = cache.read().unwrap().get_snapshot(&self.home);
             if let Some(snapshot) = &mut self.largest {
                 SortOrder::Size.sort_children(&mut snapshot.children);
             }

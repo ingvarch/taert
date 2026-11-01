@@ -7,12 +7,26 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use super::cache::StorageCache;
 use super::safety::{FileIdentity, Safety};
+
+/// Walks get their own pool. On rayon's global pool, a walk gives up after a second of other
+/// `par_iter` work and the folder reads as empty.
+pub(crate) fn walk_parallelism() -> jwalk::Parallelism {
+    static POOL: LazyLock<Option<Arc<rayon::ThreadPool>>> =
+        LazyLock::new(|| rayon::ThreadPoolBuilder::new().build().ok().map(Arc::new));
+    match POOL.as_ref() {
+        Some(pool) => jwalk::Parallelism::RayonExistingPool {
+            pool: pool.clone(),
+            busy_timeout: None,
+        },
+        None => jwalk::Parallelism::Serial,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,16 +141,8 @@ impl DirSizer {
         let mut direct_bytes: HashMap<PathBuf, u64> = HashMap::new();
         let mut direct_files: HashMap<PathBuf, usize> = HashMap::new();
 
-        // A walk that needs the pool it already runs on gives up as busy and reports 0 bytes.
-        let parallelism = if rayon::current_thread_index().is_some() {
-            jwalk::Parallelism::Serial
-        } else {
-            jwalk::Parallelism::RayonDefaultPool {
-                busy_timeout: std::time::Duration::from_secs(1),
-            }
-        };
         let walker = jwalk::WalkDir::new(path)
-            .parallelism(parallelism)
+            .parallelism(walk_parallelism())
             .skip_hidden(false)
             .follow_links(false)
             .process_read_dir(|_, _, _, children| {
@@ -266,6 +272,34 @@ mod tests {
         let measurement = DirSizer::measure(&dir);
         assert!(measurement.bytes > 0);
         assert_eq!(measurement.status, MeasurementStatus::Complete);
+    }
+
+    #[test]
+    fn a_walk_finishes_while_every_global_pool_thread_is_busy() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("f"), vec![1_u8; 8192]).unwrap();
+        let done = AtomicBool::new(false);
+
+        let measurement = rayon::scope(|scope| {
+            for _ in 0..rayon::current_num_threads() {
+                scope.spawn(|_| {
+                    while !done.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                });
+            }
+            let measurement = std::thread::scope(|threads| {
+                threads
+                    .spawn(|| DirSizer::measure(temp.path()))
+                    .join()
+                    .unwrap()
+            });
+            done.store(true, Ordering::Relaxed);
+            measurement
+        });
+
+        assert_eq!(measurement.status, MeasurementStatus::Complete);
+        assert!(measurement.bytes >= 8192, "{measurement:?}");
     }
 
     #[test]

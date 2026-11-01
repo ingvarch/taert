@@ -636,12 +636,17 @@ fn the_sampler_runs_only_while_the_status_row_is_highlighted() {
 
 #[test]
 fn the_explore_row_picks_up_a_measured_home_folder() {
-    let home = taert::core::safety::Safety::home_dir();
+    // A temporary folder: the snapshot expires when its folder changes, and a real home changes.
+    let home = tempfile::tempdir().unwrap();
     let cache = Arc::new(RwLock::new(StorageCache::new()));
     let mut snapshot = sample_analyze().levels.pop().unwrap().snapshot;
-    snapshot.path = home.clone();
-    cache.write().unwrap().put_snapshot(home, snapshot);
+    snapshot.path = home.path().to_path_buf();
+    cache
+        .write()
+        .unwrap()
+        .put_snapshot(home.path().to_path_buf(), snapshot);
     let mut state = home_state(EXPLORE_STORAGE);
+    state.home = home.path().to_path_buf();
 
     state.tick(&cache);
 
