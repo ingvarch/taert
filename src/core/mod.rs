@@ -18,6 +18,7 @@ pub mod purger;
 pub mod safety;
 pub mod scanner;
 pub mod sizer;
+pub mod startup;
 pub mod stores;
 pub mod sysinfo;
 pub mod telemetry;

@@ -1263,11 +1263,13 @@ mod tests {
                 }),
                 processes: vec![
                     ProcessStatus {
+                        pid: 0,
                         name: "a-process-with-a-very-long-name".to_string(),
                         cpu_percent: 250.0,
                         memory_bytes: GB,
                     },
                     ProcessStatus {
+                        pid: 0,
                         name: "node".to_string(),
                         cpu_percent: 50.0,
                         memory_bytes: GB,
@@ -1281,6 +1283,7 @@ mod tests {
 
     fn process(name: String, cpu_percent: f32) -> ProcessStatus {
         ProcessStatus {
+            pid: 0,
             name,
             cpu_percent,
             memory_bytes: GB,

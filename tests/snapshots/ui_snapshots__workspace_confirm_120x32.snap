@@ -10,17 +10,17 @@ expression: output
    │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches                        │
    │   ⌦ Uninstall apps           › │  │ and the Trash. You'll review every item before                              │
    ╰────────────────────────────────╯  │ anything is removed.                                                        │
-   ╭─ Inspect ──────────────────────╮  │                                                                             │
-   │   ◔ Explore storage          › │  │ ↵ Open                                                                      │
-   │   ▤ System status            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
-   ╰─────────────────────────╭────────────────────────────────────────────────────────────╮
-   ╭─ Settings ──────────────│ Explore your home folder?                                  │───── 118.6 GB available ─╮
-   │   ⌥ Preferences         │                                                            │──── 375.8 GB of 494.4 GB │
-   │   ◈ Protected paths     │ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
-   ╰─────────────────────────│                                                            │                          │
-                             │                                                            │                          │
-                             │                                           Cancel    Start  │──────────────────────────╯
-                             │                                    Enter select   Esc back │
+   ╭─ Optimize ─────────────────────╮  │                                                                             │
+   │   ▲ Startup items            › │  │ ↵ Open                                                                      │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╭─ Inspect ───────────────╭────────────────────────────────────────────────────────────╮
+   │   ◔ Explore storage     │ Explore your home folder?                                  │───── 118.6 GB available ─╮
+   │   ▤ System status       │                                                            │──── 375.8 GB of 494.4 GB │
+   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   ╭─ Settings ──────────────│                                                            │                          │
+   │   ⌥ Preferences         │                                                            │                          │
+   │   ◈ Protected paths     │                                           Cancel    Start  │──────────────────────────╯
+   ╰─────────────────────────│                                    Enter select   Esc back │
                              ╰────────────────────────────────────────────────────────────╯
 
 

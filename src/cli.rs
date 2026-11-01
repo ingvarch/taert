@@ -51,6 +51,9 @@ pub enum Command {
     /// Display memory and APFS storage status
     Optimize,
 
+    /// Review and switch off login and background items
+    Startup(StartupArgs),
+
     /// Manage protected paths that cannot be scanned or cleaned
     Ignore(IgnoreArgs),
 
@@ -121,4 +124,28 @@ pub enum IgnoreAction {
     Remove { path: PathBuf },
     /// List all protected paths
     List,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct StartupArgs {
+    /// Include Apple services and background task management entries (requires root password)
+    #[arg(long)]
+    pub all: bool,
+
+    #[command(subcommand)]
+    pub action: Option<StartupAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StartupAction {
+    /// Disable a startup service or login item
+    Disable {
+        /// Label of the launchd service or name of the login item
+        label: String,
+    },
+    /// Enable a startup service or login item
+    Enable {
+        /// Label of the launchd service or name of the login item
+        label: String,
+    },
 }

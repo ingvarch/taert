@@ -42,6 +42,7 @@ pub struct Glyphs {
     pub icon_uninstall: &'static str,
     pub icon_storage: &'static str,
     pub icon_status: &'static str,
+    pub icon_startup: &'static str,
     pub icon_prefs: &'static str,
     pub icon_protected: &'static str,
 }
@@ -95,6 +96,7 @@ impl Glyphs {
             icon_uninstall: "⌦",
             icon_storage: "◔",
             icon_status: "▤",
+            icon_startup: "▲",
             icon_prefs: "⌥",
             icon_protected: "◈",
         }
@@ -142,6 +144,7 @@ impl Glyphs {
             icon_uninstall: "U",
             icon_storage: "E",
             icon_status: "S",
+            icon_startup: "T",
             icon_prefs: "O",
             icon_protected: "X",
         }

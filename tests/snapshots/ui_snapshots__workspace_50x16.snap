@@ -13,8 +13,8 @@ expression: output
    │   ▦ Docker cleanup                      › │
    │   ⌦ Uninstall apps                      › │
    ╰───────────────────────────────────────────╯
-   ╭─ Inspect ─────────────────────────────────╮
-   │   ◔ Explore storage                     › │
-   │   ▤ System status                       › │
+   ╭─ Optimize ────────────────────────────────╮
+   │   ▲ Startup items                       › │
+   ╰───────────────────────────────────────────╯
 ──────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More         Open  ↵

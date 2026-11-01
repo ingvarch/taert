@@ -18,6 +18,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of browsers and apps it sees running
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
+- Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics
 - Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 
@@ -39,6 +40,7 @@ taert purge ~/Projects --older-than 30 --json
 taert analyze ~/Downloads
 taert docker --dry-run
 taert uninstall Zoom --dry-run
+taert startup
 ```
 
 For subcommands, keyboard shortcuts, and scripting options, see [docs/usage.md](docs/usage.md).

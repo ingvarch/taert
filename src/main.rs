@@ -10,7 +10,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::{
-    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs, UninstallArgs,
+    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, IgnoreAction, PurgeArgs, StartupArgs,
+    UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -21,6 +22,7 @@ use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
 use crate::core::sizer::DirSizer;
+use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::sysinfo::SysInfo;
 use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
@@ -70,6 +72,8 @@ fn main() -> ExitCode {
         }
 
         Some(Command::Optimize) => handle_optimize(&cli),
+
+        Some(Command::Startup(ref args)) => handle_startup(args, &cli, use_plain, &ignore, &config),
 
         Some(Command::Ignore(args)) => handle_ignore(args.action, &ignore),
 
@@ -579,4 +583,120 @@ fn handle_config(args: &ConfigArgs, config: &Config) -> ExitCode {
         println!("Custom artifacts: {:?}", config.extra_artifacts);
     }
     ExitCode::SUCCESS
+}
+
+fn handle_startup(
+    args: &StartupArgs,
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    config: &Config,
+) -> ExitCode {
+    let host = MacHost;
+    let layout = Layout::current();
+
+    if let Some(ref action) = args.action {
+        let (label, is_enable) = match action {
+            cli::StartupAction::Disable { label } => (label, false),
+            cli::StartupAction::Enable { label } => (label, true),
+        };
+
+        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        let Some(item) = scan
+            .items
+            .into_iter()
+            .find(|it| it.label == *label || it.name == *label)
+        else {
+            eprintln!("Error: Startup item '{label}' not found");
+            return ExitCode::FAILURE;
+        };
+
+        let result = if is_enable {
+            startup::enable_item(&host, &layout, ignore, &item, cli.dry_run)
+        } else {
+            startup::disable_item(&host, &layout, ignore, &item, cli.dry_run)
+        };
+
+        match result {
+            Ok(msg) => {
+                println!("{msg}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("Error: {err}");
+                ExitCode::FAILURE
+            }
+        }
+    } else if cli.json {
+        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        match serde_json::to_string_pretty(&scan.items) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("JSON serialization error: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else if use_plain {
+        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        println!("=== macOS Startup Items ===");
+        if scan.items.is_empty() {
+            println!("No startup items found.");
+        } else {
+            for item in &scan.items {
+                let app_info = item
+                    .app_name
+                    .as_deref()
+                    .map(|a| format!(" ({a})"))
+                    .unwrap_or_default();
+                let state_str = match item.state {
+                    startup::StartupState::Running => {
+                        if let (Some(cpu), Some(mem)) = (item.cpu_percent, item.memory_bytes) {
+                            format!("running (CPU: {cpu:.1}%, Memory: {})", format_bytes(mem))
+                        } else {
+                            "running".to_string()
+                        }
+                    }
+                    startup::StartupState::Enabled => "enabled".to_string(),
+                    startup::StartupState::Disabled => "disabled".to_string(),
+                    startup::StartupState::Broken => "broken (missing executable)".to_string(),
+                };
+                let prog_str = item
+                    .program
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| {
+                        item.plist_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+
+                println!(
+                    "- {}{app_info} [{}] -> {} ({prog_str})",
+                    item.name,
+                    item.kind.as_str(),
+                    state_str
+                );
+            }
+        }
+        if !scan.notes.is_empty() {
+            println!();
+            for note in &scan.notes {
+                println!("Note: {note}");
+            }
+        }
+        ExitCode::SUCCESS
+    } else {
+        let mut app = ui::app::App::new_startup(ignore.clone(), config.clone(), args.all);
+        match app.run() {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("TUI Error: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
 }

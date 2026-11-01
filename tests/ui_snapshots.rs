@@ -16,6 +16,7 @@ use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use taert::core::startup::{StartupItem, StartupKind, StartupState};
 use taert::core::stores::{Config, IgnoreStore};
 use taert::core::telemetry::{
     CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
@@ -29,6 +30,7 @@ use taert::ui::preferences::{PreferencesState, render_preferences};
 use taert::ui::progress::{ProgressState, render_progress};
 use taert::ui::review::{ReviewState, render_review};
 use taert::ui::select::{ModalOverlay, SelectState, render_select};
+use taert::ui::startup::{StartupScreenState, render_startup};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{StartConfirmKind, WorkspaceState, render_workspace};
@@ -160,6 +162,7 @@ fn mock_system_status() -> FullSystemStatus {
             ]
             .into_iter()
             .map(|(name, cpu_percent, memory_bytes)| ProcessStatus {
+                pid: 0,
                 name: name.to_string(),
                 cpu_percent,
                 memory_bytes,
@@ -171,6 +174,7 @@ fn mock_system_status() -> FullSystemStatus {
             ]
             .into_iter()
             .map(|(name, cpu_percent, memory_bytes)| ProcessStatus {
+                pid: 0,
                 name: name.to_string(),
                 cpu_percent,
                 memory_bytes,
@@ -235,6 +239,76 @@ fn snapshot_workspace_confirm() {
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_workspace(f, &state, &theme));
         assert_snapshot!(format!("workspace_confirm_{label}"), output);
+    }
+}
+
+#[test]
+fn snapshot_startup_items() {
+    let theme = snapshot_theme();
+    let items = vec![
+        StartupItem {
+            label: "com.docker.helper".to_string(),
+            name: "Docker".to_string(),
+            app_name: Some("Docker".to_string()),
+            app_bundle: Some(PathBuf::from("/Applications/Docker.app")),
+            kind: StartupKind::UserAgent,
+            state: StartupState::Running,
+            program: Some(PathBuf::from(
+                "/Applications/Docker.app/Contents/MacOS/Docker",
+            )),
+            plist_path: Some(PathBuf::from(
+                "/Users/user/Library/LaunchAgents/com.docker.helper.plist",
+            )),
+            pid: Some(1234),
+            cpu_percent: Some(1.2),
+            memory_bytes: Some(45 * 1024 * 1024),
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        },
+        StartupItem {
+            label: "com.spotify.webhelper".to_string(),
+            name: "Spotify Web Helper".to_string(),
+            app_name: Some("Spotify".to_string()),
+            app_bundle: Some(PathBuf::from("/Applications/Spotify.app")),
+            kind: StartupKind::UserAgent,
+            state: StartupState::Disabled,
+            program: Some(PathBuf::from(
+                "/Applications/Spotify.app/Contents/MacOS/SpotifyWebHelper",
+            )),
+            plist_path: Some(PathBuf::from(
+                "/Users/user/Library/LaunchAgents/com.spotify.webhelper.plist",
+            )),
+            pid: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        },
+        StartupItem {
+            label: "com.broken.service".to_string(),
+            name: "Old Broken Service".to_string(),
+            app_name: None,
+            app_bundle: None,
+            kind: StartupKind::UserAgent,
+            state: StartupState::Broken,
+            program: Some(PathBuf::from("/nonexistent/path/binary")),
+            plist_path: Some(PathBuf::from(
+                "/Users/user/Library/LaunchAgents/com.broken.service.plist",
+            )),
+            pid: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        },
+    ];
+    let state = StartupScreenState::new(items, false);
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_startup(f, &state, &theme));
+        assert_snapshot!(format!("startup_{label}"), output);
     }
 }
 
@@ -547,9 +621,11 @@ fn home_screen(state: &WorkspaceState, w: u16, h: u16) -> String {
 const CLEAN_CACHES: usize = 0;
 const PROJECT_CLEANUP: usize = 1;
 const DOCKER_CLEANUP: usize = 2;
-const EXPLORE_STORAGE: usize = 4;
-const SYSTEM_STATUS: usize = 5;
-const PREFERENCES: usize = 6;
+const _UNINSTALL_APPS: usize = 3;
+const _STARTUP_ITEMS: usize = 4;
+const EXPLORE_STORAGE: usize = 5;
+const SYSTEM_STATUS: usize = 6;
+const PREFERENCES: usize = 7;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {

@@ -11,6 +11,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Storage Cache | `crate::core::cache` | In-memory tree aggregation and folder snapshot cache |
 | Catalog | `crate::core::catalog` | Defines known cache paths, risk tiers, and auto-select defaults |
 | Cleaner | `crate::core::cleaner` | Executes safe deletions with live progress and safety checks |
+| Startup Manager | `crate::core::startup` | Scans, associates, inspects live metrics, and switches launchd/login items |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
 | TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
@@ -75,6 +76,19 @@ These rules keep it from removing the wrong thing:
 - **Root**: everything that needs root runs as one script, so macOS asks for the password once. taert uses `sudo` if it has a cached session, and the macOS password dialog otherwise. Paths are quoted. `Safety::is_safe_as_root` refuses a target below a folder the user could replace, because `rm` run as root follows folder links, and the script compares device and inode again right before each `rm`, since the password prompt can stay open for minutes.
 
 Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
+
+## Startup and Background Items
+
+[`startup.rs`](../src/core/startup.rs) manages launchd services (user agents, system agents, daemons) and classic login items:
+
+- **Launchd Management**: Inspects disabled states (`launchctl print-disabled`) and running services (`launchctl print gui/<uid>` and `launchctl print system`). Services are associated with installed applications via program path or bundle IDs.
+- **Ordered Teardown**: When disabling a launchd service, `taert` executes `launchctl disable` *before* `launchctl bootout`. This prevents `launchd` from immediately respawning the job when stopped.
+- **Domain Separation**: User launch agents operate in the `gui/<uid>/` domain without elevation (`Host::run`). System daemons operate in `system/` and require root elevation via `Host::run_admin`.
+- **System Events & Login Items**: Discovered via AppleScript (`osascript`) through System Events. When disabled, items are recorded in `~/.config/taert/disabled_login_items.json` and deleted from Login Items; enabling re-creates them via AppleScript. If Automation permissions are refused by macOS, `taert` logs a clean diagnostic note without crashing or corrupting other items.
+- **Safety Gate**:
+  - Apple system items (`com.apple.*`) are hidden by default, excluded from user scans unless `--all` is passed, and strictly refused for modification or deletion.
+  - Security agents (CrowdStrike, SentinelOne, Jamf, Carbon Black, etc.) are protected and read-only.
+  - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
 
 ## APFS Space Accounting
 

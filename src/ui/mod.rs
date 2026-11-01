@@ -11,6 +11,7 @@ pub mod progress;
 pub mod review;
 pub mod select;
 pub mod size_level;
+pub mod startup;
 pub mod system_status;
 pub mod theme;
 pub mod workspace;

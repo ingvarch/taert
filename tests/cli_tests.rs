@@ -436,4 +436,48 @@ mod uninstall {
 
         assert!(home.path().join("Applications/Taert Fixture.app").exists());
     }
+
+    #[test]
+    fn test_cli_startup_plain() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["startup", "--plain"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("=== macOS Startup Items ==="));
+    }
+
+    #[test]
+    fn test_cli_startup_json() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["startup", "--json"])
+            .assert()
+            .success()
+            .stdout(predicate::str::starts_with("["));
+    }
+
+    #[test]
+    fn test_cli_startup_disable_nonexistent() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["startup", "disable", "com.nonexistent.service"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Startup item 'com.nonexistent.service' not found",
+            ));
+    }
+
+    #[test]
+    fn test_cli_startup_enable_nonexistent() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["startup", "enable", "com.nonexistent.service"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Startup item 'com.nonexistent.service' not found",
+            ));
+    }
 }
