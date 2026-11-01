@@ -15,6 +15,7 @@ use crate::cli::{
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
+use crate::core::cleaner::RemovalMode;
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::host::MacHost;
@@ -48,7 +49,7 @@ fn main() -> ExitCode {
                 );
                 ExitCode::SUCCESS
             } else {
-                let mut app = ui::app::App::new(ignore, config);
+                let mut app = ui::app::App::new(ignore, config).with_permanent(cli.permanent);
                 match app.run() {
                     Ok(_) => ExitCode::SUCCESS,
                     Err(e) => {
@@ -157,7 +158,7 @@ fn process_scan_result(
 
     // 2. Dry-run mode: display scan and exit without deleting
     if cli.dry_run {
-        PlainRunner::print_scan(scan);
+        PlainRunner::print_scan_with_options(scan, cli.permanent);
         println!("\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
     }
@@ -175,7 +176,7 @@ fn process_scan_result(
 
     // 4. Plain interactive mode or fallback
     if use_plain {
-        PlainRunner::print_scan(scan);
+        PlainRunner::print_scan_with_options(scan, cli.permanent);
         if let Err(e) = PlainRunner::prompt_selection(scan) {
             eprintln!("Selection error: {e}");
             return ExitCode::FAILURE;
@@ -202,7 +203,8 @@ fn process_scan_result(
     } else {
         // Launch TUI with pre-scanned items
         let mut app =
-            ui::app::App::with_select(scan.clone(), ignore.clone(), Config::load_or_default());
+            ui::app::App::with_select(scan.clone(), ignore.clone(), Config::load_or_default())
+                .with_permanent(cli.permanent);
         match app.run() {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {
@@ -271,7 +273,8 @@ fn pick_apps_to_uninstall(
     layout: &Layout,
 ) -> ExitCode {
     if !use_plain && !cli.json && !cli.dry_run {
-        let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default());
+        let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default())
+            .with_permanent(cli.permanent);
         app.launch_app_scan();
         return run_tui(&mut app);
     }
@@ -292,7 +295,7 @@ fn pick_apps_to_uninstall(
         };
     }
 
-    PlainRunner::print_scan(&list);
+    PlainRunner::print_scan_with_options(&list, cli.permanent);
     if cli.dry_run {
         println!("\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
@@ -330,11 +333,22 @@ fn run_tui(app: &mut ui::app::App) -> ExitCode {
     }
 }
 
-fn run_uninstall(plan: &UninstallPlan, ignore: &IgnoreStore, layout: &Layout) -> ExitCode {
+fn run_uninstall(
+    plan: &UninstallPlan,
+    cli: &Cli,
+    ignore: &IgnoreStore,
+    layout: &Layout,
+) -> ExitCode {
+    let mode = if cli.permanent {
+        RemovalMode::Permanent
+    } else {
+        RemovalMode::Trash
+    };
     let report = Uninstaller {
         host: &MacHost,
         layout,
         ignore,
+        mode,
     }
     .run(plan, |_| {});
     PlainRunner::print_report("Uninstall", &report);
@@ -373,29 +387,30 @@ fn finish_uninstall(
     }
 
     if cli.dry_run {
-        PlainRunner::print_scan(&plan.scan);
+        PlainRunner::print_scan_with_options(&plan.scan, cli.permanent);
         PlainRunner::print_notes(&plan.notes);
         println!("\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
     }
 
     if cli.force {
-        return run_uninstall(&plan, ignore, layout);
+        return run_uninstall(&plan, cli, ignore, layout);
     }
 
     if !use_plain {
-        let mut app = ui::app::App::with_plan(plan, ignore.clone(), Config::load_or_default());
+        let mut app = ui::app::App::with_plan(plan, ignore.clone(), Config::load_or_default())
+            .with_permanent(cli.permanent);
         return run_tui(&mut app);
     }
 
-    PlainRunner::print_scan(&plan.scan);
+    PlainRunner::print_scan_with_options(&plan.scan, cli.permanent);
     PlainRunner::print_notes(&plan.notes);
     if let Err(error) = PlainRunner::prompt_selection(&mut plan.scan) {
         eprintln!("Selection error: {error}");
         return ExitCode::FAILURE;
     }
     match PlainRunner::prompt_confirm(&plan.scan) {
-        Ok(true) => run_uninstall(&plan, ignore, layout),
+        Ok(true) => run_uninstall(&plan, cli, ignore, layout),
         Ok(false) => {
             println!("Operation cancelled.");
             ExitCode::SUCCESS
@@ -421,7 +436,8 @@ fn handle_analyze(path: PathBuf, depth: usize, cli: &Cli, use_plain: bool) -> Ex
             scan_root,
             IgnoreStore::load_or_default(),
             Config::load_or_default(),
-        );
+        )
+        .with_permanent(cli.permanent);
         return match app.run() {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {

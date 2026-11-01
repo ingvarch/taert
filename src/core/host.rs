@@ -22,6 +22,8 @@ pub trait Host: Send + Sync {
     fn run_admin(&self, script: &str, prompt: &str) -> Result<(), String>;
     fn signal(&self, pid: u32, signal: i32);
     fn pause(&self, duration: Duration);
+    /// Moves a file or folder to the system Trash.
+    fn trash(&self, path: &std::path::Path) -> Result<(), String>;
 }
 
 pub struct MacHost;
@@ -120,6 +122,16 @@ impl Host for MacHost {
     fn pause(&self, duration: Duration) {
         thread::sleep(duration);
     }
+
+    fn trash(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut ctx = trash::TrashContext::default();
+        #[cfg(target_os = "macos")]
+        {
+            use trash::macos::{DeleteMethod, TrashContextExtMacos};
+            ctx.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        ctx.delete(path).map_err(|e| e.to_string())
+    }
 }
 
 /// Quotes a string for /bin/sh.
@@ -131,6 +143,7 @@ pub fn shell_quote(text: &str) -> String {
 pub mod fake {
     use super::*;
     use std::collections::VecDeque;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     type Effect = Box<dyn Fn() + Send>;
@@ -145,6 +158,9 @@ pub mod fake {
         pub admin_effect: Mutex<Option<Effect>>,
         pub run_effects: Mutex<Vec<(String, Effect)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
+        pub trashed: Mutex<Vec<PathBuf>>,
+        pub trash_error: Mutex<Option<String>>,
+        pub simulate_trash: Mutex<bool>,
     }
 
     impl FakeHost {
@@ -222,6 +238,18 @@ pub mod fake {
                 .iter()
                 .position(|line| line.starts_with(command))
         }
+
+        pub fn fail_trash(&self, error: &str) {
+            *self.trash_error.lock().unwrap() = Some(error.to_string());
+        }
+
+        pub fn trashed(&self) -> Vec<PathBuf> {
+            self.trashed.lock().unwrap().clone()
+        }
+
+        pub fn simulate_trash(&self) {
+            *self.simulate_trash.lock().unwrap() = true;
+        }
     }
 
     impl Host for FakeHost {
@@ -263,6 +291,21 @@ pub mod fake {
         }
 
         fn pause(&self, _duration: Duration) {}
+
+        fn trash(&self, path: &Path) -> Result<(), String> {
+            self.trashed.lock().unwrap().push(path.to_path_buf());
+            if let Some(error) = self.trash_error.lock().unwrap().clone() {
+                return Err(error);
+            }
+            if *self.simulate_trash.lock().unwrap() {
+                if path.is_dir() && !path.is_symlink() {
+                    std::fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+                } else {
+                    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 

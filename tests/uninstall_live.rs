@@ -117,3 +117,18 @@ fn plain_mode_without_a_choice_removes_nothing() {
 
     assert!(home.path().join("Applications/Taert Fixture.app").exists());
 }
+
+#[test]
+#[ignore = "talks to the running Mac"]
+fn mac_host_trash_moves_file_to_trash() {
+    use taert::core::host::{Host, MacHost};
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("trash_test.txt");
+    fs::write(&file, "test trash content").unwrap();
+    assert!(file.exists());
+
+    let host = MacHost;
+    let res = host.trash(&file);
+    assert!(res.is_ok(), "host.trash failed: {:?}", res);
+    assert!(!file.exists(), "file still exists after trash");
+}

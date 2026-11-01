@@ -20,7 +20,7 @@ use super::apps::{
     InstalledApp, bundle_id_of, embedded_bundle_ids, find_apps, find_copies, is_common_name,
     official_uninstaller,
 };
-use super::cleaner::{Cleaner, RemovalFailure, RemovalProgress, RemovalReport};
+use super::cleaner::{Cleaner, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport};
 use super::host::{Host, Output, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
@@ -512,7 +512,7 @@ fn tree_is_removable(folder: &Path) -> bool {
         })
 }
 
-fn user_can_remove(path: &Path) -> bool {
+pub fn user_can_remove(path: &Path) -> bool {
     let owned =
         fs::symlink_metadata(path).is_ok_and(|meta| meta.uid() == unsafe { libc::getuid() });
     owned
@@ -523,7 +523,7 @@ fn user_can_remove(path: &Path) -> bool {
 
 /// App Management can keep a terminal out of an app it owns. Finding that out
 /// now, with one empty file, saves stopping the app and asking for a password twice.
-fn can_write_inside(bundle: &Path) -> bool {
+pub fn can_write_inside(bundle: &Path) -> bool {
     let contents = bundle.join("Contents");
     if bundle.is_symlink() || !contents.is_dir() {
         return true;
@@ -532,6 +532,32 @@ fn can_write_inside(bundle: &Path) -> bool {
     let writable = fs::File::create(&probe).is_ok();
     let _ = fs::remove_file(&probe);
     writable
+}
+
+/// Determines if removing an item requires root privileges.
+pub fn needs_root(item: &ScanItem) -> bool {
+    if matches!(item.role, Some(UninstallRole::Receipt { .. })) {
+        return true;
+    }
+    if item.path.symlink_metadata().is_ok() {
+        if !user_can_remove(&item.path) {
+            return true;
+        }
+        if matches!(item.role, Some(UninstallRole::Bundle))
+            && (!can_write_inside(&item.path) || !tree_is_removable(&item.path))
+        {
+            return true;
+        }
+        return false;
+    }
+    if item.path.starts_with("/Library")
+        || item.path.starts_with("/System")
+        || item.path.starts_with("/usr")
+        || item.path.starts_with("/opt")
+    {
+        return true;
+    }
+    false
 }
 
 fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
@@ -776,10 +802,22 @@ impl<F: FnMut(RemovalProgress)> Tally<F> {
         });
     }
 
-    fn removed(&mut self, item: &ScanItem) {
+    fn removed(&mut self, item: &ScanItem, mode: RemovalMode) {
         self.report.removed_count += 1;
-        self.report.freed_bytes = self.report.freed_bytes.saturating_add(item.size_bytes);
+        match mode {
+            RemovalMode::Trash if !item.contents_only => {
+                self.report.trashed_bytes =
+                    self.report.trashed_bytes.saturating_add(item.size_bytes);
+            }
+            _ => {
+                self.report.freed_bytes = self.report.freed_bytes.saturating_add(item.size_bytes);
+            }
+        }
         self.removed_paths.push(item.path.clone());
+    }
+
+    fn removed_permanent(&mut self, item: &ScanItem) {
+        self.removed(item, RemovalMode::Permanent);
     }
 
     fn failed(&mut self, path: &Path, error: impl Into<String>) {
@@ -811,6 +849,7 @@ pub struct Uninstaller<'a> {
     pub host: &'a dyn Host,
     pub layout: &'a Layout,
     pub ignore: &'a IgnoreStore,
+    pub mode: RemovalMode,
 }
 
 impl Uninstaller<'_> {
@@ -1176,7 +1215,7 @@ impl Uninstaller<'_> {
         self.count_bundle(job, bundle, tally);
         match self.brew_uninstall(token, &bundle.path) {
             BrewResult::Removed => {
-                tally.removed(bundle);
+                tally.removed_permanent(bundle);
                 job.bundle_done = true;
             }
             BrewResult::NotTracked => {}
@@ -1192,9 +1231,9 @@ impl Uninstaller<'_> {
             return;
         };
         self.count_bundle(job, bundle, tally);
-        match Cleaner::remove_verified(bundle, |path| self.check(path)) {
+        match Cleaner::new(self.host, self.mode).remove_verified(bundle, |path| self.check(path)) {
             Ok(()) => {
-                tally.removed(bundle);
+                tally.removed(bundle, self.mode);
                 job.bundle_done = true;
             }
             Err(error) if error.is_permission_denied() => job.bundle_needs_root = true,
@@ -1213,7 +1252,7 @@ impl Uninstaller<'_> {
         for item in std::mem::take(&mut job.root_files) {
             tally.step(&item.path);
             if is_gone(&item.path) {
-                tally.removed(item);
+                tally.removed_permanent(item);
             } else if let Err(error) = Cleaner::verify(item, |path| self.check(path)) {
                 tally.failed(&item.path, error.to_string());
             } else if item.identity.is_some() && Safety::is_safe_as_root(&item.path, self.layout) {
@@ -1302,7 +1341,7 @@ impl Uninstaller<'_> {
             if let Some(bundle) = job.bundle.filter(|_| job.bundle_needs_root) {
                 job.bundle_needs_root = false;
                 if is_gone(&bundle.path) {
-                    tally.removed(bundle);
+                    tally.removed_permanent(bundle);
                     job.bundle_done = true;
                 } else {
                     tally.failed(&bundle.path, because(APP_MANAGEMENT_HINT));
@@ -1323,7 +1362,7 @@ impl Uninstaller<'_> {
                 .chain(receipts.into_iter().map(|(item, _)| item))
             {
                 if is_gone(&item.path) {
-                    tally.removed(item);
+                    tally.removed_permanent(item);
                 } else {
                     tally.failed(&item.path, because(NOT_REMOVED));
                 }
@@ -1344,12 +1383,13 @@ impl Uninstaller<'_> {
         for item in &job.own_files {
             tally.step(&item.path);
             if is_gone(&item.path) {
-                tally.removed(item);
+                tally.removed(item, self.mode);
                 continue;
             }
-            match Cleaner::remove_verified(item, |path| self.check(path)) {
-                Ok(()) => tally.removed(item),
-                Err(_) if is_container_stub(&item.path) => tally.removed(item),
+            match Cleaner::new(self.host, self.mode).remove_verified(item, |path| self.check(path))
+            {
+                Ok(()) => tally.removed(item, self.mode),
+                Err(_) if is_container_stub(&item.path) => tally.removed(item, self.mode),
                 Err(error) if error.is_permission_denied() => {
                     tally.failed(&item.path, FULL_DISK_HINT);
                 }
@@ -2228,10 +2268,12 @@ mod run_tests {
         layout: &Layout,
         ignore: &IgnoreStore,
     ) -> RemovalReport {
+        host.simulate_trash();
         Uninstaller {
             host,
             layout,
             ignore,
+            mode: RemovalMode::Trash,
         }
         .run(plan, |_| {})
     }
@@ -2261,7 +2303,8 @@ mod run_tests {
         assert!(!cache.exists());
         assert!(kept.exists());
         assert_eq!(report.removed_count, 2);
-        assert_eq!(report.freed_bytes, 200);
+        assert_eq!(report.trashed_bytes, 200);
+        assert_eq!(report.freed_bytes, 0);
     }
 
     #[test]
@@ -2271,6 +2314,7 @@ mod run_tests {
         let cache = folder(layout.user("Library/Caches/com.acme.foo"));
         let plan = plan_of(&foo, vec![leftover(&cache)]);
         let host = FakeHost::default();
+        host.simulate_trash();
         let ignore = IgnoreStore::default();
         let mut seen = Vec::new();
 
@@ -2278,12 +2322,38 @@ mod run_tests {
             host: &host,
             layout: &layout,
             ignore: &ignore,
+            mode: RemovalMode::Trash,
         }
         .run(&plan, |step| {
             seen.push((step.current_index, step.total_count))
         });
 
         assert_eq!(seen, [(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn permanent_mode_frees_bytes_instead_of_trashing() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let cache = folder(layout.user("Library/Caches/com.acme.foo"));
+        let plan = plan_of(&foo, vec![leftover(&cache)]);
+        let host = FakeHost::default();
+        let ignore = IgnoreStore::default();
+
+        let report = Uninstaller {
+            host: &host,
+            layout: &layout,
+            ignore: &ignore,
+            mode: RemovalMode::Permanent,
+        }
+        .run(&plan, |_| {});
+
+        assert_eq!(report.removed_count, 2);
+        assert_eq!(report.freed_bytes, 200);
+        assert_eq!(report.trashed_bytes, 0);
+        assert!(host.trashed().is_empty());
+        assert!(!foo.path.exists());
+        assert!(!cache.exists());
     }
 
     #[test]
@@ -3041,10 +3111,12 @@ mod run_tests {
         let mut seen = Vec::new();
         lock_folder(&helpers);
 
+        host.simulate_trash();
         let report = Uninstaller {
             host: &host,
             layout: &layout,
             ignore: &ignore,
+            mode: RemovalMode::Trash,
         }
         .run(&plan, |step| seen.push(step.current_index));
 

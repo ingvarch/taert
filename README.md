@@ -5,14 +5,15 @@
 [![Rust](https://img.shields.io/badge/Rust-dea584?logo=rust&logoColor=black)](Cargo.toml)
 [![macOS](https://img.shields.io/badge/macOS-11+-000000?logo=apple&logoColor=white)](https://apple.com)
 
-A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with Rust and Ratatui. It finds caches, system junk, project build artifacts, and everything an app leaves behind, giving you transparent control over what gets deleted permanently.
+A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with Rust and Ratatui. It finds caches, system junk, project build artifacts, and everything an app leaves behind, giving you transparent control over what gets cleaned. Personal files and apps move to the Trash by default, while system junk and build artifacts are permanently deleted (with `--permanent` to skip Trash entirely).
 
 ## Features
 
 - Apple Human Interface Guidelines-inspired TUI with adaptive split-view on wide terminals (≥100 columns)
 - Safety engine protecting system roots, credentials, symlinks, and iCloud dataless files
+- Safe file removal: personal files and apps move to the Trash by default so they can be recovered, while caches, build artifacts, and Docker objects are deleted permanently
 - Accurate APFS space accounting via allocated blocks (`st_blocks * 512`) with hardlink deduplication
-- Interactive storage browser with streaming progress, selection, deletion, and tree-aggregating cache
+- Interactive storage browser with streaming progress, selection, deletion ("Move to Trash" or "Delete Permanently"), and tree-aggregating cache
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
 - App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of browsers and apps it sees running
@@ -20,7 +21,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics
 - Doctor diagnostic command (`taert doctor`) to explain what is slowing the Mac down, heating it up, or draining battery with named causes and single actions
-- Script-friendly automation with `--dry-run`, `--json`, `--force`, and `--plain` flags
+- Script-friendly automation with `--dry-run`, `--json`, `--force`, `--permanent`, and `--plain` flags
 - Zero telemetry, zero analytics, private and open-source
 
 ## Install

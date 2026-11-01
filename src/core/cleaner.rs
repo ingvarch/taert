@@ -8,20 +8,47 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::docker::{DockerClient, DockerRemover};
+use super::host::Host;
 use super::safety::{FileIdentity, Safety, SafetyError};
 use super::scanner::ScanItem;
 use super::stores::IgnoreStore;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemovalMode {
+    Permanent,
+    #[default]
+    Trash,
+}
+
+/// Determines whether an item goes to the Trash or is permanently removed.
+pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> RemovalMode {
+    if permanent || item.contents_only || item.docker.is_some() {
+        return RemovalMode::Permanent;
+    }
+    match scan_id {
+        super::uninstaller::PLAN_ID => {
+            if super::uninstaller::needs_root(item) {
+                RemovalMode::Permanent
+            } else {
+                RemovalMode::Trash
+            }
+        }
+        "analyze" => RemovalMode::Trash,
+        _ => RemovalMode::Permanent,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovalFailure {
     pub path: PathBuf,
     pub error: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RemovalReport {
     pub removed_count: usize,
     pub freed_bytes: u64,
+    pub trashed_bytes: u64,
     pub failures: Vec<RemovalFailure>,
     /// Things worth telling that are not failures.
     pub notes: Vec<String>,
@@ -33,6 +60,8 @@ pub enum ItemRemovalError {
     Refused(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Trash(String),
 }
 
 impl ItemRemovalError {
@@ -40,6 +69,10 @@ impl ItemRemovalError {
         match self {
             Self::Refused(_) => false,
             Self::Io(error) => matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)),
+            Self::Trash(error) => {
+                let lower = error.to_lowercase();
+                lower.contains("permission denied") || lower.contains("operation not permitted")
+            }
         }
     }
 }
@@ -58,16 +91,38 @@ fn connect_docker() -> Result<Box<dyn DockerRemover>, String> {
     }
 }
 
-pub struct Cleaner;
+pub struct Cleaner<'a> {
+    pub host: &'a dyn Host,
+    pub mode: RemovalMode,
+}
 
-impl Cleaner {
-    /// Permanently remove selected items with strict safety re-checks.
-    pub fn remove_items(items: &[ScanItem], ignore: &IgnoreStore) -> RemovalReport {
-        Self::remove_items_with_progress(items, ignore, None::<fn(RemovalProgress)>)
+impl<'a> Cleaner<'a> {
+    pub fn new(host: &'a dyn Host, mode: RemovalMode) -> Self {
+        Self { host, mode }
     }
 
-    /// Permanently remove selected items and report progress via callback before each item.
+    pub fn permanent(host: &'a dyn Host) -> Self {
+        Self {
+            host,
+            mode: RemovalMode::Permanent,
+        }
+    }
+
+    pub fn trash(host: &'a dyn Host) -> Self {
+        Self {
+            host,
+            mode: RemovalMode::Trash,
+        }
+    }
+
+    /// Remove selected items with strict safety re-checks.
+    pub fn remove_items(&self, items: &[ScanItem], ignore: &IgnoreStore) -> RemovalReport {
+        self.remove_items_with_progress(items, ignore, None::<fn(RemovalProgress)>)
+    }
+
+    /// Remove selected items and report progress via callback before each item.
     pub fn remove_items_with_progress<F>(
+        &self,
         items: &[ScanItem],
         ignore: &IgnoreStore,
         progress_cb: Option<F>,
@@ -75,10 +130,11 @@ impl Cleaner {
     where
         F: FnMut(RemovalProgress),
     {
-        Self::remove_with(items, ignore, progress_cb, connect_docker)
+        self.remove_with(items, ignore, progress_cb, connect_docker)
     }
 
     fn remove_with<F, C>(
+        &self,
         items: &[ScanItem],
         ignore: &IgnoreStore,
         mut progress_cb: Option<F>,
@@ -133,7 +189,7 @@ impl Cleaner {
                 continue;
             }
 
-            Self::remove_row(item, ignore, &mut report);
+            self.remove_row(item, ignore, &mut report);
         }
 
         // Images share layers, so only the daemon knows what a removal really freed.
@@ -150,7 +206,7 @@ impl Cleaner {
     }
 
     /// Checks every folder of a row before the first one goes, then counts what went.
-    fn remove_row(item: &ScanItem, ignore: &IgnoreStore, report: &mut RemovalReport) {
+    fn remove_row(&self, item: &ScanItem, ignore: &IgnoreStore, report: &mut RemovalReport) {
         let check = |path: &Path| Safety::can_remove(path, ignore);
         let failure = |folder: &ScanItem, error: ItemRemovalError| RemovalFailure {
             path: folder.path.clone(),
@@ -166,10 +222,15 @@ impl Cleaner {
         }
         let mut any_went = false;
         for folder in item.folders() {
-            match Self::remove_verified(folder, check) {
+            match self.remove_verified(folder, check) {
                 Ok(()) => {
                     any_went = true;
-                    report.freed_bytes = report.freed_bytes.saturating_add(folder.own_bytes());
+                    if self.mode == RemovalMode::Trash && !folder.contents_only {
+                        report.trashed_bytes =
+                            report.trashed_bytes.saturating_add(folder.own_bytes());
+                    } else {
+                        report.freed_bytes = report.freed_bytes.saturating_add(folder.own_bytes());
+                    }
                 }
                 Err(error) => report.failures.push(failure(folder, error)),
             }
@@ -179,16 +240,23 @@ impl Cleaner {
 
     /// Runs the safety rule, confirms the path is the one scanned, and removes it.
     pub fn remove_verified(
+        &self,
         item: &ScanItem,
         check: impl Fn(&Path) -> Result<(), SafetyError>,
     ) -> Result<(), ItemRemovalError> {
         Self::verify(item, check)?;
-        if item.contents_only {
-            Self::remove_contents(&item.path)?;
-        } else if item.path.is_dir() {
-            fs::remove_dir_all(&item.path)?;
+        if item.contents_only || self.mode == RemovalMode::Permanent {
+            if item.contents_only {
+                Self::remove_contents(&item.path)?;
+            } else if item.path.is_dir() {
+                fs::remove_dir_all(&item.path)?;
+            } else {
+                fs::remove_file(&item.path)?;
+            }
         } else {
-            fs::remove_file(&item.path)?;
+            self.host
+                .trash(&item.path)
+                .map_err(ItemRemovalError::Trash)?;
         }
         Ok(())
     }
@@ -237,10 +305,16 @@ impl Cleaner {
 mod tests {
     use super::*;
     use crate::core::docker::DockerObject;
+    use crate::core::host::MacHost;
+    use crate::core::host::fake::FakeHost;
     use std::cell::{Cell, RefCell};
     use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
     use tempfile::tempdir;
+
+    fn cleaner() -> Cleaner<'static> {
+        Cleaner::new(&MacHost, RemovalMode::Permanent)
+    }
 
     #[derive(Default)]
     struct Daemon {
@@ -269,7 +343,7 @@ mod tests {
 
     fn remove_with(items: &[ScanItem], daemon: &Rc<Daemon>) -> RemovalReport {
         let daemon = daemon.clone();
-        Cleaner::remove_with(
+        cleaner().remove_with(
             items,
             &IgnoreStore::default(),
             None::<fn(RemovalProgress)>,
@@ -362,7 +436,9 @@ mod tests {
             ScanItem::new(target.clone(), 7, true, false),
         ];
 
-        let report = Cleaner::remove_with(
+        let host = FakeHost::default();
+        let cleaner = Cleaner::new(&host, RemovalMode::Permanent);
+        let report = cleaner.remove_with(
             &items,
             &IgnoreStore::default(),
             None::<fn(RemovalProgress)>,
@@ -381,7 +457,7 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let item = ScanItem::new(target, 7, true, false);
 
-        let report = Cleaner::remove_with(
+        let report = cleaner().remove_with(
             &[item],
             &IgnoreStore::default(),
             None::<fn(RemovalProgress)>,
@@ -401,7 +477,7 @@ mod tests {
         let item = ScanItem::new(target.clone(), 100, true, false);
         let ignore = IgnoreStore::default();
         let mut progress_count = 0;
-        let report = Cleaner::remove_items_with_progress(
+        let report = cleaner().remove_items_with_progress(
             &[item],
             &ignore,
             Some(|p: RemovalProgress| {
@@ -432,7 +508,7 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let item = ScanItem::new(target.clone(), 1, true, false);
 
-        let error = Cleaner::remove_verified(&item, refuse).unwrap_err();
+        let error = cleaner().remove_verified(&item, refuse).unwrap_err();
 
         assert!(target.exists());
         assert!(error.to_string().contains("Safety check failed"));
@@ -467,7 +543,7 @@ mod tests {
         let root = temp.path().canonicalize().unwrap();
         let (row, first, second) = row_of_two_folders(&root);
 
-        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+        let report = cleaner().remove_items(&[row], &IgnoreStore::default());
 
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.removed_count, 1);
@@ -483,7 +559,7 @@ mod tests {
         let (row, first, second) = row_of_two_folders(&root);
         let locked = lock_inside(&second);
 
-        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+        let report = cleaner().remove_items(&[row], &IgnoreStore::default());
 
         unlock(&locked);
         assert_eq!(report.removed_count, 1);
@@ -501,7 +577,7 @@ mod tests {
         let (row, first, second) = row_of_two_folders(&root);
         let locked = lock_inside(&first);
 
-        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+        let report = cleaner().remove_items(&[row], &IgnoreStore::default());
 
         unlock(&locked);
         assert_eq!(report.removed_count, 1);
@@ -519,7 +595,7 @@ mod tests {
         let (row, first, second) = row_of_two_folders(&root);
         let locks = [lock_inside(&first), lock_inside(&second)];
 
-        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+        let report = cleaner().remove_items(&[row], &IgnoreStore::default());
 
         locks.iter().for_each(|locked| unlock(locked));
         assert_eq!(report.removed_count, 0);
@@ -535,7 +611,7 @@ mod tests {
         fs::remove_dir(&second).unwrap();
         fs::write(&second, b"something else").unwrap();
 
-        let report = Cleaner::remove_items(&[row], &IgnoreStore::default());
+        let report = cleaner().remove_items(&[row], &IgnoreStore::default());
 
         assert_eq!(report.removed_count, 0);
         assert_eq!(report.failures.len(), 1);
@@ -554,7 +630,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("spacer")).unwrap();
         fs::create_dir_all(&target).unwrap();
 
-        let error = Cleaner::remove_verified(&item, allow).unwrap_err();
+        let error = cleaner().remove_verified(&item, allow).unwrap_err();
 
         assert!(target.exists());
         assert!(error.to_string().contains("identity"));
@@ -569,7 +645,7 @@ mod tests {
         let item = ScanItem::new(target.clone(), 1, true, false);
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let error = Cleaner::remove_verified(&item, allow).unwrap_err();
+        let error = cleaner().remove_verified(&item, allow).unwrap_err();
 
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(error.is_permission_denied(), "{error}");
@@ -582,7 +658,7 @@ mod tests {
         fs::write(&target, b"x").unwrap();
         let item = ScanItem::new(target.clone(), 1, true, false);
 
-        Cleaner::remove_verified(&item, allow).unwrap();
+        cleaner().remove_verified(&item, allow).unwrap();
 
         assert!(!target.exists());
     }
@@ -596,10 +672,135 @@ mod tests {
 
         let item = ScanItem::new(target.clone(), 50, true, true);
         let ignore = IgnoreStore::default();
-        let report = Cleaner::remove_items(&[item], &ignore);
+        let report = cleaner().remove_items(&[item], &ignore);
 
         assert_eq!(report.removed_count, 1);
         assert!(target.exists());
         assert!(!target.join("app.log").exists());
+    }
+
+    #[test]
+    fn in_trash_mode_the_host_gets_the_call_and_fs_removes_nothing() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("trash_test");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("file.txt"), b"hello").unwrap();
+        let item = ScanItem::new(target.clone(), 5, true, false);
+
+        let host = FakeHost::default();
+        let cleaner = Cleaner::new(&host, RemovalMode::Trash);
+        let report = cleaner.remove_items(&[item], &IgnoreStore::default());
+
+        assert_eq!(host.trashed(), vec![target.clone()]);
+        assert!(target.exists());
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.trashed_bytes, 5);
+        assert_eq!(report.freed_bytes, 0);
+    }
+
+    #[test]
+    fn a_refused_path_and_a_replaced_path_dont_reach_the_host() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("refused");
+        fs::create_dir_all(&target).unwrap();
+        let item = ScanItem::new(target.clone(), 5, true, false);
+
+        let host = FakeHost::default();
+        let cleaner = Cleaner::new(&host, RemovalMode::Trash);
+        let error = cleaner.remove_verified(&item, refuse).unwrap_err();
+        assert!(error.to_string().contains("Safety check failed"));
+        assert!(host.trashed().is_empty());
+
+        // Replaced path
+        fs::remove_dir(&target).unwrap();
+        fs::create_dir_all(temp.path().join("spacer")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let error = cleaner.remove_verified(&item, allow).unwrap_err();
+        assert!(error.to_string().contains("identity"));
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn a_failed_trash_call_leaves_the_file_in_place_and_lists_a_failure() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("fail_trash");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("file.txt"), b"content").unwrap();
+        let item = ScanItem::new(target.clone(), 7, true, false);
+
+        let host = FakeHost::default();
+        host.fail_trash("operation not permitted");
+        let cleaner = Cleaner::new(&host, RemovalMode::Trash);
+        let report = cleaner.remove_items(&[item], &IgnoreStore::default());
+
+        assert!(target.exists());
+        assert_eq!(report.removed_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, target);
+        assert!(report.failures[0].error.contains("operation not permitted"));
+    }
+
+    #[test]
+    fn contents_only_items_are_removed_permanently() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("logs");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("app.log"), b"log data").unwrap();
+        let item = ScanItem::new(target.clone(), 8, true, true);
+
+        let host = FakeHost::default();
+        let cleaner = Cleaner::new(&host, RemovalMode::Trash);
+        let report = cleaner.remove_items(&[item], &IgnoreStore::default());
+
+        assert!(host.trashed().is_empty());
+        assert!(target.exists());
+        assert!(!target.join("app.log").exists());
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, 8);
+        assert_eq!(report.trashed_bytes, 0);
+    }
+
+    #[test]
+    fn item_removal_mode_routes_correctly() {
+        let item = ScanItem::new(
+            PathBuf::from("/Users/alice/Library/Caches/foo"),
+            100,
+            true,
+            false,
+        );
+        assert_eq!(
+            item_removal_mode(&item, "clean", false),
+            RemovalMode::Permanent
+        );
+        assert_eq!(
+            item_removal_mode(&item, "purge", false),
+            RemovalMode::Permanent
+        );
+        assert_eq!(
+            item_removal_mode(&item, "analyze", false),
+            RemovalMode::Trash
+        );
+        assert_eq!(
+            item_removal_mode(&item, "analyze", true),
+            RemovalMode::Permanent
+        );
+
+        let mut contents_only = item.clone();
+        contents_only.contents_only = true;
+        assert_eq!(
+            item_removal_mode(&contents_only, "analyze", false),
+            RemovalMode::Permanent
+        );
+
+        let root_item = ScanItem::new(
+            PathBuf::from("/Library/PrivilegedHelperTools/foo"),
+            100,
+            true,
+            false,
+        );
+        assert_eq!(
+            item_removal_mode(&root_item, "uninstall", false),
+            RemovalMode::Permanent
+        );
     }
 }

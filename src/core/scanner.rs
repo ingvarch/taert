@@ -361,6 +361,7 @@ impl CategoryScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cleaner::{Cleaner, RemovalMode};
 
     #[test]
     fn test_scan_junk_includes_user_logs() {
@@ -376,7 +377,6 @@ mod tests {
     }
 
     use crate::core::apps::testing::sandbox;
-    use crate::core::cleaner::Cleaner;
     use crate::core::host::fake::FakeHost;
     use std::os::unix::fs::PermissionsExt;
 
@@ -510,7 +510,8 @@ mod tests {
             .into_iter()
             .filter(|item| item.path.starts_with(&layout.home))
             .collect();
-        let report = Cleaner::remove_items(&in_sandbox, &ignore);
+        let report = Cleaner::new(&FakeHost::default(), RemovalMode::Permanent)
+            .remove_items(&in_sandbox, &ignore);
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(chrome.exists());
         assert!(!firefox.exists());
@@ -564,7 +565,8 @@ mod tests {
         let ignore = IgnoreStore::default();
         let scan = junk(&layout, &FakeHost::idle(), &ignore);
         let row = rows(&scan, app_caches::BROWSER_CACHES)[0].clone();
-        let report = Cleaner::remove_items(std::slice::from_ref(&row), &ignore);
+        let report = Cleaner::new(&FakeHost::default(), RemovalMode::Permanent)
+            .remove_items(std::slice::from_ref(&row), &ignore);
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.removed_count, 1);
         assert_eq!(report.freed_bytes, row.size_bytes);
