@@ -293,6 +293,28 @@ fn snapshot_browser_caches_with_a_note() {
 }
 
 #[test]
+fn snapshot_confirming_a_row_of_two_folders() {
+    let mut state = SelectState::with_preserved_selection(browser_caches_scan());
+    state.open_confirmation();
+    let theme = snapshot_theme();
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert_snapshot!(format!("select_browser_caches_confirm_{label}"), output);
+    }
+}
+
+#[test]
+fn the_confirmation_keeps_the_end_of_a_long_path() {
+    let mut state = SelectState::with_preserved_selection(browser_caches_scan());
+    state.open_confirmation();
+    let theme = snapshot_theme();
+    for &(w, h, _) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert!(output.contains("Data/Library/Caches"), "{output}");
+    }
+}
+
+#[test]
 fn snapshot_review() {
     let theme = snapshot_theme();
     let state = ReviewState::new(sample_scan());

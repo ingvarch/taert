@@ -404,13 +404,34 @@ fn search_finds_a_row_by_its_second_folder() {
 }
 
 #[test]
-fn the_review_screen_says_a_row_holds_one_more_folder() {
+fn the_review_screen_names_every_folder_of_a_row() {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let state = ReviewState::new(scan_with_a_row_of_two_folders());
     let theme = Theme::new();
     terminal.draw(|f| render_review(f, &state, &theme)).unwrap();
-    let buffer = terminal.backend().buffer();
-    assert!(format!("{buffer:?}").contains("+1 folder"));
+    let text = format!("{:?}", terminal.backend().buffer());
+    assert!(text.contains("/.cargo/registry/cache"), "{text}");
+    assert!(text.contains("Library/Containers/second"), "{text}");
+}
+
+#[test]
+fn the_confirmation_names_the_second_folder_of_a_selected_row() {
+    let mut state = SelectState::with_preserved_selection(scan_with_a_row_of_two_folders());
+    state.open_confirmation();
+    let text = render_text(&state, 100, 30);
+    assert!(text.contains("Also removes"), "{text}");
+    assert!(text.contains("Library/Containers/second"), "{text}");
+}
+
+#[test]
+fn the_confirmation_leaves_out_the_folders_of_a_row_not_selected() {
+    let mut scan = scan_with_a_row_of_two_folders();
+    scan.groups[0].items[0].selected = false;
+    scan.groups[0].items[1].selected = true;
+    let mut state = SelectState::with_preserved_selection(scan);
+    state.open_confirmation();
+    let text = render_text(&state, 100, 30);
+    assert!(!text.contains("Also removes"), "{text}");
 }
 
 #[test]

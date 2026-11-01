@@ -28,7 +28,7 @@ use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::leftovers::UninstallRole;
-use crate::core::path_utils::prettify_path;
+use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use crate::core::uninstaller;
@@ -815,6 +815,15 @@ fn render_confirmation_dialog(
     );
 
     let mut message = vec![Line::from(msg)];
+    let (path_width, _) = Modal::message_size(frame.area());
+    let selected = state.scan.selected_items();
+    for folder in selected.into_iter().flat_map(|item| &item.also) {
+        let path = middle_truncate(&prettify_path(&folder.path), path_width);
+        message.push(Line::from(Span::styled(
+            format!("Also removes {path}"),
+            theme.callout(),
+        )));
+    }
     let volumes = state
         .scan
         .selected_items()

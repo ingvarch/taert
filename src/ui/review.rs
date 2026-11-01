@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use super::components::chrome::AppChrome;
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{
-    ListRow, render_section_header, render_section_header_spans, row_path_spans,
+    ListRow, path_spans, render_section_header, render_section_header_spans,
 };
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
@@ -113,18 +113,18 @@ pub fn render_review(frame: &mut Frame, state: &ReviewState, theme: &Theme) {
             theme,
         ));
 
+        let max_len = (content_rect.width as usize).saturating_sub(20);
         for item in sel_in_group {
-            let spans = row_path_spans(
-                &item.path,
-                item.also.len(),
-                (content_rect.width as usize).saturating_sub(20),
-                theme,
-            );
+            let spans = path_spans(&item.path, max_len, theme);
             let size_style = theme.size(item.size_bytes);
             let detail = Span::styled(format!("{:>9}", format_bytes(item.size_bytes)), size_style);
 
             let row = ListRow::new(spans).detail(detail);
             flat_items.push(row.render_line(content_rect.width as usize, theme));
+            for folder in &item.also {
+                let row = ListRow::new(path_spans(&folder.path, max_len, theme));
+                flat_items.push(row.render_line(content_rect.width as usize, theme));
+            }
         }
         flat_items.push(Line::from(""));
     }

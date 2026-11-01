@@ -1,0 +1,27 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Clean caches › System Junk                  1 of 2 selected  ·  1.1 GB
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ Browser caches ───────────────────────────────────── 2 items · 3.5 GB ─╮
+   │ ▌ ○ /Users/test/Library/Caches/Google/Chrome                     2.4 GB │
+   │   ● ╭────────────────────────────────────────────────────────────╮.1 GB │
+   ╰─────│ Remove 1 item?                                             │──────╯
+         │                                                            │
+         │ 1.1 GB will be permanently deleted. This cannot be         │
+         │ undone.                                                    │
+         │ Also removes                                               │
+         │ /Users/test/Library/Contai….Safari/Data/Library/Caches     │
+         │ Firefox keeps a cache that macOS hides from this           │
+         │ terminal. Give the terminal Full Disk Access in System     │
+         │ Settings to include it.                                    │
+         │                                                            │
+         │                                                            │
+         │                                          Cancel    Remove  │
+         │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+         ╰────────────────────────────────────────────────────────────╯
+
+   Firefox keeps a cache that macOS hides from this terminal. Give the
+   terminal Full Disk Access in System Settings to include it.
+────────────────────────────────────────────────────────────────────────────────
