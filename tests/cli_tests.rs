@@ -83,13 +83,19 @@ mod clean {
     use predicates::prelude::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, SystemTime};
     use tempfile::{TempDir, tempdir};
 
     const SAFARI: &str = "Library/Caches/com.apple.Safari";
     const SAFARI_CONTAINER: &str = "Library/Containers/com.apple.Safari/Data/Library/Caches";
     const CHROME: &str = "Library/Caches/Google/Chrome";
+    // A real browser that is running keeps its row out of `--force` whatever this test does.
+    // Edge is the one least likely to run where these tests run.
+    const EDGE: &str = "Library/Caches/Microsoft Edge";
+    const EDGE_PROGRAM: &str = "/nowhere/Microsoft Edge.app/Contents/MacOS/Microsoft Edge";
     const FULL_DISK_ACCESS: &str = "Full Disk Access";
 
     fn fill(home: &TempDir, relative: &str) -> PathBuf {
@@ -120,6 +126,29 @@ mod clean {
     impl Drop for Refused {
         fn drop(&mut self) {
             let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// `sleep` under another name, so `ps` lists that program as running. Starting a program
+    /// from a fake bundle instead makes macOS report the app as damaged.
+    struct ProgramNamed(Child);
+
+    impl ProgramNamed {
+        fn start(name: &str) -> Self {
+            let child = Command::new("/bin/sleep")
+                .arg0(name)
+                .arg("120")
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            Self(child)
+        }
+    }
+
+    impl Drop for ProgramNamed {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
         }
     }
 
@@ -195,8 +224,24 @@ mod clean {
         assert_eq!(row["also"][0]["path"].as_str(), container.to_str());
     }
 
-    // Running apps are covered in app_caches.rs and scanner.rs through the fake host.
-    // Starting a program from a fake bundle here makes macOS report the app as damaged.
+    #[test]
+    fn force_leaves_a_running_browsers_cache_and_removes_a_stale_app_cache() {
+        let home = tempdir().unwrap();
+        let edge = fill(&home, EDGE);
+        let stale = fill(&home, "Library/Caches/com.acme.stale");
+        age(&stale, 90);
+        let _edge = ProgramNamed::start(EDGE_PROGRAM);
+
+        taert(&home)
+            .args(["clean", "junk", "--force"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Clean complete"));
+
+        assert!(edge.join("data").exists());
+        assert!(!stale.exists());
+    }
+
     #[test]
     fn force_removes_a_stale_app_cache_and_leaves_a_recent_one() {
         let home = tempdir().unwrap();

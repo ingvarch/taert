@@ -62,7 +62,7 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 
 `cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
 
-Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table.
+Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table. A test of the binary has no fake `Host`, so it starts `/bin/sleep` with a bundle path as `arg0`: `ps` lists that path, and nothing runs from a bundle.
 
 ## Project structure
 
