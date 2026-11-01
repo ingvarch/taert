@@ -7,7 +7,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Component | Module | Responsibility |
 |---|---|---|
 | Safety Engine | `crate::core::safety` | Protects critical paths, credentials, symlinks, and cloud files |
-| Sizer | `crate::core::sizer` | Measures actual allocated APFS storage blocks with hardlink deduplication |
+| Sizer | `crate::core::sizer` | Measures actual allocated APFS storage blocks with hardlink and clone deduplication |
 | Storage Cache | `crate::core::cache` | In-memory tree aggregation and folder snapshot cache |
 | Catalog | `crate::core::catalog` | Defines known cache paths, risk tiers, and auto-select defaults |
 | Cleaner | `crate::core::cleaner` | Executes safe deletions with live progress and safety checks |
@@ -82,6 +82,12 @@ Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on 
 
 - **Block Allocation**: `DirSizer` queries macOS `st_blocks` via `std::os::unix::fs::MetadataExt`. Actual allocated storage is computed as `st_blocks * 512`.
 - **Hardlink Deduplication**: Files with multiple links (`st_nlink > 1`) are tracked by device and inode number (`FileIdentity { dev, ino }`). Storage blocks are counted once per inode to prevent inflated space estimates.
+- **Clone Deduplication**: APFS clones (created by Finder duplicate, `cp -c`, or package managers like pnpm and Bun) share disk blocks despite having distinct inodes. `DirSizer` queries clone identity and extended flags (`EF_SHARES_ALL_BLOCKS`) via `getattrlist` ([`apfs.rs`](../src/core/apfs.rs)). Files sharing all blocks with another file in the same measurement are counted once per clone ID and device. Files that share only part of their blocks count in full, because clone IDs do not specify partial sharing amounts.
+
+Limits:
+
+- A clone whose twin sits outside the measured folder still counts in full, though removing it frees nothing.
+- The freed total of a cleanup adds up row sizes, so two rows that share blocks count twice.
 
 ## Smart Storage Cache
 

@@ -11,6 +11,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use super::apfs::clone_identity;
 use super::cache::StorageCache;
 use super::safety::{FileIdentity, Safety};
 
@@ -137,6 +138,7 @@ impl DirSizer {
         let mut total_bytes: u64 = 0;
         let mut skipped = 0;
         let mut seen_hardlinks: HashSet<FileIdentity> = HashSet::new();
+        let mut seen_clones: HashSet<(u64, u64)> = HashSet::new();
         let mut dirs: HashSet<PathBuf> = HashSet::new();
         dirs.insert(path.to_path_buf());
         let mut direct_bytes: HashMap<PathBuf, u64> = HashMap::new();
@@ -189,7 +191,14 @@ impl DirSizer {
                                 // Already counted hardlink
                                 continue;
                             }
-                            let allocated = Self::allocated_size(&m);
+                            let is_duplicate_clone = clone_identity(&entry_path).is_some_and(|c| {
+                                c.shares_all_blocks && !seen_clones.insert((m.dev(), c.clone_id))
+                            });
+                            let allocated = if is_duplicate_clone {
+                                0
+                            } else {
+                                Self::allocated_size(&m)
+                            };
                             total_bytes = total_bytes.saturating_add(allocated);
 
                             if let Some(parent) = entry_path.parent() {
@@ -344,5 +353,113 @@ mod tests {
         let measurement = pool.install(|| DirSizer::measure(temp.path()));
         assert_eq!(measurement.status, MeasurementStatus::Complete);
         assert!(measurement.bytes >= 8192, "{measurement:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn clone_file(src: &Path, dst: &Path) {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_src = CString::new(src.as_os_str().as_bytes()).unwrap();
+        let c_dst = CString::new(dst.as_os_str().as_bytes()).unwrap();
+        let ret = unsafe { libc::clonefile(c_src.as_ptr(), c_dst.as_ptr(), 0) };
+        assert_eq!(
+            ret,
+            0,
+            "clonefile failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn two_clones_in_one_folder_measure_as_one_file() {
+        let temp = tempdir().unwrap();
+        let f1 = temp.path().join("f1.bin");
+        let f2 = temp.path().join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+
+        clone_file(&f1, &f2);
+
+        let single = DirSizer::measure(&f1);
+        let folder = DirSizer::measure(temp.path());
+
+        assert_eq!(folder.status, MeasurementStatus::Complete);
+        assert_eq!(folder.bytes, single.bytes);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn clone_changed_afterwards_counts_as_well() {
+        let temp = tempdir().unwrap();
+        let f1 = temp.path().join("f1.bin");
+        let f2 = temp.path().join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+
+        clone_file(&f1, &f2);
+
+        // Modify f2 to break full block sharing
+        {
+            use std::fs::OpenOptions;
+            let mut file = OpenOptions::new().write(true).open(&f2).unwrap();
+            file.write_all(b"modified prefix").unwrap();
+        }
+
+        let m1 = DirSizer::measure(&f1);
+        let m2 = DirSizer::measure(&f2);
+        let folder = DirSizer::measure(temp.path());
+
+        assert_eq!(folder.status, MeasurementStatus::Complete);
+        assert_eq!(folder.bytes, m1.bytes + m2.bytes);
+    }
+
+    #[test]
+    fn hardlinks_still_count_once() {
+        let temp = tempdir().unwrap();
+        let f1 = temp.path().join("f1.bin");
+        let f2 = temp.path().join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+        fs::hard_link(&f1, &f2).unwrap();
+
+        let single = DirSizer::measure(&f1);
+        let folder = DirSizer::measure(temp.path());
+
+        assert_eq!(folder.status, MeasurementStatus::Complete);
+        assert_eq!(folder.bytes, single.bytes);
+    }
+
+    #[test]
+    fn plain_file_measures_the_same_as_before() {
+        let temp = tempdir().unwrap();
+        let f = temp.path().join("plain.bin");
+        fs::write(&f, vec![1_u8; 65536]).unwrap();
+
+        let meta = fs::metadata(&f).unwrap();
+        let allocated = DirSizer::allocated_size(&meta);
+        let folder = DirSizer::measure(temp.path());
+
+        assert_eq!(folder.status, MeasurementStatus::Complete);
+        assert_eq!(folder.bytes, allocated);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn clones_in_different_subfolders_count_once_in_parent_total() {
+        let temp = tempdir().unwrap();
+        let sub1 = temp.path().join("sub1");
+        let sub2 = temp.path().join("sub2");
+        fs::create_dir_all(&sub1).unwrap();
+        fs::create_dir_all(&sub2).unwrap();
+
+        let f1 = sub1.join("f1.bin");
+        let f2 = sub2.join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+
+        clone_file(&f1, &f2);
+
+        let single = DirSizer::measure(&f1);
+        let parent = DirSizer::measure(temp.path());
+
+        assert_eq!(parent.status, MeasurementStatus::Complete);
+        assert_eq!(parent.bytes, single.bytes);
     }
 }
