@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use super::apps::{InstalledApp, find_apps};
 use super::host::Host;
 use super::layout::Layout;
-use super::uninstaller::checked_process_table;
+use super::uninstaller::{checked_process_table, is_inside_any};
 
 pub const APP_CACHES: &str = "App caches";
 pub const BROWSER_CACHES: &str = "Browser caches";
@@ -153,18 +153,19 @@ fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
 }
 
 fn runs_inside(processes: &Processes, bundle: &Path) -> bool {
-    let target = fs::canonicalize(bundle).ok();
-    processes.iter().any(|(_, _, program)| {
-        let program = Path::new(program);
-        program.starts_with(bundle) || target.as_ref().is_some_and(|t| program.starts_with(t))
-    })
+    let mut folders = vec![bundle.to_path_buf()];
+    folders.extend(fs::canonicalize(bundle));
+    processes
+        .iter()
+        .any(|(_, _, program)| is_inside_any(program, &folders))
 }
 
+/// Looks in `Contents/MacOS` only: extensions in a bundle can run while the app is closed.
 fn runs_bundle_named(processes: &Processes, bundles: &[&str]) -> bool {
     processes.iter().any(|(_, _, program)| {
-        Path::new(program)
-            .components()
-            .any(|part| bundles.iter().any(|bundle| part.as_os_str() == *bundle))
+        bundles
+            .iter()
+            .any(|bundle| program.contains(&format!("/{bundle}/Contents/MacOS/")))
     })
 }
 
@@ -259,7 +260,9 @@ pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime
     let mut notes = Vec::new();
     if processes.is_none() {
         notes.push(
-            "taert could not list the running programs, so no cache starts selected.".to_string(),
+            "taert could not list the running programs, \
+             so no app or browser cache starts selected."
+                .to_string(),
         );
     }
     let apps = find_apps(layout);
@@ -359,6 +362,39 @@ mod tests {
             fs::File::open(dir).unwrap().set_modified(old).unwrap();
         }
         let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        assert!(!row(group(&plan, APP_CACHES), &folder).selected);
+    }
+
+    /// An old cache that holds an old folder, locked after its dates were set.
+    fn old_cache_with_a_locked_folder(layout: &Layout, mode: u32) -> (PathBuf, PathBuf) {
+        let folder = cache(layout, "com.acme.locked", 90);
+        let locked = folder.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("data"), b"x").unwrap();
+        let then = SystemTime::now() - DAY * 90;
+        for path in [locked.join("data"), locked.clone(), folder.clone()] {
+            fs::File::open(path).unwrap().set_modified(then).unwrap();
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+        (folder, locked)
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_listed_keeps_the_cache_unselected() {
+        let (_temp, layout) = sandbox();
+        let (folder, locked) = old_cache_with_a_locked_folder(&layout, 0o000);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!row(group(&plan, APP_CACHES), &folder).selected);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_read_keeps_the_cache_unselected() {
+        let (_temp, layout) = sandbox();
+        // The folder lists its entries, but their metadata stays out of reach.
+        let (folder, locked) = old_cache_with_a_locked_folder(&layout, 0o444);
+        let plan = plan_for(&layout, &FakeHost::idle(), &[]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!row(group(&plan, APP_CACHES), &folder).selected);
     }
 
@@ -542,6 +578,20 @@ mod tests {
         assert!(!row(group(&plan, BROWSER_CACHES), &firefox).selected);
     }
 
+    #[test]
+    fn an_extension_that_outlives_safari_does_not_count_as_safari_running() {
+        let (_temp, layout) = sandbox();
+        let safari = cache(&layout, "com.apple.Safari", 90);
+        let host = FakeHost::default();
+        running(
+            &host,
+            "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app\
+             /Contents/Extensions/SafariLinkExtension.appex/Contents/MacOS/SafariLinkExtension",
+        );
+        let plan = plan_for(&layout, &host, &[]);
+        assert!(row(group(&plan, BROWSER_CACHES), &safari).selected);
+    }
+
     fn safari_container(layout: &Layout) -> PathBuf {
         let container = layout.user("Library/Containers/com.apple.Safari/Data/Library/Caches");
         fs::create_dir_all(&container).unwrap();
@@ -634,7 +684,9 @@ mod tests {
         assert!(!row(group(&plan, APP_CACHES), &old).selected);
         assert!(!row(group(&plan, BROWSER_CACHES), &chrome).selected);
         assert!(
-            plan.notes.iter().any(|note| note.contains("running")),
+            plan.notes
+                .iter()
+                .any(|note| note.contains("no app or browser cache starts selected")),
             "{:?}",
             plan.notes
         );

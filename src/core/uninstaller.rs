@@ -557,7 +557,7 @@ fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
     folders
 }
 
-fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
+pub(crate) fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
     folders
         .iter()
         .any(|folder| Path::new(program).starts_with(folder))
