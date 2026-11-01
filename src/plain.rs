@@ -164,8 +164,7 @@ impl PlainRunner {
     /// Execute cleaning and print results
     pub fn execute_clean(scan: &CategoryScan, ignore: &IgnoreStore) -> RemovalReport {
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        let mut report = Cleaner::remove_items(&items, ignore);
-        report.notes.extend(scan.notes.iter().cloned());
+        let report = Cleaner::remove_items(&items, ignore);
         Self::print_report("Clean", &report);
         report
     }
@@ -237,11 +236,5 @@ mod tests {
             text.contains("Note: Safari needs Full Disk Access."),
             "{text}"
         );
-    }
-
-    #[test]
-    fn a_forced_clean_reports_the_notes_of_the_scan() {
-        let report = PlainRunner::execute_clean(&scan_with_note(), &IgnoreStore::default());
-        assert_eq!(report.notes, ["Safari needs Full Disk Access."]);
     }
 }

@@ -161,6 +161,7 @@ fn process_scan_result(
     // 3. Force mode: unattended cleanup of default-selected items
     if cli.force {
         let report = PlainRunner::execute_clean(scan, ignore);
+        PlainRunner::print_notes(&scan.notes);
         return if report.failures.is_empty() {
             ExitCode::SUCCESS
         } else {

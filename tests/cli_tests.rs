@@ -279,7 +279,24 @@ mod clean {
             .assert()
             .success()
             .stdout(predicate::str::contains("Clean complete"))
-            .stdout(predicate::str::contains(FULL_DISK_ACCESS));
+            .stdout(predicate::str::contains(FULL_DISK_ACCESS).count(1));
+    }
+
+    #[test]
+    fn plain_mode_prints_a_note_once_through_a_whole_clean() {
+        let home = tempdir().unwrap();
+        let _refused = Refused::in_home(&home, SAFARI_CONTAINER);
+        let cache = fill(&home, "Library/Caches/com.acme.app");
+
+        taert(&home)
+            .args(["clean", "junk", "--plain"])
+            .write_stdin("all\nyes\n")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Clean complete"))
+            .stdout(predicate::str::contains(FULL_DISK_ACCESS).count(1));
+
+        assert!(!cache.exists());
     }
 
     #[test]
