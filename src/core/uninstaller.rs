@@ -31,6 +31,7 @@ use super::path_utils::prettify_path;
 use super::safety::{Safety, SafetyError};
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
 use super::sizer::DirSizer;
+use super::startup::LOGIN_ITEM_SCRIPT;
 use super::stores::IgnoreStore;
 
 pub const PLAN_ID: &str = "uninstall";
@@ -62,19 +63,6 @@ const APP_MANAGEMENT_HINT: &str = "macOS refused. Allow your terminal in System 
 const FULL_DISK_HINT: &str = "macOS refused. Give your terminal Full Disk Access in System Settings > Privacy & Security, then run this again";
 const NOT_SAFE_AS_ROOT: &str = "A folder on the way could be replaced, so taert will not use administrator rights here. Remove it in Finder";
 const NOT_REMOVED: &str = "It was still there after the removal";
-
-/// Removes a login item by name. The name arrives as an argument, so no quoting
-/// of it can break the script.
-const LOGIN_ITEM_SCRIPT: &[&str] = &[
-    "on run argv",
-    "set target to item 1 of argv",
-    "tell application \"System Events\"",
-    "repeat with i from (count of login items) to 1 by -1",
-    "if name of login item i is target then delete login item i",
-    "end repeat",
-    "end tell",
-    "end run",
-];
 
 /// Configuration that can point at an app, read only to tell the user.
 const CONFIG_FILES: &[&str] = &[

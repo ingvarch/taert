@@ -17,6 +17,7 @@ use super::apps::{
 use super::host::Host;
 use super::layout::Layout;
 use super::safety::FileIdentity;
+use super::startup::launch_program;
 
 const MIN_NAME: usize = 2;
 const MIN_CHANNEL_BASE: usize = 3;
@@ -382,18 +383,6 @@ fn id_leaf_spellings(id: &str, name: &str) -> Vec<String> {
         return Vec::new();
     }
     vec![leaf.to_string(), format!("{name} {}", split_words(rest))]
-}
-
-fn launch_program(plist: &Path) -> Option<String> {
-    let info = Value::from_file(plist).ok()?.into_dictionary()?;
-    let program = info.get("Program").and_then(Value::as_string);
-    let first_argument = || {
-        info.get("ProgramArguments")?
-            .as_array()?
-            .first()?
-            .as_string()
-    };
-    program.or_else(first_argument).map(str::to_string)
 }
 
 fn runs_inside(program: &str, bundle: &Path) -> bool {

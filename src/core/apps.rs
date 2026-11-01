@@ -496,6 +496,18 @@ pub fn official_uninstaller(app: &InstalledApp) -> Option<&'static str> {
         .map(|(vendor, _, _)| *vendor)
 }
 
+/// Whether a bundle id or app name belongs to a known security vendor.
+pub fn is_security_vendor(bundle_id: Option<&str>, name: Option<&str>) -> bool {
+    let id = bundle_id.unwrap_or_default().to_ascii_lowercase();
+    let n = name.unwrap_or_default().to_ascii_lowercase();
+    OFFICIAL_UNINSTALLERS
+        .iter()
+        .any(|(_, prefixes, fragments)| {
+            prefixes.iter().any(|prefix| id.starts_with(prefix))
+                || fragments.iter().any(|fragment| n.contains(fragment))
+        })
+}
+
 /// Generic words that say nothing about which app a file belongs to.
 pub fn is_common_name(name: &str) -> bool {
     COMMON_NAMES.contains(&name.to_lowercase().as_str())

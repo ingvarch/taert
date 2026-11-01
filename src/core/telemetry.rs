@@ -89,6 +89,7 @@ pub struct PowerStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessStatus {
+    pub pid: u32,
     pub name: String,
     pub cpu_percent: f32,
     pub memory_bytes: u64,
@@ -166,17 +167,47 @@ pub fn product_name(properties: &Properties) -> Option<String> {
     Some(name.trim_end_matches('\0').to_string())
 }
 
-fn parse_processes(output: &str) -> Vec<ProcessStatus> {
+pub fn parse_processes(output: &str) -> Vec<ProcessStatus> {
     output
         .lines()
         .filter_map(|line| {
-            let (cpu, rest) = line.trim().split_once(char::is_whitespace)?;
-            let (rss_kb, name) = rest.trim_start().split_once(char::is_whitespace)?;
-            Some(ProcessStatus {
-                name: name.trim().to_string(),
-                cpu_percent: cpu.parse().ok()?,
-                memory_bytes: rss_kb.parse::<u64>().ok()?.saturating_mul(1024),
-            })
+            let trimmed = line.trim();
+            let mut words = trimmed.split_whitespace();
+            let t1 = words.next()?;
+            let t2 = words.next()?;
+            let t3 = words.next()?;
+            let t4 = words.next();
+
+            if t4.is_some()
+                && let Ok(pid) = t1.parse::<u32>()
+                && let Ok(cpu_percent) = t2.parse::<f32>()
+                && let Ok(rss_kb) = t3.parse::<u64>()
+            {
+                let offset = (t3.as_ptr() as usize - trimmed.as_ptr() as usize) + t3.len();
+                let name = trimmed[offset..].trim_start().to_string();
+                return Some(ProcessStatus {
+                    pid,
+                    name,
+                    cpu_percent,
+                    memory_bytes: rss_kb.saturating_mul(1024),
+                });
+            }
+
+            // Fallback for 3-column input without pid: cpu, rss_kb, name
+            if let Ok(cpu_percent) = t1.parse::<f32>()
+                && let Ok(rss_kb) = t2.parse::<u64>()
+            {
+                let offset = (t2.as_ptr() as usize - trimmed.as_ptr() as usize) + t2.len();
+                let name = trimmed[offset..].trim_start().to_string();
+                return Some(ProcessStatus {
+                    pid: 0,
+                    name,
+                    cpu_percent,
+                    memory_bytes: rss_kb.saturating_mul(1024),
+                });
+            }
+
+            None
         })
         .collect()
 }
@@ -219,7 +250,7 @@ fn rank_processes(output: &str, limit: usize) -> (Vec<ProcessStatus>, Vec<Proces
 // ps runs setuid root on macOS, so it sees the processes of every user.
 fn top_processes() -> (Vec<ProcessStatus>, Vec<ProcessStatus>) {
     Command::new("/bin/ps")
-        .args(["-Aceo", "pcpu=,rss=,comm=", "-r"])
+        .args(["-Aceo", "pid=,pcpu=,rss=,comm=", "-r"])
         .output()
         .map(|output| rank_processes(&String::from_utf8_lossy(&output.stdout), TOP_PROCESSES))
         .unwrap_or_default()
@@ -644,6 +675,21 @@ mod tests {
 
         assert_eq!(health.severity, Severity::Warning);
         assert_eq!(health.message, "Battery health 72%");
+    }
+
+    #[test]
+    fn parses_processes_with_pids() {
+        let output = "  417  45.2 350800 WindowServer\n 12096   4.0 1070512 claude helper\n";
+
+        let processes = parse_processes(output);
+
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 417);
+        assert_eq!(processes[0].name, "WindowServer");
+        assert_eq!(processes[0].cpu_percent, 45.2);
+        assert_eq!(processes[0].memory_bytes, 350_800 * 1024);
+        assert_eq!(processes[1].pid, 12096);
+        assert_eq!(processes[1].name, "claude helper");
     }
 
     #[test]

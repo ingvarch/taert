@@ -39,16 +39,18 @@ pub enum MainMenuChoice {
     ProjectCleanup, // 2
     DockerCleanup,  // 3
     UninstallApps,  // 4
-    ExploreStorage, // 5
-    SystemStatus,   // 6
-    Preferences,    // 7
-    ProtectedPaths, // 8
+    StartupItems,   // 5
+    ExploreStorage, // 6
+    SystemStatus,   // 7
+    Preferences,    // 8
+    ProtectedPaths, // 9
 }
 
-const MENU_SECTIONS: [(&str, &[usize]); 3] = [
+const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3]),
-    ("Inspect", &[4, 5]),
-    ("Settings", &[6, 7]),
+    ("Optimize", &[4]),
+    ("Inspect", &[5, 6]),
+    ("Settings", &[7, 8]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +143,12 @@ impl WorkspaceState {
                     "Uninstall apps",
                     "Remove apps with everything they left behind",
                     "Remove an app together with its settings, caches, login\nitems and background helpers. You'll review every file\nbefore anything is removed.",
+                ),
+                (
+                    MainMenuChoice::StartupItems,
+                    "Startup items",
+                    "Review and switch off login and background items",
+                    "Inspect launchd agents, daemons, and classic login items.\nDisable unneeded background services to save battery and\nfree CPU cycles. You'll review every change before\nanything is switched off.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
@@ -369,6 +377,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
         MainMenuChoice::DockerCleanup => theme.g.icon_docker,
         MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
+        MainMenuChoice::StartupItems => theme.g.icon_startup,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Preferences => theme.g.icon_prefs,
@@ -379,6 +388,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
 fn section_color(title: &str, theme: &Theme) -> Color {
     match title {
         "Cleanup" => theme.p.accent,
+        "Optimize" => theme.p.orange,
         "Inspect" => theme.p.teal,
         _ => theme.p.purple,
     }
@@ -548,6 +558,7 @@ fn detail_data(
         }
         MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
         MainMenuChoice::DockerCleanup
+        | MainMenuChoice::StartupItems
         | MainMenuChoice::Preferences
         | MainMenuChoice::ProtectedPaths => Vec::new(),
     }

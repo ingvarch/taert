@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Optimize › Startup items                                                                               3 items
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Startup items (3) ─────────────────────────────────────────────╮  ╭─ Service detail ───────────────────────────╮
+   │ ▌ ● Docker                             running (1.2% · 47.2 MB) │  │ Name:    Docker                            │
+   │   · Spotify Web Helper (Spotify)                       disabled │  │ Label:   com.docker.helper                 │
+   │   ✕ Old Broken Service                                   broken │  │ App:     Docker                            │
+   │                                                                 │  │ Bundle:  /Applications/Docker.app          │
+   │                                                                 │  │ Kind:    user agent                        │
+   │                                                                 │  │ State:   Running                           │
+   │                                                                 │  │ Program: /Applications/Docker.app/Contents/M
+   │                                                                 │  │ Plist:   /Users/user/Library/LaunchAgents/co
+   │                                                                 │  │                                            │
+   │                                                                 │  │ PID:     1234  CPU: 1.2%  Memory: 47.2 MB  │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   │                                                                 │  │                                            │
+   ╰─────────────────────────────────────────────────────────────────╯  ╰────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ␣  Toggle / Action    ↑↓  Navigate    ⎋  Back

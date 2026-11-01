@@ -12,16 +12,15 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Explore Storage, System Status, and Preferences. Keys `1` to `8` open a row directly.
-- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup items, disk usage and the largest items of your home folder for Explore Storage, and live CPU and memory for System Status. The main menu, System Status, Explore Storage, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Startup Items, Explore Storage, System Status, and Preferences. Keys `1` to `9` open a row directly (rows past the 9th have no digit key).
+- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
+- **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
+- **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Deletion is permanent. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
+- **Startup Items**: Review launch agents, launch daemons, and classic login items. Shows the owning app, service kind, live CPU% and memory if active, and whether the service is enabled, disabled, or broken (missing executable on disk). On wide terminals (≥100 columns), details appear in a side card. `Space` toggles an item (opens a confirmation modal naming the owning app before anything is switched off) or removes a broken user agent plist. Apple system services (`com.apple.*`) are hidden by default and read-only.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and safe deletion via `D` or `Backspace`.
 - **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights.
-
-- **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
-
-- **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Deletion is permanent. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
 
 Every screen shows its sections in colored frames. While taert scans or measures, a framed card in the middle of the window shows the progress.
 
@@ -30,7 +29,7 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | Key | Context | Action |
 |---|---|---|
 | `↑` / `↓` or `k` / `j` | All screens | Move selection cursor |
-| `Space` | Select / Explore | Toggle focused item selection |
+| `Space` | Select / Explore / Startup | Toggle focused item selection / toggle startup service |
 | `A` / `N` | Select / Explore | Select all visible / clear selection |
 | `D` / `Backspace` / `Delete` | Explore Storage | Delete selected item(s) with confirmation dialog |
 | `⇧S` / `⇧N` / `⇧D` | Explore Storage / Docker / Uninstall Apps | Sort by size / name / date |
@@ -190,5 +189,32 @@ taert optimize
 # Machine-readable JSON output
 taert optimize --json
 ```
+
+### Startup Items (`taert startup`)
+
+```bash
+# Interactive TUI list
+taert startup
+
+# Plain text table for scripts or terminals
+taert startup --plain
+
+# Machine-readable JSON output
+taert startup --json
+
+# Include Apple system items and background task management dump (prompts for root password)
+taert startup --all
+
+# Switch off a service or login item
+taert startup disable com.example.service
+
+# Switch a service back on
+taert startup enable com.example.service
+
+# Preview switching off without changing state
+taert startup disable com.example.service --dry-run
+```
+
+When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
 
 For configuration and preferences, see [configuration.md](configuration.md).

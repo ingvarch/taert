@@ -26,6 +26,7 @@ use super::preferences::{PreferencesFocus, PreferencesState, render_preferences}
 use super::progress::{ProgressState, render_progress};
 use super::review::{ReviewState, render_review};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
+use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
 use super::theme::Theme;
 use super::workspace::{
@@ -43,6 +44,7 @@ use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
+use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 
@@ -53,6 +55,7 @@ pub enum Screen {
     Review(ReviewState),
     Analyze(Box<AnalyzeState>),
     SystemStatus(Box<SystemStatusState>),
+    Startup(StartupScreenState),
     Preferences(PreferencesState),
     PathListEditor(PathListEditorState),
 }
@@ -141,6 +144,20 @@ impl App {
             installed: Vec::new(),
             plan: None,
         }
+    }
+
+    pub fn new_startup(ignore: IgnoreStore, config: Config, include_all: bool) -> Self {
+        let mut app = Self::new(ignore, config);
+        app.open_startup(include_all);
+        app
+    }
+
+    pub fn open_startup(&mut self, include_all: bool) {
+        let scan = startup::scan_startup(&*self.host, &self.layout, &self.ignore, include_all);
+        self.open(Screen::Startup(StartupScreenState::new(
+            scan.items,
+            include_all,
+        )));
     }
 
     pub fn with_select(scan: CategoryScan, ignore: IgnoreStore, config: Config) -> Self {
@@ -370,6 +387,7 @@ impl App {
             Screen::Review(state) => render_review(frame, state, &self.theme),
             Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
             Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
+            Screen::Startup(state) => render_startup(frame, state, &self.theme),
             Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
             Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
         }
@@ -827,6 +845,116 @@ impl App {
                 _ => {}
             },
 
+            Screen::Startup(state) => {
+                if state.confirm.is_some() {
+                    match code {
+                        KeyCode::Enter => {
+                            if state.confirm_button == 1 {
+                                state.cancel_confirm();
+                            } else {
+                                let action = state.confirm.take().unwrap();
+                                match action {
+                                    StartupConfirm::Toggle { index, enable } => {
+                                        if let Some(item) = state.items.get(index) {
+                                            let res = if enable {
+                                                startup::enable_item(
+                                                    &*self.host,
+                                                    &self.layout,
+                                                    &self.ignore,
+                                                    item,
+                                                    false,
+                                                )
+                                            } else {
+                                                startup::disable_item(
+                                                    &*self.host,
+                                                    &self.layout,
+                                                    &self.ignore,
+                                                    item,
+                                                    false,
+                                                )
+                                            };
+                                            match res {
+                                                Ok(msg) => {
+                                                    state.message = Some((msg, false));
+                                                    let scan = startup::scan_startup(
+                                                        &*self.host,
+                                                        &self.layout,
+                                                        &self.ignore,
+                                                        state.include_all,
+                                                    );
+                                                    state.items = scan.items;
+                                                    if state.selected_index >= state.items.len()
+                                                        && !state.items.is_empty()
+                                                    {
+                                                        state.selected_index =
+                                                            state.items.len() - 1;
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    state.message = Some((err, true));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    StartupConfirm::RemoveBroken { index } => {
+                                        if let Some(item) = state.items.get(index) {
+                                            let res =
+                                                startup::remove_broken_plist(item, &self.ignore);
+                                            match res {
+                                                Ok(()) => {
+                                                    state.message = Some((
+                                                        format!(
+                                                            "Removed broken plist for {}",
+                                                            item.name
+                                                        ),
+                                                        false,
+                                                    ));
+                                                    let scan = startup::scan_startup(
+                                                        &*self.host,
+                                                        &self.layout,
+                                                        &self.ignore,
+                                                        state.include_all,
+                                                    );
+                                                    state.items = scan.items;
+                                                    if state.selected_index >= state.items.len()
+                                                        && !state.items.is_empty()
+                                                    {
+                                                        state.selected_index =
+                                                            state.items.len() - 1;
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    state.message = Some((err, true));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                            state.toggle_confirm_button();
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                            state.cancel_confirm();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                        KeyCode::Down | KeyCode::Char('j') => state.next(),
+                        KeyCode::PageUp => state.page_up(),
+                        KeyCode::PageDown => state.page_down(),
+                        KeyCode::Home | KeyCode::Char('g') => state.move_to_start(),
+                        KeyCode::End | KeyCode::Char('G') => state.move_to_end(),
+                        KeyCode::Char(' ') | KeyCode::Enter => state.request_toggle(),
+                        KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
+                        _ => {}
+                    }
+                }
+            }
+
             Screen::Preferences(state) => match code {
                 KeyCode::Up | KeyCode::Char('k') => state.previous(),
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
@@ -920,7 +1048,7 @@ impl App {
             Screen::Workspace(state) => vec![
                 HelpSection::new(
                     "Menu",
-                    vec![Hint::new("↵", "Select"), Hint::new("1-8", "Quick select")],
+                    vec![Hint::new("↵", "Select"), Hint::new("1-9", "Quick select")],
                 ),
                 general(vec![
                     navigate,
@@ -985,6 +1113,10 @@ impl App {
                 hints.push(Hint::new("⎋ / q / ↵", "Back"));
                 vec![general(hints)]
             }
+            Screen::Startup(_) => vec![HelpSection::new(
+                "Startup items",
+                vec![Hint::new("␣", "Toggle service"), navigate, back],
+            )],
             Screen::Preferences(_) => vec![
                 HelpSection::new(
                     "Preferences",
@@ -1126,6 +1258,7 @@ impl App {
             }
             MainMenuChoice::DockerCleanup => self.launch_docker_scan(),
             MainMenuChoice::UninstallApps => self.launch_app_scan(),
+            MainMenuChoice::StartupItems => self.open_startup(false),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
@@ -1635,19 +1768,19 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Char('5'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('6'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 4);
+        assert_main_menu(&app, 5);
     }
 
     #[test]
     fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('8'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Char('9'), KeyCode::Esc]);
 
-        assert_main_menu(&app, 7);
+        assert_main_menu(&app, 8);
     }
 
     #[test]
@@ -1657,7 +1790,7 @@ mod tests {
         press(
             &mut app,
             &[
-                KeyCode::Char('7'),
+                KeyCode::Char('8'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -1673,7 +1806,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 6);
+        assert_main_menu(&app, 7);
     }
 
     #[test]
@@ -1721,14 +1854,14 @@ mod tests {
     fn protected_paths_name_preferences_only_when_opened_there() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('8'));
+        app.handle_key(KeyCode::Char('9'));
         assert!(!screen_text(&app).contains("Preferences"));
 
         press(
             &mut app,
             &[
                 KeyCode::Esc,
-                KeyCode::Char('7'),
+                KeyCode::Char('8'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -1983,7 +2116,7 @@ mod tests {
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('7'));
+        app.handle_key(KeyCode::Char('8'));
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
         app.handle_key(KeyCode::Down);
@@ -1994,13 +2127,13 @@ mod tests {
     fn a_path_list_offers_removal_only_when_it_has_paths() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('8')]);
+        press(&mut app, &[KeyCode::Char('9')]);
         assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
 
         app.handle_key(KeyCode::Esc);
         app.ignore.roots.push("/nowhere/protected".to_string());
 
-        app.handle_key(KeyCode::Char('8'));
+        app.handle_key(KeyCode::Char('9'));
         assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
     }
 
@@ -2040,7 +2173,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('6'));
+        app.handle_key(KeyCode::Char('7'));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();
