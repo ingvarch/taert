@@ -41,18 +41,19 @@ pub enum MainMenuChoice {
     UninstallApps,  // 4
     Doctor,         // 5
     StartupItems,   // 6
-    Compress,       // 7
-    ExploreStorage, // 8
-    SystemStatus,   // 9
-    Preferences,    // 10
-    ProtectedPaths, // 11
+    SlimApps,       // 7
+    Compress,       // 8
+    ExploreStorage, // 9
+    SystemStatus,   // 10
+    Preferences,    // 11
+    ProtectedPaths, // 12
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3]),
-    ("Optimize", &[4, 5, 6]),
-    ("Inspect", &[7, 8]),
-    ("Settings", &[9, 10]),
+    ("Optimize", &[4, 5, 6, 7]),
+    ("Inspect", &[8, 9]),
+    ("Settings", &[10, 11]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +158,12 @@ impl WorkspaceState {
                     "Startup items",
                     "Review and switch off login and background items",
                     "Inspect launchd agents, daemons, and classic login items.\nDisable unneeded background services to save battery and\nfree CPU cycles. You'll review every change before\nanything is switched off.",
+                ),
+                (
+                    MainMenuChoice::SlimApps,
+                    "Slim apps",
+                    "Remove Intel code from universal apps",
+                    "Strip Intel (x86_64) code from universal apps that you only\nrun on Apple Silicon. Slices of apps you keep stay untouched,\nand the original app goes to the Trash.",
                 ),
                 (
                     MainMenuChoice::Compress,
@@ -393,6 +400,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
         MainMenuChoice::Doctor => theme.g.icon_doctor,
         MainMenuChoice::StartupItems => theme.g.icon_startup,
+        MainMenuChoice::SlimApps => theme.g.icon_uninstall,
         MainMenuChoice::Compress => theme.g.icon_clean,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
@@ -553,6 +561,7 @@ fn detail_data(
         MainMenuChoice::CleanCaches
         | MainMenuChoice::ProjectCleanup
         | MainMenuChoice::Compress
+        | MainMenuChoice::SlimApps
         | MainMenuChoice::UninstallApps => storage_summary(system, width, theme),
         MainMenuChoice::ExploreStorage => {
             let mut lines = storage_summary(system, width, theme);

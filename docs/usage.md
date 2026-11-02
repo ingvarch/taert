@@ -246,6 +246,51 @@ taert startup disable com.example.service --dry-run
 
 When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
 
+### Universal App Slimming (`taert slim`)
+
+Reclaim gigabytes of APFS storage on Apple Silicon Macs by stripping unneeded Intel (`x86_64` / `i386`) code slices from universal applications. The native ARM (`arm64` / `arm64e`) slices remain intact and untouched, preserving code signatures, while the original unmodified app bundle is moved to the Trash.
+
+> **Note on App Updates:** App updates (installed via the web, Sparkle updater, or Homebrew) replace the entire application bundle with a new universal binary, bringing Intel code back. Simply re-run `taert slim` after major app updates to reclaim space again.
+
+```bash
+# Interactive TUI candidate selection
+taert slim
+
+# Slim a specific application by name or partial name
+taert slim Slack
+
+# Preview slimming and estimated savings without modifying anything
+taert slim Slack --dry-run
+taert slim --dry-run
+
+# Structured JSON report of eligible and ineligible apps
+taert slim --json
+taert slim Slack --json
+
+# Slim without interactive confirmation prompt
+taert slim Slack --force
+```
+
+#### How Slimming Works
+
+1. **Safety Check**: Checks that your Mac runs Apple Silicon (`sysctl hw.optional.arm64`). If run on an Intel Mac, `taert slim` stops immediately with a clear message: `"Slimming universal apps requires an Apple Silicon Mac."`
+2. **APFS Clone**: Clones the candidate application bundle alongside itself using `ditto --clone` on APFS without duplicating disk blocks.
+3. **Binary Thinning**: Scans the Mach-O fat headers inside the cloned bundle and strips x86_64 slices, rewriting the fat headers to retain only ARM slices with standard power-of-two alignment. Files sealed by whole-file hashes in `_CodeSignature/CodeResources` are left alone to ensure code signing integrity.
+4. **ARM Verification**: Inspects Mach-O architecture headers to verify that a valid ARM slice (`CPU_TYPE_ARM64` / `CPU_TYPE_ARM64_32`) is present and preserved.
+5. **Signature & Gatekeeper Verification**: Validates the slimmed bundle using `codesign --verify --deep --strict` and `spctl -a -t exec`. If extended attributes (`com.apple.FinderInfo` or `com.apple.ResourceFork`) interfere, taert cleans them up and retries verification.
+6. **Original Bundle Verification**: Verifies that the original application bundle remained unchanged and that no process inside it was launched while slimming was in progress.
+7. **Atomic Swap & Trash**: Atomically exchanges the slimmed copy and the original bundle using APFS `renamex_np(RENAME_SWAP)`, then moves the original unslimmed app to the Trash (`Host::trash`). If any verification step fails prior to the swap, the temporary clone is removed and the original application is left completely untouched.
+
+#### Eligibility & Exclusion Rules
+
+`taert slim` verifies that each application is safe to slim:
+- **System Applications**: Apple bundles (`com.apple.*`) and system roots are strictly refused.
+- **Mac App Store Apps**: Apps with an App Store receipt (`_MASReceipt`) are skipped because macOS App Store verification requires the original unmodified bundle.
+- **Running Applications**: Running applications are detected via `/bin/ps` and skipped to prevent file locks and memory corruptions.
+- **Rosetta Preference**: Apps configured to run under Rosetta (`LSArchitecturesForX86_64` in `com.apple.LaunchServices.plist`) are excluded so Rosetta compatibility is not broken.
+- **User Ownership**: Only user-owned applications can be slimmed without root escalation. If permissions fail, `taert` reports a hint to grant App Management in System Settings.
+- **Developer ID Signing**: Only apps signed with a valid Developer ID certification authority (or ad-hoc signed when `TAERT_SLIM_ALLOW_ADHOC=1` is set) are eligible.
+
 ### Transparent APFS Compression (`taert compress`)
 
 Reclaim gigabytes of APFS storage transparently using macOS kernel-level decmpfs compression. Compressed files remain completely transparent to apps, CLI tools, and the OS:

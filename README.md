@@ -20,6 +20,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics
+- Universal app slimming (`taert slim`) to strip Intel (x86_64) code from universal apps on Apple Silicon Macs, preserving ARM slices and code signatures and moving originals to the Trash
 - Doctor diagnostic command (`taert doctor`) to explain what is slowing the Mac down, heating it up, or draining battery with named causes and single actions
 - Transparent APFS compression (`taert compress`) using Apple `libcompression` (LZFSE/LZVN) to shrink app bundles, Homebrew packages, and toolchains without altering data or breaking codesign
 - Local record of removals and changes (`taert history`) kept safely on this Mac
@@ -44,6 +45,7 @@ taert purge ~/Projects --older-than 30 --json
 taert analyze ~/Downloads
 taert docker --dry-run
 taert uninstall Zoom --dry-run
+taert slim Slack --dry-run
 taert doctor
 taert startup
 taert compress ~/.rustup --dry-run

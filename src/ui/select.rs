@@ -31,6 +31,7 @@ use crate::core::leftovers::UninstallRole;
 use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use crate::core::slim;
 use crate::core::uninstaller;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +466,11 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         PrimaryAction::new(format!("Review {chosen}"), enter)
     } else if id == apps::LIST_ID && total_count > 0 {
         PrimaryAction::new("Review app", enter)
+    } else if id == slim::SCAN_ID && selected_count > 0 {
+        let chosen = plural(selected_count, "app", "apps");
+        PrimaryAction::new(format!("Slim {chosen}"), enter)
+    } else if id == slim::SCAN_ID && total_count > 0 {
+        PrimaryAction::new("Slim app", enter)
     } else if selected_count > 0 {
         PrimaryAction::new(format!("Review {selected_count} items"), enter)
     } else {
@@ -474,6 +480,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let title = state.scan.title.as_str();
     let crumbs = if id == uninstaller::PLAN_ID {
         vec!["taert", "Uninstall apps", title]
+    } else if id == slim::SCAN_ID {
+        vec!["taert", "Optimize", "Slim apps"]
     } else if id == SCAN_ID || id == purger::SCAN_ID || id == apps::LIST_ID {
         vec!["taert", title]
     } else {
@@ -593,7 +601,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 theme.callout()
             };
 
-            let app_name = (state.scan.id == apps::LIST_ID)
+            let app_name = (state.scan.id == apps::LIST_ID || state.scan.id == slim::SCAN_ID)
                 .then(|| row.full_path.as_deref().and_then(Path::file_stem))
                 .flatten();
             let title_spans = if let Some(name) = app_name {
@@ -823,7 +831,9 @@ fn render_confirmation_dialog(
         .iter()
         .filter(|item| item.role == Some(UninstallRole::Bundle))
         .count();
-    let title = if bundles > 0 {
+    let title = if state.scan.id == slim::SCAN_ID {
+        format!("Slim {}?", plural(count, "app", "apps"))
+    } else if bundles > 0 {
         format!("Uninstall {}?", plural(bundles, "app", "apps"))
     } else {
         format!("Remove {count} {noun}?")
@@ -905,8 +915,14 @@ fn render_confirmation_dialog(
         .message(message)
         .buttons(vec![
             Button::new("Cancel").focused(cancel_focused),
-            Button::destructive(if bundles > 0 { "Uninstall" } else { "Remove" })
-                .focused(remove_focused),
+            Button::destructive(if state.scan.id == slim::SCAN_ID {
+                "Slim"
+            } else if bundles > 0 {
+                "Uninstall"
+            } else {
+                "Remove"
+            })
+            .focused(remove_focused),
         ])
         .render(frame, frame.area(), theme);
 }
@@ -961,10 +977,18 @@ fn render_removing_dialog(
 }
 
 fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, theme: &Theme) {
-    let title = match (report.removed_count > 0, plan) {
-        (true, true) => "Uninstall Complete",
-        (true, false) => "Clean Complete",
-        (false, _) => "Nothing was removed",
+    let title = if report.notes.iter().any(|n| n.contains("Trash is emptied")) {
+        if report.removed_count > 0 {
+            "Slim Complete"
+        } else {
+            "Nothing was slimmed"
+        }
+    } else {
+        match (report.removed_count > 0, plan) {
+            (true, true) => "Uninstall Complete",
+            (true, false) => "Clean Complete",
+            (false, _) => "Nothing was removed",
+        }
     };
 
     let mut message = Vec::new();

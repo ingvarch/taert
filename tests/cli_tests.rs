@@ -491,4 +491,34 @@ mod uninstall {
                 "Startup item 'com.nonexistent.service' not found",
             ));
     }
+
+    #[test]
+    fn test_cli_slim_json() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["slim", "--json"])
+            .assert()
+            .success()
+            .stdout(predicate::str::starts_with("["));
+    }
+
+    #[test]
+    fn test_cli_slim_dry_run() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["slim", "--dry-run"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Dry run completed."));
+    }
+
+    #[test]
+    fn test_cli_slim_nonexistent() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["slim", "NonExistentApp12345"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("NonExistentApp12345"));
+    }
 }
