@@ -120,3 +120,23 @@ fn test_cli_schedule_refuses_purge_and_docker() {
         .failure()
         .stderr(predicate::str::contains("cannot be scheduled"));
 }
+
+#[test]
+fn compress_refuses_a_folder_where_apps_keep_live_data() {
+    let home = tempfile::tempdir().unwrap();
+    let data = home
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("Library/Application Support/Foo");
+    std::fs::create_dir_all(&data).unwrap();
+
+    taert(&home)
+        .args(["compress", "--dry-run"])
+        .arg(&data)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "where apps keep data that changes while they run",
+        ));
+}
