@@ -12,6 +12,7 @@ use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
+use taert::core::large_files;
 use taert::core::leftovers::{Evidence, UninstallRole};
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
@@ -695,8 +696,9 @@ const _STARTUP_ITEMS: usize = 5;
 const _SLIM_APPS: usize = 6;
 const _COMPRESS: usize = 7;
 const EXPLORE_STORAGE: usize = 8;
-const SYSTEM_STATUS: usize = 9;
-const PREFERENCES: usize = 10;
+const _LARGE_FILES: usize = 9;
+const SYSTEM_STATUS: usize = 10;
+const PREFERENCES: usize = 11;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -1034,6 +1036,72 @@ fn snapshot_select_slim_apps() {
     assert_snapshot!("select_slim_apps_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_slim_apps_80x24", narrow);
+}
+
+fn large_files_list() -> CategoryScan {
+    let old_date = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    let mut item1 = ScanItem::new(
+        PathBuf::from("/Users/test/Downloads/ubuntu-24.04-desktop-arm64.iso"),
+        2_500_000_000,
+        false,
+        false,
+    );
+    item1.modified = Some(old_date);
+
+    let mut item2 = ScanItem::new(
+        PathBuf::from("/Users/test/Downloads/Xcode_16.xip"),
+        14_200_000_000,
+        false,
+        false,
+    );
+    item2.modified = Some(old_date + Duration::from_secs(86400 * 30));
+
+    let mut item3 = ScanItem::new(
+        PathBuf::from("/Users/test/Documents/Archive/backup_2024.tar.gz"),
+        8_700_000_000,
+        false,
+        false,
+    );
+    item3.modified = Some(old_date);
+
+    let mut pkg = ScanItem::new(
+        PathBuf::from("/Users/test/Pictures/Photos Library.photoslibrary"),
+        45_000_000_000,
+        false,
+        false,
+    );
+    pkg.modified = Some(old_date);
+
+    CategoryScan {
+        id: large_files::SCAN_ID.to_string(),
+        title: "Large Files".to_string(),
+        notes: Vec::new(),
+        groups: vec![
+            ToolGroup {
+                tool: "Pictures".to_string(),
+                items: vec![pkg],
+            },
+            ToolGroup {
+                tool: "Downloads".to_string(),
+                items: vec![item2, item1],
+            },
+            ToolGroup {
+                tool: "Documents".to_string(),
+                items: vec![item3],
+            },
+        ],
+    }
+}
+
+#[test]
+fn snapshot_select_large_files() {
+    let state = SelectState::with_preserved_selection(large_files_list());
+    let theme = snapshot_theme();
+
+    for &(w, h, label) in SIZES {
+        let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
+        assert_snapshot!(format!("select_large_files_{label}"), output);
+    }
 }
 
 #[test]

@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Inspect › Large files                          0 of 4 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ Pictures ─────────────────────────────────────────── 1 item · 45.0 GB ─╮
+   │     NAME                                                         SIZE ↓ │
+   │ ▌ ○ /Users/test/Pictures/Photos Library.photoslibrary           45.0 GB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Downloads ───────────────────────────────────────── 2 items · 16.7 GB ─╮
+   │     NAME                                                         SIZE ↓ │
+   │   ○ /Users/test/Downloads/Xcode_16.xip                          14.2 GB │
+   │   ○ /Users/test/Downloads/ubu…u-24.04-desktop-arm64.iso          2.5 GB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Documents ─────────────────────────────────────────── 1 item · 8.7 GB ─╮
+   │     NAME                                                         SIZE ↓ │
+   │   ○ /Users/test/Documents/Archive/backup_2024.tar.gz             8.7 GB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ␣  Select    A  All    N  None    ?  More                    Review items  ↵

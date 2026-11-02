@@ -27,6 +27,7 @@ use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
+use crate::core::large_files;
 use crate::core::leftovers::UninstallRole;
 use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::core::purger;
@@ -125,7 +126,8 @@ impl SelectState {
     }
 
     pub fn with_preserved_selection(scan: CategoryScan) -> Self {
-        let is_table = scan.id == SCAN_ID || scan.id == apps::LIST_ID;
+        let is_table =
+            scan.id == SCAN_ID || scan.id == apps::LIST_ID || scan.id == large_files::SCAN_ID;
         let sort_order = is_table.then(SortOrder::default);
         let notes = scan.notes.clone();
         let mut state = Self {
@@ -237,7 +239,10 @@ impl SelectState {
 
             if self.sort_order.is_some() {
                 let is_cache = |item: &ScanItem| item.docker == Some(DockerObject::BuildCache);
-                let date = if self.scan.id == apps::LIST_ID || group.items.iter().any(is_cache) {
+                let date = if self.scan.id == apps::LIST_ID
+                    || self.scan.id == large_files::SCAN_ID
+                    || group.items.iter().any(is_cache)
+                {
                     "LAST USED"
                 } else {
                     "CREATED"
@@ -482,6 +487,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Uninstall apps", title]
     } else if id == slim::SCAN_ID {
         vec!["taert", "Optimize", "Slim apps"]
+    } else if id == large_files::SCAN_ID {
+        vec!["taert", "Inspect", "Large files"]
     } else if id == SCAN_ID || id == purger::SCAN_ID || id == apps::LIST_ID {
         vec!["taert", title]
     } else {
@@ -777,6 +784,9 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             hints.push(Hint::new("⇧S/N/D", order.hint_label()));
         }
         hints.push(Hint::new("/", "Search"));
+        if state.scan.id == large_files::SCAN_ID {
+            hints.push(Hint::new("O", "Reveal"));
+        }
         hints.push(Hint::new("↑↓", "Move"));
     }
     hints.push(Hint::new("⎋", "Back"));

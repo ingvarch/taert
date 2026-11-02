@@ -259,14 +259,12 @@ fn parse_spotlight_date(value: &str) -> Option<SystemTime> {
     parse_rfc3339(&format!("{}Z", value.trim().strip_suffix(" +0000")?))
 }
 
-fn last_used_dates(host: &dyn Host, apps: &mut [InstalledApp]) {
-    if apps.is_empty() {
-        return;
+/// Reads `kMDItemLastUsedDate` from Spotlight in a batch for the given paths.
+pub fn last_used_dates(host: &dyn Host, paths: &[&Path]) -> Vec<Option<SystemTime>> {
+    if paths.is_empty() {
+        return Vec::new();
     }
-    let paths: Vec<String> = apps
-        .iter()
-        .map(|app| app.path.display().to_string())
-        .collect();
+    let path_strings: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     let mut args = vec![
         "-raw",
         "-nullMarker",
@@ -274,14 +272,24 @@ fn last_used_dates(host: &dyn Host, apps: &mut [InstalledApp]) {
         "-name",
         "kMDItemLastUsedDate",
     ];
-    args.extend(paths.iter().map(String::as_str));
+    args.extend(path_strings.iter().map(String::as_str));
 
     let output = host.run("/usr/bin/mdls", &args, MDLS_TIMEOUT);
     let values: Vec<&str> = output.stdout.trim_end_matches('\0').split('\0').collect();
-    // Without one value per app the dates could land on the wrong apps.
-    if values.len() == apps.len() {
-        for (app, value) in apps.iter_mut().zip(values) {
-            app.last_used = parse_spotlight_date(value);
+    // Without one value per path the dates could land on the wrong items.
+    if values.len() == paths.len() {
+        values.into_iter().map(parse_spotlight_date).collect()
+    } else {
+        vec![None; paths.len()]
+    }
+}
+
+fn fill_app_last_used_dates(host: &dyn Host, apps: &mut [InstalledApp]) {
+    let path_refs: Vec<&Path> = apps.iter().map(|app| app.path.as_path()).collect();
+    let dates = last_used_dates(host, &path_refs);
+    if dates.len() == apps.len() {
+        for (app, date) in apps.iter_mut().zip(dates) {
+            app.last_used = date;
         }
     }
 }
@@ -356,7 +364,7 @@ pub fn measure_apps(
             let _ = tx.send(ScanProgressEvent::ItemFound { bytes });
         }
     });
-    last_used_dates(host, apps);
+    fill_app_last_used_dates(host, apps);
 }
 
 /// Every app with its size and last use.

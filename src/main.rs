@@ -11,7 +11,7 @@ use clap::Parser;
 
 use crate::cli::{
     CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
-    HistoryArgs, IgnoreAction, PurgeArgs, SlimArgs, StartupArgs, UninstallArgs,
+    HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, SlimArgs, StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -21,8 +21,9 @@ use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
 use crate::core::host::MacHost;
+use crate::core::large_files;
 use crate::core::layout::Layout;
-use crate::core::path_utils::prettify_path;
+use crate::core::path_utils::{expand_tilde, prettify_path};
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
@@ -78,6 +79,8 @@ fn main() -> ExitCode {
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
         }
+
+        Some(Command::Large(ref args)) => handle_large(args, &cli, use_plain, &ignore),
 
         Some(Command::Doctor(ref args)) => handle_doctor(args, &cli, use_plain, &ignore, &config),
 
@@ -154,6 +157,29 @@ fn handle_docker(cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
     }
 }
 
+fn handle_large(args: &LargeArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
+    if cli.force {
+        eprintln!("Error: personal files must never be removed unreviewed");
+        return ExitCode::FAILURE;
+    }
+
+    let root = match &args.path {
+        Some(p) => expand_tilde(&p.to_string_lossy()),
+        None => Safety::home_dir(),
+    };
+
+    if !root.exists() {
+        eprintln!("Error: Path '{}' does not exist", root.display());
+        return ExitCode::FAILURE;
+    }
+
+    let command = format!("large {}", prettify_path(&root));
+    let options = large_files::LargeScanOptions::new(args.min_size, args.older_than, args.limit);
+    let mut scan = large_files::scan(&root, &options, &MacHost, ignore, None, None);
+
+    process_scan_result(&mut scan, cli, use_plain, ignore, &command)
+}
+
 fn process_scan_result(
     scan: &mut CategoryScan,
     cli: &Cli,
@@ -186,9 +212,10 @@ fn process_scan_result(
     if cli.force {
         let total = scan.selected_items().len();
         let session = HistoryLog::default_log().start_run(command, "force", Some(total));
-        let report = PlainRunner::execute_clean_with_callbacks(
+        let report = PlainRunner::execute_clean_with_options(
             scan,
             ignore,
+            cli.permanent,
             Some(|outcome: &ItemOutcome| session.record_item(outcome)),
         );
         session.finish();
@@ -213,9 +240,10 @@ fn process_scan_result(
                 let total = scan.selected_items().len();
                 let session =
                     HistoryLog::default_log().start_run(command, "interactive", Some(total));
-                let report = PlainRunner::execute_clean_with_callbacks(
+                let report = PlainRunner::execute_clean_with_options(
                     scan,
                     ignore,
+                    cli.permanent,
                     Some(|outcome: &ItemOutcome| session.record_item(outcome)),
                 );
                 session.finish();

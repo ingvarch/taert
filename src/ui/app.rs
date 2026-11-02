@@ -41,6 +41,7 @@ use crate::core::docker;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
 use crate::core::host::{Host, MacHost};
+use crate::core::large_files;
 use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
@@ -732,6 +733,14 @@ impl App {
                         state.set_sort(SortOrder::Date);
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
+                    KeyCode::Char('o') | KeyCode::Char('O') => {
+                        if let Some(path) = state.current_focused_path() {
+                            let _ = std::process::Command::new("open")
+                                .arg("-R")
+                                .arg(&path)
+                                .spawn();
+                        }
+                    }
                     KeyCode::Char('/') => {
                         state.is_searching = true;
                         state.search_query.clear();
@@ -1219,6 +1228,7 @@ impl App {
         match &self.screen {
             Screen::Workspace(state) => {
                 let quick_key = match state.items.len() {
+                    13 => "1-13",
                     12 => "1-12",
                     11 => "1-11",
                     10 => "1-10",
@@ -1252,16 +1262,17 @@ impl App {
                     uninstaller::PLAN_ID => "Uninstall",
                     _ => "Review & clean",
                 };
-                let mut sections = vec![HelpSection::new(
-                    "Select items",
-                    vec![
-                        Hint::new("␣", "Toggle item"),
-                        Hint::new("A", "Select all"),
-                        Hint::new("N", "Select none"),
-                        Hint::new("/", "Search"),
-                        Hint::new("↵", enter),
-                    ],
-                )];
+                let mut hints = vec![
+                    Hint::new("␣", "Toggle item"),
+                    Hint::new("A", "Select all"),
+                    Hint::new("N", "Select none"),
+                    Hint::new("/", "Search"),
+                ];
+                if state.scan.id == large_files::SCAN_ID {
+                    hints.push(Hint::new("O", "Reveal in Finder"));
+                }
+                hints.push(Hint::new("↵", enter));
+                let mut sections = vec![HelpSection::new("Select items", hints)];
                 if state.sort_order.is_some() {
                     sections.push(sort_section());
                 }
@@ -1513,6 +1524,7 @@ impl App {
                         let command = match scan_id.as_str() {
                             "docker" => "docker".to_string(),
                             "purge" => "purge".to_string(),
+                            "large" => "large".to_string(),
                             "dev" => "clean dev".to_string(),
                             "junk" => "clean junk".to_string(),
                             "ai" => "clean ai".to_string(),
@@ -1525,13 +1537,17 @@ impl App {
                             "interactive",
                             Some(total),
                         );
-                        let rep = Cleaner::new(&*host, RemovalMode::Permanent)
-                            .remove_items_with_callbacks(
-                                &selected_items,
-                                &ignore,
-                                Some(on_progress),
-                                Some(|outcome: &ItemOutcome| session.record_item(outcome)),
-                            );
+                        let mode = if scan_id == "large" && !permanent {
+                            RemovalMode::Trash
+                        } else {
+                            RemovalMode::Permanent
+                        };
+                        let rep = Cleaner::new(&*host, mode).remove_items_with_callbacks(
+                            &selected_items,
+                            &ignore,
+                            Some(on_progress),
+                            Some(|outcome: &ItemOutcome| session.record_item(outcome)),
+                        );
                         session.finish();
                         rep
                     }
@@ -1619,6 +1635,7 @@ impl App {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
                 }
             }
+            MainMenuChoice::LargeFiles => self.launch_large_scan(),
             MainMenuChoice::SystemStatus => {
                 self.open(Screen::SystemStatus(Box::default()));
             }
@@ -1722,6 +1739,36 @@ impl App {
 
         self.open(Screen::Scanning(
             ProgressState::new("Scanning Universal Apps").top_level(),
+            rx,
+            cancel,
+        ));
+    }
+
+    pub fn launch_large_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        let ignore = self.ignore.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_scan = cancel.clone();
+        let home = Safety::home_dir();
+
+        thread::spawn(move || {
+            let (progress, bridge) = forward_progress(tx.clone());
+            let options = large_files::LargeScanOptions::default();
+            let scan = large_files::scan(
+                &home,
+                &options,
+                &*host,
+                &ignore,
+                Some(progress),
+                Some(cancel_scan),
+            );
+            let _ = bridge.join();
+            let _ = tx.send(ScanMessage::Finished(scan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Scanning Large Files").top_level(),
             rx,
             cancel,
         ));
@@ -1942,6 +1989,23 @@ mod tests {
         let mut state = WorkspaceState::new();
 
         assert_eq!(state.select_by_number(8), Some(MainMenuChoice::Compress));
+    }
+
+    #[test]
+    fn the_ninth_quick_key_opens_explore_storage() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(
+            state.select_by_number(9),
+            Some(MainMenuChoice::ExploreStorage)
+        );
+    }
+
+    #[test]
+    fn the_tenth_quick_key_opens_large_files() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(state.select_by_number(10), Some(MainMenuChoice::LargeFiles));
     }
 
     fn select_app(scan: CategoryScan) -> App {
@@ -2211,7 +2275,7 @@ mod tests {
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
 
-        assert_main_menu(&app, 11);
+        assert_main_menu(&app, 12);
     }
 
     #[test]
@@ -2239,7 +2303,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 10);
+        assert_main_menu(&app, 11);
     }
 
     #[test]
@@ -2608,7 +2672,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('0'));
+        app.open(Screen::SystemStatus(Box::default()));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();

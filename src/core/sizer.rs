@@ -239,7 +239,7 @@ impl DirSizer {
     /// Calculate allocated byte size from file metadata.
     /// On Unix/macOS, st_blocks represents the number of 512-byte blocks allocated.
     #[inline]
-    fn allocated_size(meta: &fs::Metadata) -> u64 {
+    pub fn allocated_size(meta: &fs::Metadata) -> u64 {
         let blocks = meta.blocks();
         if blocks > 0 {
             blocks.saturating_mul(512)

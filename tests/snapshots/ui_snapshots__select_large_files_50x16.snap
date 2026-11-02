@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ Large files              0 of 4 selected  ·  0 B
+──────────────────────────────────────────────────
+   ╭─ Pictures ───────────── 1 item · 45.0 GB ─╮
+   │     NAME                           SIZE ↓ │
+   │ ▌ ○ /Users/tes…toslibrary         45.0 GB │
+   ╰───────────────────────────────────────────╯
+
+   ╭─ Downloads ─────────── 2 items · 16.7 GB ─╮
+   │     NAME                           SIZE ↓ │
+   │   ○ /Users/tes…ode_16.xip         14.2 GB │
+   │   ○ /Users/tes…-arm64.iso          2.5 GB │
+   ╰───────────────────────────────────────────╯
+
+   ╭─ Documents ───────────── 1 item · 8.7 GB ─╮
+──────────────────────────────────────────────────
+  ␣  Select    ?  More           Review items  ↵

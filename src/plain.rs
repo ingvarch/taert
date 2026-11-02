@@ -201,8 +201,26 @@ impl PlainRunner {
     where
         O: FnMut(&ItemOutcome),
     {
+        Self::execute_clean_with_options(scan, ignore, false, outcome_cb)
+    }
+
+    /// Execute cleaning with permanent/trash options and outcome callback
+    pub fn execute_clean_with_options<O>(
+        scan: &CategoryScan,
+        ignore: &IgnoreStore,
+        permanent: bool,
+        outcome_cb: Option<O>,
+    ) -> RemovalReport
+    where
+        O: FnMut(&ItemOutcome),
+    {
+        let mode = if scan.id == "large" && !permanent {
+            RemovalMode::Trash
+        } else {
+            RemovalMode::Permanent
+        };
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        let report = Cleaner::new(&MacHost, RemovalMode::Permanent).remove_items_with_callbacks(
+        let report = Cleaner::new(&MacHost, mode).remove_items_with_callbacks(
             &items,
             ignore,
             None::<fn(RemovalProgress)>,

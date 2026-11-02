@@ -14,6 +14,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Safe file removal: personal files and apps move to the Trash by default so they can be recovered, while caches, build artifacts, and Docker objects are deleted permanently
 - Accurate APFS space accounting via allocated blocks (`st_blocks * 512`) with hardlink deduplication
 - Interactive storage browser with streaming progress, selection, deletion ("Move to Trash" or "Delete Permanently"), and tree-aggregating cache
+- Large file finder (`taert large`) to uncover forgotten big files and packages with size, age filtering, and Trash removal
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
 - App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of browsers and apps it sees running
@@ -43,6 +44,7 @@ taert
 taert clean dev --dry-run
 taert purge ~/Projects --older-than 30 --json
 taert analyze ~/Downloads
+taert large --min-size 500M
 taert docker --dry-run
 taert uninstall Zoom --dry-run
 taert slim Slack --dry-run

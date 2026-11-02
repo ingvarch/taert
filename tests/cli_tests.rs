@@ -521,4 +521,36 @@ mod uninstall {
             .failure()
             .stderr(predicate::str::contains("NonExistentApp12345"));
     }
+
+    #[test]
+    fn test_cli_large_force_fails() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["large", "--force"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "personal files must never be removed unreviewed",
+            ));
+    }
+
+    #[test]
+    fn test_cli_large_json() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["large", "--json"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\"id\": \"large\""));
+    }
+
+    #[test]
+    fn test_cli_large_dry_run() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["large", "--dry-run"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Dry run completed."));
+    }
 }

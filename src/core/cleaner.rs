@@ -34,7 +34,7 @@ pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> Rem
                 RemovalMode::Trash
             }
         }
-        "analyze" => RemovalMode::Trash,
+        "analyze" | "large" => RemovalMode::Trash,
         _ => RemovalMode::Permanent,
     }
 }
@@ -885,6 +885,11 @@ mod tests {
         );
         assert_eq!(
             item_removal_mode(&item, "analyze", true),
+            RemovalMode::Permanent
+        );
+        assert_eq!(item_removal_mode(&item, "large", false), RemovalMode::Trash);
+        assert_eq!(
+            item_removal_mode(&item, "large", true),
             RemovalMode::Permanent
         );
 

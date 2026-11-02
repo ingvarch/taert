@@ -52,6 +52,9 @@ pub enum Command {
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
 
+    /// Find the largest and oldest files
+    Large(LargeArgs),
+
     /// Explain what is slowing the Mac down
     Doctor(DoctorArgs),
 
@@ -121,6 +124,24 @@ pub struct AnalyzeArgs {
     /// Maximum folder depth to display in plain mode
     #[arg(long, default_value = "1")]
     pub depth: usize,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct LargeArgs {
+    /// Root directory to scan (defaults to home folder)
+    pub path: Option<PathBuf>,
+
+    /// Minimum file size to include (e.g. 100M, 500MB, 1G)
+    #[arg(long, default_value = "100M", value_parser = crate::core::bytes::parse_size)]
+    pub min_size: u64,
+
+    /// Filter by artifact age in days: not modified or opened for this many days
+    #[arg(long)]
+    pub older_than: Option<u64>,
+
+    /// Limit the number of files returned
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
 }
 
 #[derive(Debug, Args, Default)]
