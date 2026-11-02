@@ -37,6 +37,14 @@ pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> Rem
     if permanent || item.contents_only || item.docker.is_some() {
         return RemovalMode::Permanent;
     }
+    if scan_id != super::uninstaller::PLAN_ID
+        && matches!(
+            item.role,
+            Some(super::leftovers::UninstallRole::Leftover { .. })
+        )
+    {
+        return RemovalMode::Trash;
+    }
     match scan_id {
         super::uninstaller::PLAN_ID => {
             if super::uninstaller::needs_root(item) {
@@ -63,6 +71,67 @@ pub struct RemovalReport {
     pub failures: Vec<RemovalFailure>,
     /// Things worth telling that are not failures.
     pub notes: Vec<String>,
+}
+
+impl RemovalReport {
+    pub fn absorb(&mut self, other: RemovalReport) {
+        self.removed_count += other.removed_count;
+        self.freed_bytes += other.freed_bytes;
+        self.trashed_bytes += other.trashed_bytes;
+        self.failures.extend(other.failures);
+        self.notes.extend(other.notes);
+    }
+}
+
+/// Splits the items by `item_removal_mode` into a Trash batch and a Permanent batch,
+/// runs `Cleaner::remove_items_with_callbacks` for each non-empty batch (Trash first),
+/// and adds the two reports together.
+pub fn remove_selected<P, O>(
+    host: &dyn Host,
+    scan_id: &str,
+    items: &[ScanItem],
+    permanent: bool,
+    ignore: &IgnoreStore,
+    mut progress: Option<P>,
+    mut outcome: Option<O>,
+) -> RemovalReport
+where
+    P: FnMut(RemovalProgress),
+    O: FnMut(&ItemOutcome),
+{
+    let mut trash_items = Vec::new();
+    let mut perm_items = Vec::new();
+
+    for item in items {
+        match item_removal_mode(item, scan_id, permanent) {
+            RemovalMode::Trash => trash_items.push(item.clone()),
+            RemovalMode::Permanent => perm_items.push(item.clone()),
+        }
+    }
+
+    let mut report = RemovalReport::default();
+
+    if !trash_items.is_empty() {
+        let rep = Cleaner::new(host, RemovalMode::Trash).remove_items_with_callbacks(
+            &trash_items,
+            ignore,
+            progress.as_mut().map(|cb| &mut *cb),
+            outcome.as_mut().map(|cb| &mut *cb),
+        );
+        report.absorb(rep);
+    }
+
+    if !perm_items.is_empty() {
+        let rep = Cleaner::new(host, RemovalMode::Permanent).remove_items_with_callbacks(
+            &perm_items,
+            ignore,
+            progress.as_mut().map(|cb| &mut *cb),
+            outcome.as_mut().map(|cb| &mut *cb),
+        );
+        report.absorb(rep);
+    }
+
+    report
 }
 
 #[derive(Debug, Error)]
@@ -958,5 +1027,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn orphan_rows_are_labelled_trash_in_a_clean_scan() {
+        use super::super::leftovers::{Evidence, UninstallRole};
+
+        let mut item = ScanItem::new(PathBuf::from("/test/file"), 100, false, false);
+        item.role = Some(UninstallRole::Leftover {
+            evidence: Evidence::BundleId,
+        });
+        assert_eq!(item_removal_mode(&item, "clean", false), RemovalMode::Trash);
+        assert_eq!(
+            item_removal_mode(&item, "clean", true),
+            RemovalMode::Permanent
+        );
+
+        let plain_item = ScanItem::new(PathBuf::from("/test/file"), 100, false, false);
+        assert_eq!(
+            item_removal_mode(&plain_item, "clean", false),
+            RemovalMode::Permanent
+        );
+    }
+
+    #[test]
+    fn remove_selected_trashes_orphans_and_deletes_caches() {
+        use super::super::leftovers::{Evidence, UninstallRole};
+
+        let temp = tempdir().unwrap();
+        let orphan_dir = temp.path().join("orphan");
+        fs::create_dir_all(&orphan_dir).unwrap();
+        fs::write(orphan_dir.join("file.txt"), b"orphan data").unwrap();
+
+        let cache_dir = temp.path().join("cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("file.txt"), b"cache data").unwrap();
+
+        let mut orphan_item = ScanItem::new(orphan_dir.clone(), 11, true, false);
+        orphan_item.role = Some(UninstallRole::Leftover {
+            evidence: Evidence::BundleId,
+        });
+        let cache_item = ScanItem::new(cache_dir.clone(), 10, true, false);
+
+        let host = FakeHost::default();
+        let report = remove_selected(
+            &host,
+            "clean",
+            &[orphan_item, cache_item],
+            false,
+            &IgnoreStore::default(),
+            None::<fn(RemovalProgress)>,
+            None::<fn(&ItemOutcome)>,
+        );
+
+        assert_eq!(host.trashed(), vec![orphan_dir]);
+        assert!(!cache_dir.exists());
+        assert_eq!(report.removed_count, 2);
+        assert_eq!(report.trashed_bytes, 11);
+        assert_eq!(report.freed_bytes, 10);
     }
 }

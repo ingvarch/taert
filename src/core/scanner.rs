@@ -16,6 +16,7 @@ use super::docker::DockerObject;
 use super::host::Host;
 use super::layout::Layout;
 use super::leftovers::UninstallRole;
+use super::orphans;
 use super::path_utils::prettify_path;
 use super::safety::{FileIdentity, Safety};
 use super::sizer::DirSizer;
@@ -203,7 +204,7 @@ fn contents_of(paths: &[PathBuf], ignore: &IgnoreStore) -> Vec<PathBuf> {
 }
 
 /// One folder of a row, unless it is gone, not safe to remove, or next to empty.
-fn scan_folder(
+pub(crate) fn scan_folder(
     path: PathBuf,
     selected: bool,
     ignore: &IgnoreStore,
@@ -281,6 +282,16 @@ impl CategoryScanner {
         progress_tx: Option<Sender<ScanProgressEvent>>,
         is_cancelled: Option<Arc<AtomicBool>>,
     ) -> CategoryScan {
+        if category_id == orphans::SCAN_ID {
+            return orphans::scan(
+                context.layout,
+                context.host,
+                ignore,
+                SystemTime::now(),
+                progress_tx,
+                is_cancelled,
+            );
+        }
         Self::scan_with(
             context,
             category_id,

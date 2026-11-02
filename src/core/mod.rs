@@ -15,6 +15,7 @@ pub mod iokit;
 pub mod large_files;
 pub mod layout;
 pub mod leftovers;
+pub mod orphans;
 pub mod path_utils;
 pub mod profiler;
 pub mod projects_store;

@@ -14,7 +14,7 @@ taert
 
 - **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
-- **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
+- **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), Orphaned App Files, or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
 - **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Personal files and apps move to the Trash by default (recoverable), while root files are permanently deleted. Use `--permanent` to skip Trash. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
@@ -65,6 +65,9 @@ taert clean ai
 # Scan and empty macOS Trash
 taert clean trash
 
+# Scan orphaned files left behind by apps that are gone
+taert clean orphans
+
 # Preview without deleting anything
 taert clean dev --dry-run
 
@@ -82,6 +85,26 @@ An app cache starts selected when nothing in it changed for 30 days and its app 
 `--plain` and `--dry-run` print both folders of a Safari or Arc row, and `--json` puts the second under `also`.
 
 Safari keeps its cache in `~/Library/Caches/com.apple.Safari` and in a container. macOS may refuse both reads unless your terminal has **Full Disk Access**. Without it, taert skips those folders and shows a note on the list, in the plain output, and after a `--force` run.
+
+#### Orphaned App Files (`taert clean orphans`)
+
+`taert clean orphans` inspects the top level (one level deep) of 11 user Library folders: `~/Library/Application Scripts`, `Application Support`, `Caches`, `Containers`, `Cookies`, `Group Containers`, `HTTPStorages`, `Logs`, `Preferences`, `Saved Application State`, and `WebKit`. Symlinks are skipped, and `~/Library/LaunchAgents` is left to Startup Items.
+
+Only names that carry a reverse-DNS bundle id are found (free-form names such as `Foo Editor` are never listed). In `Containers`, the id is read from the container metadata plist (`MCMMetadataIdentifier`). In `Group Containers`, a leading `group.` or 10-character team id prefix is removed. An id is dropped if it starts with `com.apple.`, matches an installed app bundle id or embedded helper/extension id, or for shared group containers shares a vendor token with an installed app.
+
+Before listing an orphan candidate, taert checks Spotlight with `mdfind` for the bundle id. If Spotlight finds the app on any connected drive (including the Trash), the candidate is dropped. If the Spotlight check fails, the candidate stays listed but starts unselected.
+
+Apps on a drive that is not connected look removed. To protect them, rows changed in the last 30 days start unselected.
+
+| Condition | Starts Selected (`taert clean orphans`) |
+|---|---|
+| Exact id, age ≥ 30 days, Spotlight confirmed missing | Yes |
+| Exact id, age < 30 days (or recent child < 30 days) | No |
+| Exact id, Spotlight check failed | No |
+| Shared id (`Group Containers`) | No |
+| Any orphan row in `taert clean` (no category) or TUI All row | No |
+
+In `taert clean` with no category and in the TUI's All row, every orphan row starts unselected, so `taert clean --force` with no category never removes one. Orphaned files are personal data (Application Support, Containers), so rows go to the Trash by default. Passing `--permanent` overrides this to permanent removal.
 
 ### Project Build Artifacts (`taert purge`)
 
@@ -458,6 +481,7 @@ By default, taert moves personal files and user apps to macOS Trash instead of d
 - **Explore Storage (`taert analyze`)**: Dialog offers **Move to Trash** (default) and **Delete Permanently**.
 - **Large Files (`taert large`)**: Selected files and packages move to Trash (default).
 - **Uninstall Apps (`taert uninstall`)**: User-level app bundles and leftovers in home folders move to Trash. Files requiring root (`/Library/...`) and package receipts are deleted permanently because root has no Trash.
+- **Orphaned App Files (`taert clean orphans`)**: Orphan rows move to the Trash because they hold personal data in Application Support and Containers.
 - **Caches, Build Artifacts & Docker**: Caches (`taert clean`), project artifacts (`taert purge`), Docker items (`taert docker`), and emptying the Trash are always permanently removed.
 - **`--permanent` flag**: Global CLI flag (`taert --permanent ...`) that skips Trash and deletes files and apps permanently.
 

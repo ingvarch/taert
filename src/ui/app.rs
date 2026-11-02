@@ -36,9 +36,7 @@ use super::workspace::{
 };
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
-use crate::core::cleaner::{
-    Cleaner, RemovalMode, RemovalProgress, RemovalReport, scan_removal_mode,
-};
+use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport, remove_selected};
 use crate::core::compress::Compressor;
 use crate::core::docker;
 use crate::core::doctor;
@@ -1535,6 +1533,7 @@ impl App {
                             "junk" => "clean junk".to_string(),
                             "ai" => "clean ai".to_string(),
                             "trash" => "clean trash".to_string(),
+                            "orphans" => "clean orphans".to_string(),
                             _ => "clean".to_string(),
                         };
                         let total = selected_items.len();
@@ -1543,9 +1542,11 @@ impl App {
                             "interactive",
                             Some(total),
                         );
-                        let mode = scan_removal_mode(&scan_id, permanent);
-                        let rep = Cleaner::new(&*host, mode).remove_items_with_callbacks(
+                        let rep = remove_selected(
+                            &*host,
+                            &scan_id,
                             &selected_items,
+                            permanent,
                             &ignore,
                             Some(on_progress),
                             Some(|outcome: &ItemOutcome| session.record_item(outcome)),
@@ -1675,6 +1676,7 @@ impl App {
             CleanSubcategory::Developer => self.launch_category_scan("dev", "Developer Caches"),
             CleanSubcategory::UserJunk => self.launch_category_scan("junk", "System Junk"),
             CleanSubcategory::AiTools => self.launch_category_scan("ai", "AI Tool Caches"),
+            CleanSubcategory::Orphans => self.launch_category_scan("orphans", "Orphaned App Files"),
             CleanSubcategory::Trash => self.launch_category_scan("trash", "Trash"),
         }
     }
@@ -1847,6 +1849,7 @@ impl App {
                 ("junk", "System Junk"),
                 ("ai", "AI Tool Caches"),
                 ("trash", "Trash"),
+                ("orphans", "Orphaned App Files"),
             ];
             let total = categories.len();
             let mut scans = Vec::new();
@@ -1870,7 +1873,7 @@ impl App {
                     }
                 });
 
-                scans.push(CategoryScanner::scan(
+                let mut scan = CategoryScanner::scan(
                     &ScanContext {
                         layout: &layout,
                         host: &*host,
@@ -1880,7 +1883,15 @@ impl App {
                     &ignore,
                     Some(prog_tx),
                     Some(Arc::clone(&cancel_clone)),
-                ));
+                );
+                if *id == "orphans" {
+                    for group in &mut scan.groups {
+                        for item in &mut group.items {
+                            item.selected = false;
+                        }
+                    }
+                }
+                scans.push(scan);
                 let _ = bridge_handle.join();
             }
 

@@ -63,6 +63,7 @@ pub enum CleanSubcategory {
     Developer,
     UserJunk,
     AiTools,
+    Orphans,
     Trash,
 }
 
@@ -207,7 +208,7 @@ impl WorkspaceState {
                 (
                     CleanSubcategory::All,
                     "All categories",
-                    "Developer caches, user junk, AI tools, and Trash",
+                    "Developer caches, user junk, AI tools, orphaned files, and Trash",
                 ),
                 (
                     CleanSubcategory::Developer,
@@ -223,6 +224,11 @@ impl WorkspaceState {
                     CleanSubcategory::AiTools,
                     "AI tools",
                     "Caches and logs from local AI tools",
+                ),
+                (
+                    CleanSubcategory::Orphans,
+                    "Orphaned files",
+                    "Leftovers of apps that are gone",
                 ),
                 (
                     CleanSubcategory::Trash,
@@ -618,6 +624,7 @@ fn render_submenu_content(
             CleanSubcategory::Developer => theme.g.icon_projects,
             CleanSubcategory::UserJunk => theme.g.check_off,
             CleanSubcategory::AiTools => "◎",
+            CleanSubcategory::Orphans => theme.g.icon_uninstall,
             CleanSubcategory::Trash => theme.g.key_backspace,
         };
 

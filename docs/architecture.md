@@ -15,6 +15,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
+| Orphan Detector | `crate::core::orphans` | Finds files left behind by apps that are gone with Spotlight and bundle ID checks |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
 | TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
 
@@ -79,10 +80,18 @@ These rules keep it from removing the wrong thing:
 
 Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
 
+## Orphaned App Files
+
+[`orphans.rs`](../src/core/orphans.rs) finds files and containers left behind in `~/Library` by apps that have been removed.
+
+- **How an id is orphaned**: taert inspects the top level of 11 folders apps use (`Application Scripts`, `Application Support`, `Caches`, `Containers`, `Cookies`, `Group Containers`, `HTTPStorages`, `Logs`, `Preferences`, `Saved Application State`, `WebKit`). Names are trimmed of suffixes (`.plist`, `.binarycookies`, `.savedState`) or stripped of group/team prefixes, while `Containers` folders resolve their id from metadata plists (`MCMMetadataIdentifier`). Every candidate must pass `apps::is_reverse_dns`. Candidates starting with `com.apple.` are skipped. An id is orphaned when no installed app or embedded helper/login item claims it, and for shared group containers when no installed app shares its vendor token.
+- **Spotlight check**: for each surviving id, taert runs `mdfind` for `kMDItemCFBundleIdentifier == '{id}'`. If Spotlight finds an app anywhere on connected volumes (including in the Trash), the candidate is dropped. If Spotlight fails, the row remains but starts unselected.
+- **Per-item Trash mode**: Orphaned files in `Application Support` and `Containers` often contain user data. When cleaning, `cleaner::remove_selected` splits items into Trash and Permanent batches using `cleaner::item_removal_mode`. Orphan rows move to the Trash by default, while caches and logs in the same scan are deleted permanently.
+
 ## Trash vs Permanent Removal
 
 Items slated for removal are classified via `cleaner::item_removal_mode`:
-- **Personal files and user apps**: user app bundles and leftovers in home folders (`~/Library`, `~/.config`, etc.) move to the Trash by default via `NSFileManager` (`Host::trash`). In Explore Storage (`taert analyze`), users can choose between "Move to Trash" (default) and "Delete Permanently".
+- **Personal files, user apps, and orphaned files**: user app bundles, orphaned files (`taert clean orphans`), and leftovers in home folders (`~/Library`, `~/.config`, etc.) move to the Trash by default via `NSFileManager` (`Host::trash`). In Explore Storage (`taert analyze`), users can choose between "Move to Trash" (default) and "Delete Permanently".
 - **Permanent removal**: caches and logs (`taert clean`), build artifacts (`taert purge`), Docker objects (`taert docker`), emptying the Trash, root files (`/Library/...`), and items with `contents_only = true` are permanently deleted.
 - **`--permanent` override**: passing `--permanent` forces permanent deletion across all subcommands, bypassing the Trash.
 - **Reporting**: outcomes and progress report both `trashed_bytes` ("Moved X to the Trash. Empty it to get the space back.") and `freed_bytes` ("Removed Y permanently.").
