@@ -6,13 +6,13 @@ expression: output
 ──────────────────────────────────────────────────
    ╭─ Cleanup ─────────────────────────────────╮
    │ ▌    Preselect a… older than ‹  7 days  › │
+   │      Scheduled cleanup             Off  › │
    ╰───────────────────────────────────────────╯
 
    ╭─ Locations ───────────────────────────────╮
    │      Project folders          6 folders › │
    │      Protected paths            0 paths › │
    ╰───────────────────────────────────────────╯
-
 
 
 

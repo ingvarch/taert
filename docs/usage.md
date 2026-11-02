@@ -397,6 +397,37 @@ Example history summary:
 - **Bounded size**: Keeps the last 1,000 runs automatically.
 - **Overrides**: `--dry-run` writes nothing to the log. Set `TAERT_NO_HISTORY=1` to disable recording completely.
 
+### Scheduled Cleanup (`taert schedule`)
+
+Keep caches under control with no manual runs. You choose categories and recurrence frequency, and macOS runs the cleanup in the background via `launchd`. It removes only what `--force` would remove, and only when enough space can be freed.
+
+```bash
+# Schedule weekly cleanup for dev and junk caches when at least 1 GB can be freed
+taert schedule set --every week --categories dev,junk --min-reclaim 1G
+
+# View schedule status, last run details, and health checks
+taert schedule show
+
+# Turn off scheduled cleanup and remove launch agent
+taert schedule off
+```
+
+- **`--every`**: Frequency interval: `day` (daily at 09:00), `week` (Mondays at 09:00, default), or `month` (1st of each month at 09:00).
+- **`--categories`**: Comma-separated list of any of `dev`, `junk`, `ai`, and `trash` (default `dev,junk`).
+  - `purge`, `docker`, `uninstall`, and `clean orphans` cannot be scheduled; their results require interactive review.
+- **`--min-reclaim`**: Minimum reclaimable space threshold (default `1G`). If scanning finds less than this amount, the run is skipped and the skip is recorded.
+
+#### Launch Agent & Full Disk Access
+
+Scheduled cleanup installs a user launch agent into `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`:
+- Missed calendar intervals run automatically when your Mac wakes.
+- `taert schedule run` executes silently in the background, acquiring a lock file at `~/.config/taert/schedule.lock` to prevent overlapping runs.
+- Because `launchd` launches `taert` directly in the background, permissions granted to your terminal app do not apply. Any rows that fail with `EPERM` are logged as failures, and `taert schedule show` will warn and provide instructions on how to grant Full Disk Access to the stable binary (e.g. `/opt/homebrew/bin/taert`).
+
+#### Interactive Preferences
+
+You can also switch on and adjust scheduled cleanup in the TUI workspace under **Preferences** → **Scheduled cleanup** using `←` and `→` to cycle between `Off`, `Every day`, `Every week`, and `Every month`.
+
 ### Trash & Permanent Deletion
 
 By default, taert moves personal files and user apps to macOS Trash instead of deleting them immediately:

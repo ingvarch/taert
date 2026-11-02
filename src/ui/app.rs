@@ -1139,10 +1139,16 @@ impl App {
             Screen::Preferences(state) => match code {
                 KeyCode::Up | KeyCode::Char('k') => state.previous(),
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
-                KeyCode::Left => state.step_age_left(&mut self.config),
-                KeyCode::Right => state.step_age_right(&mut self.config),
+                KeyCode::Left => {
+                    state.step_age_left(&mut self.config);
+                    state.step_schedule_left(&mut self.config, &*self.host, &self.layout);
+                }
+                KeyCode::Right => {
+                    state.step_age_right(&mut self.config);
+                    state.step_schedule_right(&mut self.config, &*self.host, &self.layout);
+                }
                 KeyCode::Enter => match state.focus {
-                    PreferencesFocus::AgeThreshold => {}
+                    PreferencesFocus::AgeThreshold | PreferencesFocus::ScheduledCleanup => {}
                     PreferencesFocus::ProjectFolders => {
                         self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProjectFolders,
@@ -2290,6 +2296,7 @@ mod tests {
                 KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
+                KeyCode::Down,
                 KeyCode::Enter,
             ],
         );
@@ -2361,6 +2368,7 @@ mod tests {
                 KeyCode::End,
                 KeyCode::Up,
                 KeyCode::Enter,
+                KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2618,6 +2626,8 @@ mod tests {
         press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
+        // Moving to project folders (a list link) removes the adjust arrows
+        app.handle_key(KeyCode::Down);
         app.handle_key(KeyCode::Down);
         assert_footer(&app, &["⎋  Back"], &["Adjust"]);
     }
