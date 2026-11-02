@@ -80,6 +80,38 @@ impl IgnoreStore {
     }
 }
 
+use super::schedule::ScheduleFrequency;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleSkip {
+    pub at: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleConfig {
+    #[serde(default = "default_schedule_every")]
+    pub every: ScheduleFrequency,
+    #[serde(default = "default_schedule_categories")]
+    pub categories: Vec<String>,
+    #[serde(default = "default_schedule_min_reclaim")]
+    pub min_reclaim: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_skip: Option<ScheduleSkip>,
+}
+
+fn default_schedule_every() -> ScheduleFrequency {
+    ScheduleFrequency::Week
+}
+
+fn default_schedule_categories() -> Vec<String> {
+    vec!["dev".to_string(), "junk".to_string()]
+}
+
+fn default_schedule_min_reclaim() -> u64 {
+    1_000_000_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_older_than_days")]
@@ -88,6 +120,8 @@ pub struct Config {
     pub appearance: String,
     #[serde(default)]
     pub extra_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleConfig>,
 }
 
 fn default_older_than_days() -> u64 {
@@ -104,13 +138,21 @@ impl Default for Config {
             older_than_days: default_older_than_days(),
             appearance: default_appearance(),
             extra_artifacts: Vec::new(),
+            schedule: None,
         }
     }
 }
 
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("taert").join("config.toml"))
+        let dir = dirs::config_dir()?.join("taert");
+        let toml_path = dir.join("config.toml");
+        let json_path = dir.join("config.json");
+        if json_path.exists() && !toml_path.exists() {
+            Some(json_path)
+        } else {
+            Some(toml_path)
+        }
     }
 
     pub fn load_or_default() -> Self {
@@ -125,16 +167,26 @@ impl Config {
         }
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
-        let config: Config = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-        Ok(config)
+        if path.extension().is_some_and(|ext| ext == "json") {
+            let config: Config = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse config from {}", path.display()))?;
+            Ok(config)
+        } else {
+            let config: Config = toml::from_str(&content)
+                .with_context(|| format!("Failed to parse config from {}", path.display()))?;
+            Ok(config)
+        }
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = toml::to_string_pretty(self)?;
+        let content = if path.extension().is_some_and(|ext| ext == "json") {
+            serde_json::to_string_pretty(self)?
+        } else {
+            toml::to_string_pretty(self)?
+        };
         let temp_path = path.with_extension("tmp");
         fs::write(&temp_path, content)?;
         fs::rename(&temp_path, path)?;

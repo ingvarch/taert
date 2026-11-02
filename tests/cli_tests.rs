@@ -553,4 +553,71 @@ mod uninstall {
             .success()
             .stdout(predicate::str::contains("Dry run completed."));
     }
+
+    #[test]
+    fn test_cli_schedule_show_when_off() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["schedule", "show"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Scheduled cleanup is off."));
+    }
+
+    #[test]
+    fn test_cli_schedule_refuses_purge_and_docker() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args(["schedule", "set", "--categories", "purge"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot be scheduled"));
+
+        taert(&home)
+            .args(["schedule", "set", "--categories", "docker"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot be scheduled"));
+    }
+
+    #[test]
+    fn test_cli_schedule_set_and_off() {
+        let home = tempfile::tempdir().unwrap();
+        taert(&home)
+            .args([
+                "schedule",
+                "set",
+                "--every",
+                "week",
+                "--categories",
+                "dev,junk",
+                "--min-reclaim",
+                "1G",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Every week: dev, junk, when at least 1 GB can be freed.",
+            ));
+
+        taert(&home)
+            .args(["schedule", "show"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Every week: dev, junk, when at least 1 GB can be freed.",
+            ));
+
+        taert(&home)
+            .args(["schedule", "off"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Scheduled cleanup turned off."));
+
+        taert(&home)
+            .args(["schedule", "show"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Scheduled cleanup is off."));
+    }
 }

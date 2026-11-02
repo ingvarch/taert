@@ -12,14 +12,18 @@ use super::components::list::ListRow;
 use super::components::text::plural;
 use super::components::toast::Toast;
 use super::theme::Theme;
+use crate::core::host::Host;
+use crate::core::layout::Layout;
 use crate::core::projects_store::ProjectFoldersStore;
-use crate::core::stores::{Config, IgnoreStore};
+use crate::core::schedule::{ScheduleFrequency, remove_schedule, set_schedule};
+use crate::core::stores::{Config, IgnoreStore, ScheduleConfig};
 
 pub const AGE_PRESETS: &[u64] = &[1, 3, 7, 14, 30, 60, 90, 180, 365];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferencesFocus {
     AgeThreshold,
+    ScheduledCleanup,
     ProjectFolders,
     ProtectedPaths,
 }
@@ -27,6 +31,7 @@ pub enum PreferencesFocus {
 pub struct PreferencesState {
     pub focus: PreferencesFocus,
     pub older_than_days: u64,
+    pub schedule: Option<ScheduleFrequency>,
     pub folder_count: usize,
     pub path_count: usize,
     pub save_notice: Option<&'static str>,
@@ -37,6 +42,7 @@ impl PreferencesState {
         Self {
             focus: PreferencesFocus::AgeThreshold,
             older_than_days: config.older_than_days,
+            schedule: config.schedule.as_ref().map(|s| s.every),
             folder_count: ProjectFoldersStore::load_or_default().roots.len(),
             path_count: ignore.roots.len(),
             save_notice: None,
@@ -45,7 +51,8 @@ impl PreferencesState {
 
     pub fn next(&mut self) {
         self.focus = match self.focus {
-            PreferencesFocus::AgeThreshold => PreferencesFocus::ProjectFolders,
+            PreferencesFocus::AgeThreshold => PreferencesFocus::ScheduledCleanup,
+            PreferencesFocus::ScheduledCleanup => PreferencesFocus::ProjectFolders,
             PreferencesFocus::ProjectFolders => PreferencesFocus::ProtectedPaths,
             PreferencesFocus::ProtectedPaths => PreferencesFocus::AgeThreshold,
         };
@@ -54,7 +61,8 @@ impl PreferencesState {
     pub fn previous(&mut self) {
         self.focus = match self.focus {
             PreferencesFocus::AgeThreshold => PreferencesFocus::ProtectedPaths,
-            PreferencesFocus::ProjectFolders => PreferencesFocus::AgeThreshold,
+            PreferencesFocus::ScheduledCleanup => PreferencesFocus::AgeThreshold,
+            PreferencesFocus::ProjectFolders => PreferencesFocus::ScheduledCleanup,
             PreferencesFocus::ProtectedPaths => PreferencesFocus::ProjectFolders,
         };
     }
@@ -81,6 +89,72 @@ impl PreferencesState {
             config.older_than_days = next;
             let _ = config.save_to(&Config::default_path().unwrap());
             self.save_notice = Some("Saved age threshold");
+        }
+    }
+
+    pub fn step_schedule_left(&mut self, config: &mut Config, host: &dyn Host, layout: &Layout) {
+        if self.focus != PreferencesFocus::ScheduledCleanup {
+            return;
+        }
+        let next_sched = match self.schedule {
+            None => None,
+            Some(ScheduleFrequency::Day) => None,
+            Some(ScheduleFrequency::Week) => Some(ScheduleFrequency::Day),
+            Some(ScheduleFrequency::Month) => Some(ScheduleFrequency::Week),
+        };
+        self.apply_schedule(next_sched, config, host, layout);
+    }
+
+    pub fn step_schedule_right(&mut self, config: &mut Config, host: &dyn Host, layout: &Layout) {
+        if self.focus != PreferencesFocus::ScheduledCleanup {
+            return;
+        }
+        let next_sched = match self.schedule {
+            None => Some(ScheduleFrequency::Day),
+            Some(ScheduleFrequency::Day) => Some(ScheduleFrequency::Week),
+            Some(ScheduleFrequency::Week) => Some(ScheduleFrequency::Month),
+            Some(ScheduleFrequency::Month) => Some(ScheduleFrequency::Month),
+        };
+        self.apply_schedule(next_sched, config, host, layout);
+    }
+
+    fn apply_schedule(
+        &mut self,
+        new_freq: Option<ScheduleFrequency>,
+        config: &mut Config,
+        host: &dyn Host,
+        layout: &Layout,
+    ) {
+        if self.schedule == new_freq {
+            return;
+        }
+        self.schedule = new_freq;
+        match new_freq {
+            Some(freq) => {
+                let categories = config
+                    .schedule
+                    .as_ref()
+                    .map(|s| s.categories.clone())
+                    .unwrap_or_else(|| vec!["dev".into(), "junk".into()]);
+                let min_reclaim = config
+                    .schedule
+                    .as_ref()
+                    .map(|s| s.min_reclaim)
+                    .unwrap_or(1_000_000_000);
+                config.schedule = Some(ScheduleConfig {
+                    every: freq,
+                    categories: categories.clone(),
+                    min_reclaim,
+                    last_skip: None,
+                });
+                let _ = set_schedule(host, layout, config, freq, categories, min_reclaim, None);
+                self.save_notice = Some("Enabled scheduled cleanup");
+            }
+            None => {
+                config.schedule = None;
+                let _ = remove_schedule(host, layout, config);
+                self.save_notice = Some("Disabled scheduled cleanup");
+            }
         }
     }
 }
@@ -149,6 +223,31 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
         cleanup.push(render_presets_slider(state.older_than_days, width, theme));
         cleanup.push(render_presets_labels(width, theme));
     }
+
+    let sched_focused = state.focus == PreferencesFocus::ScheduledCleanup;
+    let (left_sched_arr, right_sched_arr) = match state.schedule {
+        None => (" ", "›"),
+        Some(ScheduleFrequency::Day) => ("‹", "›"),
+        Some(ScheduleFrequency::Week) => ("‹", "›"),
+        Some(ScheduleFrequency::Month) => ("‹", " "),
+    };
+    let sched_detail = match state.schedule {
+        Some(freq) => format!("{left_sched_arr}  Every {}  {right_sched_arr}", freq),
+        None => format!("{left_sched_arr}  Off  {right_sched_arr}"),
+    };
+
+    let sched_row = ListRow::new(vec![Span::styled("Scheduled cleanup", theme.body())])
+        .detail(Span::styled(
+            sched_detail,
+            if sched_focused {
+                theme.accent_text()
+            } else {
+                theme.callout()
+            },
+        ))
+        .selected(sched_focused);
+
+    cleanup.push(sched_row.render_line(width, theme));
 
     let mut locations = Vec::new();
 

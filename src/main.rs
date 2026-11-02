@@ -11,7 +11,8 @@ use clap::Parser;
 
 use crate::cli::{
     CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
-    HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, SlimArgs, StartupArgs, UninstallArgs,
+    HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs, SlimArgs,
+    StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -27,6 +28,7 @@ use crate::core::path_utils::{expand_tilde, prettify_path};
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner};
+use crate::core::schedule;
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
@@ -91,6 +93,8 @@ fn main() -> ExitCode {
         Some(Command::Config(ref args)) => handle_config(args, &config),
 
         Some(Command::History(ref args)) => handle_history(args, &cli),
+
+        Some(Command::Schedule(ref args)) => handle_schedule(args, &config),
     }
 }
 
@@ -899,6 +903,65 @@ fn handle_history(args: &HistoryArgs, cli: &Cli) -> ExitCode {
                 println!("{}", run.format_line());
             }
             ExitCode::SUCCESS
+        }
+    }
+}
+
+fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
+    let host = MacHost;
+    let layout = Layout::current();
+    let mut config = config.clone();
+
+    match args.action {
+        None | Some(ScheduleAction::Show) => {
+            let history = HistoryLog::default_log();
+            let text = schedule::show_schedule(&host, &layout, &config, &history);
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Some(ScheduleAction::Set(ref set_args)) => {
+            let categories: Vec<String> = set_args
+                .categories
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            match schedule::set_schedule(
+                &host,
+                &layout,
+                &mut config,
+                set_args.every,
+                categories,
+                set_args.min_reclaim,
+                None,
+            ) {
+                Ok(()) => {
+                    let history = HistoryLog::default_log();
+                    let text = schedule::show_schedule(&host, &layout, &config, &history);
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(ScheduleAction::Off) => match schedule::remove_schedule(&host, &layout, &mut config) {
+            Ok(()) => {
+                println!("Scheduled cleanup turned off.");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some(ScheduleAction::Run) => {
+            match schedule::run_scheduled(&host, &layout, &mut config, None, None) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            }
         }
     }
 }

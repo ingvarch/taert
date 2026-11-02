@@ -21,6 +21,7 @@ pub mod projects_store;
 pub mod purger;
 pub mod safety;
 pub mod scanner;
+pub mod schedule;
 pub mod sizer;
 pub mod slim;
 pub mod startup;

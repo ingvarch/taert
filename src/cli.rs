@@ -75,6 +75,46 @@ pub enum Command {
 
     /// Keep a log of removals and show it with taert history
     History(HistoryArgs),
+
+    /// Manage automatic background cleanup schedule
+    Schedule(ScheduleArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct ScheduleArgs {
+    #[command(subcommand)]
+    pub action: Option<ScheduleAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScheduleAction {
+    /// Set or update the background cleanup schedule
+    Set(ScheduleSetArgs),
+
+    /// Show the current schedule and last run status
+    Show,
+
+    /// Switch off the background cleanup schedule
+    Off,
+
+    /// Run the scheduled cleanup in the background (used by launchd)
+    #[command(hide = true)]
+    Run,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct ScheduleSetArgs {
+    /// Cleanup frequency: day, week, or month
+    #[arg(long, default_value = "week")]
+    pub every: crate::core::schedule::ScheduleFrequency,
+
+    /// Comma-separated list of categories: dev, junk, ai, trash
+    #[arg(long, default_value = "dev,junk")]
+    pub categories: String,
+
+    /// Skip run if less than this size would be freed
+    #[arg(long, default_value = "1G", value_parser = crate::core::bytes::parse_size)]
+    pub min_reclaim: u64,
 }
 
 #[derive(Debug, Args, Default)]

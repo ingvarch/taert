@@ -54,6 +54,16 @@ homebrew_casks:
     description: Fast, transparent, and keyboard-driven macOS disk cleanup and storage explorer
     license: MIT
     skip_upload: auto
+    uninstall:
+      launchctl:
+        - io.github.ingvarch.taert.schedule
+      delete:
+        - ~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist
+    zap:
+      launchctl:
+        - io.github.ingvarch.taert.schedule
+      trash:
+        - ~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist
     repository:
       owner: ingvarch
       name: homebrew-tap
