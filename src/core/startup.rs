@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::apps::{self, InstalledApp};
 use super::cleaner::{Cleaner, RemovalMode};
-use super::host::{Host, MacHost, shell_quote};
+use super::host::{Host, MacHost, Output, shell_quote};
 use super::layout::Layout;
 use super::safety::Safety;
 use super::scanner::ScanItem;
@@ -41,6 +41,8 @@ pub enum StartupKind {
     UserAgent,
     SystemAgent,
     Daemon,
+    /// A Background Task Management record that taert only lists.
+    Background,
 }
 
 impl StartupKind {
@@ -50,6 +52,7 @@ impl StartupKind {
             Self::UserAgent => "user agent",
             Self::SystemAgent => "system agent",
             Self::Daemon => "daemon",
+            Self::Background => "background item",
         }
     }
 }
@@ -311,12 +314,211 @@ fn host_uid() -> u32 {
     }
 }
 
-/// Scans all startup and background items.
+const BACKGROUND_READ_ONLY: &str = "Background task entries are read-only";
+const LAUNCHCTL: &str = "/bin/launchctl";
+const OSASCRIPT: &str = "/usr/bin/osascript";
+const LIST_LOGIN_ITEMS_SCRIPT: &str = "tell application \"System Events\"\nset res to \"\"\nrepeat with item_ref in every login item\nset res to res & (name of item_ref) & tab & (path of item_ref) & linefeed\nend repeat\nreturn res\nend tell";
+const ADD_LOGIN_ITEM_SCRIPT: &[&str] = &[
+    "on run argv",
+    "tell application \"System Events\" to make login item at end with properties {path:(item 1 of argv), name:(item 2 of argv), hidden:false}",
+    "end run",
+];
+
+// The dump is read through a pipe, so root writes to no file. The password dialog is
+// part of this time, so it leaves room to type.
+const BTM_TIMEOUT: Duration = Duration::from_secs(120);
+const BTM_SCRIPT: &str = "/usr/bin/sfltool dumpbtm";
+const BTM_PROMPT: &str = "Read Background Task Management records";
+
+/// An `osascript` argument list: each script line after `-e`, then the arguments after `--`.
+fn osascript_args<'a>(script: &[&'a str], args: &[&'a str]) -> Vec<&'a str> {
+    let mut all: Vec<&str> = script.iter().flat_map(|line| ["-e", *line]).collect();
+    all.push("--");
+    all.extend_from_slice(args);
+    all
+}
+
+/// One record from `sfltool dumpbtm`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtmEntry {
+    pub identifier: String,
+    pub name: Option<String>,
+    pub developer: Option<String>,
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub executable: Option<PathBuf>,
+}
+
+/// What reading the Background Task Management records gave.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Btm {
+    #[default]
+    Skipped,
+    Entries(Vec<BtmEntry>),
+    Unavailable(String),
+}
+
+/// Parses `sfltool dumpbtm`. Lines it does not know are ignored.
+pub fn parse_btm(output: &str) -> Vec<BtmEntry> {
+    let mut entries = Vec::new();
+    let mut current: Option<HashMap<&str, &str>> = None;
+    let flush = |fields: Option<HashMap<&str, &str>>, entries: &mut Vec<BtmEntry>| {
+        if let Some(entry) = fields.and_then(|f| btm_entry(&f)) {
+            entries.push(entry);
+        }
+    };
+    for line in output.lines() {
+        let line = line.trim();
+        let is_item_header = line
+            .strip_prefix('#')
+            .and_then(|rest| rest.strip_suffix(':'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if is_item_header {
+            flush(current.replace(HashMap::new()), &mut entries);
+        } else if line.starts_with("Records for UID") {
+            flush(current.take(), &mut entries);
+        } else if let (Some(fields), Some((key, value))) = (current.as_mut(), line.split_once(':'))
+        {
+            fields.entry(key.trim()).or_insert_with(|| value.trim());
+        }
+    }
+    flush(current, &mut entries);
+    entries
+}
+
+fn btm_entry(fields: &HashMap<&str, &str>) -> Option<BtmEntry> {
+    let raw = fields
+        .get("Identifier")
+        .copied()
+        .filter(|v| !v.is_empty())?;
+    let identifier = match raw.split_once('.') {
+        Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest,
+        _ => raw,
+    };
+    let text = |key: &str| {
+        fields
+            .get(key)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string())
+    };
+    let enabled = fields
+        .get("Disposition")
+        .and_then(|d| d.split_once('[')?.1.split_once(']'))
+        .is_some_and(|(flags, _)| flags.split(',').any(|f| f.trim() == "enabled"));
+    Some(BtmEntry {
+        identifier: identifier.to_string(),
+        name: text("Name"),
+        developer: text("Developer Name"),
+        enabled,
+        url: text("URL"),
+        executable: text("Executable Path").map(PathBuf::from),
+    })
+}
+
+/// Reads the Background Task Management records as root. One password prompt.
+pub fn read_btm(host: &dyn Host) -> Btm {
+    match host.run_admin_output(BTM_SCRIPT, BTM_PROMPT, BTM_TIMEOUT) {
+        Err(error) => Btm::Unavailable(format!(
+            "Background task records unavailable: {}",
+            if error.is_empty() {
+                "sfltool failed"
+            } else {
+                &error
+            }
+        )),
+        Ok(output) => {
+            let entries = parse_btm(&output);
+            if entries.is_empty() {
+                Btm::Unavailable(
+                    "Background task records unavailable: sfltool printed nothing taert can read."
+                        .to_string(),
+                )
+            } else {
+                Btm::Entries(entries)
+            }
+        }
+    }
+}
+
+/// The path in a `file://` URL, with `%20` style escapes undone.
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%')
+            .then(|| rest.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
+}
+
+fn startup_state(broken: bool, disabled: bool, running: bool) -> StartupState {
+    if broken {
+        StartupState::Broken
+    } else if disabled {
+        StartupState::Disabled
+    } else if running {
+        StartupState::Running
+    } else {
+        StartupState::Enabled
+    }
+}
+
+fn is_security_item(
+    apps: &[InstalledApp],
+    path: Option<&Path>,
+    app_name: Option<&str>,
+    label: &str,
+) -> bool {
+    let bundle_id = path
+        .and_then(|p| apps.iter().find(|a| p.starts_with(&a.path)))
+        .and_then(|a| a.bundle_id.as_deref());
+    apps::is_security_vendor(bundle_id, app_name) || apps::is_security_vendor(Some(label), None)
+}
+
+fn metrics(pid: Option<u32>, pid_map: &HashMap<u32, (f32, u64)>) -> (Option<f32>, Option<u64>) {
+    match pid.and_then(|p| pid_map.get(&p)) {
+        Some(m) => (Some(m.0), Some(m.1)),
+        None => (None, None),
+    }
+}
+
+/// Scans all startup and background items. With `include_all` it asks for the administrator
+/// password to read the Background Task Management records.
 pub fn scan_startup(
     host: &dyn Host,
     layout: &Layout,
     ignore: &IgnoreStore,
     include_all: bool,
+) -> StartupScan {
+    let btm = if include_all {
+        read_btm(host)
+    } else {
+        Btm::Skipped
+    };
+    scan_startup_with(host, layout, ignore, include_all, &btm)
+}
+
+/// Like `scan_startup`, with Background Task Management records read earlier.
+pub fn scan_startup_with(
+    host: &dyn Host,
+    layout: &Layout,
+    ignore: &IgnoreStore,
+    include_all: bool,
+    btm: &Btm,
 ) -> StartupScan {
     let mut scan = StartupScan::default();
     let uid = host_uid();
@@ -340,7 +542,7 @@ pub fn scan_startup(
 
     // Read disabled states from launchctl
     let disabled_gui_out = host.run(
-        "/bin/launchctl",
+        LAUNCHCTL,
         &["print-disabled", &format!("gui/{uid}")],
         TIMEOUT,
     );
@@ -350,30 +552,24 @@ pub fn scan_startup(
         HashMap::new()
     };
 
-    let disabled_sys_out = host.run("/bin/launchctl", &["print-disabled", "system"], TIMEOUT);
+    let disabled_sys_out = host.run(LAUNCHCTL, &["print-disabled", "system"], TIMEOUT);
     if disabled_sys_out.ok {
         disabled_map.extend(parse_print_disabled(&disabled_sys_out.stdout));
     }
 
-    // Read live services from launchctl print gui/<uid>
-    let print_gui = host.run("/bin/launchctl", &["print", &format!("gui/{uid}")], TIMEOUT);
-    let mut live_map: HashMap<String, LaunchdServiceEntry> = HashMap::new();
-    if print_gui.ok {
-        for s in parse_launchctl_services(&print_gui.stdout) {
-            if !s.label.starts_with("application.") {
-                live_map.insert(s.label.clone(), s);
-            }
+    // Live services: the user's domain first, then the system domain (needs no root)
+    let mut live_map: HashMap<String, (LaunchdServiceEntry, StartupKind)> = HashMap::new();
+    for (domain, kind) in [
+        (format!("gui/{uid}"), StartupKind::UserAgent),
+        ("system".to_string(), StartupKind::Daemon),
+    ] {
+        let printed = host.run(LAUNCHCTL, &["print", &domain], TIMEOUT);
+        if !printed.ok {
+            continue;
         }
-    }
-
-    // Read live services from launchctl print system (for daemons)
-    if include_all {
-        let print_sys = host.run("/bin/launchctl", &["print", "system"], TIMEOUT);
-        if print_sys.ok {
-            for s in parse_launchctl_services(&print_sys.stdout) {
-                if !s.label.starts_with("application.") {
-                    live_map.entry(s.label.clone()).or_insert(s);
-                }
+        for s in parse_launchctl_services(&printed.stdout) {
+            if !s.label.starts_with("application.") {
+                live_map.entry(s.label.clone()).or_insert((s, kind));
             }
         }
     }
@@ -389,6 +585,7 @@ pub fn scan_startup(
     ];
 
     let mut seen_labels: HashSet<String> = HashSet::new();
+    let mut seen_plists: HashSet<PathBuf> = HashSet::new();
 
     for (folder, kind) in &plist_folders {
         if !folder.exists() {
@@ -428,6 +625,7 @@ pub fn scan_startup(
             if !seen_labels.insert(label.clone()) {
                 continue;
             }
+            seen_plists.insert(path.clone());
 
             let is_apple = label.starts_with("com.apple.");
             if is_apple && !include_all {
@@ -451,47 +649,26 @@ pub fn scan_startup(
             let (app_name, app_bundle) =
                 match_app(program.as_deref(), &associated_ids, &label, &apps);
 
-            let live = live_map.remove(&label);
-            let pid = live.as_ref().and_then(|l| l.pid);
-            let (cpu_percent, memory_bytes) = match pid {
-                Some(p) => {
-                    let metrics = pid_map.get(&p);
-                    (metrics.map(|m| m.0), metrics.map(|m| m.1))
-                }
-                None => (None, None),
-            };
+            let pid = live_map.remove(&label).and_then(|(l, _)| l.pid);
+            let (cpu_percent, memory_bytes) = metrics(pid, &pid_map);
 
             let is_disabled = disabled_map.get(&label).copied().unwrap_or(false);
             let is_broken = program
                 .as_ref()
                 .is_some_and(|p| !p.exists() && p.is_absolute());
-
-            let state = if is_broken {
-                StartupState::Broken
-            } else if pid.is_some() {
-                StartupState::Running
-            } else if is_disabled {
-                StartupState::Disabled
-            } else {
-                StartupState::Enabled
-            };
+            let state = startup_state(is_broken, is_disabled, pid.is_some());
 
             let name = app_name.clone().unwrap_or_else(|| label_leaf_name(&label));
 
-            let is_security = apps::is_security_vendor(
-                app_bundle
-                    .as_ref()
-                    .and_then(|_| apps.iter().find(|a| Some(&a.path) == app_bundle.as_ref()))
-                    .and_then(|a| a.bundle_id.as_deref()),
-                app_name.as_deref(),
-            ) || apps::is_security_vendor(Some(&label), None);
+            let is_security =
+                is_security_item(&apps, app_bundle.as_deref(), app_name.as_deref(), &label);
 
             let is_ignored = Safety::is_ignored_or_protected(&path, ignore)
                 || program
                     .as_ref()
                     .is_some_and(|p| Safety::is_ignored_or_protected(p, ignore));
 
-            let item = StartupItem {
+            scan.items.push(StartupItem {
                 label: label.clone(),
                 name,
                 app_name,
@@ -506,14 +683,12 @@ pub fn scan_startup(
                 is_apple,
                 is_security,
                 is_ignored,
-            };
-
-            scan.items.push(item);
+            });
         }
     }
 
     // 2. Background items registered without a plist on disk (from `live_map`)
-    for (label, service) in live_map {
+    for (label, (service, kind)) in live_map {
         if label.starts_with("application.") {
             continue;
         }
@@ -525,12 +700,9 @@ pub fn scan_startup(
             continue;
         }
 
-        // Query detailed info from launchctl print gui/<uid>/<label>
-        let detail_out = host.run(
-            "/bin/launchctl",
-            &["print", &format!("gui/{uid}/{label}")],
-            TIMEOUT,
-        );
+        // Query detailed info from launchctl print <domain>/<label>
+        let domain = domain_for(kind);
+        let detail_out = host.run(LAUNCHCTL, &["print", &format!("{domain}/{label}")], TIMEOUT);
         let detail = if detail_out.ok {
             parse_service_detail(&detail_out.stdout)
         } else {
@@ -538,13 +710,7 @@ pub fn scan_startup(
         };
 
         let pid = service.pid.or(detail.pid);
-        let (cpu_percent, memory_bytes) = match pid {
-            Some(p) => {
-                let metrics = pid_map.get(&p);
-                (metrics.map(|m| m.0), metrics.map(|m| m.1))
-            }
-            None => (None, None),
-        };
+        let (cpu_percent, memory_bytes) = metrics(pid, &pid_map);
 
         let mut associated = Vec::new();
         if let Some(ref p_bid) = detail.parent_bundle_id {
@@ -559,26 +725,13 @@ pub fn scan_startup(
             .program
             .as_ref()
             .is_some_and(|p| !p.exists() && p.is_absolute());
-
-        let state = if is_broken {
-            StartupState::Broken
-        } else if pid.is_some() || detail.state.as_deref() == Some("running") {
-            StartupState::Running
-        } else if is_disabled {
-            StartupState::Disabled
-        } else {
-            StartupState::Enabled
-        };
+        let running = pid.is_some() || detail.state.as_deref() == Some("running");
+        let state = startup_state(is_broken, is_disabled, running);
 
         let name = app_name.clone().unwrap_or_else(|| label_leaf_name(&label));
 
-        let is_security = apps::is_security_vendor(
-            app_bundle
-                .as_ref()
-                .and_then(|_| apps.iter().find(|a| Some(&a.path) == app_bundle.as_ref()))
-                .and_then(|a| a.bundle_id.as_deref()),
-            app_name.as_deref(),
-        ) || apps::is_security_vendor(Some(&label), None);
+        let is_security =
+            is_security_item(&apps, app_bundle.as_deref(), app_name.as_deref(), &label);
 
         let is_ignored = detail
             .program
@@ -590,7 +743,7 @@ pub fn scan_startup(
             name,
             app_name,
             app_bundle,
-            kind: StartupKind::UserAgent,
+            kind,
             state,
             program: detail.program,
             plist_path: detail.path,
@@ -604,8 +757,7 @@ pub fn scan_startup(
     }
 
     // 3. Classic Login Items through osascript
-    let script = "tell application \"System Events\"\nset res to \"\"\nrepeat with item_ref in every login item\nset res to res & (name of item_ref) & tab & (path of item_ref) & linefeed\nend repeat\nreturn res\nend tell";
-    let osa_out = host.run("/usr/bin/osascript", &["-e", script], TIMEOUT);
+    let osa_out = host.run(OSASCRIPT, &["-e", LIST_LOGIN_ITEMS_SCRIPT], TIMEOUT);
     if osa_out.ok {
         let login_items = parse_login_items(&osa_out.stdout);
         for (name, path) in login_items {
@@ -617,13 +769,7 @@ pub fn scan_startup(
                         .file_name()
                         .is_some_and(|f| p.name.eq_ignore_ascii_case(&f.to_string_lossy()))
             });
-            let state = if is_broken {
-                StartupState::Broken
-            } else if is_running {
-                StartupState::Running
-            } else {
-                StartupState::Enabled
-            };
+            let state = startup_state(is_broken, false, is_running);
 
             let app_name = apps
                 .iter()
@@ -632,6 +778,7 @@ pub fn scan_startup(
                 .or_else(|| Some(name.clone()));
 
             scan.items.push(StartupItem {
+                is_security: is_security_item(&apps, Some(&path), app_name.as_deref(), &label),
                 label,
                 name: name.clone(),
                 app_name,
@@ -644,7 +791,6 @@ pub fn scan_startup(
                 cpu_percent: None,
                 memory_bytes: None,
                 is_apple: false,
-                is_security: false,
                 is_ignored: Safety::is_ignored_or_protected(&path, ignore),
             });
         }
@@ -662,14 +808,15 @@ pub fn scan_startup(
             .iter()
             .any(|it| it.kind == StartupKind::LoginItem && it.name == disabled.name)
         {
-            let is_broken = !disabled.path.exists();
-            let state = if is_broken {
-                StartupState::Broken
-            } else {
-                StartupState::Disabled
-            };
+            let state = startup_state(!disabled.path.exists(), true, false);
             let label = format!("loginitem.{}", disabled.name);
             scan.items.push(StartupItem {
+                is_security: is_security_item(
+                    &apps,
+                    Some(&disabled.path),
+                    Some(&disabled.name),
+                    &label,
+                ),
                 label,
                 name: disabled.name.clone(),
                 app_name: Some(disabled.name),
@@ -682,22 +829,63 @@ pub fn scan_startup(
                 cpu_percent: None,
                 memory_bytes: None,
                 is_apple: false,
-                is_security: false,
                 is_ignored: Safety::is_ignored_or_protected(&disabled.path, ignore),
             });
         }
     }
 
-    // 5. If --all is requested, query sfltool dumpbtm via Host::run_admin
-    if include_all {
-        let temp_file = layout.user(".config/taert/btm_dump.tmp");
-        let script = format!(
-            "/usr/bin/sfltool dumpbtm > {} 2>&1",
-            shell_quote(&temp_file.to_string_lossy())
-        );
-        let admin_res = host.run_admin(&script, "Read Background Task Management records");
-        if admin_res.is_ok() && temp_file.exists() {
-            let _ = fs::remove_file(&temp_file);
+    // 5. Background Task Management records that the sections above did not show
+    match btm {
+        Btm::Skipped => {}
+        Btm::Unavailable(note) => scan.notes.push(note.clone()),
+        Btm::Entries(entries) => {
+            for entry in entries {
+                let url_path = entry.url.as_deref().and_then(file_url_path);
+                let listed = !seen_labels.insert(entry.identifier.clone())
+                    || url_path.as_ref().is_some_and(|p| seen_plists.contains(p));
+                if listed {
+                    continue;
+                }
+                let name = entry
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| label_leaf_name(&entry.identifier));
+                let is_login_item_row = scan
+                    .items
+                    .iter()
+                    .any(|it| it.kind == StartupKind::LoginItem && it.name == name);
+                if is_login_item_row {
+                    continue;
+                }
+                let program = entry.executable.clone().or(url_path);
+                let (app_name, app_bundle) =
+                    match_app(program.as_deref(), &[], &entry.identifier, &apps);
+                let is_apple = entry.identifier.starts_with("com.apple.")
+                    || entry.developer.as_deref() == Some("Apple Inc.");
+                scan.items.push(StartupItem {
+                    is_security: is_security_item(
+                        &apps,
+                        app_bundle.as_deref(),
+                        app_name.as_deref(),
+                        &entry.identifier,
+                    ),
+                    label: entry.identifier.clone(),
+                    name,
+                    app_name,
+                    app_bundle,
+                    kind: StartupKind::Background,
+                    state: startup_state(false, !entry.enabled, false),
+                    is_ignored: program
+                        .as_ref()
+                        .is_some_and(|p| Safety::is_ignored_or_protected(p, ignore)),
+                    program,
+                    plist_path: None,
+                    pid: None,
+                    cpu_percent: None,
+                    memory_bytes: None,
+                    is_apple,
+                });
+            }
         }
     }
 
@@ -720,7 +908,111 @@ fn label_leaf_name(label: &str) -> String {
         .to_string()
 }
 
-/// Disables a startup item.
+/// Finds the item a command line names: a label, or a login item's name. A name that fits
+/// several items is an error that lists them.
+pub fn resolve_item(items: &[StartupItem], query: &str) -> Result<StartupItem, String> {
+    let by_label: Vec<&StartupItem> = items.iter().filter(|it| it.label == query).collect();
+    let found = if by_label.is_empty() {
+        items
+            .iter()
+            .filter(|it| it.kind == StartupKind::LoginItem && it.name == query)
+            .collect()
+    } else {
+        by_label
+    };
+    match found.as_slice() {
+        [] => Err(format!("Startup item '{query}' not found")),
+        [item] => Ok((*item).clone()),
+        several => {
+            let labels: Vec<&str> = several.iter().map(|it| it.label.as_str()).collect();
+            Err(format!(
+                "'{query}' fits several items: {}. Use a label.",
+                labels.join(", ")
+            ))
+        }
+    }
+}
+
+impl StartupItem {
+    /// Switched off, yet the process is still there.
+    pub fn is_disabled_but_running(&self) -> bool {
+        self.state == StartupState::Disabled && self.pid.is_some()
+    }
+
+    /// The reason taert will not change this item, if there is one.
+    pub fn read_only_reason(&self) -> Option<&'static str> {
+        if self.is_apple || self.label.starts_with("com.apple.") {
+            Some("Apple system services cannot be modified")
+        } else if self.is_security {
+            Some("Security agent services are read-only")
+        } else if self.is_ignored {
+            Some("Protected startup items are read-only")
+        } else if self.kind == StartupKind::Background {
+            Some(BACKGROUND_READ_ONLY)
+        } else {
+            None
+        }
+    }
+}
+
+fn domain_for(kind: StartupKind) -> String {
+    match kind {
+        StartupKind::Daemon => "system".to_string(),
+        _ => format!("gui/{}", host_uid()),
+    }
+}
+
+/// What launchd says about one service right now.
+struct LaunchdState {
+    disabled: bool,
+    loaded: bool,
+    pid: Option<u32>,
+}
+
+fn read_launchd_state(
+    host: &dyn Host,
+    kind: StartupKind,
+    label: &str,
+) -> Result<LaunchdState, String> {
+    let domain = domain_for(kind);
+    let again = |what: &str, out: &Output| {
+        format!(
+            "Could not read the launchd {what} again: {}",
+            out.stderr.trim()
+        )
+    };
+    let disabled = host.run(LAUNCHCTL, &["print-disabled", &domain], TIMEOUT);
+    if !disabled.ok {
+        return Err(again("disabled list", &disabled));
+    }
+    let printed = host.run(LAUNCHCTL, &["print", &domain], TIMEOUT);
+    if !printed.ok {
+        return Err(again("service list", &printed));
+    }
+    let service = parse_launchctl_services(&printed.stdout)
+        .into_iter()
+        .find(|s| s.label == label);
+    Ok(LaunchdState {
+        disabled: parse_print_disabled(&disabled.stdout).get(label) == Some(&true),
+        loaded: service.is_some(),
+        pid: service.and_then(|s| s.pid),
+    })
+}
+
+fn login_item_listed(host: &dyn Host, name: &str) -> Result<bool, String> {
+    let out = host.run(OSASCRIPT, &["-e", LIST_LOGIN_ITEMS_SCRIPT], TIMEOUT);
+    if !out.ok {
+        return Err(format!(
+            "Could not read the login items again: {}",
+            out.stderr.trim()
+        ));
+    }
+    Ok(parse_login_items(&out.stdout)
+        .iter()
+        .any(|(listed, _)| listed == name))
+}
+
+/// Disables a startup item and reports the state launchd or System Events shows afterwards.
 pub fn disable_item(
     host: &dyn Host,
     layout: &Layout,
@@ -728,14 +1020,8 @@ pub fn disable_item(
     item: &StartupItem,
     dry_run: bool,
 ) -> Result<String, String> {
-    if item.is_apple {
-        return Err("Apple system services cannot be modified".to_string());
-    }
-    if item.is_security {
-        return Err("Security agent services are read-only".to_string());
-    }
-    if item.is_ignored {
-        return Err("Protected startup items are read-only".to_string());
+    if let Some(reason) = item.read_only_reason() {
+        return Err(reason.to_string());
     }
 
     if dry_run {
@@ -746,71 +1032,114 @@ pub fn disable_item(
         ));
     }
 
+    let label = &item.label;
     match item.kind {
         StartupKind::LoginItem => {
-            let script_args = [
-                "-e",
-                LOGIN_ITEM_SCRIPT[0],
-                "-e",
-                LOGIN_ITEM_SCRIPT[1],
-                "-e",
-                LOGIN_ITEM_SCRIPT[2],
-                "-e",
-                LOGIN_ITEM_SCRIPT[3],
-                "-e",
-                LOGIN_ITEM_SCRIPT[4],
-                "-e",
-                LOGIN_ITEM_SCRIPT[5],
-                "-e",
-                LOGIN_ITEM_SCRIPT[6],
-                "-e",
-                LOGIN_ITEM_SCRIPT[7],
-                "--",
-                &item.name,
-            ];
-            let out = host.run("/usr/bin/osascript", &script_args, TIMEOUT);
-            if !out.ok {
-                return Err(format!("Failed to remove login item: {}", out.stderr));
-            }
-            let mut disabled = load_disabled_login_items(layout);
-            if !disabled.iter().any(|d| d.name == item.name)
-                && let Some(ref path) = item.program
-            {
+            let Some(ref path) = item.program else {
+                return Err("The login item has no saved path, so it was left in place".to_string());
+            };
+            // Save the path first: a failed save must leave the item where it is.
+            let before = load_disabled_login_items(layout);
+            let mut disabled = before.clone();
+            if !disabled.iter().any(|d| d.name == item.name) {
                 disabled.push(DisabledLoginItem {
                     name: item.name.clone(),
                     path: path.clone(),
                 });
-                let _ = save_disabled_login_items(layout, &disabled);
+                save_disabled_login_items(layout, &disabled).map_err(|e| {
+                    format!("Could not save the login item path, so it was left in place: {e}")
+                })?;
+            }
+            let args = osascript_args(LOGIN_ITEM_SCRIPT, &[&item.name]);
+            let out = host.run(OSASCRIPT, &args, TIMEOUT);
+            if !out.ok {
+                let _ = save_disabled_login_items(layout, &before);
+                return Err(format!("Failed to remove login item: {}", out.stderr));
+            }
+            if login_item_listed(host, &item.name)? {
+                return Err(format!("Login item {} is still listed", item.name));
             }
             Ok(format!("Disabled login item {}", item.name))
         }
         StartupKind::Daemon => {
-            let label = &item.label;
+            let quoted = shell_quote(label);
             let script = format!(
-                "/bin/launchctl disable system/{} && /bin/launchctl bootout system/{} || true",
-                shell_quote(label),
-                shell_quote(label)
+                "{LAUNCHCTL} disable system/{quoted} && {{ {LAUNCHCTL} bootout system/{quoted} || true; }}"
             );
             host.run_admin(&script, &format!("Disable system daemon {label}"))
                 .map_err(|e| format!("Failed to disable daemon: {e}"))?;
+            confirm_disabled(host, item, "")?;
             Ok(format!("Disabled system daemon {label}"))
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
-            let uid = host_uid();
-            let target = format!("gui/{uid}/{}", item.label);
+            let target = format!("{}/{label}", domain_for(item.kind));
             // 1. disable first so launchd can't restart it
-            let dis_out = host.run("/bin/launchctl", &["disable", &target], TIMEOUT);
+            let dis_out = host.run(LAUNCHCTL, &["disable", &target], TIMEOUT);
             if !dis_out.ok {
                 return Err(format!("launchctl disable failed: {}", dis_out.stderr));
             }
             // 2. bootout to stop it now
-            let _ = host.run("/bin/launchctl", &["bootout", &target], TIMEOUT);
-            Ok(format!("Disabled service {}", item.label))
+            let boot_out = host.run(LAUNCHCTL, &["bootout", &target], TIMEOUT);
+            confirm_disabled(host, item, boot_out.stderr.trim())?;
+            Ok(format!("Disabled service {label}"))
         }
+        StartupKind::Background => Err(BACKGROUND_READ_ONLY.to_string()),
     }
 }
 
-/// Enables a startup item.
+fn confirm_disabled(
+    host: &dyn Host,
+    item: &StartupItem,
+    bootout_error: &str,
+) -> Result<(), String> {
+    let state = read_launchd_state(host, item.kind, &item.label)?;
+    if !state.disabled {
+        return Err(format!(
+            "launchd still lists {} as enabled after disable",
+            item.label
+        ));
+    }
+    if state.pid.is_some() {
+        return Err(format!(
+            "Disabled {}, but it is still running. {bootout_error}",
+            item.label
+        )
+        .trim_end()
+        .to_string());
+    }
+    Ok(())
+}
+
+/// Stops the running process of a launchd service and checks that it is gone.
+pub fn stop_item(host: &dyn Host, item: &StartupItem) -> Result<String, String> {
+    if let Some(reason) = item.read_only_reason() {
+        return Err(reason.to_string());
+    }
+    let label = &item.label;
+    match item.kind {
+        StartupKind::Daemon => {
+            let script = format!("{LAUNCHCTL} bootout system/{}", shell_quote(label));
+            host.run_admin(&script, &format!("Stop system daemon {label}"))
+                .map_err(|e| format!("Failed to stop daemon: {e}"))?;
+        }
+        StartupKind::UserAgent | StartupKind::SystemAgent => {
+            let target = format!("{}/{label}", domain_for(item.kind));
+            let out = host.run(LAUNCHCTL, &["bootout", &target], TIMEOUT);
+            if !out.ok && read_launchd_state(host, item.kind, label)?.pid.is_some() {
+                return Err(format!("launchctl bootout failed: {}", out.stderr.trim()));
+            }
+        }
+        StartupKind::LoginItem | StartupKind::Background => {
+            return Err("Only launchd services can be stopped".to_string());
+        }
+    }
+    if read_launchd_state(host, item.kind, label)?.pid.is_some() {
+        return Err(format!("{label} is still running"));
+    }
+    Ok(format!("Stopped {label}"))
+}
+
+/// Enables a startup item and reports the state launchd or System Events shows afterwards.
 pub fn enable_item(
     host: &dyn Host,
     layout: &Layout,
@@ -818,14 +1147,8 @@ pub fn enable_item(
     item: &StartupItem,
     dry_run: bool,
 ) -> Result<String, String> {
-    if item.is_apple {
-        return Err("Apple system services cannot be modified".to_string());
-    }
-    if item.is_security {
-        return Err("Security agent services are read-only".to_string());
-    }
-    if item.is_ignored {
-        return Err("Protected startup items are read-only".to_string());
+    if let Some(reason) = item.read_only_reason() {
+        return Err(reason.to_string());
     }
 
     if dry_run {
@@ -836,64 +1159,83 @@ pub fn enable_item(
         ));
     }
 
+    let label = &item.label;
     match item.kind {
         StartupKind::LoginItem => {
-            let path_str = item
-                .program
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let script = format!(
-                "tell application \"System Events\" to make login item at end with properties {{path: \"{}\", name: \"{}\", hidden: false}}",
-                path_str.replace('"', "\\\""),
-                item.name.replace('"', "\\\"")
-            );
-            let out = host.run("/usr/bin/osascript", &["-e", &script], TIMEOUT);
+            let Some(ref path) = item.program else {
+                return Err("The login item has no saved path to restore".to_string());
+            };
+            let path = path.to_string_lossy();
+            let args = osascript_args(ADD_LOGIN_ITEM_SCRIPT, &[&path, &item.name]);
+            let out = host.run(OSASCRIPT, &args, TIMEOUT);
             if !out.ok {
                 return Err(format!("Failed to enable login item: {}", out.stderr));
             }
+            if !login_item_listed(host, &item.name)? {
+                return Err(format!("Login item {} is not listed", item.name));
+            }
             let mut disabled = load_disabled_login_items(layout);
             disabled.retain(|d| d.name != item.name);
-            let _ = save_disabled_login_items(layout, &disabled);
+            save_disabled_login_items(layout, &disabled).map_err(|e| {
+                format!("Enabled, but could not update the saved login item list: {e}")
+            })?;
             Ok(format!("Enabled login item {}", item.name))
         }
         StartupKind::Daemon => {
-            let label = &item.label;
-            let mut script = format!("/bin/launchctl enable system/{}", shell_quote(label));
+            let mut script = format!("{LAUNCHCTL} enable system/{}", shell_quote(label));
             if let Some(ref plist) = item.plist_path
                 && plist.exists()
             {
                 script.push_str(&format!(
-                    " && /bin/launchctl bootstrap system {}",
+                    " && {{ {LAUNCHCTL} bootstrap system {} || true; }}",
                     shell_quote(&plist.to_string_lossy())
                 ));
             }
             host.run_admin(&script, &format!("Enable system daemon {label}"))
                 .map_err(|e| format!("Failed to enable daemon: {e}"))?;
+            if read_launchd_state(host, item.kind, label)?.disabled {
+                return Err(format!("launchd still lists {label} as disabled"));
+            }
             Ok(format!("Enabled system daemon {label}"))
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
-            let uid = host_uid();
-            let target = format!("gui/{uid}/{}", item.label);
-            let en_out = host.run("/bin/launchctl", &["enable", &target], TIMEOUT);
+            let domain = domain_for(item.kind);
+            let target = format!("{domain}/{label}");
+            let en_out = host.run(LAUNCHCTL, &["enable", &target], TIMEOUT);
             if !en_out.ok {
                 return Err(format!("launchctl enable failed: {}", en_out.stderr));
             }
+            let mut boot_error = None;
             if let Some(ref plist) = item.plist_path
                 && plist.exists()
             {
-                let _ = host.run(
-                    "/bin/launchctl",
-                    &["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()],
+                let out = host.run(
+                    LAUNCHCTL,
+                    &["bootstrap", &domain, &plist.to_string_lossy()],
                     TIMEOUT,
                 );
-                return Ok(format!("Enabled service {}", item.label));
+                if !out.ok {
+                    boot_error = Some(out.stderr);
+                }
             }
-            Ok(format!(
-                "Enabled service {} (will start at next login)",
-                item.label
-            ))
+            let state = read_launchd_state(host, item.kind, label)?;
+            if state.disabled {
+                return Err(format!("launchd still lists {label} as disabled"));
+            }
+            if let Some(error) = boot_error
+                && !state.loaded
+            {
+                return Err(format!("launchctl bootstrap failed: {}", error.trim()));
+            }
+            if state.loaded {
+                Ok(format!("Enabled service {label}"))
+            } else {
+                Ok(format!(
+                    "Enabled service {label} (will start at next login)"
+                ))
+            }
         }
+        StartupKind::Background => Err(BACKGROUND_READ_ONLY.to_string()),
     }
 }
 
@@ -1049,6 +1391,7 @@ mod tests {
     #[test]
     fn disable_runs_before_bootout() {
         let host = FakeHost::idle();
+        reply_disabled(&host, "gui/", "com.test.agent");
         host.reply("/bin/launchctl", "");
         let temp = tempdir().unwrap();
         let layout = Layout {
@@ -1081,11 +1424,11 @@ mod tests {
         let calls = host.calls.lock().unwrap();
         let disable_idx = calls
             .iter()
-            .position(|c| c.contains("disable"))
+            .position(|c| c.starts_with("/bin/launchctl disable "))
             .expect("called disable");
         let bootout_idx = calls
             .iter()
-            .position(|c| c.contains("bootout"))
+            .position(|c| c.starts_with("/bin/launchctl bootout "))
             .expect("called bootout");
         assert!(disable_idx < bootout_idx, "disable must run before bootout");
     }
@@ -1093,6 +1436,8 @@ mod tests {
     #[test]
     fn daemon_goes_through_run_admin_user_agent_does_not() {
         let host = FakeHost::idle();
+        reply_disabled(&host, "system", "com.test.daemon");
+        host.reply("/bin/launchctl print system", "");
         let temp = tempdir().unwrap();
         let layout = Layout {
             home: temp.path().to_path_buf(),
@@ -1140,6 +1485,7 @@ mod tests {
         };
 
         let host2 = FakeHost::idle();
+        reply_disabled(&host2, "gui/", "com.test.agent");
         host2.reply("/bin/launchctl", "");
         let res2 = disable_item(&host2, &layout, &ignore, &user_agent, false);
         assert!(res2.is_ok());
@@ -1169,7 +1515,7 @@ mod tests {
             pid: Some(103),
             cpu_percent: None,
             memory_bytes: None,
-            is_apple: true,
+            is_apple: false,
             is_security: false,
             is_ignored: false,
         };
@@ -1178,11 +1524,13 @@ mod tests {
         assert!(res.is_err());
         let res_en = enable_item(&host, &layout, &ignore, &apple_item, false);
         assert!(res_en.is_err());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
     }
 
     #[test]
     fn plist_stays_on_disk_after_disable() {
         let host = FakeHost::idle();
+        reply_disabled(&host, "gui/", "com.test.agent");
         host.reply("/bin/launchctl", "");
         let temp = tempdir().unwrap();
         let plist_path = temp.path().join("com.test.agent.plist");
@@ -1399,5 +1747,480 @@ mod tests {
         item.state = StartupState::Broken;
         item.kind = StartupKind::Daemon;
         assert!(remove_broken_plist(&item, &ignore).is_err());
+    }
+
+    fn reply_disabled(host: &FakeHost, domain: &str, label: &str) {
+        host.reply(
+            &format!("/bin/launchctl print-disabled {domain}"),
+            &format!("disabled services = {{\n \"{label}\" => disabled\n}}\n"),
+        );
+    }
+
+    fn layout_in(temp: &tempfile::TempDir) -> Layout {
+        Layout {
+            home: temp.path().join("home"),
+            root: temp.path().join("root"),
+            user_cache: None,
+        }
+    }
+
+    fn test_item(label: &str, kind: StartupKind, state: StartupState) -> StartupItem {
+        StartupItem {
+            label: label.to_string(),
+            name: label.to_string(),
+            app_name: None,
+            app_bundle: None,
+            kind,
+            state,
+            program: Some(PathBuf::from("/bin/sleep")),
+            plist_path: None,
+            pid: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        }
+    }
+
+    fn write_plist(folder: &Path, label: &str, program: &str) {
+        fs::create_dir_all(folder).unwrap();
+        let mut dict = plist::Dictionary::new();
+        dict.insert("Label".into(), label.into());
+        dict.insert("Program".into(), program.into());
+        plist::Value::Dictionary(dict)
+            .to_file_xml(folder.join(format!("{label}.plist")))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_background_dump_never_goes_through_a_path_the_user_controls() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+
+        scan_startup(&host, &layout, &IgnoreStore::default(), true);
+
+        let scripts = host.admin_scripts.lock().unwrap();
+        let script = scripts.iter().find(|s| s.contains("sfltool")).unwrap();
+        assert!(!script.contains('>'), "no redirect: {script}");
+        assert!(!script.contains(&*layout.home.to_string_lossy()));
+    }
+
+    #[test]
+    fn a_daemon_that_stays_enabled_after_disable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print-disabled system",
+            "disabled services = {\n \"com.test.daemon\" => enabled\n}\n",
+        );
+        let item = test_item(
+            "com.test.daemon",
+            StartupKind::Daemon,
+            StartupState::Running,
+        );
+
+        let res = disable_item(
+            &host,
+            &layout_in(&temp),
+            &IgnoreStore::default(),
+            &item,
+            false,
+        );
+
+        assert!(res.is_err(), "{res:?}");
+    }
+
+    #[test]
+    fn daemons_come_from_print_system_without_all() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        write_plist(
+            &layout.system("Library/LaunchDaemons"),
+            "com.test.plistd",
+            "/bin/sleep",
+        );
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 77 - com.test.plistd\n 78 - com.test.bundled\n }\n}\n",
+        );
+        host.reply("/bin/ps", " 77 3.0 1024 plistd\n 78 1.0 2048 bundled\n");
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let by_label = |l: &str| scan.items.iter().find(|it| it.label == l).unwrap();
+        assert_eq!(by_label("com.test.plistd").state, StartupState::Running);
+        assert_eq!(by_label("com.test.plistd").pid, Some(77));
+        let bundled = by_label("com.test.bundled");
+        assert_eq!(bundled.kind, StartupKind::Daemon);
+        assert_eq!(bundled.pid, Some(78));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_login_item() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        fs::create_dir_all(&layout.home).unwrap();
+        fs::write(
+            layout.home.join(".config"),
+            "a file where a folder should be",
+        )
+        .unwrap();
+        let host = FakeHost::idle();
+        let mut item = test_item(
+            "loginitem.Demo",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        item.name = "Demo".to_string();
+        item.program = Some(PathBuf::from("/Applications/Demo.app"));
+
+        let res = disable_item(&host, &layout, &IgnoreStore::default(), &item, false);
+
+        assert!(res.is_err());
+        assert!(!host.ran("/usr/bin/osascript"), "the item must stay");
+    }
+
+    #[test]
+    fn a_security_login_item_is_read_only() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.reply(
+            "/usr/bin/osascript",
+            "CrowdStrike Falcon\t/Applications/Falcon.app\n",
+        );
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let item = scan.items.iter().find(|it| it.name == "CrowdStrike Falcon");
+        let item = item.expect("login item listed");
+        assert!(item.is_security);
+        let res = disable_item(&host, &layout, &IgnoreStore::default(), item, false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_path_with_a_backslash_reaches_applescript_as_an_argument() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "");
+        let path = "/Applications/Back\\slash \"Q\".app";
+        let mut item = test_item(
+            "loginitem.Demo",
+            StartupKind::LoginItem,
+            StartupState::Disabled,
+        );
+        item.name = "Demo".to_string();
+        item.program = Some(PathBuf::from(path));
+
+        let _ = enable_item(
+            &host,
+            &layout_in(&temp),
+            &IgnoreStore::default(),
+            &item,
+            false,
+        );
+
+        let calls = host.calls.lock().unwrap();
+        let make = calls
+            .iter()
+            .find(|c| c.contains("make login item"))
+            .expect("script ran");
+        assert!(make.contains(&format!("-- {path}")), "{make}");
+        let before_args = make.split(" -- ").next().unwrap();
+        assert!(
+            !before_args.contains("Back"),
+            "path must not be in the script"
+        );
+    }
+
+    #[test]
+    fn a_disabled_item_that_still_runs_keeps_both_facts() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        write_plist(
+            &layout.user("Library/LaunchAgents"),
+            "com.test.stuck",
+            "/bin/sleep",
+        );
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print-disabled gui/",
+            "disabled services = {\n \"com.test.stuck\" => disabled\n}\n",
+        );
+        host.reply(
+            "/bin/launchctl print gui/",
+            "gui/501 = {\n services = {\n 55 - com.test.stuck\n }\n}\n",
+        );
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let item = scan.items.iter().find(|it| it.label == "com.test.stuck");
+        let item = item.unwrap();
+        assert_eq!(item.state, StartupState::Disabled);
+        assert_eq!(item.pid, Some(55));
+    }
+
+    // The sample is rebuilt from the field layout in the DumpBTM README
+    // (https://github.com/objective-see/DumpBTM) and in "In the background: Identification"
+    // (https://eclecticlight.co/2026/02/20/in-the-background-identification/).
+    // No real dump could be taken, so the names, ids and UUIDs are made up.
+    const BTM_FIXTURE: &str = include_str!("../../tests/fixtures/sfltool_dumpbtm.txt");
+
+    #[test]
+    fn parses_the_background_task_dump_and_skips_lines_it_does_not_know() {
+        let entries = parse_btm(BTM_FIXTURE);
+
+        assert_eq!(entries.len(), 2);
+        let sync = &entries[0];
+        assert_eq!(sync.identifier, "com.example.sync.daemon");
+        assert_eq!(sync.name.as_deref(), Some("Example Sync"));
+        assert_eq!(sync.developer.as_deref(), Some("Example Software Ltd"));
+        assert!(sync.enabled);
+        assert_eq!(
+            sync.url.as_deref(),
+            Some("file:///Library/LaunchDaemons/com.example.sync.daemon.plist")
+        );
+        assert_eq!(
+            sync.executable,
+            Some(PathBuf::from(
+                "/Applications/Example Sync.app/Contents/MacOS/syncd"
+            ))
+        );
+        assert!(!entries[1].enabled);
+        assert_eq!(entries[1].identifier, "com.example.helper");
+    }
+
+    #[test]
+    fn dump_entries_become_read_only_rows_without_repeating_known_ones() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        write_plist(
+            &layout.system("Library/LaunchDaemons"),
+            "com.example.sync.daemon",
+            "/bin/sleep",
+        );
+        let host = FakeHost::idle();
+        *host.admin_stdout.lock().unwrap() = BTM_FIXTURE.to_string();
+        let ignore = IgnoreStore::default();
+
+        let scan = scan_startup(&host, &layout, &ignore, true);
+
+        let rows: Vec<_> = scan
+            .items
+            .iter()
+            .filter(|it| it.label.starts_with("com.example."))
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let helper = rows.iter().find(|it| it.label == "com.example.helper");
+        let helper = helper.unwrap();
+        assert_eq!(helper.kind, StartupKind::Background);
+        assert_eq!(helper.state, StartupState::Disabled);
+        assert!(disable_item(&host, &layout, &ignore, helper, false).is_err());
+        assert!(enable_item(&host, &layout, &ignore, helper, false).is_err());
+    }
+
+    #[test]
+    fn output_the_parser_cannot_read_gives_a_note_and_no_rows() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        *host.admin_stdout.lock().unwrap() = "something from a future macOS\n".to_string();
+
+        let scan = scan_startup(&host, &layout_in(&temp), &IgnoreStore::default(), true);
+
+        assert!(
+            scan.items
+                .iter()
+                .all(|it| it.kind != StartupKind::Background)
+        );
+        assert!(
+            scan.notes.iter().any(|n| n.contains("sfltool")),
+            "{:?}",
+            scan.notes
+        );
+    }
+
+    #[test]
+    fn a_refused_password_gives_a_note() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        *host.admin_result.lock().unwrap() =
+            Some("The administrator password was not given".into());
+
+        let scan = scan_startup(&host, &layout_in(&temp), &IgnoreStore::default(), true);
+
+        assert!(
+            scan.notes
+                .iter()
+                .any(|n| n.contains("password was not given"))
+        );
+    }
+
+    #[test]
+    fn a_name_that_fits_two_items_is_an_error_that_lists_them() {
+        let mut a = test_item(
+            "loginitem.Twin",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        a.name = "Twin".to_string();
+        let b = a.clone();
+        let daemon = test_item("Twin", StartupKind::Daemon, StartupState::Running);
+
+        let err = resolve_item(&[a.clone(), b], "Twin")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("fits several items") && err.contains("loginitem.Twin"));
+
+        let chosen = resolve_item(&[a, daemon.clone()], "Twin").unwrap();
+        assert_eq!(chosen, daemon, "an exact label wins over a login item name");
+        assert!(resolve_item(&[], "Twin").is_err());
+    }
+
+    #[test]
+    fn an_app_name_shared_by_a_login_item_and_a_daemon_does_not_pick_the_daemon() {
+        let mut login = test_item(
+            "loginitem.Acme",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        login.name = "Acme".to_string();
+        login.app_name = Some("Acme".to_string());
+        let mut daemon = test_item(
+            "com.acme.daemon",
+            StartupKind::Daemon,
+            StartupState::Running,
+        );
+        daemon.name = "Acme".to_string();
+        daemon.app_name = Some("Acme".to_string());
+
+        let chosen = resolve_item(&[daemon, login.clone()], "Acme").unwrap();
+
+        assert_eq!(chosen, login);
+    }
+
+    #[test]
+    fn stop_boots_out_a_disabled_agent_and_checks_that_it_is_gone() {
+        let temp = tempdir().unwrap();
+        let _ = temp;
+        let host = FakeHost::idle();
+        host.reply("/bin/launchctl", "");
+        let mut item = test_item(
+            "com.test.stuck",
+            StartupKind::UserAgent,
+            StartupState::Disabled,
+        );
+        item.pid = Some(55);
+
+        let res = stop_item(&host, &item);
+
+        assert!(res.is_ok(), "{res:?}");
+        assert!(host.ran("/bin/launchctl bootout gui/"));
+    }
+
+    #[test]
+    fn stop_fails_when_the_process_is_still_there() {
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print gui/",
+            "gui/501 = {\n services = {\n 55 - com.test.stuck\n }\n}\n",
+        );
+        host.reply("/bin/launchctl", "");
+        let mut item = test_item(
+            "com.test.stuck",
+            StartupKind::UserAgent,
+            StartupState::Disabled,
+        );
+        item.pid = Some(55);
+
+        assert!(stop_item(&host, &item).is_err());
+    }
+
+    #[test]
+    fn stopping_a_daemon_goes_through_admin_rights() {
+        let host = FakeHost::idle();
+        host.reply("/bin/launchctl", "");
+        let mut item = test_item(
+            "com.test.daemon",
+            StartupKind::Daemon,
+            StartupState::Disabled,
+        );
+        item.pid = Some(9);
+
+        assert!(stop_item(&host, &item).is_ok());
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert!(scripts[0].contains("bootout system/'com.test.daemon'"));
+    }
+
+    #[test]
+    fn an_agent_that_is_still_listed_as_disabled_after_enable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        reply_disabled(&host, "gui/", "com.test.agent");
+        host.reply("/bin/launchctl", "");
+        let item = test_item(
+            "com.test.agent",
+            StartupKind::UserAgent,
+            StartupState::Disabled,
+        );
+
+        let res = enable_item(
+            &host,
+            &layout_in(&temp),
+            &IgnoreStore::default(),
+            &item,
+            false,
+        );
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_login_item_that_is_still_listed_after_removal_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "Demo\t/Applications/Demo.app\n");
+        let mut item = test_item(
+            "loginitem.Demo",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        item.name = "Demo".to_string();
+        item.program = Some(PathBuf::from("/Applications/Demo.app"));
+
+        let res = disable_item(&host, &layout, &IgnoreStore::default(), &item, false);
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_login_item_is_saved_before_it_is_removed() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "");
+        let mut item = test_item(
+            "loginitem.Demo",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        item.name = "Demo".to_string();
+        item.program = Some(PathBuf::from("/Applications/Demo.app"));
+        let saved = layout.user(".config/taert/disabled_login_items.json");
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = seen.clone();
+        host.when("/usr/bin/osascript -e on run", move || {
+            flag.store(saved.exists(), std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let res = disable_item(&host, &layout, &IgnoreStore::default(), &item, false);
+
+        assert!(res.is_ok(), "{res:?}");
+        assert!(seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(load_disabled_login_items(&layout).len(), 1);
     }
 }

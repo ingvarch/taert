@@ -172,11 +172,17 @@ impl App {
     }
 
     pub fn open_startup(&mut self, include_all: bool) {
-        let scan = startup::scan_startup(&*self.host, &self.layout, &self.ignore, include_all);
-        self.open(Screen::Startup(StartupScreenState::new(
-            scan.items,
-            include_all,
-        )));
+        let btm = if include_all {
+            startup::read_btm(&*self.host)
+        } else {
+            startup::Btm::Skipped
+        };
+        let scan =
+            startup::scan_startup_with(&*self.host, &self.layout, &self.ignore, include_all, &btm);
+        let mut state = StartupScreenState::new(scan.items, include_all);
+        state.notes = scan.notes;
+        state.btm = btm;
+        self.open(Screen::Startup(state));
     }
 
     pub fn new_doctor(ignore: IgnoreStore, config: Config, seconds: u64) -> Self {
@@ -990,59 +996,49 @@ impl App {
                                                     false,
                                                 )
                                             };
-                                            match res {
-                                                Ok(msg) => {
-                                                    state.message = Some((msg, false));
-                                                    let scan = startup::scan_startup(
-                                                        &*self.host,
-                                                        &self.layout,
-                                                        &self.ignore,
-                                                        state.include_all,
-                                                    );
-                                                    state.items = scan.items;
-                                                    if state.selected_index >= state.items.len()
-                                                        && !state.items.is_empty()
-                                                    {
-                                                        state.selected_index =
-                                                            state.items.len() - 1;
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    state.message = Some((err, true));
-                                                }
-                                            }
+                                            state.finish_action(res);
+                                            state.apply_scan(startup::scan_startup_with(
+                                                &*self.host,
+                                                &self.layout,
+                                                &self.ignore,
+                                                state.include_all,
+                                                &state.btm,
+                                            ));
+                                        }
+                                    }
+                                    StartupConfirm::Stop { index } => {
+                                        if let Some(item) = state.items.get(index) {
+                                            let res = startup::stop_item(&*self.host, item);
+                                            state.finish_action(res);
+                                            state.apply_scan(startup::scan_startup_with(
+                                                &*self.host,
+                                                &self.layout,
+                                                &self.ignore,
+                                                state.include_all,
+                                                &state.btm,
+                                            ));
                                         }
                                     }
                                     StartupConfirm::RemoveBroken { index } => {
                                         if let Some(item) = state.items.get(index) {
                                             let res =
-                                                startup::remove_broken_plist(item, &self.ignore);
-                                            match res {
-                                                Ok(()) => {
-                                                    state.message = Some((
+                                                startup::remove_broken_plist(item, &self.ignore)
+                                                    .map(|()| {
                                                         format!(
                                                             "Removed broken plist for {}",
                                                             item.name
-                                                        ),
-                                                        false,
-                                                    ));
-                                                    let scan = startup::scan_startup(
-                                                        &*self.host,
-                                                        &self.layout,
-                                                        &self.ignore,
-                                                        state.include_all,
-                                                    );
-                                                    state.items = scan.items;
-                                                    if state.selected_index >= state.items.len()
-                                                        && !state.items.is_empty()
-                                                    {
-                                                        state.selected_index =
-                                                            state.items.len() - 1;
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    state.message = Some((err, true));
-                                                }
+                                                        )
+                                                    });
+                                            let removed = res.is_ok();
+                                            state.finish_action(res);
+                                            if removed {
+                                                state.apply_scan(startup::scan_startup_with(
+                                                    &*self.host,
+                                                    &self.layout,
+                                                    &self.ignore,
+                                                    state.include_all,
+                                                    &state.btm,
+                                                ));
                                             }
                                         }
                                     }

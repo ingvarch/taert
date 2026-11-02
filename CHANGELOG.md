@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Startup items**: `taert startup --all` no longer lets root write to a path in the home folder, shows the Background Task Management entries, and times out on its own. `disable` and `enable` read the state again and report it. Daemons come from `launchctl print system` without `--all`. A name that fits several items is refused. A login item's path is saved before the item is removed. Security login items are read-only. Notes show in the TUI and in `--json`, which now prints an object with `items` and `notes`. A disabled item that still runs offers "stop". Login item paths reach AppleScript as arguments.
+
 ## [0.1.0] - 2026-10-30
 
 ### Added

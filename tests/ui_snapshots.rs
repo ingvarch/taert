@@ -318,7 +318,46 @@ fn snapshot_startup_items() {
             is_ignored: false,
         },
     ];
-    let state = StartupScreenState::new(items, false);
+    let mut items = items;
+    items.push(StartupItem {
+        label: "com.example.stuck".to_string(),
+        name: "Stuck Updater".to_string(),
+        app_name: None,
+        app_bundle: None,
+        kind: StartupKind::Daemon,
+        state: StartupState::Disabled,
+        program: Some(PathBuf::from("/Library/PrivilegedHelperTools/stuck")),
+        plist_path: None,
+        pid: Some(321),
+        cpu_percent: Some(0.0),
+        memory_bytes: Some(8 * 1024 * 1024),
+        is_apple: false,
+        is_security: false,
+        is_ignored: false,
+    });
+    items.push(StartupItem {
+        label: "com.example.sync.daemon".to_string(),
+        name: "Example Sync".to_string(),
+        app_name: None,
+        app_bundle: None,
+        kind: StartupKind::Background,
+        state: StartupState::Enabled,
+        program: Some(PathBuf::from(
+            "/Applications/Example Sync.app/Contents/MacOS/syncd",
+        )),
+        plist_path: None,
+        pid: None,
+        cpu_percent: None,
+        memory_bytes: None,
+        is_apple: false,
+        is_security: false,
+        is_ignored: false,
+    });
+    let mut state = StartupScreenState::new(items, false);
+    state.notes = vec![
+        "System Events login items unavailable: macOS Automation permission refused or not granted."
+            .to_string(),
+    ];
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_startup(f, &state, &theme));
         assert_snapshot!(format!("startup_{label}"), output);

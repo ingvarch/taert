@@ -2,14 +2,14 @@
 source: tests/ui_snapshots.rs
 expression: output
 ---
- taert › Optimize › Startup items                                                                               3 items
+ taert › Optimize › Startup items                                                                               5 items
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   ╭─ Startup items (3) ─────────────────────────────────────────────╮  ╭─ Service detail ───────────────────────────╮
+   ╭─ Startup items (5) ─────────────────────────────────────────────╮  ╭─ Service detail ───────────────────────────╮
    │ ▌ ● Docker                             running (1.2% · 47.2 MB) │  │ Name:    Docker                            │
    │   · Spotify Web Helper (Spotify)                       disabled │  │ Label:   com.docker.helper                 │
    │   ✕ Old Broken Service                                   broken │  │ App:     Docker                            │
-   │                                                                 │  │ Bundle:  /Applications/Docker.app          │
-   │                                                                 │  │ Kind:    user agent                        │
+   │   · Stuck Updater                      disabled · still running │  │ Bundle:  /Applications/Docker.app          │
+   │   ○ Example Sync                                        enabled │  │ Kind:    user agent                        │
    │                                                                 │  │ State:   Running                           │
    │                                                                 │  │ Program: /Applications/Docker.app/Contents/M
    │                                                                 │  │ Plist:   /Users/user/Library/LaunchAgents/co
@@ -30,7 +30,7 @@ expression: output
    │                                                                 │  │                                            │
    │                                                                 │  │                                            │
    │                                                                 │  │                                            │
-   │                                                                 │  │                                            │
    ╰─────────────────────────────────────────────────────────────────╯  ╰────────────────────────────────────────────╯
+   Note: System Events login items unavailable: macOS Automation permission refused or not granted.
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ␣  Toggle / Action    ↑↓  Navigate    ⎋  Back

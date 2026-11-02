@@ -91,13 +91,16 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 
 [`startup.rs`](../src/core/startup.rs) manages launchd services (user agents, system agents, daemons) and classic login items:
 
-- **Launchd Management**: Inspects disabled states (`launchctl print-disabled`) and running services (`launchctl print gui/<uid>` and `launchctl print system`). Services are associated with installed applications via program path or bundle IDs.
+- **Launchd Management**: Inspects disabled states (`launchctl print-disabled`) and running services (`launchctl print gui/<uid>` and `launchctl print system`, both on every scan, since neither needs root). A service from the system domain is a daemon, also when it has no plist on disk. Services are associated with installed applications via program path or bundle IDs. A disabled item that still runs keeps both facts: its state is `disabled` and it has a pid. The screen offers "stop" for it, which boots the service out.
 - **Ordered Teardown**: When disabling a launchd service, `taert` executes `launchctl disable` *before* `launchctl bootout`. This prevents `launchd` from immediately respawning the job when stopped.
+- **Real State**: After `disable`, `enable`, or `stop`, `taert` reads `print-disabled` and `print` again and reports what launchd says. A step that failed, or a result that differs from the request, is an error. A daemon script exits non-zero when `disable` fails.
 - **Domain Separation**: User launch agents operate in the `gui/<uid>/` domain without elevation (`Host::run`). System daemons operate in `system/` and require root elevation via `Host::run_admin`.
-- **System Events & Login Items**: Discovered via AppleScript (`osascript`) through System Events. When disabled, items are recorded in `~/.config/taert/disabled_login_items.json` and deleted from Login Items; enabling re-creates them via AppleScript. If Automation permissions are refused by macOS, `taert` logs a clean diagnostic note without crashing or corrupting other items.
+- **System Events & Login Items**: Discovered via AppleScript (`osascript`) through System Events. When disabled, items are recorded in `~/.config/taert/disabled_login_items.json` and deleted from Login Items; enabling re-creates them via AppleScript. The path is saved before the item is removed. If the save fails, the item stays. The path goes to AppleScript as an argument (`on run argv`), never inside the script text. If Automation permissions are refused by macOS, `taert` adds a note that shows in the TUI, in `--plain`, and in `--json`, without crashing or corrupting other items.
+- **Background Task Management (`--all`)**: `sfltool dumpbtm` runs as root and prints to a pipe that taert reads (`Host::run_admin_output`). Root writes to no file, so a link planted by a user process has nothing to follow. The command has its own 2 minute timeout, which includes the time to type the password. `parse_btm` ignores lines it does not know. Entries that no other source listed show as read-only `background item` rows. Output the parser cannot read gives a note and no rows. The TUI reads the dump once per scan and reuses it after each change.
 - **Safety Gate**:
-  - Apple system items (`com.apple.*`) are hidden by default, excluded from user scans unless `--all` is passed, and strictly refused for modification or deletion.
-  - Security agents (CrowdStrike, SentinelOne, Jamf, Carbon Black, etc.) are protected and read-only.
+  - Apple system items (`com.apple.*`) are hidden by default, excluded from user scans unless `--all` is passed, and strictly refused for modification or deletion. The label decides, not a flag.
+  - Security agents (CrowdStrike, SentinelOne, Jamf, Carbon Black, etc.) are protected and read-only, login items included.
+  - `disable` and `enable` on the command line take a label. A login item can also be named by its name. A name that fits several items is an error that lists them.
   - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
 
 ## Universal App Slimming

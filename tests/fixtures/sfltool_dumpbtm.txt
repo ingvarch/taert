@@ -1,0 +1,39 @@
+========================
+ Records for UID 501 : 5E2A7B1C-0D3F-4A6B-9C81-2F4E6A7B8C90
+========================
+
+ ServiceManagement migrated: true
+ SMAppService URL: file:///Applications/
+ Team Identifier Mapping: (not shown here)
+
+ Contents of Login Items: none
+ Some line the parser has never seen: with a colon
+
+ Items:
+
+ #1:
+                 UUID: 11111111-AAAA-4BBB-8CCC-000000000001
+                 Name: Example Sync
+       Developer Name: Example Software Ltd
+      Team Identifier: ABCDE12345
+                 Type: legacy daemon (0x10010)
+                Flags: [ legacy ] (0x1)
+          Disposition: [enabled, allowed, visible, notified] (0xb)
+           Identifier: 16.com.example.sync.daemon
+                  URL: file:///Library/LaunchDaemons/com.example.sync.daemon.plist
+      Executable Path: /Applications/Example Sync.app/Contents/MacOS/syncd
+           Generation: 1
+    Parent Identifier: Example Sync
+
+ #2:
+                 UUID: 11111111-AAAA-4BBB-8CCC-000000000002
+                 Name: Example Helper
+       Developer Name: Example Software Ltd
+      Team Identifier: ABCDE12345
+                 Type: daemon (0x10)
+                Flags: [ ] (0x0)
+          Disposition: [disabled, allowed, visible, notified] (0xa)
+           Identifier: 2.com.example.helper
+                  URL: Contents/Library/LaunchDaemons/com.example.helper.plist
+           Generation: 2
+    Parent Identifier: com.example.app

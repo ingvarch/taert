@@ -266,10 +266,10 @@ taert startup
 # Plain text table for scripts or terminals
 taert startup --plain
 
-# Machine-readable JSON output
+# Machine-readable JSON output: an object with "items" and "notes"
 taert startup --json
 
-# Include Apple system items and background task management dump (prompts for root password)
+# Include Apple system items and background task management records (asks for the administrator password once)
 taert startup --all
 
 # Switch off a service or login item
@@ -282,7 +282,7 @@ taert startup enable com.example.service
 taert startup disable com.example.service --dry-run
 ```
 
-When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
+`disable` and `enable` take the label of the item. A login item can also be named by its name. A name that fits several items is refused, and the error lists them. When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. Afterwards `taert` reads the state again and reports it, and a step that did not take effect is an error. In the interactive list, an item that is switched off but still running offers "stop". With `--all`, entries from the Background Task Management records that taert cannot switch show as read-only `background item` rows. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
 
 ### Universal App Slimming (`taert slim`)
 

@@ -17,13 +17,15 @@ use super::components::modal::{Modal, dim_backdrop};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::path_utils::prettify_path;
-use crate::core::startup::{StartupItem, StartupKind, StartupState};
+use crate::core::startup::{Btm, StartupItem, StartupKind, StartupScan, StartupState};
 
 const SPLIT_MIN_WIDTH: u16 = 100;
+const MAX_NOTE_ROWS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupConfirm {
     Toggle { index: usize, enable: bool },
+    Stop { index: usize },
     RemoveBroken { index: usize },
 }
 
@@ -34,6 +36,9 @@ pub struct StartupScreenState {
     pub confirm: Option<StartupConfirm>,
     pub confirm_button: usize,
     pub message: Option<(String, bool)>,
+    pub notes: Vec<String>,
+    /// The Background Task Management records read for this screen, reused after each change.
+    pub btm: Btm,
 }
 
 impl StartupScreenState {
@@ -45,7 +50,22 @@ impl StartupScreenState {
             confirm: None,
             confirm_button: 0,
             message: None,
+            notes: Vec::new(),
+            btm: Btm::Skipped,
         }
+    }
+
+    pub fn apply_scan(&mut self, scan: StartupScan) {
+        self.items = scan.items;
+        self.notes = scan.notes;
+        self.selected_index = self.selected_index.min(self.items.len().saturating_sub(1));
+    }
+
+    pub fn finish_action(&mut self, result: Result<String, String>) {
+        self.message = Some(match result {
+            Ok(msg) => (msg, false),
+            Err(err) => (err, true),
+        });
     }
 
     pub fn selected_item(&self) -> Option<&StartupItem> {
@@ -101,16 +121,16 @@ impl StartupScreenState {
             return;
         };
 
-        if item.is_apple {
-            self.message = Some(("Apple system services cannot be modified".to_string(), true));
+        if let Some(reason) = item.read_only_reason() {
+            self.message = Some((reason.to_string(), true));
             return;
         }
-        if item.is_security {
-            self.message = Some(("Security agent services are read-only".to_string(), true));
-            return;
-        }
-        if item.is_ignored {
-            self.message = Some(("Protected startup items are read-only".to_string(), true));
+
+        if item.is_disabled_but_running() {
+            self.confirm = Some(StartupConfirm::Stop {
+                index: self.selected_index,
+            });
+            self.confirm_button = 0;
             return;
         }
 
@@ -174,6 +194,13 @@ pub fn render_startup(frame: &mut Frame, state: &StartupScreenState, theme: &The
         .behind_dialog(state.confirm.is_some());
 
     let inner = chrome.render(frame, theme);
+    let notes_height = state.notes.len().min(MAX_NOTE_ROWS) as u16;
+    let [inner, notes_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(notes_height.min(inner.height.saturating_sub(1))),
+    ])
+    .areas(inner);
+    render_notes(frame, notes_area, &state.notes, theme);
 
     if state.items.is_empty() {
         EmptyState::new(
@@ -206,6 +233,25 @@ pub fn render_startup(frame: &mut Frame, state: &StartupScreenState, theme: &The
     if let Some(ref confirm) = state.confirm {
         render_confirm_modal(frame, area, state, confirm, theme);
     }
+}
+
+fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) {
+    let width = area.width as usize;
+    let lines: Vec<Line> = notes
+        .iter()
+        .take(area.height as usize)
+        .map(|note| {
+            let text = format!("Note: {note}");
+            let text = if text.chars().count() > width {
+                let cut: String = text.chars().take(width.saturating_sub(1)).collect();
+                format!("{cut}…")
+            } else {
+                text
+            };
+            Line::from(Span::styled(text, theme.warning()))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_item_list(frame: &mut Frame, area: Rect, state: &StartupScreenState, theme: &Theme) {
@@ -257,6 +303,9 @@ fn render_item_list(frame: &mut Frame, area: Rect, state: &StartupScreenState, t
                 }
             }
             StartupState::Enabled => "enabled".to_string(),
+            StartupState::Disabled if item.is_disabled_but_running() => {
+                "disabled · still running".to_string()
+            }
             StartupState::Disabled => "disabled".to_string(),
             StartupState::Broken => "broken".to_string(),
         };
@@ -264,6 +313,7 @@ fn render_item_list(frame: &mut Frame, area: Rect, state: &StartupScreenState, t
         let detail_style = match item.state {
             StartupState::Running => theme.success(),
             StartupState::Enabled => theme.callout(),
+            StartupState::Disabled if item.is_disabled_but_running() => theme.warning(),
             StartupState::Disabled => theme.footnote(),
             StartupState::Broken => theme.danger(),
         };
@@ -336,6 +386,9 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
     let (state_text, state_style): (&str, _) = match item.state {
         StartupState::Running => ("Running", theme.success()),
         StartupState::Enabled => ("Enabled", theme.callout()),
+        StartupState::Disabled if item.is_disabled_but_running() => {
+            ("Disabled, still running", theme.warning())
+        }
         StartupState::Disabled => ("Disabled", theme.footnote()),
         StartupState::Broken => ("Broken (missing executable)", theme.danger()),
     };
@@ -382,14 +435,16 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
     }
 
     // Protection note
-    if item.is_apple || item.is_security || item.is_ignored {
+    if item.read_only_reason().is_some() {
         lines.push(Line::from(""));
         let (note_text, note_style) = if item.is_apple {
             ("Apple system service · Read-only", theme.footnote())
         } else if item.is_security {
             ("Security vendor service · Protected", theme.warning())
-        } else {
+        } else if item.is_ignored {
             ("Protected path · Excluded by rules", theme.footnote())
+        } else {
+            ("Background task entry · Read-only", theme.footnote())
         };
         lines.push(Line::from(Span::styled(note_text, note_style)));
     }
@@ -499,6 +554,47 @@ fn render_confirm_modal(
                 .render(frame, area, theme);
         }
 
+        StartupConfirm::Stop { index } => {
+            let Some(item) = state.items.get(*index) else {
+                return;
+            };
+
+            let message = vec![
+                Line::from(vec![
+                    Span::styled("Stop ", theme.body().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("\"{}\"", item.name), theme.accent_text()),
+                    Span::styled("?", theme.body().add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Service:    ", theme.callout()),
+                    Span::styled(item.label.clone(), theme.footnote()),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "It is switched off but still running. This stops the running process.",
+                    theme.callout(),
+                )),
+            ];
+
+            let buttons = vec![
+                Button::primary("Stop").focused(state.confirm_button == 0),
+                Button::new("Cancel").focused(state.confirm_button == 1),
+            ];
+
+            Modal::new("Stop Startup Item")
+                .tint(theme.p.orange)
+                .message(message)
+                .buttons(buttons)
+                .hints(Line::from(vec![
+                    Span::styled(theme.g.key_enter, theme.accent_text()),
+                    Span::styled(" Confirm  ", theme.callout()),
+                    Span::styled(theme.g.key_esc, theme.accent_text()),
+                    Span::styled(" Cancel", theme.callout()),
+                ]))
+                .render(frame, area, theme);
+        }
+
         StartupConfirm::RemoveBroken { index } => {
             let Some(item) = state.items.get(*index) else {
                 return;
@@ -552,5 +648,50 @@ fn render_confirm_modal(
                 ]))
                 .render(frame, area, theme);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(kind: StartupKind, state: StartupState, pid: Option<u32>) -> StartupItem {
+        StartupItem {
+            label: "com.example.item".to_string(),
+            name: "Item".to_string(),
+            app_name: None,
+            app_bundle: None,
+            kind,
+            state,
+            program: None,
+            plist_path: None,
+            pid,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        }
+    }
+
+    #[test]
+    fn a_disabled_item_that_still_runs_offers_stop() {
+        let running = item(StartupKind::Daemon, StartupState::Disabled, Some(9));
+        let mut state = StartupScreenState::new(vec![running], false);
+
+        state.request_toggle();
+
+        assert_eq!(state.confirm, Some(StartupConfirm::Stop { index: 0 }));
+    }
+
+    #[test]
+    fn a_background_entry_cannot_be_toggled() {
+        let entry = item(StartupKind::Background, StartupState::Enabled, None);
+        let mut state = StartupScreenState::new(vec![entry], false);
+
+        state.request_toggle();
+
+        assert_eq!(state.confirm, None);
+        assert!(state.message.is_some_and(|(_, is_error)| is_error));
     }
 }

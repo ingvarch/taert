@@ -209,7 +209,7 @@ pub enum IgnoreAction {
 
 #[derive(Debug, Args, Default)]
 pub struct StartupArgs {
-    /// Include Apple services and background task management entries (requires root password)
+    /// Include Apple services and background task management entries (asks for the administrator password)
     #[arg(long)]
     pub all: bool,
 
