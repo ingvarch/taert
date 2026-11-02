@@ -364,6 +364,18 @@ impl PlainRunner {
                     report.skipped.not_compressed
                 ));
             }
+            if report.skipped.locked > 0 {
+                out.push_str(&format!(
+                    "  • Locked by a flag or an ACL: {}\n",
+                    report.skipped.locked
+                ));
+            }
+            if report.skipped.open_for_writing > 0 {
+                out.push_str(&format!(
+                    "  • Open for writing: {}\n",
+                    report.skipped.open_for_writing
+                ));
+            }
         }
 
         if !report.failures.is_empty() {
@@ -398,6 +410,18 @@ mod tests {
     use super::*;
     use crate::core::scanner::{ScanItem, ToolGroup};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_compress_report_names_locked_and_busy_files() {
+        let mut report = crate::core::compress::CompressReport::default();
+        report.skipped.locked = 2;
+        report.skipped.open_for_writing = 1;
+
+        let text = PlainRunner::compress_report_text(&report, std::path::Path::new("/x"));
+
+        assert!(text.contains("Locked by a flag or an ACL: 2"), "{text}");
+        assert!(text.contains("Open for writing: 1"), "{text}");
+    }
 
     fn scan_with_note() -> CategoryScan {
         CategoryScan {

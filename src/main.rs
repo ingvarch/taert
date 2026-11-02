@@ -86,7 +86,7 @@ fn main() -> ExitCode {
             handle_uninstall(args, &cli, use_plain, &ignore, &context, console)
         }
 
-        Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore),
+        Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore, &context),
 
         Some(Command::Slim(ref args)) => {
             handle_slim(args, &cli, use_plain, &ignore, &context, console)
@@ -1085,32 +1085,41 @@ fn handle_schedule(
     }
 }
 
-fn handle_compress(args: &CompressArgs, cli: &Cli, ignore: &IgnoreStore) -> ExitCode {
-    let layout = Layout::current();
-    if let Err(e) = Safety::can_compress(&args.path, ignore, &layout) {
-        if cli.json {
-            let error_json = serde_json::json!({
-                "error": e.to_string(),
-                "path": args.path,
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&error_json).unwrap_or_default()
-            );
-        } else {
-            eprintln!("Error: {e}");
-        }
-        return ExitCode::FAILURE;
-    }
-
+fn handle_compress(
+    args: &CompressArgs,
+    cli: &Cli,
+    ignore: &IgnoreStore,
+    context: &ScanContext,
+) -> ExitCode {
     let options = crate::core::compress::CompressOptions {
         dry_run: cli.dry_run,
         undo: args.undo,
     };
     let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let compressor = crate::core::compress::Compressor {
+        host: context.host,
+        layout: context.layout,
+        ignore,
+    };
 
-    let report =
-        crate::core::compress::process_path(&args.path, &options, ignore, &cancelled, |_, _| {});
+    let report = match compressor.process_path(&args.path, &options, &cancelled, |_, _| {}) {
+        Ok(report) => report,
+        Err(e) => {
+            if cli.json {
+                let error_json = serde_json::json!({
+                    "error": e.to_string(),
+                    "path": args.path,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&error_json).unwrap_or_default()
+                );
+            } else {
+                eprintln!("Error: {e}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
 
     if cli.json {
         match serde_json::to_string_pretty(&report) {

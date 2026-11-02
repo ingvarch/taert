@@ -3,6 +3,8 @@
 //! and completion outcome dialog.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
 
 use ratatui::Frame;
@@ -47,6 +49,8 @@ pub enum ModalOverlay {
     Removing {
         progress: RemovalProgress,
         spinner_idx: usize,
+        /// Set when the run can be stopped with Esc.
+        cancel: Option<Arc<AtomicBool>>,
     },
     Outcome(RemovalReport),
 }
@@ -720,8 +724,9 @@ fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         ModalOverlay::Removing {
             progress,
             spinner_idx,
+            cancel,
         } => {
-            render_removing_dialog(frame, progress, *spinner_idx, theme);
+            render_removing_dialog(frame, progress, *spinner_idx, cancel.is_some(), theme);
         }
         ModalOverlay::Outcome(report) => {
             render_outcome_dialog(frame, report, is_plan(state), theme);
@@ -941,6 +946,7 @@ fn render_removing_dialog(
     frame: &mut Frame,
     progress: &RemovalProgress,
     spinner_idx: usize,
+    cancellable: bool,
     theme: &Theme,
 ) {
     let count = progress.total_count;
@@ -972,16 +978,24 @@ fn render_removing_dialog(
 
     let bar_spans = bar(fraction, 40, theme.p.accent, theme);
 
+    let mut message = vec![
+        path_line,
+        Line::from(bar_spans),
+        Line::from(vec![Span::styled(
+            format!("{} of {}", progress.current_index, progress.total_count),
+            theme.footnote(),
+        )]),
+    ];
+    if cancellable {
+        message.push(Line::from(vec![Span::styled(
+            "Esc stops after the current file.",
+            theme.footnote(),
+        )]));
+    }
+
     Modal::new(&title)
         .tint(theme.p.orange)
-        .message(vec![
-            path_line,
-            Line::from(bar_spans),
-            Line::from(vec![Span::styled(
-                format!("{} of {}", progress.current_index, progress.total_count),
-                theme.footnote(),
-            )]),
-        ])
+        .message(message)
         .buttons(vec![])
         .render(frame, frame.area(), theme);
 }

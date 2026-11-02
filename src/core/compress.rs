@@ -1,37 +1,50 @@
 //! APFS transparent per-file compression (`decmpfs`) engine.
 //!
-//! Compresses files in place using macOS `decmpfs` with LZFSE (type 12) or LZVN (type 8)
+//! Compresses files in place using macOS `decmpfs` with LZFSE (type 12)
 //! chunks stored in the file's resource fork, verified via read-back and atomically
 //! swapped via `renamex_np(RENAME_SWAP)`.
 
-use std::ffi::CString;
+use std::collections::HashSet;
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::apfs;
+use super::cleaner::{RemovalFailure, RemovalReport};
+use super::host::Host;
 use super::layout::Layout;
-use super::safety::Safety;
+use super::safety::{Safety, SafetyError};
 use super::scanner::{CategoryScan, ScanItem, ToolGroup};
 use super::stores::IgnoreStore;
 
 pub const BLOCK_SIZE: usize = 65536; // 64 KiB blocks
 pub const UF_COMPRESSED: u32 = 0x0000_0020;
+const UF_IMMUTABLE: u32 = 0x0000_0002;
+const UF_APPEND: u32 = 0x0000_0004;
+const SF_IMMUTABLE: u32 = 0x0002_0000;
+const SF_APPEND: u32 = 0x0004_0000;
 pub const DECMPFS_MAGIC: u32 = 0x636d_7066; // 'cmpf' in LE
 
 const XATTR_NOFOLLOW: libc::c_int = 0x0001;
 const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
 const RENAME_SWAP: libc::c_uint = 0x0000_0002;
+const LSOF: &str = "/usr/sbin/lsof";
+const LSOF_TIMEOUT: Duration = Duration::from_secs(60);
+/// Marks taert's own copy until right before the swap. The cleanup of leftovers
+/// removes only marked files, so it never removes an original.
+const COPY_MARK: &CStr = c"io.github.ingvarch.taert.copy";
 
 const COMPRESSION_LZFSE: i32 = 0x801;
-const COMPRESSION_LZVN: i32 = 0x900;
 
 #[link(name = "compression")]
 unsafe extern "C" {
@@ -81,26 +94,25 @@ unsafe extern "C" {
         acl: *mut libc::c_void,
     ) -> libc::c_int;
     fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_to_text(acl: *mut libc::c_void, len: *mut isize) -> *mut libc::c_char;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Lzfse,
-    Lzvn,
 }
 
 impl Codec {
     pub const fn type_id(self) -> u32 {
         match self {
             Self::Lzfse => 12,
-            Self::Lzvn => 8,
         }
     }
 
     pub const fn algorithm(self) -> i32 {
         match self {
             Self::Lzfse => COMPRESSION_LZFSE,
-            Self::Lzvn => COMPRESSION_LZVN,
         }
     }
 }
@@ -115,6 +127,8 @@ pub enum SkipReason {
     NotUserOwned,
     Incompressible,
     NotCompressed,
+    Locked,
+    OpenForWriting,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +147,8 @@ pub struct SkippedStats {
     pub not_user_owned: usize,
     pub incompressible: usize,
     pub not_compressed: usize,
+    pub locked: usize,
+    pub open_for_writing: usize,
 }
 
 impl SkippedStats {
@@ -146,6 +162,8 @@ impl SkippedStats {
             SkipReason::NotUserOwned => self.not_user_owned += 1,
             SkipReason::Incompressible => self.incompressible += 1,
             SkipReason::NotCompressed => self.not_compressed += 1,
+            SkipReason::Locked => self.locked += 1,
+            SkipReason::OpenForWriting => self.open_for_writing += 1,
         }
     }
 
@@ -158,6 +176,8 @@ impl SkippedStats {
             + self.not_user_owned
             + self.incompressible
             + self.not_compressed
+            + self.locked
+            + self.open_for_writing
     }
 }
 
@@ -231,42 +251,56 @@ fn temp_path_for(path: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(parent.join(format!(".{name}.taert-tmp-{pid}-{nanos}-{seq}.tmp")))
 }
 
+/// A name beside `path` for a changed original that must stay. The cleanup of
+/// leftovers does not match it.
+fn kept_path_for(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    path.with_file_name(format!("{name}.taert-changed-{nanos}"))
+}
+
+fn has_xattr(c_path: &CStr, name: &CStr) -> bool {
+    let res = unsafe {
+        getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            XATTR_NOFOLLOW,
+        )
+    };
+    res >= 0
+}
+
 /// Checks whether `path` already carries compression-related xattrs.
 pub fn has_compression_xattrs(path: &Path) -> Result<bool, std::io::Error> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let c_file = c_path(path)?;
+    Ok(has_xattr(&c_file, c"com.apple.decmpfs") || has_xattr(&c_file, c"com.apple.ResourceFork"))
+}
 
-    let decmp = CString::new("com.apple.decmpfs").unwrap();
-    let res1 = unsafe {
-        getxattr(
-            c_path.as_ptr(),
-            decmp.as_ptr(),
-            std::ptr::null_mut(),
+fn mark_copy(file: &File) -> io::Result<()> {
+    check(unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            COPY_MARK.as_ptr(),
+            b"".as_ptr().cast(),
             0,
             0,
-            XATTR_NOFOLLOW,
+            0,
         )
-    };
-    if res1 >= 0 {
-        return Ok(true);
-    }
+    })
+}
 
-    let rf = CString::new("com.apple.ResourceFork").unwrap();
-    let res2 = unsafe {
-        getxattr(
-            c_path.as_ptr(),
-            rf.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            0,
-            XATTR_NOFOLLOW,
-        )
-    };
-    if res2 >= 0 {
-        return Ok(true);
-    }
+fn unmark_copy(file: &File) -> io::Result<()> {
+    check(unsafe { libc::fremovexattr(file.as_raw_fd(), COPY_MARK.as_ptr(), 0) })
+}
 
-    Ok(false)
+fn has_copy_mark(path: &Path) -> bool {
+    c_path(path).is_ok_and(|c_file| has_xattr(&c_file, COPY_MARK))
 }
 
 /// Compress a single buffer chunk into a valid decmpfs codec frame.
@@ -332,46 +366,54 @@ pub fn build_resource_fork_payload(
     Ok((table, payload))
 }
 
-/// Copy extended attributes from `c_src` to `c_dst`, skipping `com.apple.decmpfs`
-/// and `com.apple.ResourceFork`.
-fn copy_xattrs(
-    c_src: *const libc::c_char,
-    c_dst: *const libc::c_char,
-    copy_compression_xattrs: bool,
-) -> Result<(), std::io::Error> {
-    let list_size = unsafe { listxattr(c_src, std::ptr::null_mut(), 0, XATTR_NOFOLLOW) };
-    if list_size <= 0 {
+fn c_path(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn check(res: libc::c_int) -> io::Result<()> {
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Copies extended attributes from `c_src` to `c_dst`, skipping `com.apple.decmpfs`
+/// and `com.apple.ResourceFork`. Any error stops the copy.
+fn copy_xattrs(c_src: &CString, c_dst: &CString) -> io::Result<()> {
+    let list_size = unsafe { listxattr(c_src.as_ptr(), std::ptr::null_mut(), 0, XATTR_NOFOLLOW) };
+    if list_size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if list_size == 0 {
         return Ok(());
     }
 
     let mut buf = vec![0u8; list_size as usize];
     let actual_size = unsafe {
         listxattr(
-            c_src,
+            c_src.as_ptr(),
             buf.as_mut_ptr() as *mut libc::c_char,
             buf.len(),
             XATTR_NOFOLLOW,
         )
     };
-    if actual_size <= 0 {
-        return Ok(());
+    if actual_size < 0 {
+        return Err(io::Error::last_os_error());
     }
 
-    let names_slice = &buf[..actual_size as usize];
-    for name_bytes in names_slice.split(|&b| b == 0).filter(|p| !p.is_empty()) {
-        if !copy_compression_xattrs
-            && (name_bytes == b"com.apple.decmpfs" || name_bytes == b"com.apple.ResourceFork")
-        {
+    let names = &buf[..actual_size as usize];
+    for name in names.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        if name == b"com.apple.decmpfs" || name == b"com.apple.ResourceFork" {
             continue;
         }
-
-        let Ok(c_name) = CString::new(name_bytes) else {
-            continue;
-        };
+        let c_name =
+            CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         let val_size = unsafe {
             getxattr(
-                c_src,
+                c_src.as_ptr(),
                 c_name.as_ptr(),
                 std::ptr::null_mut(),
                 0,
@@ -380,95 +422,173 @@ fn copy_xattrs(
             )
         };
         if val_size < 0 {
-            continue;
+            return Err(io::Error::last_os_error());
         }
 
-        let mut val_buf = vec![0u8; val_size as usize];
-        let got_size = if val_size > 0 {
-            unsafe {
-                getxattr(
-                    c_src,
-                    c_name.as_ptr(),
-                    val_buf.as_mut_ptr() as *mut libc::c_void,
-                    val_buf.len(),
-                    0,
-                    XATTR_NOFOLLOW,
-                )
-            }
-        } else {
-            0
+        let mut value = vec![0u8; val_size as usize];
+        let got_size = unsafe {
+            getxattr(
+                c_src.as_ptr(),
+                c_name.as_ptr(),
+                value.as_mut_ptr() as *mut libc::c_void,
+                value.len(),
+                0,
+                XATTR_NOFOLLOW,
+            )
         };
-
-        if got_size >= 0 {
-            unsafe {
-                setxattr(
-                    c_dst,
-                    c_name.as_ptr(),
-                    val_buf.as_ptr() as *const libc::c_void,
-                    got_size as usize,
-                    0,
-                    XATTR_NOFOLLOW,
-                );
-            }
+        if got_size < 0 {
+            return Err(io::Error::last_os_error());
         }
+
+        check(unsafe {
+            setxattr(
+                c_dst.as_ptr(),
+                c_name.as_ptr(),
+                value.as_ptr() as *const libc::c_void,
+                got_size as usize,
+                0,
+                XATTR_NOFOLLOW,
+            )
+        })?;
     }
 
     Ok(())
 }
 
-/// Copies owner, mode, times, flags, ACL, and extended attributes.
-fn copy_metadata(
-    orig_path: &Path,
-    temp_path: &Path,
-    temp_fd: libc::c_int,
-    orig_meta: &fs::Metadata,
-    compressed: bool,
-) -> Result<(), std::io::Error> {
-    // 1. Mode / permissions
-    let mode = (orig_meta.mode() & 0o7777) as libc::mode_t;
-    unsafe { libc::fchmod(temp_fd, mode) };
+fn copy_acl(c_src: &CString, c_dst: &CString) -> io::Result<()> {
+    let acl = unsafe { acl_get_file(c_src.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(()),
+            _ => Err(error),
+        };
+    }
+    let res = unsafe { acl_set_file(c_dst.as_ptr(), ACL_TYPE_EXTENDED, acl) };
+    let error = io::Error::last_os_error();
+    unsafe { acl_free(acl) };
+    if res == 0 { Ok(()) } else { Err(error) }
+}
 
-    // 2. Owner (best effort for non-root)
-    let _ = unsafe { libc::fchown(temp_fd, orig_meta.uid(), orig_meta.gid()) };
+/// Removes every ACL entry from `c_path`.
+fn clear_acl(c_path: &CString) -> io::Result<()> {
+    let existing = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if existing.is_null() {
+        return Ok(());
+    }
+    unsafe { acl_free(existing) };
+    let empty = unsafe { acl_init(0) };
+    if empty.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let res = unsafe { acl_set_file(c_path.as_ptr(), ACL_TYPE_EXTENDED, empty) };
+    let error = io::Error::last_os_error();
+    unsafe { acl_free(empty) };
+    if res == 0 { Ok(()) } else { Err(error) }
+}
 
-    // 3. Timestamps
+/// Whether an ACL text has a deny entry for `right`.
+fn text_denies(text: &str, right: &str) -> bool {
+    text.lines().any(|line| {
+        let mut fields = line.rsplitn(3, ':');
+        let (Some(rights), Some(kind)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        kind.starts_with("deny") && rights.split(',').any(|r| r == right)
+    })
+}
+
+fn acl_denies(path: &Path, right: &str) -> bool {
+    let Ok(c_file) = c_path(path) else {
+        return false;
+    };
+    let acl = unsafe { acl_get_file(c_file.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return false;
+    }
+    let text = unsafe { acl_to_text(acl, std::ptr::null_mut()) };
+    let denied =
+        !text.is_null() && text_denies(&unsafe { CStr::from_ptr(text) }.to_string_lossy(), right);
+    unsafe {
+        if !text.is_null() {
+            acl_free(text.cast());
+        }
+        acl_free(acl);
+    }
+    denied
+}
+
+fn is_locked(meta: &fs::Metadata) -> bool {
+    DarwinMetadataExt::st_flags(meta) & (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND) != 0
+}
+
+/// Whether the file or its folder stops a swap: flags, or an ACL that denies delete.
+/// A folder that cannot be read counts as locked.
+fn blocks_replacement(path: &Path, meta: &fs::Metadata) -> bool {
+    let folder_blocks = |folder: &Path| {
+        fs::symlink_metadata(folder).map_or(true, |m| is_locked(&m))
+            || acl_denies(folder, "delete_child")
+    };
+    is_locked(meta) || acl_denies(path, "delete") || path.parent().is_none_or(folder_blocks)
+}
+
+/// Removes a file that may carry flags or an ACL that stop the removal.
+fn force_remove(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    let c_file = c_path(path)?;
+    let flags = DarwinMetadataExt::st_flags(&meta);
+    if flags & (UF_IMMUTABLE | UF_APPEND) != 0 {
+        check(unsafe { libc::chflags(c_file.as_ptr(), flags & !(UF_IMMUTABLE | UF_APPEND)) })?;
+    }
+    let _ = clear_acl(&c_file);
+    fs::remove_file(path)
+}
+
+/// Sets access, modification, and birth times. The birth time goes last,
+/// because an earlier modification time pulls it back.
+fn copy_times(fd: libc::c_int, meta: &fs::Metadata) -> io::Result<()> {
     let times = [
         libc::timespec {
-            tv_sec: orig_meta.atime(),
-            tv_nsec: orig_meta.atime_nsec(),
+            tv_sec: meta.atime(),
+            tv_nsec: meta.atime_nsec(),
         },
         libc::timespec {
-            tv_sec: orig_meta.mtime(),
-            tv_nsec: orig_meta.mtime_nsec(),
+            tv_sec: meta.mtime(),
+            tv_nsec: meta.mtime_nsec(),
         },
     ];
-    unsafe { libc::futimens(temp_fd, times.as_ptr()) };
+    check(unsafe { libc::futimens(fd, times.as_ptr()) })?;
 
-    // 4. Flags
-    let orig_flags = DarwinMetadataExt::st_flags(orig_meta);
-    let target_flags = if compressed {
-        orig_flags | UF_COMPRESSED
-    } else {
-        orig_flags & !UF_COMPRESSED
+    let mut attrs: libc::attrlist = unsafe { std::mem::zeroed() };
+    attrs.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+    attrs.commonattr = libc::ATTR_CMN_CRTIME;
+    let mut birth = libc::timespec {
+        tv_sec: DarwinMetadataExt::st_birthtime(meta),
+        tv_nsec: DarwinMetadataExt::st_birthtime_nsec(meta),
     };
-    unsafe { libc::fchflags(temp_fd, target_flags) };
+    check(unsafe {
+        libc::fsetattrlist(
+            fd,
+            (&mut attrs as *mut libc::attrlist).cast(),
+            (&mut birth as *mut libc::timespec).cast(),
+            std::mem::size_of::<libc::timespec>(),
+            0,
+        )
+    })
+}
 
-    let c_orig = CString::new(orig_path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let c_temp = CString::new(temp_path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-
-    // 5. ACL
-    let acl = unsafe { acl_get_file(c_orig.as_ptr(), ACL_TYPE_EXTENDED) };
-    if !acl.is_null() {
-        unsafe { acl_set_file(c_temp.as_ptr(), ACL_TYPE_EXTENDED, acl) };
-        unsafe { acl_free(acl) };
+/// Reads until `buf` is full or the file ends.
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
-
-    // 6. Extended attributes (omit compression xattrs)
-    let _ = copy_xattrs(c_orig.as_ptr(), c_temp.as_ptr(), false);
-
-    Ok(())
+    Ok(filled)
 }
 
 /// Compares `temp_path` and `original_path` byte by byte.
@@ -476,21 +596,21 @@ fn verify_identical_content(
     temp_path: &Path,
     original_path: &Path,
     expected_len: u64,
-) -> Result<(), std::io::Error> {
+) -> io::Result<()> {
     let mut f1 = File::open(temp_path)?;
     let mut f2 = File::open(original_path)?;
 
-    let mut buf1 = [0u8; 65536];
-    let mut buf2 = [0u8; 65536];
+    let mut buf1 = vec![0u8; BLOCK_SIZE];
+    let mut buf2 = vec![0u8; BLOCK_SIZE];
     let mut compared = 0u64;
 
     loop {
-        let n1 = f1.read(&mut buf1)?;
-        let n2 = f2.read(&mut buf2)?;
+        let n1 = read_full(&mut f1, &mut buf1)?;
+        let n2 = read_full(&mut f2, &mut buf2)?;
 
         if n1 != n2 || buf1[..n1] != buf2[..n2] {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
                 "verification mismatch: byte contents differ",
             ));
         }
@@ -503,8 +623,8 @@ fn verify_identical_content(
     }
 
     if compared != expected_len {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
             format!("verification mismatch: expected {expected_len} bytes, read {compared}"),
         ));
     }
@@ -512,22 +632,221 @@ fn verify_identical_content(
     Ok(())
 }
 
-/// Atomically swap `temp_path` and `orig_path`, then remove `temp_path`.
-fn swap_and_remove_temp(temp_path: &Path, orig_path: &Path) -> Result<(), std::io::Error> {
-    let c_temp = CString::new(temp_path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let c_orig = CString::new(orig_path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+fn swap(temp_path: &Path, orig_path: &Path) -> io::Result<()> {
+    let (c_temp, c_orig) = (c_path(temp_path)?, c_path(orig_path)?);
+    check(unsafe { renamex_np(c_temp.as_ptr(), c_orig.as_ptr(), RENAME_SWAP) })
+}
 
-    let res = unsafe { renamex_np(c_temp.as_ptr(), c_orig.as_ptr(), RENAME_SWAP) };
-    if res != 0 {
-        let err = std::io::Error::last_os_error();
-        let _ = fs::remove_file(temp_path);
-        return Err(err);
+/// The steps of a replacement, so a test can fail or change the file at each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    WriteData,
+    WriteHeader,
+    CopyMetadata,
+    Verify,
+    SetTimes,
+    Permissions,
+    BeforeSwap,
+    Swap,
+    AfterSwap,
+}
+
+type Probe<'a> = &'a dyn Fn(Step) -> io::Result<()>;
+
+fn no_probe(_: Step) -> io::Result<()> {
+    Ok(())
+}
+
+/// What tells that a file was written to: the inode, size, and modification time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+}
+
+impl Identity {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.len(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+}
+
+fn changed() -> io::Error {
+    io::Error::other("the file changed while it was being processed, so it was left as it is")
+}
+
+/// Removes the temporary file when dropped, whatever way the work ends.
+struct TempGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempGuard {
+    fn remove(&mut self) -> io::Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        self.armed = false;
+        match force_remove(&self.path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
+}
+
+/// A new copy of a file, built beside it and swapped in when it checks out.
+struct Replacement<'a> {
+    path: &'a Path,
+    meta: &'a fs::Metadata,
+    snapshot: Identity,
+    temp: TempGuard,
+    file: File,
+    probe: Probe<'a>,
+}
+
+impl<'a> Replacement<'a> {
+    /// Opens the original for reading and creates the temporary file.
+    fn begin(path: &'a Path, meta: &'a fs::Metadata, probe: Probe<'a>) -> io::Result<(Self, File)> {
+        let source = File::open(path)?;
+        let snapshot = Identity::of(&source.metadata()?);
+        if snapshot != Identity::of(meta) {
+            return Err(changed());
+        }
+        let temp_path = temp_path_for(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp_path)?;
+        let temp = TempGuard {
+            path: temp_path,
+            armed: true,
+        };
+        clear_acl(&c_path(&temp.path)?)?;
+        mark_copy(&file)?;
+        let replacement = Self {
+            path,
+            meta,
+            snapshot,
+            temp,
+            file,
+            probe,
+        };
+        Ok((replacement, source))
     }
 
-    let _ = fs::remove_file(temp_path);
-    Ok(())
+    fn step(&self, step: Step) -> io::Result<()> {
+        (self.probe)(step)
+    }
+
+    /// Copies owner, flags, and extended attributes. Any error fails the file.
+    fn copy_attributes(&self, compressed: bool) -> io::Result<()> {
+        self.step(Step::CopyMetadata)?;
+        let fd = self.file.as_raw_fd();
+        check(unsafe { libc::fchown(fd, self.meta.uid(), self.meta.gid()) })?;
+
+        let flags = DarwinMetadataExt::st_flags(self.meta);
+        let flags = if compressed {
+            flags | UF_COMPRESSED
+        } else {
+            flags & !UF_COMPRESSED
+        };
+        check(unsafe { libc::fchflags(fd, flags) })?;
+
+        copy_xattrs(&c_path(self.path)?, &c_path(&self.temp.path)?)
+    }
+
+    fn verify(&self, len: u64) -> io::Result<()> {
+        self.step(Step::Verify)?;
+        verify_identical_content(&self.temp.path, self.path, len)
+    }
+
+    /// Sets the times, ACL, and mode, swaps the copy in, and checks again that
+    /// nobody wrote to the original. A changed original goes back in place.
+    fn finish(&mut self) -> io::Result<()> {
+        self.step(Step::SetTimes)?;
+        copy_times(self.file.as_raw_fd(), self.meta)?;
+
+        self.step(Step::Permissions)?;
+        unmark_copy(&self.file)?;
+        copy_acl(&c_path(self.path)?, &c_path(&self.temp.path)?)?;
+        let mode = (self.meta.mode() & 0o7777) as libc::mode_t;
+        check(unsafe { libc::fchmod(self.file.as_raw_fd(), mode) })?;
+
+        self.step(Step::BeforeSwap)?;
+        if Identity::of(&fs::symlink_metadata(self.path)?) != self.snapshot {
+            return Err(changed());
+        }
+
+        self.step(Step::Swap)?;
+        let copy = self.file.metadata()?;
+        swap(&self.temp.path, self.path)?;
+
+        let unchanged =
+            self.step(Step::AfterSwap)
+                .and_then(|()| match fs::symlink_metadata(&self.temp.path) {
+                    Ok(old) if Identity::of(&old) == self.snapshot => Ok(()),
+                    _ => Err(changed()),
+                });
+        match unchanged {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.swap_back(error, (copy.dev(), copy.ino()))),
+        }
+    }
+
+    /// Puts the changed original back, if `path` still holds the copy. Otherwise the
+    /// changed original is kept under a name that the cleanup does not match.
+    fn swap_back(&mut self, error: io::Error, copy: (u64, u64)) -> io::Error {
+        let holds_copy = fs::symlink_metadata(self.path).is_ok_and(|m| (m.dev(), m.ino()) == copy);
+        if holds_copy && swap(&self.temp.path, self.path).is_ok() {
+            return error;
+        }
+        self.temp.armed = false;
+        let kept = kept_path_for(self.path);
+        match fs::rename(&self.temp.path, &kept) {
+            Ok(()) => io::Error::other(format!(
+                "{error}; the changed file is kept at {}",
+                kept.display()
+            )),
+            Err(back) => io::Error::other(format!(
+                "{error}; the changed file is at {} ({back})",
+                self.temp.path.display()
+            )),
+        }
+    }
+
+    /// Removes the temporary file and adds a failure to do so to `result`.
+    fn cleanup<T>(
+        mut self,
+        result: Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let Err(e) = self.temp.remove() else {
+            return result;
+        };
+        let leftover = format!(
+            "the temporary file {} could not be removed: {e}",
+            self.temp.path.display()
+        );
+        Err(match result {
+            Ok(_) => leftover.into(),
+            Err(error) => format!("{error}; {leftover}").into(),
+        })
+    }
 }
 
 /// Check eligibility of a single file for compression.
@@ -539,6 +858,10 @@ pub fn check_eligibility_compress(path: &Path, meta: &fs::Metadata) -> Result<()
     let uid = unsafe { libc::geteuid() };
     if meta.uid() != uid {
         return Err(SkipReason::NotUserOwned);
+    }
+
+    if blocks_replacement(path, meta) {
+        return Err(SkipReason::Locked);
     }
 
     if DarwinMetadataExt::st_flags(meta) & UF_COMPRESSED != 0 {
@@ -650,10 +973,71 @@ pub fn estimate_file(path: &Path, meta: &fs::Metadata) -> Result<FileOutcome, Sk
     })
 }
 
+/// Compresses `src` into the resource fork at `rsrc_path` one block at a time.
+/// Returns the size of the fork, or `None` when the gain is under 4 KB.
+fn write_compressed_fork(
+    src: &mut File,
+    rsrc_path: &Path,
+    raw_len: u64,
+    probe: Probe,
+) -> io::Result<Option<u64>> {
+    let too_large = || io::Error::new(io::ErrorKind::InvalidInput, "file too large to compress");
+    let num_blocks =
+        usize::try_from(raw_len.div_ceil(BLOCK_SIZE as u64)).map_err(|_| too_large())?;
+    let table_len = (num_blocks + 1) * 4;
+
+    let mut rsrc = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(rsrc_path)?;
+    rsrc.write_all(&vec![0u8; table_len])?;
+
+    let scratch_len = unsafe { compression_encode_scratch_buffer_size(COMPRESSION_LZFSE) };
+    let mut scratch = vec![0u8; scratch_len];
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    let mut offset = u32::try_from(table_len).map_err(|_| too_large())?;
+    let mut offsets = Vec::with_capacity(num_blocks + 1);
+    offsets.push(offset);
+
+    let mut remaining = raw_len;
+    while remaining > 0 {
+        probe(Step::WriteData)?;
+        let want = remaining.min(BLOCK_SIZE as u64) as usize;
+        src.read_exact(&mut buf[..want])?;
+        let Some(block) = compress_chunk(&buf[..want], &mut scratch, Codec::Lzfse) else {
+            return Ok(None);
+        };
+        let block_len = u32::try_from(block.len()).map_err(|_| too_large())?;
+        offset = offset.checked_add(block_len).ok_or_else(too_large)?;
+        if u64::from(offset) + 4096 > raw_len {
+            return Ok(None);
+        }
+        rsrc.write_all(&block)?;
+        offsets.push(offset);
+        remaining -= want as u64;
+    }
+
+    let table: Vec<u8> = offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+    rsrc.seek(SeekFrom::Start(0))?;
+    rsrc.write_all(&table)?;
+    rsrc.flush()?;
+    rsrc.sync_all()?;
+    Ok(Some(u64::from(offset)))
+}
+
 /// Compress an individual file following the atomic 4-step pipeline.
 pub fn compress_file(
     path: &Path,
     dry_run: bool,
+) -> Result<FileOutcome, Box<dyn std::error::Error>> {
+    compress_file_probed(path, dry_run, &no_probe)
+}
+
+fn compress_file_probed(
+    path: &Path,
+    dry_run: bool,
+    probe: Probe,
 ) -> Result<FileOutcome, Box<dyn std::error::Error>> {
     let meta = fs::symlink_metadata(path)?;
 
@@ -668,64 +1052,35 @@ pub fn compress_file(
         };
     }
 
-    let data = fs::read(path)?;
-    let raw_len = data.len() as u64;
+    let raw_len = meta.len();
     if raw_len < 4096 {
         return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
     }
 
-    let scratch_len = unsafe { compression_encode_scratch_buffer_size(COMPRESSION_LZFSE) };
-    let mut scratch = vec![0u8; scratch_len];
-    let mut blocks = Vec::new();
+    let (mut replacement, mut source) = Replacement::begin(path, &meta, probe)?;
+    let result = compress_into(&mut replacement, &mut source, &meta, probe);
+    replacement.cleanup(result)
+}
 
-    for chunk in data.chunks(BLOCK_SIZE) {
-        let Some(comp) = compress_chunk(chunk, &mut scratch, Codec::Lzfse) else {
-            return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
-        };
-        blocks.push(comp);
-    }
-
-    let (table, payload) = build_resource_fork_payload(&blocks)?;
-    let encoded_len = (table.len() + payload.len()) as u64;
-
-    if encoded_len + 4096 > raw_len {
-        return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
-    }
+fn compress_into(
+    replacement: &mut Replacement,
+    source: &mut File,
+    meta: &fs::Metadata,
+    probe: Probe,
+) -> Result<FileOutcome, Box<dyn std::error::Error>> {
+    let raw_len = meta.len();
 
     // Step 1: Write to temporary file in same folder
-    let temp_path = temp_path_for(path)?;
-    let temp_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
-    let temp_fd = temp_file.as_raw_fd();
+    let rsrc_path = replacement.temp.path.join("..namedfork").join("rsrc");
+    let Some(encoded_len) = write_compressed_fork(source, &rsrc_path, raw_len, probe)? else {
+        return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
+    };
 
-    // Write resource fork via namedfork
-    let rsrc_path = temp_path.join("..namedfork").join("rsrc");
-    let write_rf = (|| -> Result<(), std::io::Error> {
-        let mut rsrc_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&rsrc_path)?;
-        rsrc_file.write_all(&table)?;
-        rsrc_file.write_all(&payload)?;
-        rsrc_file.flush()?;
-        rsrc_file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_rf {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
-
-    // Write decmpfs header xattr
-    let c_temp = CString::new(temp_path.as_os_str().as_bytes())?;
+    replacement.step(Step::WriteHeader)?;
+    let c_temp = c_path(&replacement.temp.path)?;
     let hdr = decmpfs_header(Codec::Lzfse, raw_len);
     let xattr_decmp = CString::new("com.apple.decmpfs")?;
-    let res = unsafe {
+    check(unsafe {
         setxattr(
             c_temp.as_ptr(),
             xattr_decmp.as_ptr(),
@@ -734,38 +1089,24 @@ pub fn compress_file(
             0,
             XATTR_NOFOLLOW,
         )
-    };
-    if res != 0 {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(std::io::Error::last_os_error()));
-    }
+    })?;
 
-    // Step 2: Copy owner, mode, times, flags, ACL, and extended attributes
-    if let Err(e) = copy_metadata(path, &temp_path, temp_fd, &meta, true) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
+    // Step 2: Copy owner, flags, and extended attributes
+    replacement.copy_attributes(true)?;
 
     // Check actual blocks saved on the written temp file
-    let temp_meta = fs::symlink_metadata(&temp_path)?;
+    let temp_meta = fs::symlink_metadata(&replacement.temp.path)?;
     let orig_blocks = meta.blocks();
     let temp_blocks = temp_meta.blocks();
     if orig_blocks <= temp_blocks || (orig_blocks - temp_blocks) * 512 < 4096 {
-        let _ = fs::remove_file(&temp_path);
         return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
     }
 
     // Step 3: Read temporary file back and compare byte by byte with original
-    if let Err(e) = verify_identical_content(&temp_path, path, raw_len) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
+    replacement.verify(raw_len)?;
 
-    // Step 4: Replace original with renamex_np and RENAME_SWAP, then remove old copy
-    if let Err(e) = swap_and_remove_temp(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
+    // Step 4: Set times, ACL, and mode, then swap and check the original again
+    replacement.finish()?;
 
     let saved_blocks = orig_blocks - temp_blocks;
     let saved_bytes = saved_blocks * 512;
@@ -782,6 +1123,14 @@ pub fn compress_file(
 
 /// Unpack a compressed file back to a normal file using the atomic 4-step pipeline.
 pub fn undo_file(path: &Path, dry_run: bool) -> Result<FileOutcome, Box<dyn std::error::Error>> {
+    undo_file_probed(path, dry_run, &no_probe)
+}
+
+fn undo_file_probed(
+    path: &Path,
+    dry_run: bool,
+    probe: Probe,
+) -> Result<FileOutcome, Box<dyn std::error::Error>> {
     let meta = fs::symlink_metadata(path)?;
 
     if !meta.file_type().is_file() || meta.file_type().is_symlink() {
@@ -793,8 +1142,12 @@ pub fn undo_file(path: &Path, dry_run: bool) -> Result<FileOutcome, Box<dyn std:
         return Ok(FileOutcome::Skipped(SkipReason::NotUserOwned));
     }
 
-    if DarwinMetadataExt::st_flags(&meta) & UF_COMPRESSED == 0 {
+    let flags = DarwinMetadataExt::st_flags(&meta);
+    if flags & UF_COMPRESSED == 0 {
         return Ok(FileOutcome::Skipped(SkipReason::NotCompressed));
+    }
+    if blocks_replacement(path, &meta) {
+        return Ok(FileOutcome::Skipped(SkipReason::Locked));
     }
 
     let orig_blocks = meta.blocks();
@@ -809,74 +1162,338 @@ pub fn undo_file(path: &Path, dry_run: bool) -> Result<FileOutcome, Box<dyn std:
         });
     }
 
-    // Step 1: Write decompressed bytes to plain data fork of temp file
-    let temp_path = temp_path_for(path)?;
-    let mut temp_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
-    let temp_fd = temp_file.as_raw_fd();
-
-    let data = fs::read(path)?;
-    temp_file.write_all(&data)?;
-    temp_file.flush()?;
-    temp_file.sync_all()?;
-
-    // Step 2: Copy owner, mode, times, flags (without UF_COMPRESSED), ACL, xattrs
-    if let Err(e) = copy_metadata(path, &temp_path, temp_fd, &meta, false) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
-
-    // Step 3: Read temporary file back and compare byte by byte with original
-    if let Err(e) = verify_identical_content(&temp_path, path, data.len() as u64) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
-
-    // Step 4: Atomic swap and remove old copy
-    if let Err(e) = swap_and_remove_temp(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(Box::new(e));
-    }
-
-    let new_meta = fs::symlink_metadata(path)?;
+    let (mut replacement, mut source) = Replacement::begin(path, &meta, probe)?;
+    let result = undo_into(&mut replacement, &mut source, len, probe);
+    replacement.cleanup(result)?;
+    let restored_blocks = fs::symlink_metadata(path)?.blocks();
     Ok(FileOutcome::Unpacked {
         original_bytes: len,
         original_blocks: orig_blocks,
-        restored_blocks: new_meta.blocks(),
+        restored_blocks,
     })
 }
 
-/// Recursively traverses `path` and compresses or uncompresses files.
-pub fn process_path<F>(
-    path: &Path,
-    options: &CompressOptions,
-    ignore: &IgnoreStore,
-    cancelled: &AtomicBool,
-    mut on_file: F,
-) -> CompressReport
-where
-    F: FnMut(&Path, &FileOutcome),
-{
-    let mut report = CompressReport {
-        dry_run: options.dry_run,
-        undo: options.undo,
-        ..Default::default()
-    };
+fn undo_into(
+    replacement: &mut Replacement,
+    source: &mut File,
+    len: u64,
+    probe: Probe,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Step 1: Write decompressed bytes to plain data fork of temp file
+    let mut buf = vec![0u8; BLOCK_SIZE];
+    let mut copied = 0u64;
+    loop {
+        probe(Step::WriteData)?;
+        let n = read_full(source, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        replacement.file.write_all(&buf[..n])?;
+        copied += n as u64;
+    }
+    if copied != len {
+        return Err(Box::new(changed()));
+    }
+    replacement.file.sync_all()?;
 
-    if !path.exists() {
-        report.failures.push(CompressFailure {
-            path: path.to_path_buf(),
-            error: "path does not exist".to_string(),
-        });
-        return report;
+    // Step 2: Copy owner, flags (without UF_COMPRESSED), and extended attributes
+    replacement.copy_attributes(false)?;
+
+    // Step 3: Read temporary file back and compare byte by byte with original
+    replacement.verify(len)?;
+
+    // Step 4: Set times, ACL, and mode, then swap and check the original again
+    replacement.finish()?;
+    Ok(())
+}
+
+/// Files that a program holds open for writing, from one `lsof` listing.
+fn open_for_writing(host: &dyn Host) -> Result<HashSet<PathBuf>, String> {
+    let listing = host.run(LSOF, &["-nP", "-w", "-F", "fan"], LSOF_TIMEOUT);
+    if !listing.ok {
+        return Err("could not list the files in use, so none were changed".to_string());
+    }
+    Ok(parse_open_for_writing(&listing.stdout))
+}
+
+fn parse_open_for_writing(listing: &str) -> HashSet<PathBuf> {
+    let mut found = HashSet::new();
+    let mut writing = false;
+    let mut name: Option<&str> = None;
+    let mut flush = |writing: &mut bool, name: &mut Option<&str>| {
+        if let Some(name) = name.take()
+            && *writing
+        {
+            found.insert(PathBuf::from(name));
+        }
+        *writing = false;
+    };
+    for line in listing.lines() {
+        let (tag, rest) = line.split_at_checked(1).unwrap_or(("", ""));
+        match tag {
+            "p" | "f" => flush(&mut writing, &mut name),
+            "a" => writing = rest == "w" || rest == "u",
+            "n" => name = Some(rest),
+            _ => {}
+        }
+    }
+    flush(&mut writing, &mut name);
+    found
+}
+
+/// For a leftover `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp`: the name and the pid.
+fn stale_temp_owner(file_name: &str) -> Option<(&str, u32)> {
+    let rest = file_name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (name, tail) = rest.rsplit_once(".taert-tmp-")?;
+    let mut parts = tail.split('-');
+    let pid = parts.next()?.parse().ok()?;
+    parts.next()?.parse::<u128>().ok()?;
+    parts.next()?.parse::<u64>().ok()?;
+    parts.next().is_none().then_some((name, pid))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let res = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    res == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Removes a temporary file that an earlier run left behind. A file without the
+/// copy mark may be an original that a swap moved there, so it stays.
+fn remove_stale_temp(path: &Path) -> Result<(), String> {
+    let failed =
+        |e: io::Error| format!("could not remove a temporary file from an earlier run: {e}");
+    let meta = fs::symlink_metadata(path).map_err(failed)?;
+    if !meta.file_type().is_file() {
+        return Ok(());
+    }
+    if !has_copy_mark(path) {
+        return Err(
+            "a temporary file from an earlier run may hold the original with changes, \
+             so it was left in place. Compare it with the file beside it and remove the one \
+             you do not need"
+                .to_string(),
+        );
+    }
+    force_remove(path).map_err(failed)
+}
+
+/// What a run needs: commands, folders, and the ignore list.
+pub struct Compressor<'a> {
+    pub host: &'a dyn Host,
+    pub layout: &'a Layout,
+    pub ignore: &'a IgnoreStore,
+}
+
+impl CompressReport {
+    fn record(&mut self, outcome: &FileOutcome) {
+        match *outcome {
+            FileOutcome::Compressed {
+                original_bytes,
+                compressed_bytes,
+                saved_bytes,
+                original_blocks,
+                compressed_blocks,
+                saved_blocks,
+            } => {
+                self.processed_files += 1;
+                self.original_bytes += original_bytes;
+                self.compressed_bytes += compressed_bytes;
+                self.saved_bytes += saved_bytes;
+                self.original_blocks += original_blocks;
+                self.compressed_blocks += compressed_blocks;
+                self.saved_blocks += saved_blocks;
+            }
+            FileOutcome::Unpacked {
+                original_bytes,
+                original_blocks,
+                restored_blocks,
+            } => {
+                self.processed_files += 1;
+                self.original_bytes += original_bytes;
+                self.original_blocks += original_blocks;
+                self.compressed_blocks += restored_blocks;
+            }
+            FileOutcome::Skipped(reason) => self.skipped.record(reason),
+        }
+    }
+}
+
+impl Compressor<'_> {
+    /// Checks the path with the safety gate, then compresses or unpacks the file
+    /// or every file below it. Both the command line and the TUI come here.
+    pub fn process_path<F>(
+        &self,
+        path: &Path,
+        options: &CompressOptions,
+        cancelled: &AtomicBool,
+        mut on_file: F,
+    ) -> Result<CompressReport, SafetyError>
+    where
+        F: FnMut(&Path, &FileOutcome),
+    {
+        let path = Safety::absolute(path);
+        Safety::can_compress_with_host(&path, self.ignore, self.layout, self.host)?;
+        let path = path.canonicalize().unwrap_or(path);
+
+        let mut report = CompressReport {
+            dry_run: options.dry_run,
+            undo: options.undo,
+            ..Default::default()
+        };
+
+        let busy = if options.dry_run {
+            HashSet::new()
+        } else {
+            match open_for_writing(self.host) {
+                Ok(busy) => busy,
+                Err(error) => {
+                    report.failures.push(CompressFailure { path, error });
+                    return Ok(report);
+                }
+            }
+        };
+
+        if path.is_file() {
+            if !options.dry_run
+                && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+            {
+                self.remove_stale_temps(parent, Some(name), &mut report);
+            }
+            self.process_file(&path, options, &busy, &mut report, &mut on_file);
+            return Ok(report);
+        }
+
+        let mut dirs_to_visit = vec![path];
+        while let Some(current_dir) = dirs_to_visit.pop() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if Safety::is_ignored_or_protected(&current_dir, self.ignore)
+                || Safety::is_live_data_path(&current_dir, self.layout)
+            {
+                continue;
+            }
+
+            if !options.dry_run {
+                self.remove_stale_temps(&current_dir, None, &mut report);
+            }
+
+            let entries = match fs::read_dir(&current_dir) {
+                Ok(e) => e,
+                Err(err) => {
+                    report.failures.push(CompressFailure {
+                        path: current_dir,
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let entry_path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+
+                if file_type.is_dir() {
+                    if file_type.is_symlink() || Safety::is_cloud_or_dataless(&entry_path) {
+                        continue;
+                    }
+                    if let Some(refusal) = self.refuse_bundle(&entry_path, &current_dir) {
+                        report.failures.push(refusal);
+                        continue;
+                    }
+                    dirs_to_visit.push(entry_path);
+                } else if file_type.is_file()
+                    && stale_temp_owner(&entry.file_name().to_string_lossy()).is_none()
+                {
+                    self.process_file(&entry_path, options, &busy, &mut report, &mut on_file);
+                }
+            }
+        }
+
+        Ok(report)
     }
 
-    if path.is_file() {
+    /// Compresses each path the TUI selected and sums up the result.
+    pub fn compress_selected(
+        &self,
+        paths: &[PathBuf],
+        cancelled: &AtomicBool,
+        mut on_progress: impl FnMut(usize, &Path),
+    ) -> RemovalReport {
+        let options = CompressOptions::default();
+        let mut result = RemovalReport::default();
+        for (index, path) in paths.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            on_progress(index, path);
+            match self.process_path(path, &options, cancelled, |_, _| {}) {
+                Ok(report) => {
+                    result.freed_bytes += report.saved_bytes;
+                    result.removed_count += report.processed_files;
+                    result
+                        .failures
+                        .extend(report.failures.into_iter().map(|f| RemovalFailure {
+                            path: f.path,
+                            error: f.error,
+                        }));
+                }
+                Err(error) => result.failures.push(RemovalFailure {
+                    path: path.clone(),
+                    error: error.to_string(),
+                }),
+            }
+        }
+        let mut note = format!(
+            "Compressed {} files, freed {} via APFS transparent compression.",
+            result.removed_count,
+            super::bytes::format_bytes(result.freed_bytes)
+        );
+        if cancelled.load(Ordering::Relaxed) {
+            note.push_str(" Cancelled before the end.");
+        }
+        result.notes.push(note);
+        result
+    }
+
+    /// An app bundle met on the way gets the same check as one named on the command line.
+    fn refuse_bundle(&self, dir: &Path, parent: &Path) -> Option<CompressFailure> {
+        let is_bundle = dir
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
+        if !is_bundle || Safety::enclosing_app_bundle(parent).is_some() {
+            return None;
+        }
+        Safety::can_compress_with_host(dir, self.ignore, self.layout, self.host)
+            .err()
+            .map(|error| CompressFailure {
+                path: dir.to_path_buf(),
+                error: error.to_string(),
+            })
+    }
+
+    fn process_file<F>(
+        &self,
+        path: &Path,
+        options: &CompressOptions,
+        busy: &HashSet<PathBuf>,
+        report: &mut CompressReport,
+        on_file: &mut F,
+    ) where
+        F: FnMut(&Path, &FileOutcome),
+    {
         report.scanned_files += 1;
-        let res = if options.undo {
+        let in_use = !busy.is_empty() && path.canonicalize().is_ok_and(|real| busy.contains(&real));
+        let res = if in_use {
+            Ok(FileOutcome::Skipped(SkipReason::OpenForWriting))
+        } else if options.undo {
             undo_file(path, options.dry_run)
         } else {
             compress_file(path, options.dry_run)
@@ -884,146 +1501,120 @@ where
         match res {
             Ok(outcome) => {
                 on_file(path, &outcome);
-                match outcome {
-                    FileOutcome::Compressed {
-                        original_bytes,
-                        compressed_bytes,
-                        saved_bytes,
-                        original_blocks,
-                        compressed_blocks,
-                        saved_blocks,
-                    } => {
-                        report.processed_files += 1;
-                        report.original_bytes += original_bytes;
-                        report.compressed_bytes += compressed_bytes;
-                        report.saved_bytes += saved_bytes;
-                        report.original_blocks += original_blocks;
-                        report.compressed_blocks += compressed_blocks;
-                        report.saved_blocks += saved_blocks;
-                    }
-                    FileOutcome::Unpacked {
-                        original_bytes,
-                        original_blocks,
-                        restored_blocks,
-                    } => {
-                        report.processed_files += 1;
-                        report.original_bytes += original_bytes;
-                        report.original_blocks += original_blocks;
-                        report.compressed_blocks += restored_blocks;
-                    }
-                    FileOutcome::Skipped(reason) => {
-                        report.skipped.record(reason);
-                    }
-                }
+                report.record(&outcome);
             }
-            Err(e) => {
-                report.failures.push(CompressFailure {
-                    path: path.to_path_buf(),
-                    error: e.to_string(),
-                });
-            }
+            Err(e) => report.failures.push(CompressFailure {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            }),
         }
-        return report;
     }
 
-    // Directory traversal
-    let mut dirs_to_visit = vec![path.to_path_buf()];
-
-    while let Some(current_dir) = dirs_to_visit.pop() {
-        if cancelled.load(Ordering::Relaxed) {
-            break;
-        }
-
-        if Safety::is_ignored_or_protected(&current_dir, ignore) {
-            continue;
-        }
-
-        let entries = match fs::read_dir(&current_dir) {
-            Ok(e) => e,
-            Err(err) => {
-                report.failures.push(CompressFailure {
-                    path: current_dir,
-                    error: err.to_string(),
-                });
-                continue;
-            }
+    /// Deletes temporary files left by runs that are gone, for one file or for all of `dir`.
+    fn remove_stale_temps(&self, dir: &Path, only: Option<&OsStr>, report: &mut CompressReport) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
         };
-
         for entry in entries.flatten() {
-            if cancelled.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let entry_path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
+            let file_name = entry.file_name();
+            let Some((name, pid)) =
+                stale_temp_owner(&file_name.to_string_lossy()).map(|(n, p)| (n.to_string(), p))
+            else {
                 continue;
             };
+            if only.is_some_and(|only| only != OsStr::new(&name))
+                || pid == std::process::id()
+                || process_is_alive(pid)
+            {
+                continue;
+            }
+            if let Err(error) = remove_stale_temp(&entry.path()) {
+                report.failures.push(CompressFailure {
+                    path: entry.path(),
+                    error,
+                });
+            }
+        }
+    }
+}
 
+const SAMPLE_FILES: usize = 48;
+
+/// Estimates how many bytes compressing `root` would free: compresses a sample
+/// of its files, weighted by size, in memory and applies the ratio to `total_bytes`.
+fn sampled_saving(root: &Path, total_bytes: u64) -> u64 {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let file_type = meta.file_type();
             if file_type.is_dir() {
-                if !file_type.is_symlink() && !Safety::is_cloud_or_dataless(&entry_path) {
-                    dirs_to_visit.push(entry_path);
-                }
-            } else if file_type.is_file() {
-                report.scanned_files += 1;
-                let res = if options.undo {
-                    undo_file(&entry_path, options.dry_run)
-                } else {
-                    compress_file(&entry_path, options.dry_run)
-                };
-
-                match res {
-                    Ok(outcome) => {
-                        on_file(&entry_path, &outcome);
-                        match outcome {
-                            FileOutcome::Compressed {
-                                original_bytes,
-                                compressed_bytes,
-                                saved_bytes,
-                                original_blocks,
-                                compressed_blocks,
-                                saved_blocks,
-                            } => {
-                                report.processed_files += 1;
-                                report.original_bytes += original_bytes;
-                                report.compressed_bytes += compressed_bytes;
-                                report.saved_bytes += saved_bytes;
-                                report.original_blocks += original_blocks;
-                                report.compressed_blocks += compressed_blocks;
-                                report.saved_blocks += saved_blocks;
-                            }
-                            FileOutcome::Unpacked {
-                                original_bytes,
-                                original_blocks,
-                                restored_blocks,
-                            } => {
-                                report.processed_files += 1;
-                                report.original_bytes += original_bytes;
-                                report.original_blocks += original_blocks;
-                                report.compressed_blocks += restored_blocks;
-                            }
-                            FileOutcome::Skipped(reason) => {
-                                report.skipped.record(reason);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        report.failures.push(CompressFailure {
-                            path: entry_path,
-                            error: e.to_string(),
-                        });
-                    }
-                }
+                dirs.push(entry.path());
+            } else if file_type.is_file() && meta.len() >= 4096 {
+                files.push((entry.path(), meta.len()));
             }
         }
     }
 
-    report
+    let bytes: u64 = files.iter().map(|(_, len)| len).sum();
+    if bytes == 0 {
+        return 0;
+    }
+
+    let step = (bytes / SAMPLE_FILES as u64).max(1);
+    let mut next_pick = step / 2;
+    let mut seen = 0u64;
+    let (mut sampled, mut saved) = (0u64, 0u64);
+    for (path, len) in &files {
+        seen += len;
+        if seen <= next_pick {
+            continue;
+        }
+        next_pick = seen + step;
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            continue;
+        };
+        sampled += len;
+        if let Ok(FileOutcome::Compressed { saved_bytes, .. }) = estimate_file(path, &meta) {
+            saved += saved_bytes;
+        }
+    }
+    if sampled == 0 {
+        return 0;
+    }
+    (total_bytes as f64 * saved as f64 / sampled as f64) as u64
 }
 
 /// Find compression candidates for the TUI (user-owned apps, Homebrew Cellar, Rust toolchains).
 pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
     let mut candidates = Vec::new();
     let uid = unsafe { libc::geteuid() };
+
+    let mut push = |name: String, path: PathBuf, category: &'static str, min_bytes: u64| {
+        let total = super::sizer::DirSizer::measure(&path).bytes;
+        if total <= min_bytes {
+            return false;
+        }
+        let estimate = sampled_saving(&path, total);
+        if estimate == 0 {
+            return false;
+        }
+        candidates.push(CompressCandidate {
+            name,
+            path,
+            category,
+            estimated_saving_bytes: estimate,
+            total_bytes: total,
+            selected: false,
+        });
+        true
+    };
 
     // 1. User-owned app bundles in app roots
     for root in layout.app_roots() {
@@ -1040,19 +1631,7 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "App".to_string());
-                let total = super::sizer::DirSizer::measure(&p).bytes;
-                if total > 5 * 1024 * 1024 {
-                    // Quick estimate around 50%
-                    let est = total / 2;
-                    candidates.push(CompressCandidate {
-                        name,
-                        path: p,
-                        category: "Application",
-                        estimated_saving_bytes: est,
-                        total_bytes: total,
-                        selected: false,
-                    });
-                }
+                push(name, p, "Application", 5 * 1024 * 1024);
             }
         }
     }
@@ -1061,40 +1640,17 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
     let brew_paths = [
         layout.system("opt/homebrew/Cellar"),
         layout.system("usr/local/Cellar"),
-        PathBuf::from("/opt/homebrew/Cellar"),
-        PathBuf::from("/usr/local/Cellar"),
     ];
     for bp in brew_paths {
-        if bp.is_dir() {
-            let total = super::sizer::DirSizer::measure(&bp).bytes;
-            if total > 0 {
-                candidates.push(CompressCandidate {
-                    name: "Homebrew Cellar".to_string(),
-                    path: bp,
-                    category: "Package Manager",
-                    estimated_saving_bytes: total * 6 / 10,
-                    total_bytes: total,
-                    selected: false,
-                });
-                break;
-            }
+        if bp.is_dir() && push("Homebrew Cellar".to_string(), bp, "Package Manager", 0) {
+            break;
         }
     }
 
     // 3. Rust toolchains
     let rustup = layout.user(".rustup/toolchains");
     if rustup.is_dir() {
-        let total = super::sizer::DirSizer::measure(&rustup).bytes;
-        if total > 0 {
-            candidates.push(CompressCandidate {
-                name: "Rust Toolchains".to_string(),
-                path: rustup,
-                category: "Developer Tools",
-                estimated_saving_bytes: total * 65 / 100,
-                total_bytes: total,
-                selected: false,
-            });
-        }
+        push("Rust Toolchains".to_string(), rustup, "Developer Tools", 0);
     }
 
     candidates
@@ -1151,6 +1707,7 @@ pub fn compress_candidates_scan(layout: &Layout) -> CategoryScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::apps::testing::sandbox;
     use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
     use tempfile::tempdir;
 
@@ -1228,6 +1785,8 @@ mod tests {
             );
         }
 
+        let old = (1_600_000_000, 0);
+        set_times(&file, old, old, old);
         let meta_before = fs::symlink_metadata(&file).unwrap();
         let mode_before = meta_before.mode() & 0o7777;
         let mtime_before = meta_before.mtime();
@@ -1252,6 +1811,71 @@ mod tests {
         };
         assert_eq!(n, xattr_val.len() as isize);
         assert_eq!(&read_val[..n as usize], xattr_val);
+    }
+
+    fn set_times(path: &Path, atime: (i64, i64), mtime: (i64, i64), birth: (i64, i64)) {
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: atime.0,
+                tv_nsec: atime.1,
+            },
+            libc::timespec {
+                tv_sec: mtime.0,
+                tv_nsec: mtime.1,
+            },
+        ];
+        assert_eq!(
+            unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) },
+            0
+        );
+        let mut attrs: libc::attrlist = unsafe { std::mem::zeroed() };
+        attrs.bitmapcount = libc::ATTR_BIT_MAP_COUNT;
+        attrs.commonattr = libc::ATTR_CMN_CRTIME;
+        let mut value = libc::timespec {
+            tv_sec: birth.0,
+            tv_nsec: birth.1,
+        };
+        let res = unsafe {
+            libc::setattrlist(
+                c_path.as_ptr(),
+                (&mut attrs as *mut libc::attrlist).cast(),
+                (&mut value as *mut libc::timespec).cast(),
+                std::mem::size_of::<libc::timespec>(),
+                0,
+            )
+        };
+        assert_eq!(res, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    fn times_of(path: &Path) -> [(i64, i64); 3] {
+        let meta = fs::symlink_metadata(path).unwrap();
+        [
+            (meta.atime(), meta.atime_nsec()),
+            (meta.mtime(), meta.mtime_nsec()),
+            (
+                DarwinMetadataExt::st_birthtime(&meta),
+                DarwinMetadataExt::st_birthtime_nsec(&meta),
+            ),
+        ]
+    }
+
+    #[test]
+    fn access_modification_and_birth_times_survive_to_the_nanosecond() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "times.txt", 300_000);
+        set_times(
+            &file,
+            (1_600_000_000, 111_111_111),
+            (1_650_000_000, 222_222_222),
+            (1_500_000_000, 333_333_333),
+        );
+        let before = times_of(&file);
+
+        let outcome = compress_file(&file, false).unwrap();
+
+        assert!(matches!(outcome, FileOutcome::Compressed { .. }));
+        assert_eq!(times_of(&file), before);
     }
 
     #[test]
@@ -1301,16 +1925,326 @@ mod tests {
         }
     }
 
+    const ALL_STEPS: [Step; 9] = [
+        Step::WriteData,
+        Step::WriteHeader,
+        Step::CopyMetadata,
+        Step::Verify,
+        Step::SetTimes,
+        Step::Permissions,
+        Step::BeforeSwap,
+        Step::Swap,
+        Step::AfterSwap,
+    ];
+
+    fn only_file_left(dir: &Path, name: &str) -> bool {
+        let names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names == [name]
+    }
+
+    fn is_compressed(path: &Path) -> bool {
+        let meta = fs::symlink_metadata(path).unwrap();
+        DarwinMetadataExt::st_flags(&meta) & UF_COMPRESSED != 0
+    }
+
+    fn temp_file_in(dir: &Path) -> PathBuf {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(".taert-tmp-"))
+            .expect("a temporary file")
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
     #[test]
     fn failure_at_each_step_leaves_the_original_readable() {
-        let temp = tempdir().unwrap();
-        let file = make_repetitive_file(temp.path(), "safe.txt", 100_000);
-        let orig_bytes = fs::read(&file).unwrap();
+        for step in ALL_STEPS {
+            let temp = tempdir().unwrap();
+            let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+            let orig_bytes = fs::read(&file).unwrap();
+            let fired = std::cell::Cell::new(false);
+            let fail = |at: Step| {
+                if at == step {
+                    fired.set(true);
+                    return Err(io::Error::other("injected"));
+                }
+                Ok(())
+            };
 
-        let meta = fs::symlink_metadata(&file).unwrap();
-        assert!(check_eligibility_compress(&file, &meta).is_ok());
+            let result = compress_file_probed(&file, false, &fail);
+
+            assert!(fired.get(), "{step:?} never ran");
+            assert!(result.is_err(), "{step:?}");
+            assert_eq!(fs::read(&file).unwrap(), orig_bytes, "{step:?}");
+            assert!(!is_compressed(&file), "{step:?}");
+            assert!(only_file_left(temp.path(), "safe.txt"), "{step:?}");
+        }
+    }
+
+    #[test]
+    fn failure_at_each_step_of_an_undo_leaves_the_compressed_file_readable() {
+        for step in ALL_STEPS.into_iter().filter(|s| *s != Step::WriteHeader) {
+            let temp = tempdir().unwrap();
+            let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+            let orig_bytes = fs::read(&file).unwrap();
+            compress_file(&file, false).unwrap();
+            let fired = std::cell::Cell::new(false);
+            let fail = |at: Step| {
+                if at == step {
+                    fired.set(true);
+                    return Err(io::Error::other("injected"));
+                }
+                Ok(())
+            };
+
+            let result = undo_file_probed(&file, false, &fail);
+
+            assert!(fired.get(), "{step:?} never ran");
+            assert!(result.is_err(), "{step:?}");
+            assert_eq!(fs::read(&file).unwrap(), orig_bytes, "{step:?}");
+            assert!(is_compressed(&file), "{step:?}");
+            assert!(only_file_left(temp.path(), "safe.txt"), "{step:?}");
+        }
+    }
+
+    #[test]
+    fn a_failure_halfway_through_the_blocks_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "big.txt", 500_000);
+        let orig_bytes = fs::read(&file).unwrap();
+        let blocks = std::cell::Cell::new(0);
+        let fail = |at: Step| {
+            if at == Step::WriteData {
+                blocks.set(blocks.get() + 1);
+                if blocks.get() == 4 {
+                    return Err(io::Error::other("injected"));
+                }
+            }
+            Ok(())
+        };
+
+        assert!(compress_file_probed(&file, false, &fail).is_err());
 
         assert_eq!(fs::read(&file).unwrap(), orig_bytes);
+        assert!(only_file_left(temp.path(), "big.txt"));
+    }
+
+    #[test]
+    fn a_file_is_compressed_one_block_at_a_time() {
+        let temp = tempdir().unwrap();
+        let size = 8 * 1024 * 1024;
+        let file = make_repetitive_file(temp.path(), "large.txt", size);
+        let blocks = std::cell::Cell::new(0);
+        let count = |at: Step| {
+            if at == Step::WriteData {
+                blocks.set(blocks.get() + 1);
+            }
+            Ok(())
+        };
+
+        let outcome = compress_file_probed(&file, false, &count).unwrap();
+
+        assert!(matches!(outcome, FileOutcome::Compressed { .. }));
+        assert_eq!(blocks.get(), size.div_ceil(BLOCK_SIZE));
+        assert_eq!(fs::read(&file).unwrap().len(), size);
+    }
+
+    #[test]
+    fn a_write_between_the_read_and_the_swap_keeps_the_original() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let write = |at: Step| {
+            if at == Step::BeforeSwap {
+                append(&file, b"appended record\n");
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &write);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&file).unwrap(), expected);
+        assert!(!is_compressed(&file));
+        assert!(only_file_left(temp.path(), "live.log"));
+    }
+
+    #[test]
+    fn a_write_just_after_the_swap_goes_back_to_the_original() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let write = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(temp.path()), b"appended record\n");
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &write);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&file).unwrap(), expected);
+        assert!(!is_compressed(&file));
+        assert!(only_file_left(temp.path(), "live.log"));
+    }
+
+    #[test]
+    fn a_file_replaced_before_the_swap_is_left_alone() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "doc.txt", 300_000);
+        let replace = |at: Step| {
+            if at == Step::BeforeSwap {
+                let other = temp.path().join("new.txt");
+                fs::write(&other, b"saved by an editor").unwrap();
+                fs::rename(&other, &file).unwrap();
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &replace);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"saved by an editor");
+        assert!(only_file_left(temp.path(), "doc.txt"));
+    }
+
+    #[test]
+    fn undo_out_of_space_leaves_no_temporary_file() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "full.txt", 500_000);
+        let orig_bytes = fs::read(&file).unwrap();
+        compress_file(&file, false).unwrap();
+        let blocks = std::cell::Cell::new(0);
+        let fill_the_disk = |at: Step| {
+            if at == Step::WriteData {
+                blocks.set(blocks.get() + 1);
+                if blocks.get() == 4 {
+                    return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+                }
+            }
+            Ok(())
+        };
+
+        let result = undo_file_probed(&file, false, &fill_the_disk);
+
+        assert!(result.is_err());
+        assert!(only_file_left(temp.path(), "full.txt"));
+        assert!(is_compressed(&file));
+        assert_eq!(fs::read(&file).unwrap(), orig_bytes);
+    }
+
+    fn set_flags(path: &Path, flags: u32) {
+        let c_file = c_path(path).unwrap();
+        assert_eq!(unsafe { libc::chflags(c_file.as_ptr(), flags) }, 0);
+    }
+
+    #[test]
+    fn a_file_with_uchg_is_skipped_and_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "locked.txt", 300_000);
+        set_flags(&file, UF_IMMUTABLE);
+
+        let outcome = compress_file(&file, false);
+        let undo = undo_file(&file, false);
+        set_flags(&file, 0);
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert!(matches!(undo.unwrap(), FileOutcome::Skipped(_)));
+        assert!(only_file_left(temp.path(), "locked.txt"));
+    }
+
+    fn deny(file: &Path, rights: &str) {
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", &format!("everyone deny {rights}")])
+            .arg(file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn read_attribute(file: &Path, name: &str) -> Option<Vec<u8>> {
+        let (c_file, c_name) = (c_path(file).unwrap(), CString::new(name).unwrap());
+        let mut value = vec![0u8; 64];
+        let n = unsafe {
+            getxattr(
+                c_file.as_ptr(),
+                c_name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                XATTR_NOFOLLOW,
+            )
+        };
+        (n >= 0).then(|| value[..n as usize].to_vec())
+    }
+
+    fn write_attribute(file: &Path, name: &str, value: &[u8]) {
+        let (c_file, c_name) = (c_path(file).unwrap(), CString::new(name).unwrap());
+        let res = unsafe {
+            setxattr(
+                c_file.as_ptr(),
+                c_name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                XATTR_NOFOLLOW,
+            )
+        };
+        assert_eq!(res, 0);
+    }
+
+    #[test]
+    fn an_acl_that_denies_writing_attributes_keeps_attributes_and_the_acl() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        write_attribute(&file, "com.apple.metadata:kMDItemWhereFroms", b"from-here");
+        write_attribute(&file, "user.tag", b"red");
+        deny(&file, "writeextattr");
+
+        let outcome = compress_file(&file, false).unwrap();
+
+        assert!(matches!(outcome, FileOutcome::Compressed { .. }));
+        assert_eq!(
+            read_attribute(&file, "com.apple.metadata:kMDItemWhereFroms").as_deref(),
+            Some(&b"from-here"[..])
+        );
+        assert_eq!(
+            read_attribute(&file, "user.tag").as_deref(),
+            Some(&b"red"[..])
+        );
+        let acl = unsafe { acl_get_file(c_path(&file).unwrap().as_ptr(), ACL_TYPE_EXTENDED) };
+        assert!(!acl.is_null());
+        unsafe { acl_free(acl) };
+    }
+
+    #[test]
+    fn attributes_that_cannot_be_copied_fail_the_file_and_keep_it() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        write_attribute(&file, "user.tag", b"red");
+        deny(&file, "readextattr");
+        let orig_bytes = fs::read(&file).unwrap();
+
+        let result = compress_file(&file, false);
+
+        assert!(result.is_err());
+        assert!(!is_compressed(&file));
+        assert_eq!(fs::read(&file).unwrap(), orig_bytes);
+        assert!(only_file_left(temp.path(), "acl.txt"));
     }
 
     #[test]
@@ -1357,6 +2291,635 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), orig_bytes);
     }
 
+    fn host_with(ps: &str, lsof: &str) -> crate::core::host::fake::FakeHost {
+        let host = crate::core::host::fake::FakeHost::default();
+        host.reply("/bin/ps", ps);
+        host.reply("/usr/sbin/lsof", lsof);
+        host
+    }
+
+    fn run(
+        layout: &Layout,
+        host: &crate::core::host::fake::FakeHost,
+        path: &Path,
+        options: &CompressOptions,
+    ) -> Result<CompressReport, SafetyError> {
+        let compressor = Compressor {
+            host,
+            layout,
+            ignore: &IgnoreStore::default(),
+        };
+        compressor.process_path(path, options, &AtomicBool::new(false), |_, _| {})
+    }
+
+    fn real_run() -> CompressOptions {
+        CompressOptions::default()
+    }
+
+    #[test]
+    fn lsof_output_gives_the_files_open_for_writing() {
+        let listing = "p1\nf3\nar\nn/read\nf4\naw\nn/write\nf5\nau\nn/both\nf6\nn/name-first\naw\np2\nf1\naw\n";
+
+        let found = parse_open_for_writing(listing);
+
+        let expected: HashSet<PathBuf> = ["/write", "/both", "/name-first"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn only_taert_leftovers_are_told_apart() {
+        assert_eq!(
+            stale_temp_owner(".a b.txt.taert-tmp-123-456789-7.tmp"),
+            Some(("a b.txt", 123))
+        );
+        assert_eq!(stale_temp_owner(".notes.tmp"), None);
+        assert_eq!(stale_temp_owner("a.taert-tmp-1-2-3.tmp"), None);
+        assert_eq!(stale_temp_owner(".a.taert-tmp-x-2-3.tmp"), None);
+        assert_eq!(stale_temp_owner(".a.taert-tmp-1-2-3-4.tmp"), None);
+    }
+
+    #[test]
+    fn a_run_skips_files_open_for_writing_and_compresses_the_rest() {
+        let (_temp, layout) = sandbox();
+        let dir = layout.user("Projects/data");
+        fs::create_dir_all(&dir).unwrap();
+        let busy = make_repetitive_file(&dir, "db.sqlite", 300_000);
+        let idle = make_repetitive_file(&dir, "notes.txt", 300_000);
+        let host = host_with(
+            "    1     0 /sbin/launchd\n",
+            &format!("p9\nf5\naw\nn{}\n", busy.display()),
+        );
+
+        let report = run(&layout, &host, &dir, &real_run()).unwrap();
+
+        assert_eq!(report.skipped.open_for_writing, 1);
+        assert_eq!(report.processed_files, 1);
+        assert!(!is_compressed(&busy));
+        assert!(is_compressed(&idle));
+    }
+
+    #[test]
+    fn a_run_that_cannot_list_open_files_changes_nothing() {
+        let (_temp, layout) = sandbox();
+        let dir = layout.user("Projects/data");
+        fs::create_dir_all(&dir).unwrap();
+        let file = make_repetitive_file(&dir, "notes.txt", 300_000);
+        let host = crate::core::host::fake::FakeHost::default();
+        host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+        host.fail("/usr/sbin/lsof", "lsof broke");
+
+        let report = run(&layout, &host, &dir, &real_run()).unwrap();
+
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.processed_files, 0);
+        assert!(!is_compressed(&file));
+    }
+
+    #[test]
+    fn a_dry_run_does_not_list_open_files() {
+        let (_temp, layout) = sandbox();
+        let dir = layout.user("Projects/data");
+        fs::create_dir_all(&dir).unwrap();
+        make_repetitive_file(&dir, "notes.txt", 300_000);
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let options = CompressOptions {
+            dry_run: true,
+            undo: false,
+        };
+
+        let report = run(&layout, &host, &dir, &options).unwrap();
+
+        assert_eq!(report.processed_files, 1);
+        assert!(!host.ran("/usr/sbin/lsof"));
+    }
+
+    #[test]
+    fn a_running_app_in_the_home_applications_folder_is_left_alone() {
+        let (_temp, layout) = sandbox();
+        let apps = layout.user("Applications");
+        let running = apps.join("Run.app");
+        let idle = apps.join("Idle.app");
+        for bundle in [&running, &idle] {
+            fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        }
+        let in_running = make_repetitive_file(&running.join("Contents"), "data.txt", 300_000);
+        let in_idle = make_repetitive_file(&idle.join("Contents"), "data.txt", 300_000);
+        let host = host_with(
+            &format!(
+                "    1     0 /sbin/launchd\n  500     1 {}/Contents/MacOS/Run\n",
+                running.display()
+            ),
+            "",
+        );
+
+        let report = run(&layout, &host, &apps, &real_run()).unwrap();
+
+        assert!(!is_compressed(&in_running));
+        assert!(is_compressed(&in_idle));
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, running);
+        assert!(report.failures[0].error.contains("running"));
+    }
+
+    #[test]
+    fn a_path_apps_write_to_is_refused_and_skipped_in_a_walk() {
+        let (_temp, layout) = sandbox();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let data = make(&layout.user("Library/Application Support/Foo"));
+        let refused = run(&layout, &host, &data, &real_run());
+        assert_eq!(refused.unwrap_err(), SafetyError::AppDataPath);
+
+        let brew = layout.system("opt/homebrew");
+        let live = make_repetitive_file(&make(&brew.join("var/db")), "store.db", 300_000);
+        let plain = make_repetitive_file(&make(&brew.join("Cellar/foo")), "foo.txt", 300_000);
+        let report = run(&layout, &host, &brew, &real_run()).unwrap();
+
+        assert!(!is_compressed(&live));
+        assert!(is_compressed(&plain));
+        assert_eq!(report.processed_files, 1);
+    }
+
+    fn make(dir: &Path) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        dir.to_path_buf()
+    }
+
+    #[test]
+    fn leftovers_of_finished_runs_are_removed_and_those_of_live_runs_stay() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let dead_pid = dead_pid();
+        let stale = dir.join(format!(".a.txt.taert-tmp-{dead_pid}-1-2.tmp"));
+        let locked = dir.join(format!(".b.txt.taert-tmp-{dead_pid}-1-3.tmp"));
+        let live = dir.join(format!(".c.txt.taert-tmp-{}-1-4.tmp", std::process::id()));
+        for file in [&stale, &locked, &live] {
+            fs::write(file, b"x").unwrap();
+            write_attribute(file, COPY_MARK.to_str().unwrap(), b"");
+        }
+        set_flags(&locked, UF_IMMUTABLE);
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+
+        let report = run(&layout, &host, &dir, &real_run()).unwrap();
+
+        assert!(!stale.exists());
+        assert!(!locked.exists());
+        assert!(live.exists());
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.scanned_files, 0);
+    }
+
+    #[test]
+    fn cancelling_stops_before_the_next_path() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let first = make_repetitive_file(&make(&dir.join("one")), "a.txt", 300_000);
+        let second = make_repetitive_file(&make(&dir.join("two")), "b.txt", 300_000);
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let compressor = Compressor {
+            host: &host,
+            layout: &layout,
+            ignore: &IgnoreStore::default(),
+        };
+        let cancelled = AtomicBool::new(false);
+        let paths = [first.clone(), second.clone()];
+
+        let report = compressor.compress_selected(&paths, &cancelled, |index, _| {
+            if index == 0 {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+        });
+
+        assert!(report.notes[0].contains("Cancelled"));
+        assert!(!is_compressed(&second));
+    }
+
+    #[test]
+    fn a_refused_path_is_reported_as_a_failure_of_the_selection() {
+        let (_temp, layout) = sandbox();
+        let data = make(&layout.user("Library/Application Support/Foo"));
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let compressor = Compressor {
+            host: &host,
+            layout: &layout,
+            ignore: &IgnoreStore::default(),
+        };
+
+        let report = compressor.compress_selected(
+            std::slice::from_ref(&data),
+            &AtomicBool::new(false),
+            |_, _| {},
+        );
+
+        assert_eq!(report.removed_count, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, data);
+    }
+
+    fn make_random_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let data: Vec<u8> = (0..size_bytes)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 24) as u8
+            })
+            .collect();
+        let path = dir.join(name);
+        fs::write(&path, data).unwrap();
+        path
+    }
+
+    #[test]
+    fn candidate_estimates_come_from_sampled_data() {
+        let (_temp, layout) = sandbox();
+        let toolchain = make(&layout.user(".rustup/toolchains/stable/lib"));
+        make_repetitive_file(&toolchain, "libstd.rlib", 6 * 1024 * 1024);
+        let apps = layout.system("Applications");
+        let packed = make(&apps.join("Packed.app/Contents/Resources"));
+        make_random_file(&packed, "movie.bin", 6 * 1024 * 1024);
+        let text = make(&apps.join("Text.app/Contents/Resources"));
+        make_repetitive_file(&text, "strings.txt", 6 * 1024 * 1024);
+
+        let found = find_compress_candidates(&layout);
+
+        let names: Vec<_> = found.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"Rust Toolchains") && names.contains(&"Text"));
+        for candidate in found {
+            assert!(candidate.estimated_saving_bytes > candidate.total_bytes * 8 / 10);
+            assert!(candidate.estimated_saving_bytes <= candidate.total_bytes);
+        }
+    }
+
+    fn lift_acl(path: &Path) {
+        let status = std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn flags_of(path: &Path) -> u32 {
+        DarwinMetadataExt::st_flags(&fs::symlink_metadata(path).unwrap())
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_file_with_uappnd_is_skipped_and_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "append.log", 300_000);
+        set_flags(&file, UF_APPEND);
+        let outcome = compress_file(&file, false);
+        set_flags(&file, 0);
+        compress_file(&file, false).unwrap();
+        set_flags(&file, flags_of(&file) | UF_APPEND);
+        let undo = undo_file(&file, false);
+        set_flags(&file, flags_of(&file) & !UF_APPEND);
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(undo.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert!(only_file_left(temp.path(), "append.log"));
+    }
+
+    #[test]
+    fn a_file_whose_acl_denies_delete_is_skipped_and_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        deny(&file, "delete");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        lift_acl(&file);
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(leftovers, ["acl.txt"]);
+    }
+
+    #[test]
+    fn a_folder_that_denies_deleting_its_files_is_skipped() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        deny(temp.path(), "delete_child");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        lift_acl(temp.path());
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(leftovers, ["acl.txt"]);
+    }
+
+    #[test]
+    fn a_file_in_an_append_only_or_locked_folder_is_skipped_and_leaves_nothing_behind() {
+        for flag in [UF_APPEND, UF_IMMUTABLE] {
+            let temp = tempdir().unwrap();
+            let dir = make(&temp.path().join("ap"));
+            let plain = make_repetitive_file(&dir, "plain.txt", 300_000);
+            let packed = make_repetitive_file(&dir, "packed.txt", 300_000);
+            compress_file(&packed, false).unwrap();
+            set_flags(&dir, flag);
+
+            let outcome = compress_file(&plain, false);
+            let undo = undo_file(&packed, false);
+            let mut leftovers = names_in(&dir);
+            leftovers.sort();
+            set_flags(&dir, 0);
+
+            let locked = FileOutcome::Skipped(SkipReason::Locked);
+            assert_eq!(outcome.unwrap(), locked, "{flag:#x}");
+            assert_eq!(undo.unwrap(), locked, "{flag:#x}");
+            assert_eq!(leftovers, ["packed.txt", "plain.txt"], "{flag:#x}");
+        }
+    }
+
+    #[test]
+    fn an_acl_the_folder_hands_to_new_files_does_not_reach_the_copy() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "plain.txt", 300_000);
+        deny(temp.path(), "delete,file_inherit");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        let acl = unsafe { acl_get_file(c_path(&file).unwrap().as_ptr(), ACL_TYPE_EXTENDED) };
+        let has_acl = !acl.is_null();
+        lift_acl(temp.path());
+
+        assert!(matches!(outcome.unwrap(), FileOutcome::Compressed { .. }));
+        assert_eq!(leftovers, ["plain.txt"]);
+        assert!(!has_acl);
+    }
+
+    #[test]
+    fn a_temporary_file_with_the_append_flag_is_still_removed() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+        let fail = |at: Step| {
+            if at == Step::Verify {
+                set_flags(&temp_file_in(temp.path()), UF_APPEND);
+                return Err(io::Error::other("injected"));
+            }
+            Ok(())
+        };
+
+        assert!(compress_file_probed(&file, false, &fail).is_err());
+
+        assert!(only_file_left(temp.path(), "safe.txt"));
+    }
+
+    #[test]
+    fn a_temporary_file_that_cannot_be_removed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+        let fail = |at: Step| {
+            if at == Step::Verify {
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o555)).unwrap();
+                return Err(io::Error::other("injected"));
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &fail);
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("injected"), "{message}");
+        assert!(message.contains("could not be removed"), "{message}");
+    }
+
+    #[test]
+    fn the_temporary_file_is_private_until_the_swap() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "secret.env", 300_000);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let modes = std::cell::RefCell::new(Vec::new());
+        let look = |at: Step| {
+            if at == Step::Verify {
+                let mode = fs::metadata(temp_file_in(temp.path())).unwrap().mode();
+                modes.borrow_mut().push(mode & 0o777);
+            }
+            Ok(())
+        };
+
+        compress_file_probed(&file, false, &look).unwrap();
+        undo_file_probed(&file, false, &look).unwrap();
+
+        assert_eq!(*modes.borrow(), [0o600, 0o600]);
+        assert_eq!(fs::metadata(&file).unwrap().mode() & 0o777, 0o600);
+    }
+
+    fn kept_files(dir: &Path, expected: &[u8], not: &str) -> Vec<String> {
+        names_in(dir)
+            .into_iter()
+            .filter(|name| name != not && fs::read(dir.join(name)).is_ok_and(|b| b == expected))
+            .collect()
+    }
+
+    #[test]
+    fn a_changed_original_is_kept_when_the_file_is_moved_away_after_the_swap() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let rotate = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(temp.path()), b"appended record\n");
+                fs::rename(&file, temp.path().join("live.log.1")).unwrap();
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &rotate);
+
+        assert!(result.is_err());
+        let kept = kept_files(temp.path(), &expected, "live.log.1");
+        assert_eq!(kept.len(), 1, "{:?}", names_in(temp.path()));
+        assert!(stale_temp_owner(&kept[0]).is_none());
+        assert!(result.unwrap_err().to_string().contains(&kept[0]));
+    }
+
+    #[test]
+    fn a_changed_original_is_kept_when_another_file_took_its_place() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let replace = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(temp.path()), b"appended record\n");
+                let other = temp.path().join("new.log");
+                fs::write(&other, b"saved by an editor").unwrap();
+                fs::rename(&other, &file).unwrap();
+            }
+            Ok(())
+        };
+
+        assert!(compress_file_probed(&file, false, &replace).is_err());
+
+        assert_eq!(fs::read(&file).unwrap(), b"saved by an editor");
+        let kept = kept_files(temp.path(), &expected, "live.log");
+        assert_eq!(kept.len(), 1, "{:?}", names_in(temp.path()));
+        assert!(stale_temp_owner(&kept[0]).is_none());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn a_changed_original_stuck_at_the_temporary_name_survives_a_later_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let file = make_repetitive_file(&dir, "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let write_and_freeze = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(&dir), b"appended record\n");
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &write_and_freeze);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let stuck = temp_file_in(&dir);
+        let left_by_a_gone_run = dir.join(format!(".live.log.taert-tmp-{}-1-2.tmp", dead_pid()));
+        fs::rename(&stuck, &left_by_a_gone_run).unwrap();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let report = run(&layout, &host, &dir, &real_run()).unwrap();
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&*stuck.to_string_lossy())
+        );
+        assert_eq!(fs::read(&left_by_a_gone_run).unwrap(), expected);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.failures[0].path, left_by_a_gone_run);
+    }
+
+    #[test]
+    fn the_copy_mark_never_reaches_the_finished_file() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "mark.txt", 300_000);
+
+        compress_file(&file, false).unwrap();
+        let after_compress = read_attribute(&file, COPY_MARK.to_str().unwrap());
+        undo_file(&file, false).unwrap();
+        let after_undo = read_attribute(&file, COPY_MARK.to_str().unwrap());
+
+        assert_eq!(after_compress, None);
+        assert_eq!(after_undo, None);
+    }
+
+    mod memory {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static BIGGEST: Cell<usize> = const { Cell::new(0) };
+        }
+
+        pub struct Tracker;
+
+        fn note(size: usize) {
+            BIGGEST.with(|biggest| biggest.set(biggest.get().max(size)));
+        }
+
+        unsafe impl GlobalAlloc for Tracker {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                note(layout.size());
+                unsafe { System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                note(new_size);
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+        }
+
+        /// The largest single allocation of this thread since the last call.
+        pub fn take_biggest() -> usize {
+            BIGGEST.with(|biggest| biggest.replace(0))
+        }
+    }
+
+    #[global_allocator]
+    static TRACKER: memory::Tracker = memory::Tracker;
+
+    #[test]
+    fn compressing_and_unpacking_never_hold_the_whole_file_in_memory() {
+        let temp = tempdir().unwrap();
+        let size = 8 * 1024 * 1024;
+        let file = make_repetitive_file(temp.path(), "large.txt", size);
+
+        memory::take_biggest();
+        let compressed = compress_file(&file, false).unwrap();
+        let compress_peak = memory::take_biggest();
+        let unpacked = undo_file(&file, false).unwrap();
+        let undo_peak = memory::take_biggest();
+
+        assert!(matches!(compressed, FileOutcome::Compressed { .. }));
+        assert!(matches!(unpacked, FileOutcome::Unpacked { .. }));
+        assert!(
+            compress_peak < size / 4,
+            "compress allocated {compress_peak}"
+        );
+        assert!(undo_peak < size / 4, "undo allocated {undo_peak}");
+    }
+
+    #[test]
+    fn a_root_with_dots_does_not_skip_the_live_data_check() {
+        let (_temp, layout) = sandbox();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let brew = layout.system("opt/homebrew");
+        let live = make_repetitive_file(&make(&brew.join("var/db")), "store.db", 300_000);
+        let plain = make_repetitive_file(&make(&brew.join("Cellar/foo")), "foo.txt", 300_000);
+
+        let report = run(&layout, &host, &brew.join("Cellar/.."), &real_run()).unwrap();
+
+        assert!(!is_compressed(&live));
+        assert!(is_compressed(&plain));
+        assert_eq!(report.processed_files, 1);
+    }
+
+    #[test]
+    fn a_root_in_the_wrong_letter_case_does_not_skip_the_live_data_check() {
+        let (_temp, layout) = sandbox();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let brew = layout.system("opt/homebrew");
+        let live = make_repetitive_file(&make(&brew.join("var/db")), "store.db", 300_000);
+        let plain = make_repetitive_file(&make(&brew.join("Cellar/foo")), "foo.txt", 300_000);
+
+        let report = run(&layout, &host, &layout.system("opt/HomeBrew"), &real_run()).unwrap();
+
+        assert!(!is_compressed(&live));
+        assert!(is_compressed(&plain));
+        assert_eq!(report.processed_files, 1);
+    }
+
     #[test]
     #[ignore]
     fn live_test_on_signed_app() {
@@ -1370,8 +2933,9 @@ mod tests {
             return;
         };
 
-        let temp = tempdir().unwrap();
-        let dest = temp.path().join("Test.app");
+        let (_sandbox, layout) = sandbox();
+        let dest = layout.user("Applications/Test.app");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
 
         let status = std::process::Command::new("cp")
             .arg("-R")
@@ -1388,13 +2952,14 @@ mod tests {
             dry_run: false,
             undo: false,
         };
-        let _report = process_path(
-            &dest,
-            &options,
-            &IgnoreStore::default(),
-            &cancelled,
-            |_, _| {},
-        );
+        let compressor = Compressor {
+            host: &crate::core::host::MacHost,
+            layout: &layout,
+            ignore: &IgnoreStore::default(),
+        };
+        let _report = compressor
+            .process_path(&dest, &options, &cancelled, |_, _| {})
+            .unwrap();
 
         let verify_status = std::process::Command::new("codesign")
             .args(["--verify", "--deep", "--strict"])

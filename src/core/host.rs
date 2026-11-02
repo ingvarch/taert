@@ -164,10 +164,11 @@ pub mod fake {
     }
 
     impl FakeHost {
-        /// A Mac where `ps` works and only the system runs.
+        /// A Mac where `ps` works, only the system runs, and no file is open.
         pub fn idle() -> Self {
             let host = Self::default();
             host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+            host.reply("/usr/sbin/lsof", "");
             host
         }
 

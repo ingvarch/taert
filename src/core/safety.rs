@@ -58,6 +58,10 @@ pub enum SafetyError {
     OutsideUninstallScope,
     #[error("app is currently running")]
     AppIsRunning,
+    #[error("could not list running programs, so cannot tell whether the app is running")]
+    ProcessListUnavailable,
+    #[error("path is where apps keep data that changes while they run")]
+    AppDataPath,
     #[error(
         "app bundle requires App Management permission: allow terminal in System Settings > Privacy & Security > App Management"
     )]
@@ -616,6 +620,8 @@ impl Safety {
         layout: &Layout,
         host: &dyn Host,
     ) -> Result<(), SafetyError> {
+        let absolute = Self::absolute(path);
+        let path = absolute.as_path();
         if path.as_os_str().is_empty() || path == Path::new("/") {
             return Err(SafetyError::RootPath);
         }
@@ -676,6 +682,10 @@ impl Safety {
             return Err(SafetyError::Ignored);
         }
 
+        if Self::is_live_data_path(path, layout) || Self::is_live_data_path(&canonical, layout) {
+            return Err(SafetyError::AppDataPath);
+        }
+
         let in_home = canonical.starts_with(home) || path.starts_with(home);
         let is_app = Self::is_app_in_app_roots(&canonical, layout)
             || Self::is_app_in_app_roots(path, layout);
@@ -711,17 +721,8 @@ impl Safety {
 
         if let Some(bundle) =
             Self::enclosing_app_bundle(path).or_else(|| Self::enclosing_app_bundle(&canonical))
-            && is_app
         {
-            if let Some(processes) = crate::core::uninstaller::checked_process_table(host) {
-                let bundle_str = bundle.to_string_lossy();
-                for (_pid, _ppid, comm) in processes {
-                    if comm.starts_with(bundle_str.as_ref()) {
-                        return Err(SafetyError::AppIsRunning);
-                    }
-                }
-            }
-
+            Self::check_bundle_not_running(&bundle, host)?;
             if !Self::can_write_inside(&bundle) {
                 return Err(SafetyError::AppManagementPermission);
             }
@@ -730,15 +731,55 @@ impl Safety {
         Ok(())
     }
 
-    /// Check if path is valid to scan as a project root (for purge and analyze)
-    pub fn validate_scan_root(path: &Path) -> Result<PathBuf, SafetyError> {
-        let abs = if path.is_absolute() {
+    /// Folders where apps keep files that change while they run.
+    pub fn is_live_data_path(path: &Path, layout: &Layout) -> bool {
+        let folders = [
+            layout.user("Library/Application Support"),
+            layout.user("Library/Containers"),
+            layout.user("Library/Group Containers"),
+            layout.system("opt/homebrew/var"),
+            layout.system("usr/local/var"),
+            PathBuf::from("/opt/homebrew/var"),
+            PathBuf::from("/usr/local/var"),
+        ];
+        folders.iter().any(|folder| path.starts_with(folder))
+    }
+
+    fn check_bundle_not_running(bundle: &Path, host: &dyn Host) -> Result<(), SafetyError> {
+        let processes = crate::core::uninstaller::checked_process_table(host)
+            .ok_or(SafetyError::ProcessListUnavailable)?;
+        let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
+        let mut names = vec![lower(bundle)];
+        if let Ok(canonical) = bundle.canonicalize() {
+            names.push(lower(&canonical));
+        }
+        let running = processes.iter().any(|(_, _, comm)| {
+            let program = lower(Path::new(comm));
+            names.iter().any(|name| program.starts_with(name))
+        });
+        if running {
+            return Err(SafetyError::AppIsRunning);
+        }
+        Ok(())
+    }
+
+    /// Joins a relative path to the working folder.
+    pub fn absolute(path: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::absolute_in(path, &cwd)
+    }
+
+    pub fn absolute_in(path: &Path, cwd: &Path) -> PathBuf {
+        if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
-        };
+            cwd.join(path)
+        }
+    }
+
+    /// Check if path is valid to scan as a project root (for purge and analyze)
+    pub fn validate_scan_root(path: &Path) -> Result<PathBuf, SafetyError> {
+        let abs = Self::absolute(path);
 
         if Self::has_symlink_component(&abs) {
             return Err(SafetyError::SymlinkDetected);
@@ -812,6 +853,7 @@ impl Safety {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::host::fake::FakeHost;
     use std::fs::File;
     use tempfile::tempdir;
 
@@ -1149,6 +1191,107 @@ mod tests {
 
         let brew = make(&layout.root.join("opt/homebrew/Cellar/foo/1.0/bin/foo"));
         assert_eq!(Safety::can_compress(&brew, &ignore, &layout), Ok(()));
+    }
+
+    fn compress_check(path: &Path, layout: &Layout, host: &FakeHost) -> Result<(), SafetyError> {
+        Safety::can_compress_with_host(path, &IgnoreStore::default(), layout, host)
+    }
+
+    fn running_app(layout: &Layout, folder: &str) -> (PathBuf, FakeHost) {
+        let bundle = make(&layout.user(&format!("{folder}/Foo.app")));
+        make(&bundle.join("Contents/MacOS"));
+        let host = FakeHost::default();
+        host.reply(
+            "/bin/ps",
+            &format!(
+                "    1     0 /sbin/launchd\n  500     1 {}/Contents/MacOS/Foo\n",
+                bundle.display()
+            ),
+        );
+        (bundle, host)
+    }
+
+    fn relative_from_cwd(path: &Path) -> PathBuf {
+        let depth = std::env::current_dir().unwrap().components().count() - 1;
+        let mut relative = PathBuf::new();
+        for _ in 0..depth {
+            relative.push("..");
+        }
+        relative.join(path.strip_prefix("/").unwrap())
+    }
+
+    #[test]
+    fn can_compress_refuses_places_apps_write_to() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+        let places = [
+            layout.user("Library/Application Support/Foo/store"),
+            layout.user("Library/Containers/com.acme.foo/Data"),
+            layout.user("Library/Group Containers/group.acme"),
+            layout.system("opt/homebrew/var/postgres"),
+            layout.system("usr/local/var/log"),
+        ];
+
+        for place in places {
+            make(&place);
+            assert_eq!(
+                compress_check(&place, &layout, &host),
+                Err(SafetyError::AppDataPath),
+                "{}",
+                place.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_relative_path_to_a_running_app_is_refused() {
+        let (_temp, layout) = sandbox();
+        let (bundle, host) = running_app(&layout, "Applications");
+        let relative = relative_from_cwd(&bundle);
+
+        assert!(relative.is_relative());
+        assert_eq!(
+            compress_check(&relative, &layout, &host),
+            Err(SafetyError::AppIsRunning)
+        );
+    }
+
+    #[test]
+    fn a_running_app_is_refused_in_the_home_applications_folder_and_elsewhere() {
+        let (_temp, layout) = sandbox();
+        for folder in ["Applications", "Downloads"] {
+            let (bundle, host) = running_app(&layout, folder);
+
+            assert_eq!(
+                compress_check(&bundle.join("Contents/MacOS"), &layout, &host),
+                Err(SafetyError::AppIsRunning),
+                "{folder}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_process_list_refuses_an_app_bundle() {
+        let (_temp, layout) = sandbox();
+        let (bundle, _) = running_app(&layout, "Applications");
+        let host = FakeHost::default();
+        host.fail("/bin/ps", "ps broke");
+
+        assert_eq!(
+            compress_check(&bundle, &layout, &host),
+            Err(SafetyError::ProcessListUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_relative_path_is_joined_to_the_working_folder() {
+        let absolute = Safety::absolute_in(Path::new("Foo.app"), Path::new("/Applications"));
+
+        assert_eq!(absolute, Path::new("/Applications/Foo.app"));
+        assert_eq!(
+            Safety::absolute_in(Path::new("/opt/x"), Path::new("/Applications")),
+            Path::new("/opt/x")
+        );
     }
 
     #[test]

@@ -135,20 +135,24 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 [`compress.rs`](../src/core/compress.rs) implements transparent APFS file compression utilizing macOS kernel-level decmpfs support:
 
 1. **decmpfs Format & ABI**:
-   - Files are compressed using Apple's `libcompression` framework (LZFSE type 12, with LZVN type 8 fallback).
-   - Data is partitioned into 64 KiB blocks. Each block is compressed independently; if a compressed block does not shrink, the uncompressed block is stored with a literal marker (0x06).
-   - The file's data fork is truncated to 0 bytes, and the compressed chunks along with chunk offsets are written directly to the resource fork stream via `path.join("..namedfork").join("rsrc")`. This bypasses the `setxattr` system call's 4 MB `E2BIG` limit, allowing files of arbitrary size to be compressed.
+   - Files are compressed using Apple's `libcompression` framework with LZFSE (type 12). The code writes no other type.
+   - Data is split into 64 KiB blocks. Each block is compressed on its own. A file whose blocks do not shrink enough to save 4 KB is skipped.
+   - The file is read and compressed one block at a time, so a large file never sits in memory whole. The offset table is written last, once all block sizes are known.
+   - The compressed blocks go to the resource fork stream via `path.join("..namedfork").join("rsrc")`. This bypasses the `setxattr` system call's 4 MB `E2BIG` limit.
    - The `com.apple.decmpfs` extended attribute (16-byte header: magic `0x636d7066`, compression type 12, uncompressed size `u64`) is attached, and BSD flag `UF_COMPRESSED` (`0x0020`) is set via `fchflags`.
+   - Apps that rewrite a compressed file unpack it, and the next update puts back the plain bytes. Run `taert compress` again after app and package updates.
 
 2. **Atomic 4-Step Safety Pipeline**:
-   Lossy or incomplete compression can corrupt executables and data. `compress_file` enforces strict transactional safety:
-   - **Step 1 (Temp file)**: Writes compressed data and metadata to a temporary file (`.taert.compress.<pid>.<salt>`) in the same folder as the target.
-   - **Step 2 (Metadata preservation)**: Mirrors exact permissions (`fchmod`), ownership (`fchown`), access/modification times (`futimens`), flags (`fchflags`), POSIX ACLs (`acl_get_file` / `acl_set_file`), and extended attributes (`listxattr` / `getxattr` / `setxattr`).
-   - **Step 3 (Byte-by-byte readback verification)**: Reads the temporary file back through standard kernel `read()`. The macOS decmpfs filter decompresses the stream on-the-fly. The decompressed bytes are compared against the original file byte-for-byte. If any mismatch or read error occurs, the temporary file is deleted and the original file remains untouched.
-   - **Step 4 (Atomic Swap)**: Performs an atomic swap using macOS `renamex_np(..., RENAME_SWAP)`. Once swapped, the old uncompressed copy (now at the temporary location) is deleted.
+   `compress_file` and `undo_file` build a copy beside the file and swap it in only when it checks out:
+   - **Step 1 (Temp file)**: Writes the data to a temporary file `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp` in the same folder. The file is created with mode `0600`, so no other user can read the copy while it is verified, and any ACL it inherits from the folder is cleared. Then it gets the extended attribute `io.github.ingvarch.taert.copy`, which marks it as taert's copy. A guard removes it on every error, including an undo that runs out of space. The guard clears flags and ACL before it unlinks, and the error names the file if the unlink still fails.
+   - **Step 2 (Metadata)**: Copies ownership (`fchown`) and flags (`fchflags`), then the extended attributes. Any error fails the file and keeps the original.
+   - **Step 3 (Byte-by-byte readback verification)**: Reads the temporary file back through the kernel, which decompresses it, and compares it block by block with the original.
+   - **Step 4 (Times, ACL, mode, swap)**: Sets access and modification times and the birth time after the flag, because setting `UF_COMPRESSED` resets the modification time. Then it removes the copy mark and copies the ACL (after the extended attributes, so an ACL that denies `writeextattr` cannot block them) and the mode.
+   Right before the swap, the original's inode, size, and modification time must equal what they were when the file was opened. Otherwise the file is left as it is. Right after the swap `renamex_np(..., RENAME_SWAP)`, the old file, now at the temporary path, is checked again. If it is unchanged, it is deleted. If it changed, the swap is undone, so a program that wrote to the old inode loses nothing. The swap is undone only if the path still holds the new copy. If the file was renamed away or replaced in the meantime, the changed old file stays beside it as `<name>.taert-changed-<nanos>` and the error names it.
+   The check for open files is one `lsof` listing taken at the start of a run. A program that opens a file after that listing and writes only after the swap is not caught: its writes go to the old file and are lost. The refusals in the next section keep most such files out. Close programs that write to the folder before a long run.
 
 3. **Safe Undo**:
-   `taert compress --undo` reads the decompressed kernel stream, writes it to a temporary file, verifies byte equality, copies metadata (preserving flags with `UF_COMPRESSED` cleared), and atomically swaps it back, restoring a standard plain uncompressed file.
+   `taert compress --undo` copies the decompressed kernel stream to a temporary file block by block, runs the same metadata, verification, and swap steps with `UF_COMPRESSED` cleared.
 
 4. **Eligibility & Skip Rules**:
    A file is skipped without modification if:
@@ -157,14 +161,29 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    - Is an APFS clone sharing blocks with another file (`EF_SHARES_ALL_BLOCKS`).
    - Is a cloud or dataless placeholder (`SF_DATALESS`).
    - Is not owned by the current user.
+   - Has the `uchg`, `schg`, `uappnd`, or `sappnd` flag, or sits in a folder that has one. In an append-only folder taert could create the temporary file but neither swap nor remove it.
+   - Has an ACL that denies `delete`, or sits in a folder whose ACL denies `delete_child`. The swap and the removal of the temporary file would fail.
+   - Sits in a folder whose flags cannot be read.
+   - Is open for writing. One `lsof` listing at the start of the run names these files. If `lsof` fails, the run changes nothing.
    - Net compression savings are less than 4 KB (or file is under 4 KB).
 
+   Temporary files that earlier runs left behind are deleted when their folder is visited, unless the run that made them is still alive. Flags and ACL on such a file are cleared first. This keeps a stale file out of app bundles, where it would break `codesign --strict`.
+   Only a file with the copy mark is deleted. The mark comes off before the swap, so the original never has it, even when a crash or a failed swap back leaves the original at the temporary name. A leftover without the mark is kept and listed as a failure on every run, until you compare it with the file beside it and remove the one you do not need. A crash in one of three short moments leaves an unmarked file, which is listed the same way: right after the temporary file is created and before it is marked, between removing the mark and the swap, and after a swap back before the copy is removed.
+
 5. **Safety Gate (`Safety::can_compress`)**:
-   Compression is strictly limited to safe locations:
+   Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. The path is made absolute before any check, and after the gate passes the walk starts from the real path, so `..` and a wrong letter case cannot get around the later checks. Compression is strictly limited to safe locations:
    - User home directory (`~`, including `~/.rustup`, `~/.cargo/bin`, toolchains).
    - Application bundles in `/Applications` or `~/Applications`.
    - Homebrew prefix (`/opt/homebrew`, `/usr/local`).
-   - Refuses system trees (`/System`, `/usr/bin`, `/sbin`), root trees, running application bundles, and user credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, etc.).
+   - Refuses system trees (`/System`, `/usr/bin`, `/sbin`), root trees, and user credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, etc.).
+   - Refuses the places where apps keep data that changes while they run: `~/Library/Application Support`, `~/Library/Containers`, `~/Library/Group Containers`, `/opt/homebrew/var`, and `/usr/local/var`. A walk skips these folders.
+   - Refuses any app bundle that is running. The check applies to a bundle named on the command line and to each bundle met during a walk, so `~/Applications` is covered. It compares the real path of the bundle with the process table. If `ps` fails, the bundle is refused.
+
+6. **Estimates**:
+   The TUI estimate for an app, the Homebrew Cellar, or the Rust toolchains compresses a sample of 48 files in memory, picked by size across the tree, and applies the saved fraction to the folder size. Candidates that would save nothing are not listed. `taert compress --dry-run` estimates every file the same way.
+
+7. **Tests in CI**:
+   The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. A comment on issue #38 records the runner image of the first run that included the tests of the compress fixes. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
 
 ## APFS Space Accounting
 

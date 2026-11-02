@@ -37,6 +37,7 @@ use super::workspace::{
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
 use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport};
+use crate::core::compress::Compressor;
 use crate::core::docker;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
@@ -479,9 +480,14 @@ impl App {
             match msg {
                 RemovalMessage::Progress(prog) => {
                     if let Screen::Select(ref mut select) = self.screen {
+                        let cancel = match &select.overlay {
+                            ModalOverlay::Removing { cancel, .. } => cancel.clone(),
+                            _ => None,
+                        };
                         select.overlay = ModalOverlay::Removing {
                             progress: prog,
                             spinner_idx: self.removal_spinner,
+                            cancel,
                         };
                     } else if let Screen::Analyze(ref mut analyze) = self.screen {
                         analyze.overlay = AnalyzeOverlay::Deleting {
@@ -675,8 +681,12 @@ impl App {
                         }
                         return;
                     }
-                    ModalOverlay::Removing { .. } => {
-                        // User cannot interrupt removal process
+                    ModalOverlay::Removing { ref cancel, .. } => {
+                        if let Some(cancel) = cancel
+                            && code == KeyCode::Esc
+                        {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
                         return;
                     }
                     ModalOverlay::Outcome(_) => {
@@ -1369,6 +1379,7 @@ impl App {
             select.overlay = ModalOverlay::Removing {
                 progress: initial_prog,
                 spinner_idx: 0,
+                cancel: None,
             };
 
             let (tx, rx) = mpsc::channel();
@@ -1378,44 +1389,25 @@ impl App {
                 (self.layout.clone(), self.host.clone(), self.permanent);
 
             if scan_id == "compress" {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                if let ModalOverlay::Removing { cancel, .. } = &mut select.overlay {
+                    *cancel = Some(cancelled.clone());
+                }
                 thread::spawn(move || {
-                    let mut total_saved = 0u64;
-                    let mut files_compressed = 0usize;
-                    let total_candidates = selected_items.len();
-                    let options = crate::core::compress::CompressOptions {
-                        dry_run: false,
-                        undo: false,
+                    let compressor = Compressor {
+                        host: &*host,
+                        layout: &layout,
+                        ignore: &ignore,
                     };
-                    let cancelled = Arc::new(AtomicBool::new(false));
-
-                    for (idx, item) in selected_items.iter().enumerate() {
+                    let paths: Vec<_> = selected_items.iter().map(|i| i.path.clone()).collect();
+                    let total_count = paths.len();
+                    let report = compressor.compress_selected(&paths, &cancelled, |index, path| {
                         let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
-                            current_index: idx + 1,
-                            total_count: total_candidates,
-                            path: item.path.clone(),
+                            current_index: index + 1,
+                            total_count,
+                            path: path.to_path_buf(),
                         }));
-                        let rep = crate::core::compress::process_path(
-                            &item.path,
-                            &options,
-                            &ignore,
-                            &cancelled,
-                            |_, _| {},
-                        );
-                        total_saved += rep.saved_bytes;
-                        files_compressed += rep.processed_files;
-                    }
-
-                    let report = RemovalReport {
-                        freed_bytes: total_saved,
-                        trashed_bytes: 0,
-                        removed_count: files_compressed,
-                        failures: Vec::new(),
-                        notes: vec![format!(
-                            "Compressed {} files, freed {} via APFS transparent compression.",
-                            files_compressed,
-                            crate::core::bytes::format_bytes(total_saved)
-                        )],
-                    };
+                    });
                     let _ = tx.send(RemovalMessage::Finished(report));
                 });
 
@@ -3122,5 +3114,121 @@ mod tests {
 
         assert_eq!(help_row(&app, "Up one level"), Some("⎋ / ←"));
         assert_eq!(help_row(&app, "Quit explore"), Some("q"));
+    }
+
+    mod compress {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::compress::UF_COMPRESSED;
+        use crate::core::host::fake::FakeHost;
+        use std::os::darwin::fs::MetadataExt;
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        fn bundle_with_file(layout: &Layout, name: &str) -> (PathBuf, PathBuf) {
+            let bundle = layout.system("Applications").join(format!("{name}.app"));
+            let dir = bundle.join("Contents/Resources");
+            std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("strings.txt");
+            let text = "Hello APFS transparent compression!\n".repeat(10_000);
+            std::fs::write(&file, text).unwrap();
+            (bundle, file)
+        }
+
+        fn is_compressed(path: &Path) -> bool {
+            let meta = std::fs::symlink_metadata(path).unwrap();
+            meta.st_flags() & UF_COMPRESSED != 0
+        }
+
+        /// A compress screen with every named app selected, on a fake Mac where `running` apps run.
+        fn prepare(names: &[&str], running: &[&str]) -> (TempDir, App, Vec<(PathBuf, PathBuf)>) {
+            let (temp, layout) = sandbox();
+            let made: Vec<_> = names
+                .iter()
+                .map(|name| bundle_with_file(&layout, name))
+                .collect();
+            let mut ps = "    1     0 /sbin/launchd\n".to_string();
+            for name in running {
+                let bundle = layout.system("Applications").join(format!("{name}.app"));
+                let program = format!("  500     1 {}/Contents/MacOS/{name}\n", bundle.display());
+                ps.push_str(&program);
+            }
+            let host = FakeHost::default();
+            host.reply("/bin/ps", &ps);
+            host.reply("/usr/sbin/lsof", "");
+            let items = made
+                .iter()
+                .map(|(bundle, _)| ScanItem::new(bundle.clone(), 1000, true, false))
+                .collect();
+            let scan = CategoryScan {
+                id: "compress".to_string(),
+                title: "Compress".to_string(),
+                notes: Vec::new(),
+                groups: vec![ToolGroup {
+                    tool: "Applications".to_string(),
+                    items,
+                }],
+            };
+            let mut app = select_app(scan);
+            app.layout = layout;
+            app.host = Arc::new(host);
+            (temp, app, made)
+        }
+
+        fn outcome(app: &App) -> &RemovalReport {
+            let ModalOverlay::Outcome(report) = &select(app).overlay else {
+                panic!("expected the outcome dialog");
+            };
+            report
+        }
+
+        fn run_selection(app: &mut App) {
+            press(app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        #[test]
+        fn the_tui_refuses_a_running_app_and_says_so() {
+            let (_temp, mut app, made) = prepare(&["Run", "Idle"], &["Run"]);
+
+            run_selection(&mut app);
+
+            assert!(!is_compressed(&made[0].1));
+            assert!(is_compressed(&made[1].1));
+            let report = outcome(&app);
+            assert_eq!(report.removed_count, 1);
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].path, made[0].0);
+            assert!(report.failures[0].error.contains("running"));
+        }
+
+        #[test]
+        fn esc_during_a_compress_run_stops_the_worker_before_the_next_path() {
+            let (_temp, mut app, made) = prepare(&["First", "Second"], &[]);
+            let host = FakeHost::default();
+            host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+            host.reply("/usr/sbin/lsof", "");
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let held = std::sync::Mutex::new(held);
+            host.when("/usr/sbin/lsof", move || {
+                let _ = held.lock().unwrap().recv();
+            });
+            app.host = Arc::new(host);
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            app.handle_key(KeyCode::Esc);
+            drop(release);
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            assert!(!is_compressed(&made[1].1));
+            assert!(outcome(&app).notes.iter().any(|n| n.contains("Cancelled")));
+        }
     }
 }
