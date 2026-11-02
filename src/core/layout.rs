@@ -40,8 +40,20 @@ impl Layout {
         self.root.join(relative)
     }
 
+    fn data_dir(&self) -> PathBuf {
+        self.user("Library/Application Support/taert")
+    }
+
     pub fn config_path(&self) -> PathBuf {
-        Config::path_in(&self.user("Library/Application Support/taert"))
+        Config::path_in(&self.data_dir())
+    }
+
+    pub fn ignore_path(&self) -> PathBuf {
+        self.data_dir().join("ignore.toml")
+    }
+
+    pub fn projects_path(&self) -> PathBuf {
+        self.data_dir().join("projects")
     }
 
     pub fn history_path(&self) -> PathBuf {
@@ -111,7 +123,8 @@ impl Layout {
 mod tests {
     use super::*;
     use crate::core::history::HistoryLog;
-    use crate::core::stores::Config;
+    use crate::core::projects_store::ProjectFoldersStore;
+    use crate::core::stores::{Config, IgnoreStore};
 
     fn layout_at(home: &str) -> Layout {
         Layout {
@@ -136,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn ignore_list_and_project_folders_live_next_to_the_config() {
+        let layout = layout_at("/sandbox");
+
+        assert_eq!(
+            layout.ignore_path(),
+            PathBuf::from("/sandbox/Library/Application Support/taert/ignore.toml")
+        );
+        assert_eq!(
+            layout.projects_path(),
+            PathBuf::from("/sandbox/Library/Application Support/taert/projects")
+        );
+    }
+
+    #[test]
     fn an_old_json_config_is_kept_until_a_toml_one_exists() {
         let temp = tempfile::tempdir().unwrap();
         let layout = layout_at(temp.path().to_str().unwrap());
@@ -152,5 +179,10 @@ mod tests {
 
         assert_eq!(Some(layout.config_path()), Config::default_path());
         assert_eq!(layout.history_path(), HistoryLog::default_path());
+        assert_eq!(Some(layout.ignore_path()), IgnoreStore::default_path());
+        assert_eq!(
+            Some(layout.projects_path()),
+            ProjectFoldersStore::default_path()
+        );
     }
 }

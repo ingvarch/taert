@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::app_caches;
 use super::catalog::{Catalog, Target};
 use super::docker::DockerObject;
-use super::host::{Host, MacHost};
+use super::host::Host;
 use super::layout::Layout;
 use super::leftovers::UninstallRole;
 use super::path_utils::prettify_path;
@@ -274,21 +274,18 @@ fn scan_group(
 
 impl CategoryScanner {
     pub fn scan(
+        context: &ScanContext,
         category_id: &str,
         category_title: &str,
         ignore: &IgnoreStore,
         progress_tx: Option<Sender<ScanProgressEvent>>,
         is_cancelled: Option<Arc<AtomicBool>>,
     ) -> CategoryScan {
-        let layout = Layout::current();
         Self::scan_with(
-            &ScanContext {
-                layout: &layout,
-                host: &MacHost,
-            },
+            context,
             category_id,
             category_title,
-            Catalog::targets_for(category_id),
+            Catalog::targets_in(&context.layout.home, category_id),
             ignore,
             progress_tx,
             is_cancelled,
@@ -364,16 +361,26 @@ mod tests {
     use crate::core::cleaner::{Cleaner, RemovalMode};
 
     #[test]
-    fn test_scan_junk_includes_user_logs() {
-        let ignore = IgnoreStore::default();
-        let scan = CategoryScanner::scan("junk", "System Junk", &ignore, None, None);
-        if let Some(home) = dirs::home_dir()
-            && home.join("Library/Logs").exists()
-        {
-            let user_logs = scan.groups.iter().find(|g| g.tool == "User logs");
-            assert!(user_logs.is_some(), "User logs group should be discovered");
-            assert!(!user_logs.unwrap().items.is_empty());
-        }
+    fn a_scan_reads_the_folders_of_its_layout() {
+        let (_temp, layout) = sandbox();
+        fs::create_dir_all(layout.user("Library/Logs")).unwrap();
+        fs::write(layout.user("Library/Logs/app.log"), [1_u8; 8192]).unwrap();
+
+        let scan = CategoryScanner::scan(
+            &ScanContext {
+                layout: &layout,
+                host: &FakeHost::idle(),
+            },
+            "junk",
+            "System Junk",
+            &IgnoreStore::default(),
+            None,
+            None,
+        );
+
+        let logs = rows(&scan, "User logs");
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].path.starts_with(&layout.home));
     }
 
     use crate::core::apps::testing::sandbox;

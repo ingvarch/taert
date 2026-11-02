@@ -27,7 +27,7 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::{expand_tilde, prettify_path};
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
-use crate::core::scanner::{CategoryScan, CategoryScanner};
+use crate::core::scanner::{CategoryScan, CategoryScanner, ScanContext};
 use crate::core::schedule;
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
@@ -44,6 +44,12 @@ fn main() -> ExitCode {
 
     let ignore = IgnoreStore::load_or_default();
     let config = Config::load_or_default();
+    let layout = Layout::current();
+    let context = ScanContext {
+        layout: &layout,
+        host: &MacHost,
+    };
+    let mut out = std::io::stdout();
 
     match cli.command {
         None => {
@@ -72,12 +78,14 @@ fn main() -> ExitCode {
 
         Some(Command::Docker) => handle_docker(&cli, use_plain, &ignore),
 
-        Some(Command::Uninstall(ref args)) => handle_uninstall(args, &cli, use_plain, &ignore),
+        Some(Command::Uninstall(ref args)) => {
+            handle_uninstall(args, &cli, use_plain, &ignore, &context, &mut out)
+        }
 
         Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore),
 
         Some(Command::Slim(ref args)) => {
-            handle_slim(args, &cli, use_plain, &ignore, &MacHost, &Layout::current())
+            handle_slim(args, &cli, use_plain, &ignore, &context, &mut out)
         }
 
         Some(Command::Analyze(ref args)) => {
@@ -86,17 +94,13 @@ fn main() -> ExitCode {
 
         Some(Command::Large(ref args)) => handle_large(args, &cli, use_plain, &ignore),
 
-        Some(Command::Doctor(ref args)) => handle_doctor(args, &cli, use_plain, &ignore, &config),
+        Some(Command::Doctor(ref args)) => {
+            handle_doctor(args, &cli, use_plain, &ignore, &config, &context, &mut out)
+        }
 
-        Some(Command::Startup(ref args)) => handle_startup(
-            args,
-            &cli,
-            use_plain,
-            &ignore,
-            &config,
-            &MacHost,
-            &Layout::current(),
-        ),
+        Some(Command::Startup(ref args)) => {
+            handle_startup(args, &cli, use_plain, &ignore, &config, &context, &mut out)
+        }
 
         Some(Command::Ignore(args)) => handle_ignore(args.action, &ignore),
 
@@ -105,7 +109,7 @@ fn main() -> ExitCode {
         Some(Command::History(ref args)) => handle_history(args, &cli),
 
         Some(Command::Schedule(ref args)) => {
-            handle_schedule(args, &config, &MacHost, &Layout::current())
+            handle_schedule(args, &config, &MacHost, &layout, &mut out)
         }
     }
 }
@@ -132,9 +136,14 @@ fn handle_clean(args: &CleanArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreSto
         None => "clean",
     };
 
+    let layout = Layout::current();
+    let context = ScanContext {
+        layout: &layout,
+        host: &MacHost,
+    };
     let scans = categories
         .into_iter()
-        .map(|(id, title)| CategoryScanner::scan(id, title, ignore, None, None))
+        .map(|(id, title)| CategoryScanner::scan(&context, id, title, ignore, None, None))
         .collect();
     let mut scan = CategoryScan::combined("Clean Review", scans);
 
@@ -298,16 +307,17 @@ fn handle_uninstall(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
-    let layout = Layout::current();
-    let mut installed = apps::find_apps(&layout);
+    let mut installed = apps::find_apps(context.layout);
 
     if args.names.is_empty() {
         if cli.force {
             eprintln!("Error: Name the apps to remove: taert uninstall <name>");
             return ExitCode::FAILURE;
         }
-        return pick_apps_to_uninstall(&mut installed, cli, use_plain, ignore, &layout);
+        return pick_apps_to_uninstall(&mut installed, cli, use_plain, ignore, context, out);
     }
 
     let matching = if cli.force {
@@ -322,23 +332,23 @@ fn handle_uninstall(
             return ExitCode::FAILURE;
         }
     };
-    apps::measure_apps(&mut selected, &MacHost, None, None);
-    let plan = plan_uninstall(&selected, &installed, ignore, &layout);
-    finish_uninstall(plan, cli, use_plain, ignore, &layout)
+    apps::measure_apps(&mut selected, context.host, None, None);
+    let plan = plan_uninstall(&selected, &installed, ignore, context);
+    finish_uninstall(plan, cli, use_plain, ignore, context, out)
 }
 
 fn plan_uninstall(
     selected: &[InstalledApp],
     installed: &[InstalledApp],
     ignore: &IgnoreStore,
-    layout: &Layout,
+    context: &ScanContext,
 ) -> UninstallPlan {
     let request = PlanRequest {
         selected,
         installed,
         ignore,
-        host: &MacHost,
-        layout,
+        host: context.host,
+        layout: context.layout,
     };
     uninstaller::build_plan(&request, None, None)
 }
@@ -348,7 +358,8 @@ fn pick_apps_to_uninstall(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
-    layout: &Layout,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
     if !use_plain && !cli.json && !cli.dry_run {
         let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default())
@@ -357,13 +368,13 @@ fn pick_apps_to_uninstall(
         return run_tui(&mut app);
     }
 
-    apps::measure_apps(installed, &MacHost, None, None);
-    let mut list = apps::app_scan(installed, layout);
+    apps::measure_apps(installed, context.host, None, None);
+    let mut list = apps::app_scan(installed, context.layout);
 
     if cli.json {
         return match serde_json::to_string_pretty(installed) {
             Ok(json) => {
-                println!("{json}");
+                let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -373,9 +384,13 @@ fn pick_apps_to_uninstall(
         };
     }
 
-    PlainRunner::print_scan_with_options(&list, cli.permanent);
+    let _ = write!(
+        out,
+        "{}",
+        PlainRunner::scan_text_with_options(&list, cli.permanent)
+    );
     if cli.dry_run {
-        println!("\nDry run completed. No files were deleted.");
+        let _ = writeln!(out, "\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
     }
     if let Err(error) = PlainRunner::prompt_selection(&mut list) {
@@ -394,11 +409,11 @@ fn pick_apps_to_uninstall(
         .cloned()
         .collect();
     if selected.is_empty() {
-        println!("\nNothing selected for removal.");
+        let _ = writeln!(out, "\nNothing selected for removal.");
         return ExitCode::SUCCESS;
     }
-    let plan = plan_uninstall(&selected, installed, ignore, layout);
-    finish_uninstall(plan, cli, use_plain, ignore, layout)
+    let plan = plan_uninstall(&selected, installed, ignore, context);
+    finish_uninstall(plan, cli, use_plain, ignore, context, out)
 }
 
 fn run_tui(app: &mut ui::app::App) -> ExitCode {
@@ -415,7 +430,7 @@ fn run_uninstall(
     plan: &UninstallPlan,
     cli: &Cli,
     ignore: &IgnoreStore,
-    layout: &Layout,
+    context: &ScanContext,
 ) -> ExitCode {
     let mode = if cli.permanent {
         RemovalMode::Permanent
@@ -426,10 +441,11 @@ fn run_uninstall(
     let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
     let command = format!("uninstall {}", app_names.join(", "));
     let total = plan.scan.selected_items().len();
-    let session = HistoryLog::default_log().start_run(&command, run_mode, Some(total));
+    let session =
+        HistoryLog::new(context.layout.history_path()).start_run(&command, run_mode, Some(total));
     let report = Uninstaller {
-        host: &MacHost,
-        layout,
+        host: context.host,
+        layout: context.layout,
         ignore,
         mode,
     }
@@ -448,7 +464,8 @@ fn finish_uninstall(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
-    layout: &Layout,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
     if plan.apps.is_empty() {
         for note in &plan.notes {
@@ -460,7 +477,7 @@ fn finish_uninstall(
     if cli.json {
         return match serde_json::to_string_pretty(&plan) {
             Ok(json) => {
-                println!("{json}");
+                let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -471,14 +488,18 @@ fn finish_uninstall(
     }
 
     if cli.dry_run {
-        PlainRunner::print_scan_with_options(&plan.scan, cli.permanent);
-        PlainRunner::print_notes(&plan.notes);
-        println!("\nDry run completed. No files were deleted.");
+        let _ = write!(
+            out,
+            "{}",
+            PlainRunner::scan_text_with_options(&plan.scan, cli.permanent)
+        );
+        let _ = write!(out, "{}", PlainRunner::notes_text(&plan.notes));
+        let _ = writeln!(out, "\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
     }
 
     if cli.force {
-        return run_uninstall(&plan, cli, ignore, layout);
+        return run_uninstall(&plan, cli, ignore, context);
     }
 
     if !use_plain {
@@ -487,16 +508,20 @@ fn finish_uninstall(
         return run_tui(&mut app);
     }
 
-    PlainRunner::print_scan_with_options(&plan.scan, cli.permanent);
-    PlainRunner::print_notes(&plan.notes);
+    let _ = write!(
+        out,
+        "{}",
+        PlainRunner::scan_text_with_options(&plan.scan, cli.permanent)
+    );
+    let _ = write!(out, "{}", PlainRunner::notes_text(&plan.notes));
     if let Err(error) = PlainRunner::prompt_selection(&mut plan.scan) {
         eprintln!("Selection error: {error}");
         return ExitCode::FAILURE;
     }
     match PlainRunner::prompt_confirm(&plan.scan) {
-        Ok(true) => run_uninstall(&plan, cli, ignore, layout),
+        Ok(true) => run_uninstall(&plan, cli, ignore, context),
         Ok(false) => {
-            println!("Operation cancelled.");
+            let _ = writeln!(out, "Operation cancelled.");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -571,16 +596,15 @@ fn handle_doctor(
     use_plain: bool,
     ignore: &IgnoreStore,
     config: &Config,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
-    let host = MacHost;
-    let layout = Layout::current();
-
     if cli.json {
-        let snapshot = doctor::collect(&host, args.seconds, &layout, ignore);
+        let snapshot = doctor::collect(context.host, args.seconds, context.layout, ignore);
         let report = doctor::diagnose(&snapshot);
         match serde_json::to_string_pretty(&report) {
             Ok(json) => {
-                println!("{json}");
+                let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -589,9 +613,9 @@ fn handle_doctor(
             }
         }
     } else if use_plain {
-        let snapshot = doctor::collect(&host, args.seconds, &layout, ignore);
+        let snapshot = doctor::collect(context.host, args.seconds, context.layout, ignore);
         let report = doctor::diagnose(&snapshot);
-        doctor::print_plain_report(&report);
+        let _ = write!(out, "{}", doctor::plain_report(&report));
         ExitCode::SUCCESS
     } else {
         let mut app = ui::app::App::new_doctor(ignore.clone(), config.clone(), args.seconds);
@@ -697,9 +721,10 @@ fn handle_startup(
     use_plain: bool,
     ignore: &IgnoreStore,
     config: &Config,
-    host: &dyn Host,
-    layout: &Layout,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
+    let ScanContext { layout, host } = *context;
     if let Some(ref action) = args.action {
         let (label, is_enable) = match action {
             cli::StartupAction::Disable { label } => (label, false),
@@ -724,7 +749,7 @@ fn handle_startup(
 
         match result {
             Ok(msg) => {
-                println!("{msg}");
+                let _ = writeln!(out, "{msg}");
                 ExitCode::SUCCESS
             }
             Err(err) => {
@@ -736,7 +761,7 @@ fn handle_startup(
         let scan = startup::scan_startup(host, layout, ignore, args.all);
         match serde_json::to_string_pretty(&scan.items) {
             Ok(json) => {
-                println!("{json}");
+                let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -746,9 +771,9 @@ fn handle_startup(
         }
     } else if use_plain {
         let scan = startup::scan_startup(host, layout, ignore, args.all);
-        println!("=== macOS Startup Items ===");
+        let _ = writeln!(out, "=== macOS Startup Items ===");
         if scan.items.is_empty() {
-            println!("No startup items found.");
+            let _ = writeln!(out, "No startup items found.");
         } else {
             for item in &scan.items {
                 let app_info = item
@@ -779,7 +804,8 @@ fn handle_startup(
                     })
                     .unwrap_or_else(|| "-".to_string());
 
-                println!(
+                let _ = writeln!(
+                    out,
                     "- {}{app_info} [{}] -> {} ({prog_str})",
                     item.name,
                     item.kind.as_str(),
@@ -788,9 +814,9 @@ fn handle_startup(
             }
         }
         if !scan.notes.is_empty() {
-            println!();
+            let _ = writeln!(out,);
             for note in &scan.notes {
-                println!("Note: {note}");
+                let _ = writeln!(out, "Note: {note}");
             }
         }
         ExitCode::SUCCESS
@@ -923,6 +949,7 @@ fn handle_schedule(
     config: &Config,
     host: &dyn Host,
     layout: &Layout,
+    out: &mut dyn Write,
 ) -> ExitCode {
     let mut config = config.clone();
 
@@ -930,7 +957,7 @@ fn handle_schedule(
         None | Some(ScheduleAction::Show) => {
             let history = HistoryLog::new(layout.history_path());
             let text = schedule::show_schedule(host, layout, &config, &history);
-            print!("{text}");
+            let _ = write!(out, "{text}");
             ExitCode::SUCCESS
         }
         Some(ScheduleAction::Set(ref set_args)) => {
@@ -952,7 +979,7 @@ fn handle_schedule(
                 Ok(()) => {
                     let history = HistoryLog::new(layout.history_path());
                     let text = schedule::show_schedule(host, layout, &config, &history);
-                    print!("{text}");
+                    let _ = write!(out, "{text}");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -963,7 +990,7 @@ fn handle_schedule(
         }
         Some(ScheduleAction::Off) => match schedule::remove_schedule(host, layout, &mut config) {
             Ok(()) => {
-                println!("Scheduled cleanup turned off.");
+                let _ = writeln!(out, "Scheduled cleanup turned off.");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -1037,9 +1064,10 @@ fn handle_slim(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
-    host: &dyn Host,
-    layout: &Layout,
+    context: &ScanContext,
+    out: &mut dyn Write,
 ) -> ExitCode {
+    let ScanContext { layout, host } = *context;
     if !crate::core::slim::is_apple_silicon(host) {
         eprintln!("Slimming universal apps requires an Apple Silicon Mac.");
         return ExitCode::FAILURE;
@@ -1047,7 +1075,7 @@ fn handle_slim(
 
     let skip_developer_id = std::env::var("TAERT_SLIM_ALLOW_ADHOC").is_ok();
     if args.names.is_empty() {
-        return pick_apps_to_slim(cli, use_plain, ignore, host, layout, skip_developer_id);
+        return pick_apps_to_slim(cli, use_plain, ignore, context, skip_developer_id, out);
     }
 
     let installed = apps::find_apps(layout);
@@ -1085,7 +1113,11 @@ fn handle_slim(
                         "error": reason,
                         "app": app.name,
                     });
-                    println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        serde_json::to_string_pretty(&err).unwrap_or_default()
+                    );
                 } else {
                     eprintln!("Error: {} cannot be slimmed: {reason}", app.name);
                 }
@@ -1120,29 +1152,34 @@ fn handle_slim(
                     "path": app.path,
                     "intel_bytes": intel_size,
                 });
-                println!(
+                let _ = writeln!(
+                    out,
                     "{}",
                     serde_json::to_string_pretty(&info).unwrap_or_default()
                 );
             } else {
-                println!(
+                let _ = writeln!(
+                    out,
                     "Would slim {}, saving {} of Intel code. Original will go to Trash.",
                     app.name,
                     format_bytes(intel_size)
                 );
-                println!("Clones share blocks, so the space comes back when the Trash is emptied.");
+                let _ = writeln!(
+                    out,
+                    "Clones share blocks, so the space comes back when the Trash is emptied."
+                );
             }
             continue;
         }
 
         if !cli.force && use_plain {
-            print!("Slim {}? [y/N]: ", app.name);
-            let _ = std::io::stdout().flush();
+            let _ = write!(out, "Slim {}? [y/N]: ", app.name);
+            let _ = out.flush();
             let mut input = String::new();
             if std::io::stdin().read_line(&mut input).is_err()
                 || !input.trim().eq_ignore_ascii_case("y")
             {
-                println!("Cancelled.");
+                let _ = writeln!(out, "Cancelled.");
                 return ExitCode::SUCCESS;
             }
         }
@@ -1156,17 +1193,20 @@ fn handle_slim(
                         "saved_bytes": saved,
                         "success": true,
                     });
-                    println!(
+                    let _ = writeln!(
+                        out,
                         "{}",
                         serde_json::to_string_pretty(&report).unwrap_or_default()
                     );
                 } else {
-                    println!(
+                    let _ = writeln!(
+                        out,
                         "Slimmed {}, saved {} of Intel code. Original was moved to Trash.",
                         app.name,
                         format_bytes(saved)
                     );
-                    println!(
+                    let _ = writeln!(
+                        out,
                         "Clones share blocks, so the space comes back when the Trash is emptied."
                     );
                 }
@@ -1180,7 +1220,11 @@ fn handle_slim(
                         "error": error,
                         "success": false,
                     });
-                    println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        serde_json::to_string_pretty(&err).unwrap_or_default()
+                    );
                 } else {
                     eprintln!(
                         "Error: Slimming {} failed at step {step}: {error}",
@@ -1199,10 +1243,11 @@ fn pick_apps_to_slim(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
-    host: &dyn Host,
-    layout: &Layout,
+    context: &ScanContext,
     skip_developer_id: bool,
+    out: &mut dyn Write,
 ) -> ExitCode {
+    let ScanContext { layout, host } = *context;
     if !use_plain && !cli.json && !cli.dry_run {
         let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default())
             .with_permanent(cli.permanent);
@@ -1272,7 +1317,7 @@ fn pick_apps_to_slim(
 
         return match serde_json::to_string_pretty(&infos) {
             Ok(json) => {
-                println!("{json}");
+                let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -1282,9 +1327,9 @@ fn pick_apps_to_slim(
         };
     }
 
-    PlainRunner::print_scan_with_options(&scan, false);
+    let _ = write!(out, "{}", PlainRunner::scan_text_with_options(&scan, false));
     if cli.dry_run {
-        println!("\nDry run completed. No apps were modified.");
+        let _ = writeln!(out, "\nDry run completed. No apps were modified.");
         return ExitCode::SUCCESS;
     }
 
@@ -1300,7 +1345,7 @@ fn pick_apps_to_slim(
         .collect();
 
     if selected_paths.is_empty() {
-        println!("\nNothing selected for slimming.");
+        let _ = writeln!(out, "\nNothing selected for slimming.");
         return ExitCode::SUCCESS;
     }
 
@@ -1316,7 +1361,8 @@ fn pick_apps_to_slim(
         match crate::core::slim::slim_app(app, &binaries, host, skip_developer_id) {
             Ok(saved) => {
                 total_saved += saved;
-                println!(
+                let _ = writeln!(
+                    out,
                     "Slimmed {}, saved {} of Intel code.",
                     app.name,
                     format_bytes(saved)
@@ -1332,7 +1378,8 @@ fn pick_apps_to_slim(
     }
 
     if total_saved > 0 {
-        println!(
+        let _ = writeln!(
+            out,
             "\nTotal saved: {}. Clones share blocks, so the space comes back when the Trash is emptied.",
             format_bytes(total_saved)
         );
@@ -1344,7 +1391,7 @@ fn pick_apps_to_slim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::apps::testing::sandbox;
+    use crate::core::apps::testing::{fake_app, sandbox};
     use crate::core::host::fake::FakeHost;
 
     fn parse(args: &[&str]) -> Cli {
@@ -1355,41 +1402,94 @@ mod tests {
         format!("{code:?}") == format!("{:?}", ExitCode::SUCCESS)
     }
 
-    fn schedule(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+    /// Runs a handler and returns its exit code with what it wrote.
+    fn capture(run: impl FnOnce(&mut Vec<u8>) -> ExitCode) -> (ExitCode, String) {
+        let mut out = Vec::new();
+        let code = run(&mut out);
+        (code, String::from_utf8(out).unwrap())
+    }
+
+    fn schedule(args: &[&str], host: &FakeHost, layout: &Layout) -> (ExitCode, String) {
         let cli = parse(args);
         let Some(Command::Schedule(ref schedule_args)) = cli.command else {
             panic!("not a schedule command");
         };
-        handle_schedule(
-            schedule_args,
-            &Config::load_from(&layout.config_path()).unwrap(),
-            host,
-            layout,
-        )
+        let config = Config::load_from(&layout.config_path()).unwrap();
+        capture(|out| handle_schedule(schedule_args, &config, host, layout, out))
     }
 
-    fn startup(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+    fn startup(args: &[&str], host: &FakeHost, layout: &Layout) -> (ExitCode, String) {
         let cli = parse(args);
         let Some(Command::Startup(ref startup_args)) = cli.command else {
             panic!("not a startup command");
         };
-        handle_startup(
-            startup_args,
-            &cli,
-            true,
-            &IgnoreStore::default(),
-            &Config::default(),
-            host,
-            layout,
-        )
+        let context = ScanContext { layout, host };
+        capture(|out| {
+            handle_startup(
+                startup_args,
+                &cli,
+                true,
+                &IgnoreStore::default(),
+                &Config::default(),
+                &context,
+                out,
+            )
+        })
     }
 
-    fn slim(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+    fn slim(args: &[&str], host: &FakeHost, layout: &Layout) -> (ExitCode, String) {
         let cli = parse(args);
         let Some(Command::Slim(ref slim_args)) = cli.command else {
             panic!("not a slim command");
         };
-        handle_slim(slim_args, &cli, true, &IgnoreStore::default(), host, layout)
+        let context = ScanContext { layout, host };
+        capture(|out| {
+            handle_slim(
+                slim_args,
+                &cli,
+                true,
+                &IgnoreStore::default(),
+                &context,
+                out,
+            )
+        })
+    }
+
+    fn doctor_report(args: &[&str], host: &FakeHost, layout: &Layout) -> (ExitCode, String) {
+        let cli = parse(args);
+        let Some(Command::Doctor(ref doctor_args)) = cli.command else {
+            panic!("not a doctor command");
+        };
+        let context = ScanContext { layout, host };
+        capture(|out| {
+            handle_doctor(
+                doctor_args,
+                &cli,
+                true,
+                &IgnoreStore::default(),
+                &Config::default(),
+                &context,
+                out,
+            )
+        })
+    }
+
+    fn uninstall(args: &[&str], host: &FakeHost, layout: &Layout) -> (ExitCode, String) {
+        let cli = parse(args);
+        let Some(Command::Uninstall(ref uninstall_args)) = cli.command else {
+            panic!("not an uninstall command");
+        };
+        let context = ScanContext { layout, host };
+        capture(|out| {
+            handle_uninstall(
+                uninstall_args,
+                &cli,
+                true,
+                &IgnoreStore::default(),
+                &context,
+                out,
+            )
+        })
     }
 
     fn apple_silicon_host() -> FakeHost {
@@ -1403,7 +1503,7 @@ mod tests {
         let (_temp, layout) = sandbox();
         let host = FakeHost::default();
 
-        let set = schedule(
+        let (set, shown) = schedule(
             &[
                 "schedule",
                 "set",
@@ -1417,13 +1517,15 @@ mod tests {
         );
 
         assert!(succeeded(set));
+        assert!(shown.contains("Every week: dev, junk, when at least 1 GB can be freed."));
         assert!(host.ran("/bin/launchctl bootstrap"));
         let saved = Config::load_from(&layout.config_path()).unwrap();
         assert_eq!(saved.schedule.unwrap().categories, ["dev", "junk"]);
 
-        let off = schedule(&["schedule", "off"], &host, &layout);
+        let (off, said) = schedule(&["schedule", "off"], &host, &layout);
 
         assert!(succeeded(off));
+        assert_eq!(said, "Scheduled cleanup turned off.\n");
         assert!(host.ran("/bin/launchctl bootout"));
         let saved = Config::load_from(&layout.config_path()).unwrap();
         assert!(saved.schedule.is_none());
@@ -1435,12 +1537,13 @@ mod tests {
         let host = FakeHost::default();
 
         for category in ["purge", "docker"] {
-            let code = schedule(
+            let (code, shown) = schedule(
                 &["schedule", "set", "--categories", category],
                 &host,
                 &layout,
             );
             assert!(!succeeded(code));
+            assert!(shown.is_empty());
         }
 
         assert!(host.calls.lock().unwrap().is_empty());
@@ -1448,21 +1551,54 @@ mod tests {
     }
 
     #[test]
-    fn schedule_show_when_off_succeeds() {
+    fn schedule_show_when_off_says_so() {
         let (_temp, layout) = sandbox();
 
-        let code = schedule(&["schedule"], &FakeHost::default(), &layout);
+        let (code, shown) = schedule(&["schedule"], &FakeHost::default(), &layout);
 
         assert!(succeeded(code));
+        assert_eq!(shown, "Scheduled cleanup is off.\n");
+    }
+
+    fn layout_with_a_launch_agent() -> (tempfile::TempDir, Layout) {
+        let (temp, layout) = sandbox();
+        let folder = layout.user("Library/LaunchAgents");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut agent = plist::Dictionary::new();
+        agent.insert("Label".into(), "com.example.demo".into());
+        agent.insert("Program".into(), "/bin/ls".into());
+        plist::Value::Dictionary(agent)
+            .to_file_xml(folder.join("com.example.demo.plist"))
+            .unwrap();
+        (temp, layout)
     }
 
     #[test]
     fn startup_lists_items_in_plain_and_json() {
-        let (_temp, layout) = sandbox();
+        let (_temp, layout) = layout_with_a_launch_agent();
         let host = FakeHost::idle();
 
-        assert!(succeeded(startup(&["startup", "--plain"], &host, &layout)));
-        assert!(succeeded(startup(&["startup", "--json"], &host, &layout)));
+        let (code, plain) = startup(&["startup", "--plain"], &host, &layout);
+
+        assert!(succeeded(code));
+        assert!(plain.starts_with("=== macOS Startup Items ===\n"));
+        assert!(plain.contains("- demo [user agent] -> enabled (/bin/ls)"));
+
+        let (code, json) = startup(&["startup", "--json"], &host, &layout);
+
+        assert!(succeeded(code));
+        let items: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(items[0]["label"], "com.example.demo");
+    }
+
+    #[test]
+    fn startup_says_when_it_finds_nothing() {
+        let (_temp, layout) = sandbox();
+
+        let (code, plain) = startup(&["startup", "--plain"], &FakeHost::idle(), &layout);
+
+        assert!(succeeded(code));
+        assert!(plain.starts_with("=== macOS Startup Items ===\nNo startup items found.\n"));
     }
 
     #[test]
@@ -1471,12 +1607,13 @@ mod tests {
         let host = FakeHost::idle();
 
         for action in ["enable", "disable"] {
-            let code = startup(
+            let (code, shown) = startup(
                 &["startup", action, "com.nonexistent.service"],
                 &host,
                 &layout,
             );
             assert!(!succeeded(code));
+            assert!(shown.is_empty());
         }
 
         assert!(!host.ran("/bin/launchctl enable"));
@@ -1488,10 +1625,10 @@ mod tests {
         let (_temp, layout) = sandbox();
         let host = FakeHost::idle();
 
-        let code = slim(&["slim", "--dry-run"], &host, &layout);
+        let (code, _) = slim(&["slim", "--dry-run"], &host, &layout);
 
         assert!(!succeeded(code));
-        assert!(!host.ran("/usr/bin/codesign"));
+        assert!(!host.ran("codesign"));
     }
 
     #[test]
@@ -1499,8 +1636,15 @@ mod tests {
         let (_temp, layout) = sandbox();
         let host = apple_silicon_host();
 
-        assert!(succeeded(slim(&["slim", "--json"], &host, &layout)));
-        assert!(succeeded(slim(&["slim", "--dry-run"], &host, &layout)));
+        let (code, json) = slim(&["slim", "--json"], &host, &layout);
+
+        assert!(succeeded(code));
+        assert_eq!(json.trim(), "[]");
+
+        let (code, dry) = slim(&["slim", "--dry-run"], &host, &layout);
+
+        assert!(succeeded(code));
+        assert!(dry.contains("Dry run completed. No apps were modified."));
     }
 
     #[test]
@@ -1508,8 +1652,133 @@ mod tests {
         let (_temp, layout) = sandbox();
         let host = apple_silicon_host();
 
-        let code = slim(&["slim", "NonExistentApp12345"], &host, &layout);
+        let (code, _) = slim(&["slim", "NonExistentApp12345"], &host, &layout);
 
         assert!(!succeeded(code));
+    }
+
+    #[test]
+    fn doctor_describes_the_checks_in_json_and_plain() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+
+        let (code, json) = doctor_report(&["doctor", "--seconds", "2", "--json"], &host, &layout);
+
+        assert!(succeeded(code));
+        let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(report["seconds"], 2);
+        assert!(report["findings"].is_array());
+        assert!(report["checks"].is_array());
+
+        let (code, plain) = doctor_report(&["doctor", "--seconds", "2", "--plain"], &host, &layout);
+
+        assert!(succeeded(code));
+        assert!(plain.starts_with("Checked for 2 seconds."));
+    }
+
+    fn layout_with_the_fixture_app() -> (tempfile::TempDir, Layout) {
+        let (temp, layout) = sandbox();
+        fake_app(
+            &layout.user("Applications/Taert Fixture.app"),
+            "is.taert.fixture",
+            "run",
+        );
+        let cache = layout.user("Library/Caches/is.taert.fixture");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("data"), vec![0_u8; 4096]).unwrap();
+        (temp, layout)
+    }
+
+    fn fixture_is_untouched(layout: &Layout) -> bool {
+        layout.user("Applications/Taert Fixture.app").exists()
+            && layout.user("Library/Caches/is.taert.fixture").exists()
+    }
+
+    #[test]
+    fn uninstall_dry_run_shows_the_plan_and_removes_nothing() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+
+        let (code, shown) = uninstall(
+            &["uninstall", "Taert Fixture", "--dry-run", "--force"],
+            &host,
+            &layout,
+        );
+
+        assert!(succeeded(code));
+        assert!(shown.contains("Taert Fixture.app"));
+        assert!(shown.contains("is.taert.fixture"));
+        assert!(shown.contains("Dry run completed"));
+        assert!(fixture_is_untouched(&layout));
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn uninstall_json_describes_the_plan_and_removes_nothing() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+
+        let (code, json) = uninstall(
+            &["uninstall", "is.taert.fixture", "--json"],
+            &FakeHost::idle(),
+            &layout,
+        );
+
+        assert!(succeeded(code));
+        let plan: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(plan["apps"][0]["app"]["bundle_id"], "is.taert.fixture");
+        assert_eq!(plan["scan"]["groups"][0]["items"][0]["role"], "bundle");
+        assert!(fixture_is_untouched(&layout));
+    }
+
+    #[test]
+    fn uninstall_force_needs_the_whole_name() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+
+        let (code, _) = uninstall(&["uninstall", "taert fix", "--force"], &host, &layout);
+
+        assert!(!succeeded(code));
+        assert!(fixture_is_untouched(&layout));
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn uninstall_force_without_a_name_refuses() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+
+        let (code, _) = uninstall(&["uninstall", "--force"], &host, &layout);
+
+        assert!(!succeeded(code));
+        assert!(fixture_is_untouched(&layout));
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn uninstall_fails_for_an_unknown_name() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+
+        let (code, _) = uninstall(
+            &["uninstall", "No Such App", "--dry-run"],
+            &FakeHost::idle(),
+            &layout,
+        );
+
+        assert!(!succeeded(code));
+    }
+
+    #[test]
+    fn a_forced_uninstall_logs_to_the_history_of_the_layout() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+        host.simulate_trash();
+
+        let (code, _) = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+
+        assert!(succeeded(code));
+        let runs = HistoryLog::new(layout.history_path()).load_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "uninstall Taert Fixture");
+        assert!(!layout.user("Applications/Taert Fixture.app").exists());
     }
 }

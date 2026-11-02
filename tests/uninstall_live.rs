@@ -2,6 +2,7 @@
 //!
 //! Ignored by default, because it talks to the running Mac: it reads the whole
 //! /Applications folder and may ask for permission to use System Events.
+//! It removes files for good (`--permanent`), so nothing reaches the real Trash.
 //! `cargo test --test uninstall_live -- --ignored`
 
 use assert_cmd::Command;
@@ -70,7 +71,7 @@ fn force_removes_the_app_and_everything_it_left() {
     let home = home_with_app();
 
     taert(&home)
-        .args(["uninstall", "Taert Fixture", "--force"])
+        .args(["uninstall", "Taert Fixture", "--force", "--permanent"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Uninstall complete"));
@@ -84,7 +85,7 @@ fn plain_mode_removes_after_yes() {
     let home = home_with_app();
 
     taert(&home)
-        .args(["uninstall", "Taert Fixture", "--plain"])
+        .args(["uninstall", "Taert Fixture", "--plain", "--permanent"])
         .write_stdin("\nyes\n")
         .assert()
         .success();
@@ -116,19 +117,4 @@ fn plain_mode_without_a_choice_removes_nothing() {
         .stdout(predicate::str::contains("Nothing selected"));
 
     assert!(home.path().join("Applications/Taert Fixture.app").exists());
-}
-
-#[test]
-#[ignore = "talks to the running Mac"]
-fn mac_host_trash_moves_file_to_trash() {
-    use taert::core::host::{Host, MacHost};
-    let dir = tempdir().unwrap();
-    let file = dir.path().join("trash_test.txt");
-    fs::write(&file, "test trash content").unwrap();
-    assert!(file.exists());
-
-    let host = MacHost;
-    let res = host.trash(&file);
-    assert!(res.is_ok(), "host.trash failed: {:?}", res);
-    assert!(!file.exists(), "file still exists after trash");
 }

@@ -16,6 +16,7 @@ use super::components::hints::Hint;
 use super::components::list::{ListRow, path_spans};
 use super::components::modal::Modal;
 use super::theme::Theme;
+use crate::core::layout::Layout as MacLayout;
 use crate::core::path_utils::{prettify_path, standardize_path};
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::stores::IgnoreStore;
@@ -39,13 +40,18 @@ pub struct PathListEditorState {
     pub mode: PathListMode,
     pub error_message: Option<String>,
     pub in_preferences: bool,
+    ignore_path: PathBuf,
+    projects_path: PathBuf,
 }
 
 impl PathListEditorState {
-    pub fn new(kind: PathListKind, ignore: &IgnoreStore) -> Self {
+    pub fn new(kind: PathListKind, ignore: &IgnoreStore, layout: &MacLayout) -> Self {
+        let projects_path = layout.projects_path();
         let items = match kind {
             PathListKind::ProtectedPaths => ignore.roots.clone(),
-            PathListKind::ProjectFolders => ProjectFoldersStore::load_or_default().roots,
+            PathListKind::ProjectFolders => {
+                ProjectFoldersStore::load_or_default_at(&projects_path).roots
+            }
         };
 
         Self {
@@ -55,6 +61,8 @@ impl PathListEditorState {
             mode: PathListMode::Normal,
             error_message: None,
             in_preferences: true,
+            ignore_path: layout.ignore_path(),
+            projects_path,
         }
     }
 
@@ -127,11 +135,11 @@ impl PathListEditorState {
             let removed_path = self.items.remove(idx);
             if self.kind == PathListKind::ProtectedPaths {
                 ignore.remove(&removed_path);
-                let _ = ignore.save_to(&IgnoreStore::default_path().unwrap());
+                let _ = ignore.save_to(&self.ignore_path);
             } else if self.kind == PathListKind::ProjectFolders {
-                let mut store = ProjectFoldersStore::load_or_default();
+                let mut store = ProjectFoldersStore::load_or_default_at(&self.projects_path);
                 store.remove(&removed_path);
-                let _ = store.save_to(&ProjectFoldersStore::default_path().unwrap());
+                let _ = store.save_to(&self.projects_path);
             }
             if self.selected_index >= self.items.len() && self.selected_index > 0 {
                 self.selected_index = self.items.len() - 1;
@@ -159,11 +167,11 @@ impl PathListEditorState {
             self.items.push(path_str.clone());
             if self.kind == PathListKind::ProtectedPaths {
                 ignore.add(path_str);
-                let _ = ignore.save_to(&IgnoreStore::default_path().unwrap());
+                let _ = ignore.save_to(&self.ignore_path);
             } else if self.kind == PathListKind::ProjectFolders {
-                let mut store = ProjectFoldersStore::load_or_default();
+                let mut store = ProjectFoldersStore::load_or_default_at(&self.projects_path);
                 store.add(path_str);
-                let _ = store.save_to(&ProjectFoldersStore::default_path().unwrap());
+                let _ = store.save_to(&self.projects_path);
             }
 
             self.selected_index = self.items.len() - 1;
@@ -375,4 +383,59 @@ fn render_remove_dialog(frame: &mut Frame, path_str: &str, theme: &Theme) {
             Span::styled(" Cancel", theme.footnote()),
         ]))
         .render(frame, frame.area(), theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::apps::testing::sandbox;
+
+    fn typed(state: &mut PathListEditorState, path: &str) {
+        state.start_adding();
+        state.mode = PathListMode::Adding(path.to_string());
+    }
+
+    #[test]
+    fn protected_paths_are_saved_in_the_layout() {
+        let (temp, layout) = sandbox();
+        let mut ignore = IgnoreStore::default();
+        let mut state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &layout);
+        let path = temp.path().canonicalize().unwrap().display().to_string();
+
+        typed(&mut state, &path);
+        state.commit_add(&mut ignore);
+
+        let saved = IgnoreStore::load_from(&layout.ignore_path()).unwrap();
+        assert_eq!(saved.roots, [path]);
+
+        state.mode = PathListMode::ConfirmRemove(0);
+        state.confirm_remove(&mut ignore);
+
+        assert!(
+            IgnoreStore::load_from(&layout.ignore_path())
+                .unwrap()
+                .roots
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn project_folders_are_read_from_and_saved_in_the_layout() {
+        let (temp, layout) = sandbox();
+        let first = temp.path().canonicalize().unwrap().display().to_string();
+        ProjectFoldersStore::new(vec![first.clone()])
+            .save_to(&layout.projects_path())
+            .unwrap();
+        let mut ignore = IgnoreStore::default();
+        let mut state = PathListEditorState::new(PathListKind::ProjectFolders, &ignore, &layout);
+        assert_eq!(state.items, std::slice::from_ref(&first));
+
+        let second = layout.home.display().to_string();
+        typed(&mut state, &second);
+        state.commit_add(&mut ignore);
+
+        let saved = ProjectFoldersStore::load_from(&layout.projects_path()).unwrap();
+        assert_eq!(saved.roots, [first, second]);
+        assert!(!layout.ignore_path().exists());
+    }
 }

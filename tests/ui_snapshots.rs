@@ -13,6 +13,7 @@ use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::large_files;
+use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
@@ -40,6 +41,14 @@ use taert::ui::theme::Theme;
 use taert::ui::workspace::{StartConfirmKind, WorkspaceState, render_workspace};
 
 // Theme::new reads the terminal's env, and a snapshot must not depend on it.
+fn no_layout() -> Layout {
+    Layout {
+        home: "/nonexistent/home".into(),
+        root: "/nonexistent/root".into(),
+        user_cache: None,
+    }
+}
+
 fn snapshot_theme() -> Theme {
     Theme::with_env(UiEnv::default())
 }
@@ -572,7 +581,7 @@ fn snapshot_preferences() {
     let theme = snapshot_theme();
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore);
+    let state = PreferencesState::new(&config, &ignore, &no_layout());
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_preferences(f, &state, &theme));
         assert_snapshot!(format!("preferences_{label}"), output);
@@ -588,7 +597,7 @@ fn snapshot_path_list_editor() {
             "/Users/test/Projects/keep-this".to_string(),
         ],
     };
-    let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore);
+    let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));
         assert_snapshot!(format!("path_list_editor_{label}"), output);
@@ -666,7 +675,7 @@ fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
     let (w, h) = WIDE_WINDOW;
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore);
+    let state = PreferencesState::new(&config, &ignore, &no_layout());
 
     let output = render_to_string(w, h, |f| render_preferences(f, &state, &theme));
 
@@ -1762,7 +1771,7 @@ fn preferences_sit_in_frames() {
     let theme = snapshot_theme();
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore);
+    let state = PreferencesState::new(&config, &ignore, &no_layout());
 
     let output = render_to_string(120, 32, |f| render_preferences(f, &state, &theme));
 
@@ -1779,7 +1788,7 @@ fn a_path_list_sits_in_a_frame_even_when_empty() {
     let empty = IgnoreStore::default();
 
     for ignore in [filled, empty] {
-        let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore);
+        let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
         let output = render_to_string(120, 32, |f| render_path_list_editor(f, &state, &theme));
         assert!(output.contains("╭─ Protected paths"), "{output}");
         assert!(output.contains('╰'), "{output}");

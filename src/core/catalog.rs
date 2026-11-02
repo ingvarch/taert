@@ -43,6 +43,13 @@ impl Target {
 
 pub struct Catalog;
 
+fn move_home(path: PathBuf, home: &Path) -> PathBuf {
+    match path.strip_prefix(Safety::home_dir()) {
+        Ok(rest) => home.join(rest),
+        Err(_) => path,
+    }
+}
+
 impl Catalog {
     fn h(rel: &str) -> PathBuf {
         Safety::home_dir().join(rel)
@@ -294,12 +301,23 @@ impl Catalog {
 
     /// The same paths with `home` in place of the real home folder.
     pub fn named_paths_in(home: &Path) -> Vec<PathBuf> {
-        let real = Safety::home_dir();
         Self::named_paths()
             .into_iter()
-            .map(|path| match path.strip_prefix(&real) {
-                Ok(rest) => home.join(rest),
-                Err(_) => path,
+            .map(|path| move_home(path, home))
+            .collect()
+    }
+
+    /// The targets of `category` with `home` in place of the real home folder.
+    pub fn targets_in(home: &Path, category: &str) -> Vec<Target> {
+        Self::targets_for(category)
+            .into_iter()
+            .map(|target| Target {
+                paths: target
+                    .paths
+                    .into_iter()
+                    .map(|path| move_home(path, home))
+                    .collect(),
+                ..target
             })
             .collect()
     }
@@ -326,6 +344,30 @@ mod tests {
         for t in &targets {
             assert!(!t.paths.is_empty());
         }
+    }
+
+    #[test]
+    fn targets_in_move_the_home_folder_of_every_path() {
+        let home = Path::new("/sandbox");
+
+        for category in ["dev", "junk", "ai", "trash"] {
+            let real = Safety::home_dir();
+            for target in Catalog::targets_in(home, category) {
+                assert!(
+                    target.paths.iter().all(|path| !path.starts_with(&real)),
+                    "{category}: {}",
+                    target.tool
+                );
+            }
+        }
+        let homebrew = Catalog::targets_in(home, "dev")
+            .into_iter()
+            .find(|target| target.tool == "Homebrew")
+            .unwrap();
+        assert_eq!(
+            homebrew.paths,
+            vec![PathBuf::from("/sandbox/Library/Caches/Homebrew")]
+        );
     }
 
     #[test]

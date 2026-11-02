@@ -393,7 +393,7 @@ impl PlainRunner {
         print!("{}", Self::notes_text(notes));
     }
 
-    fn notes_text(notes: &[String]) -> String {
+    pub fn notes_text(notes: &[String]) -> String {
         if notes.is_empty() {
             return String::new();
         }

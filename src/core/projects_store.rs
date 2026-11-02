@@ -38,9 +38,14 @@ impl ProjectFoldersStore {
     }
 
     pub fn load_or_default() -> Self {
-        if let Some(p) = Self::default_path()
-            && p.exists()
-            && let Ok(store) = Self::load_from(&p)
+        Self::default_path()
+            .map(|path| Self::load_or_default_at(&path))
+            .unwrap_or_default()
+    }
+
+    pub fn load_or_default_at(path: &Path) -> Self {
+        if path.exists()
+            && let Ok(store) = Self::load_from(path)
         {
             return store;
         }

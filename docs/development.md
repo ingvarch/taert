@@ -62,7 +62,11 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 
 `cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
 
-Tests never read or write your real taert files, launchd, Trash, or `/Applications`. They use a temporary `Layout` and the fake `Host`. Code that saves config or history takes its path from the `Layout` it gets (`config_path()`, `history_path()`). A test of the binary sets `HOME` to a temporary folder and runs only commands that read or that write inside it. Commands that call `launchctl`, `osascript`, or `codesign` are tested through the fake `Host` in `src/main.rs`. After the tests, CI fails if `~/.config/taert`, `~/Library/Application Support/taert`, or a loaded `io.github.ingvarch.taert.schedule` agent exists.
+Unit tests and TUI tests use a temporary `Layout` and the fake `Host`, so they do not touch your taert files, launchd, Trash, or `/Applications`. Code that saves config, history, the ignore list, or project folders takes its path from the `Layout` it gets (`config_path()`, `history_path()`, `ignore_path()`, `projects_path()`). Commands that call `launchctl`, `osascript`, or `codesign` (schedule, startup, slim, doctor, uninstall) have their handlers in `src/main.rs` take a `Host`, a `Layout`, and a writer, and they are tested with the fake `Host` there.
+
+A test of the binary sets `HOME` to a temporary folder and writes only inside it. The binary has no fake `Host`, so these tests run only commands that do not call `launchctl` or `osascript`. The `clean` and `large` tests still read the real `/Applications` and run read-only tools such as `ps`. The ignored live tests use the real Mac on purpose and remove files for good, so nothing reaches the real Trash.
+
+After the tests, CI fails if `~/.config/taert`, `~/Library/Application Support/taert`, the file `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`, or a loaded `io.github.ingvarch.taert.schedule` agent exists.
 
 Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table. A test of the binary has no fake `Host`, so it starts `/bin/sleep` with a bundle path as `arg0`: `ps` lists that path, and nothing runs from a bundle.
 

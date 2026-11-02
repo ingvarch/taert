@@ -12,13 +12,12 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use super::bytes::format_bytes;
-use super::catalog::{Catalog, Target};
+use super::catalog::Catalog;
 use super::cleaner::{Cleaner, RemovalMode};
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use super::history::{HistoryLog, ItemOutcome, OutcomeKind, RunRecord};
 use super::host::Host;
 use super::layout::Layout;
-use super::safety::Safety;
 use super::scanner::{CategoryScanner, ScanContext, ScanItem};
 use super::stores::{Config, IgnoreStore, ScheduleConfig, ScheduleSkip};
 
@@ -471,32 +470,6 @@ pub fn show_schedule(
     out
 }
 
-/// Returns catalog targets mapped into `layout.home` for tests or real home folder.
-pub fn targets_for_category(category: &str, layout: &Layout) -> Vec<Target> {
-    let targets = Catalog::targets_for(category);
-    if layout.home == Safety::home_dir() {
-        targets
-    } else {
-        let real = Safety::home_dir();
-        targets
-            .into_iter()
-            .map(|t| Target {
-                tool: t.tool,
-                paths: t
-                    .paths
-                    .into_iter()
-                    .map(|p| match p.strip_prefix(&real) {
-                        Ok(rest) => layout.home.join(rest),
-                        Err(_) => p,
-                    })
-                    .collect(),
-                selected_by_default: t.selected_by_default,
-                contents_only: t.contents_only,
-            })
-            .collect()
-    }
-}
-
 /// Unattended background cleanup execution (`taert schedule run`).
 /// Prints nothing to stdout/stderr and never opens the TUI.
 pub fn run_scheduled(
@@ -518,7 +491,7 @@ pub fn run_scheduled(
     };
 
     // 2. Scan configured categories
-    let ignore = IgnoreStore::load_or_default();
+    let ignore = IgnoreStore::load_from(&layout.ignore_path()).unwrap_or_default();
     let context = ScanContext { layout, host };
     let mut all_items: Vec<ScanItem> = Vec::new();
 
@@ -527,7 +500,7 @@ pub fn run_scheduled(
             &context,
             cat,
             category_title(cat),
-            targets_for_category(cat, layout),
+            Catalog::targets_in(&layout.home, cat),
             &ignore,
             None,
             None,
@@ -761,6 +734,7 @@ mod tests {
         let result = run_scheduled(&host, &layout, &mut config, Some(&lock_path));
         assert!(result.is_ok());
         assert!(!layout.history_path().exists());
+        assert!(!layout.config_path().exists());
     }
 
     #[test]
@@ -880,5 +854,35 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].mode, "schedule");
         assert!(runs[0].completed);
+    }
+
+    #[test]
+    fn run_keeps_rows_the_ignore_list_of_the_layout_protects() {
+        let (_temp, layout) = sandbox();
+        let homebrew = layout.user("Library/Caches/Homebrew");
+        fs::create_dir_all(&homebrew).unwrap();
+        fs::write(homebrew.join("cache.tar.gz"), vec![0u8; 8192]).unwrap();
+        IgnoreStore::new(vec![homebrew.display().to_string()])
+            .save_to(&layout.ignore_path())
+            .unwrap();
+        let mut config = Config {
+            schedule: Some(ScheduleConfig {
+                every: ScheduleFrequency::Week,
+                categories: vec!["dev".to_string()],
+                min_reclaim: 1024,
+                last_skip: None,
+            }),
+            ..Default::default()
+        };
+
+        run_scheduled(
+            &FakeHost::idle(),
+            &layout,
+            &mut config,
+            Some(&layout.user("schedule.lock")),
+        )
+        .unwrap();
+
+        assert!(homebrew.join("cache.tar.gz").exists());
     }
 }
