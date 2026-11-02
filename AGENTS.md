@@ -17,6 +17,7 @@ Read [docs/development.md](docs/development.md) and [docs/architecture.md](docs/
 ## Tests
 
 - Test first: write a failing test, check that it fails for the reason you expect, then write the least code that passes.
+- If a test cannot be written the way the issue says, because the output or the code is not what the issue expects, stop and report it. Never weaken an assertion to a word that matches by chance.
 - Tests use the fake `Host` and a temporary `Layout`. No test reads or writes the real `~/.config/taert`, `~/Library/Application Support/taert`, launchd, Trash, or `/Applications`.
 - A test of the binary sets `HOME` to a temporary folder and runs only commands that read, or that write inside that folder.
 - `cargo-insta` is not installed. Update snapshots with `INSTA_UPDATE=always cargo test --all-targets`, read the `.snap` changes with `git diff`, and leave no `.snap.new` files.
