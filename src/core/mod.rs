@@ -26,6 +26,7 @@ pub mod schedule;
 pub mod sizer;
 pub mod slim;
 pub mod startup;
+pub mod status;
 pub mod stores;
 pub mod sysinfo;
 pub mod telemetry;

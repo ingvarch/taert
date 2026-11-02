@@ -23,7 +23,7 @@ taert
 - **Startup Items**: Review launch agents, launch daemons, and classic login items. Shows the owning app, service kind, live CPU% and memory if active, and whether the service is enabled, disabled, or broken (missing executable on disk). On wide terminals (≥100 columns), details appear in a side card. `Space` toggles an item (opens a confirmation modal naming the owning app before anything is switched off) or removes a broken user agent plist. Apple system services are hidden by default and read-only. See [Startup Items](#startup-items-taert-startup) for what counts as Apple's.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and deletion via `D` or `Backspace` (offering "Move to Trash" by default or "Delete Permanently").
 - **Large Files**: Flat list of the largest and oldest files and packages across your home folder (or any given path) to answer "what big things did I forget about?". Shows item name, enclosing top-level folder, size, and last used date (queried via Spotlight, fallback to modified date). `⇧S`, `⇧N`, and `⇧D` sort by size, name, or last used date. Filter interactively with `/`, reveal in Finder with `O`, and select with `Space`. Selected items move to the Trash upon confirmation.
-- **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights.
+- **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights. `taert status` prints the same data once.
 
 Every screen shows its sections in colored frames. While taert scans or measures, a framed card in the middle of the window shows the progress.
 
@@ -281,6 +281,76 @@ taert doctor --json
 - **Thermal throttling**: Detects thermal or performance warnings recorded by the system.
 - **Network traffic**: Highlights background processes transferring data above 1 MB/s over the observation window.
 - **Broken startup items**: Flags launch agents or daemons whose target executable files no longer exist. It suggests `taert startup disable` only for an item taert can switch. For any other item it says why taert leaves it alone.
+
+### System Status (`taert status`)
+
+```bash
+# Interactive TUI screen
+taert status
+
+# Non-interactive plain text output
+taert status --plain
+
+# Machine-readable JSON output
+taert status --json
+```
+
+Plain text output:
+
+```text
+Health:   All clear
+CPU:      12.4%
+Memory:   18.2 GB of 32.0 GB used, pressure Normal
+Disk:     118.6 GB of 994.7 GB available
+Battery:  87%, charging
+Top processes:
+  Safari  12.4%  1.2 GB
+  node  8.0%  600 MB
+  Finder  1.1%  120 MB
+```
+
+Shortened `--json` output:
+
+```json
+{
+  "schema_version": 1,
+  "collected_at": "2026-11-01T13:40:00Z",
+  "health": {
+    "severity": "good",
+    "message": "All clear"
+  },
+  "machine": {
+    "chip": "Apple M4 Pro",
+    "macos_version": "27.0.1"
+  },
+  "memory": {
+    "total_bytes": 32000000000,
+    "app_bytes": 18200000000,
+    "pressure": "Normal"
+  },
+  "storage": {
+    "mount_point": "/",
+    "total_bytes": 994700000000,
+    "available_bytes": 118600000000
+  },
+  "live": {
+    "cpu": {
+      "usage_percent": 12.4
+    },
+    "power": {
+      "charge_percent": 87,
+      "source": "Charging"
+    },
+    "processes": []
+  }
+}
+```
+
+A value is `null` when it could not be read, or when the Mac has no such part, such as a battery on desktop Macs.
+
+When a reading fails, notes are printed to stderr, never to stdout.
+
+Exit code is 0 on success. The command exits with code 1 if writing fails or if the report is unusable (when memory, storage, and CPU load are all missing).
 
 ### Startup Items (`taert startup`)
 

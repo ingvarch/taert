@@ -191,6 +191,12 @@ impl App {
         app
     }
 
+    pub fn new_status(ignore: IgnoreStore, config: Config) -> Self {
+        let mut app = Self::new(ignore, config);
+        app.open(Screen::SystemStatus(Box::default()));
+        app
+    }
+
     pub fn open_doctor(&mut self, seconds: u64) {
         let (tx, rx) = mpsc::channel();
         let host = self.host.clone();

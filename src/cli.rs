@@ -58,6 +58,9 @@ pub enum Command {
     /// Explain what is slowing the Mac down
     Doctor(DoctorArgs),
 
+    /// Show a live snapshot of CPU, memory, storage, battery, processes, and network
+    Status,
+
     /// Review and switch off login and background items
     Startup(StartupArgs),
 

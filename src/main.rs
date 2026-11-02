@@ -17,7 +17,7 @@ use crate::cli::{
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalMode, RemovalReport};
-use crate::core::date_utils::{format_system_time, parse_rfc3339};
+use crate::core::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
@@ -31,6 +31,7 @@ use crate::core::scanner::{CategoryScan, CategoryScanner, ScanContext};
 use crate::core::schedule;
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
+use crate::core::status;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 use crate::plain::{Console, PlainRunner};
@@ -113,6 +114,8 @@ fn main() -> ExitCode {
         Some(Command::Doctor(ref args)) => {
             handle_doctor(args, &cli, use_plain, &ignore, &config, &context, console)
         }
+
+        Some(Command::Status) => handle_status(&cli, use_plain, &config, &ignore, console),
 
         Some(Command::Startup(ref args)) => {
             handle_startup(args, &cli, use_plain, &ignore, &config, &context, console)
@@ -734,6 +737,39 @@ fn handle_doctor(
         ExitCode::SUCCESS
     } else {
         let mut app = ui::app::App::new_doctor(ignore.clone(), config.clone(), args.seconds);
+        run_tui(&mut app, cli, console)
+    }
+}
+
+fn handle_status(
+    cli: &Cli,
+    use_plain: bool,
+    config: &Config,
+    ignore: &IgnoreStore,
+    console: &mut Console,
+) -> ExitCode {
+    if cli.json || use_plain {
+        let raw = status::read();
+        let collected_at = format_rfc3339(std::time::SystemTime::now());
+        let (report, notes) = status::StatusReport::from_status(raw, collected_at);
+        for note in &notes {
+            let _ = writeln!(console.err, "{note}");
+        }
+        let write_ok = if cli.json {
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => writeln!(console.out, "{json}").is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            write!(console.out, "{}", status::plain_text(&report)).is_ok()
+        };
+        if write_ok && !report.is_unusable() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    } else {
+        let mut app = ui::app::App::new_status(ignore.clone(), config.clone());
         run_tui(&mut app, cli, console)
     }
 }
