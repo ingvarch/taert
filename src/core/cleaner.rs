@@ -21,6 +21,17 @@ pub enum RemovalMode {
     Trash,
 }
 
+/// Determines the default removal mode for a whole scan.
+pub fn scan_removal_mode(scan_id: &str, permanent: bool) -> RemovalMode {
+    if permanent {
+        return RemovalMode::Permanent;
+    }
+    match scan_id {
+        "analyze" | "large" => RemovalMode::Trash,
+        _ => RemovalMode::Permanent,
+    }
+}
+
 /// Determines whether an item goes to the Trash or is permanently removed.
 pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> RemovalMode {
     if permanent || item.contents_only || item.docker.is_some() {
@@ -34,8 +45,7 @@ pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> Rem
                 RemovalMode::Trash
             }
         }
-        "analyze" | "large" => RemovalMode::Trash,
-        _ => RemovalMode::Permanent,
+        _ => scan_removal_mode(scan_id, permanent),
     }
 }
 
@@ -934,5 +944,19 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].path, file_path);
         assert_eq!(outcomes[0].outcome, OutcomeKind::Removed);
+    }
+
+    #[test]
+    fn scan_removal_mode_agrees_with_item_removal_mode() {
+        let item = ScanItem::new(PathBuf::from("/test/file"), 100, false, false);
+        for id in ["clean", "purge", "docker", "large", "analyze", "dev"] {
+            for permanent in [false, true] {
+                assert_eq!(
+                    scan_removal_mode(id, permanent),
+                    item_removal_mode(&item, id, permanent),
+                    "mismatch for id={id}, permanent={permanent}"
+                );
+            }
+        }
     }
 }

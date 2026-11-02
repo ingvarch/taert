@@ -36,7 +36,9 @@ use super::workspace::{
 };
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
-use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport};
+use crate::core::cleaner::{
+    Cleaner, RemovalMode, RemovalProgress, RemovalReport, scan_removal_mode,
+};
 use crate::core::compress::Compressor;
 use crate::core::docker;
 use crate::core::doctor;
@@ -1541,11 +1543,7 @@ impl App {
                             "interactive",
                             Some(total),
                         );
-                        let mode = if scan_id == "large" && !permanent {
-                            RemovalMode::Trash
-                        } else {
-                            RemovalMode::Permanent
-                        };
+                        let mode = scan_removal_mode(&scan_id, permanent);
                         let rep = Cleaner::new(&*host, mode).remove_items_with_callbacks(
                             &selected_items,
                             &ignore,
@@ -1767,14 +1765,15 @@ impl App {
         let ignore = self.ignore.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_scan = cancel.clone();
-        let home = self.layout.home.clone();
+        let layout = self.layout.clone();
 
         thread::spawn(move || {
             let (progress, bridge) = forward_progress(tx.clone());
             let options = large_files::LargeScanOptions::default();
             let scan = large_files::scan(
-                &home,
+                &layout.home,
                 &options,
+                &layout,
                 &*host,
                 &ignore,
                 Some(progress),

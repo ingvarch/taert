@@ -179,7 +179,7 @@ pub struct LargeArgs {
     pub min_size: u64,
 
     /// Filter by artifact age in days: not modified or opened for this many days
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(..=36500))]
     pub older_than: Option<u64>,
 
     /// Limit the number of files returned

@@ -270,7 +270,7 @@ impl Safety {
         Self::is_cloud_or_dataless_in(path, &Self::home_dir())
     }
 
-    fn is_cloud_or_dataless_in(path: &Path, home: &Path) -> bool {
+    pub(crate) fn is_cloud_or_dataless_in(path: &Path, home: &Path) -> bool {
         let path_str = path.to_string_lossy();
         if path_str.contains("com~apple~") {
             return true;
@@ -304,7 +304,7 @@ impl Safety {
         Self::is_credential_root_in(path, &Self::home_dir())
     }
 
-    fn is_credential_root_in(path: &Path, home: &Path) -> bool {
+    pub(crate) fn is_credential_root_in(path: &Path, home: &Path) -> bool {
         for allowed in Self::credential_subpaths_in(home) {
             if path == allowed || path.starts_with(&allowed) {
                 return false;

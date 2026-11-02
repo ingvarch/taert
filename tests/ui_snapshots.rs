@@ -421,6 +421,13 @@ fn snapshot_doctor() {
 }
 
 #[test]
+fn reveal_hint_shows_on_every_select_screen() {
+    let state = SelectState::new(sample_scan());
+    let output = render_to_string(120, 32, |f| render_select(f, &state, &snapshot_theme()));
+    assert!(output.contains("Reveal"));
+}
+
+#[test]
 fn snapshot_select() {
     let theme = snapshot_theme();
     let state = SelectState::new(sample_scan());
@@ -1087,7 +1094,7 @@ fn snapshot_select_slim_apps() {
 }
 
 fn large_files_list() -> CategoryScan {
-    let old_date = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    let old_date = SystemTime::now() - Duration::from_secs(1280 * 86400);
     let mut item1 = ScanItem::new(
         PathBuf::from("/Users/test/Downloads/ubuntu-24.04-desktop-arm64.iso"),
         2_500_000_000,
