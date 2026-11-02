@@ -21,6 +21,7 @@ use plist::Value;
 use serde::{Deserialize, Serialize};
 
 use super::apps::{self, InstalledApp};
+use super::history::{HistorySession, ItemOutcome};
 use super::host::Host;
 use super::layout::Layout;
 use super::safety::{FileIdentity, Safety};
@@ -762,6 +763,21 @@ pub fn slim_app(
     Ok(total_intel_saved)
 }
 
+/// Slims an app bundle and logs the outcome to the history session on success.
+pub fn slim_app_logged(
+    session: &HistorySession,
+    app: &InstalledApp,
+    binaries: &[PathBuf],
+    host: &dyn Host,
+    skip_developer_id: bool,
+) -> Result<u64, (usize, String)> {
+    let result = slim_app(app, binaries, host, skip_developer_id);
+    if let Ok(saved) = result {
+        session.record_item(&ItemOutcome::changed(app.path.clone(), saved));
+    }
+    result
+}
+
 /// Runs a scan over installed apps to prepare a `CategoryScan` for the TUI and CLI.
 pub fn slim_scan(
     layout: &Layout,
@@ -869,6 +885,7 @@ pub struct SlimAppInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::history::{HistoryLog, OutcomeKind};
     use crate::core::host::fake::FakeHost;
     use tempfile::tempdir;
 
@@ -1470,5 +1487,106 @@ mod tests {
         // host.trashed() must contain the copy_path
         let copy_path = dir.path().join("SwapApp.app.taert-slim-tmp");
         assert_eq!(host.trashed(), vec![copy_path]);
+    }
+
+    #[test]
+    fn slim_app_logged_records_the_bytes_saved() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("SwapApp.app");
+        write_test_app(&app_path, "com.vendor.swap");
+
+        let app = InstalledApp {
+            name: "SwapApp".to_string(),
+            path: app_path.clone(),
+            bundle_id: Some("com.vendor.swap".to_string()),
+            executable: Some("testapp".to_string()),
+            size_bytes: 10000,
+            last_used: None,
+        };
+        let binaries = vec![app_path.join("Contents/MacOS/testapp")];
+        let host = FakeHost::idle();
+        host.reply("ditto", "");
+        host.when("ditto", {
+            let app_path = app_path.clone();
+            let copy_path = dir.path().join("SwapApp.app.taert-slim-tmp");
+            move || {
+                let _ = fs::create_dir_all(&copy_path);
+                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
+                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
+                    let dest = copy_path.join(rel);
+                    if entry.file_type().is_dir() {
+                        let _ = fs::create_dir_all(&dest);
+                    } else if entry.file_type().is_file() {
+                        let _ = fs::copy(entry.path(), dest);
+                    }
+                }
+            }
+        });
+        host.reply("codesign", "");
+        host.reply("spctl", "");
+
+        let history_dir = tempdir().unwrap();
+        let log_file = history_dir.path().join("history.jsonl");
+        let log = HistoryLog::new(log_file.clone());
+        let session = log.start_run("slim", "force", Some(1));
+
+        let res = slim_app_logged(&session, &app, &binaries, &host, true);
+        assert!(res.is_ok());
+        let saved = res.unwrap();
+        session.finish();
+
+        let runs = log.load_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(runs[0].items[0].outcome, OutcomeKind::Changed);
+        assert_eq!(runs[0].items[0].path, app.path.to_string_lossy());
+        assert_eq!(runs[0].items[0].bytes, saved);
+
+        // A second test with a failing codesign leaves the run with no items.
+        let dir2 = tempdir().unwrap();
+        let app_path2 = dir2.path().join("TargetApp.app");
+        write_test_app(&app_path2, "com.vendor.target");
+
+        let app2 = InstalledApp {
+            name: "TargetApp".to_string(),
+            path: app_path2.clone(),
+            bundle_id: Some("com.vendor.target".to_string()),
+            executable: Some("testapp".to_string()),
+            size_bytes: 10000,
+            last_used: None,
+        };
+        let binaries2 = vec![app_path2.join("Contents/MacOS/testapp")];
+        let host2 = FakeHost::idle();
+        host2.reply("ditto", "");
+        host2.when("ditto", {
+            let app_path = app_path2.clone();
+            let copy_path = dir2.path().join("TargetApp.app.taert-slim-tmp");
+            move || {
+                let _ = fs::create_dir_all(&copy_path);
+                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
+                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
+                    let dest = copy_path.join(rel);
+                    if entry.file_type().is_dir() {
+                        let _ = fs::create_dir_all(&dest);
+                    } else if entry.file_type().is_file() {
+                        let _ = fs::copy(entry.path(), dest);
+                    }
+                }
+            }
+        });
+        host2.fail("codesign", "verification failed\n");
+
+        let history_dir2 = tempdir().unwrap();
+        let log_file2 = history_dir2.path().join("history.jsonl");
+        let log2 = HistoryLog::new(log_file2.clone());
+        let session2 = log2.start_run("slim", "force", Some(1));
+
+        let res2 = slim_app_logged(&session2, &app2, &binaries2, &host2, true);
+        assert!(res2.is_err());
+        session2.finish();
+
+        let runs2 = log2.load_runs().unwrap();
+        assert_eq!(runs2.len(), 1);
+        assert!(runs2[0].items.is_empty());
     }
 }

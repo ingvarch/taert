@@ -3,12 +3,12 @@
 //! Records cleanup and uninstall events into `~/.config/taert/history.jsonl`
 //! in append-only JSONL format with permissions `0600`.
 
-use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,17 @@ pub struct ItemOutcome {
     pub bytes: u64,
     pub outcome: OutcomeKind,
     pub error: Option<String>,
+}
+
+impl ItemOutcome {
+    pub fn changed(path: impl Into<PathBuf>, bytes: u64) -> Self {
+        Self {
+            path: path.into(),
+            bytes,
+            outcome: OutcomeKind::Changed,
+            error: None,
+        }
+    }
 }
 
 /// A line in the JSONL history file.
@@ -275,8 +286,7 @@ impl HistoryLog {
             log_path: self.path.clone(),
             run_id: run_id.clone(),
             disabled,
-            warned: RefCell::new(false),
-            file: RefCell::new(None),
+            warned: AtomicBool::new(false),
             max_runs: self.max_runs,
         };
 
@@ -294,19 +304,7 @@ impl HistoryLog {
             total,
         };
 
-        match open_for_append(&self.path) {
-            Ok(mut file) => {
-                if let Ok(line) = serde_json::to_string(&event) {
-                    let _ = writeln!(file, "{line}");
-                    let _ = file.flush();
-                }
-                *session.file.borrow_mut() = Some(file);
-            }
-            Err(e) => {
-                session.warn(&format!("could not write to history log: {e}"));
-            }
-        }
-
+        session.append_line(&event);
         session
     }
 
@@ -416,6 +414,11 @@ impl HistoryLog {
             return Ok(());
         }
 
+        let _lock = lock_history_folder(&self.path)?;
+        if !self.path.exists() {
+            return Ok(());
+        }
+
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
 
@@ -492,8 +495,7 @@ pub struct HistorySession {
     log_path: PathBuf,
     run_id: String,
     disabled: bool,
-    warned: RefCell<bool>,
-    file: RefCell<Option<File>>,
+    warned: AtomicBool,
     max_runs: usize,
 }
 
@@ -503,9 +505,26 @@ impl HistorySession {
     }
 
     fn warn(&self, message: &str) {
-        if !*self.warned.borrow() {
-            *self.warned.borrow_mut() = true;
+        if !self.warned.swap(true, Ordering::Relaxed) {
             eprintln!("Warning: {message}");
+        }
+    }
+
+    fn append_line(&self, event: &HistoryEvent) {
+        if self.disabled {
+            return;
+        }
+
+        let line = match serde_json::to_string(event) {
+            Ok(l) => l,
+            Err(e) => {
+                self.warn(&format!("could not write to history log: {e}"));
+                return;
+            }
+        };
+
+        if let Err(e) = append_line_locked(&self.log_path, &line) {
+            self.warn(&format!("could not write to history log: {e}"));
         }
     }
 
@@ -515,11 +534,6 @@ impl HistorySession {
             return;
         }
 
-        let mut file_guard = self.file.borrow_mut();
-        let Some(file) = file_guard.as_mut() else {
-            return;
-        };
-
         let event = HistoryEvent::Item {
             run: self.run_id.clone(),
             path: outcome.path.to_string_lossy().into_owned(),
@@ -528,11 +542,7 @@ impl HistorySession {
             error: outcome.error.clone(),
         };
 
-        if let Ok(line) = serde_json::to_string(&event)
-            && let Err(e) = writeln!(file, "{line}").and_then(|_| file.flush())
-        {
-            self.warn(&format!("could not write to history log: {e}"));
-        }
+        self.append_line(&event);
     }
 
     /// Completes the run by writing the `end` event and pruning if needed.
@@ -541,24 +551,55 @@ impl HistorySession {
             return;
         }
 
-        let file_opt = self.file.borrow_mut().take();
-        if let Some(mut file) = file_opt {
-            let at = format_rfc3339(SystemTime::now());
-            let event = HistoryEvent::End {
-                run: self.run_id.clone(),
-                at,
-            };
+        let at = format_rfc3339(SystemTime::now());
+        let event = HistoryEvent::End {
+            run: self.run_id.clone(),
+            at,
+        };
+        self.append_line(&event);
 
-            if let Ok(line) = serde_json::to_string(&event) {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
-            }
-            drop(file);
+        let log = HistoryLog::new(self.log_path.clone()).with_max_runs(self.max_runs);
+        if let Err(e) = log.prune() {
+            self.warn(&format!("could not write to history log: {e}"));
         }
-
-        let log = HistoryLog::new(self.log_path).with_max_runs(self.max_runs);
-        let _ = log.prune();
     }
+}
+
+struct FolderLock(File);
+
+impl FolderLock {
+    fn acquire(folder: &Path) -> io::Result<Self> {
+        let file = File::open(folder)?;
+        let fd = file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        let fd = self.0.as_raw_fd();
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+    }
+}
+
+fn lock_history_folder(path: &Path) -> io::Result<FolderLock> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    FolderLock::acquire(parent)
+}
+
+fn append_line_locked(path: &Path, line: &str) -> io::Result<()> {
+    let _lock = lock_history_folder(path)?;
+    let mut file = open_for_append(path)?;
+    writeln!(file, "{line}")?;
+    file.flush()?;
+    Ok(())
 }
 
 fn open_for_append(path: &Path) -> io::Result<File> {
@@ -862,5 +903,79 @@ another corrupted line!
         let line3 = r3.format_line();
         assert_eq!(line3.find("interactive"), Some(35));
         assert_eq!(line3.find("interrupted after 3 of 9"), Some(48));
+    }
+
+    #[test]
+    fn a_run_still_open_keeps_its_lines_when_another_run_prunes_the_file() {
+        let temp = tempdir().unwrap();
+        let log_file = temp.path().join("history.jsonl");
+        let log = HistoryLog::new(log_file.clone()).with_max_runs(3);
+
+        // Write one finished old run
+        let old = log.start_run("clean old", "force", None);
+        old.finish();
+
+        // Start run A and keep it open
+        let session_a = log.start_run("clean A", "force", None);
+        let id_a = session_a.run_id().to_string();
+
+        // Start and finish runs B and C (3rd finish prunes: 4 runs > 3)
+        let session_b = log.start_run("clean B", "force", None);
+        session_b.finish();
+        let session_c = log.start_run("clean C", "force", None);
+        session_c.finish();
+
+        // Then A records item and finishes
+        session_a.record_item(&ItemOutcome::changed(PathBuf::from("/a"), 100));
+        session_a.finish();
+
+        let runs = log.load_runs().unwrap();
+        let run_a = runs
+            .iter()
+            .find(|r| r.run == id_a)
+            .expect("run A must be found");
+        assert_eq!(run_a.items.len(), 1);
+        assert!(run_a.completed);
+    }
+
+    #[test]
+    fn appends_wait_for_the_lock() {
+        use std::os::unix::io::AsRawFd;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempdir().unwrap();
+        let log_file = temp.path().join("history.jsonl");
+        let log = HistoryLog::new(log_file.clone());
+        let session = log.start_run("clean junk", "force", None);
+
+        // Take libc::flock(LOCK_EX) on the temp folder in the test
+        let folder = File::open(temp.path()).unwrap();
+        let fd = folder.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        assert_eq!(ret, 0);
+
+        let (tx, rx) = mpsc::channel();
+        let outcome = ItemOutcome::changed(PathBuf::from("/test"), 50);
+
+        std::thread::spawn(move || {
+            session.record_item(&outcome);
+            let _ = tx.send(());
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(rx.try_recv().is_err());
+
+        // Release the lock
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+
+        let runs = log.load_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(runs[0].items[0].path, "/test");
     }
 }
