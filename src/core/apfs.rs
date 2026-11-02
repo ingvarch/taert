@@ -110,6 +110,13 @@ mod tests {
     }
 
     #[test]
+    fn clone_identity_of_a_missing_file_is_none() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("does_not_exist.bin");
+        assert_eq!(clone_identity(&missing), None);
+    }
+
+    #[test]
     fn cloned_files_share_all_blocks_and_have_same_clone_id() {
         let temp = tempdir().unwrap();
         let file1 = temp.path().join("f1.bin");

@@ -789,9 +789,7 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             hints.push(Hint::new("⇧S/N/D", order.hint_label()));
         }
         hints.push(Hint::new("/", "Search"));
-        if state.scan.id == large_files::SCAN_ID {
-            hints.push(Hint::new("O", "Reveal"));
-        }
+        hints.push(Hint::new("O", "Reveal"));
         hints.push(Hint::new("↑↓", "Move"));
     }
     hints.push(Hint::new("⎋", "Back"));

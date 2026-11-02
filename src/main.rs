@@ -243,22 +243,33 @@ fn handle_large(
     }
 
     let root = match &args.path {
-        Some(p) => expand_tilde(&p.to_string_lossy()),
+        Some(p) => Safety::absolute(&expand_tilde(&p.to_string_lossy())),
         None => context.layout.home.clone(),
     };
 
-    if !root.exists() {
-        let _ = writeln!(
-            console.err,
-            "Error: Path '{}' does not exist",
-            root.display()
-        );
-        return ExitCode::FAILURE;
-    }
+    let root = match root.canonicalize() {
+        Ok(r) => r,
+        Err(err) => {
+            let _ = writeln!(
+                console.err,
+                "Error: Cannot scan path '{}': {err}",
+                root.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     let command = format!("large {}", prettify_path(&root));
     let options = large_files::LargeScanOptions::new(args.min_size, args.older_than, args.limit);
-    let mut scan = large_files::scan(&root, &options, context.host, ignore, None, None);
+    let mut scan = large_files::scan(
+        &root,
+        &options,
+        context.layout,
+        context.host,
+        ignore,
+        None,
+        None,
+    );
 
     process_scan_result(
         &mut scan, cli, use_plain, ignore, &command, context, console,

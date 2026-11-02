@@ -25,7 +25,7 @@ Disk cleanup tools must never compromise system integrity, user credentials, or 
 1. **System Root Protection**:
    `Safety::is_critical_root` strictly prevents operations on `/`, `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/var`, `/etc`, and user home root `~`. Attempts to delete these paths fail immediately before any filesystem calls.
 2. **Credential Isolation**:
-   `Safety::is_credential_path` protects identity stores including `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.docker`, and keychains.
+   `Safety::is_credential_path` protects identity stores including `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.gpg`, `~/.kube`, `~/.docker`, `~/.claude`, `~/.config`, `~/.cargo`, `~/.rustup`, `~/.gem`, `~/.nvm`, `~/.pyenv`, `~/.rbenv`, `~/.ollama`, and `~/.lmstudio`, except cache folders that stay scannable (`~/.docker/cli-plugins/.cache`, `~/.docker/buildx/cache`, `~/.cargo/registry/cache`, `~/.cargo/registry/index`, `~/.cargo/git/db`, `~/.cargo/git/checkouts`, `~/.ollama/logs`, `~/.lmstudio/server-logs`).
 3. **Symlink Rejection**:
    `Safety::has_symlink_component` verifies that no path or parent component is a symbolic link. Deletion operations refuse to follow symlinks to prevent accidental directory traversal outside the intended target.
 4. **Cloud Storage & APFS Dataless Protection**:
@@ -201,6 +201,7 @@ Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on 
 
 Limits:
 
+- Deduplication applies to the total of the measured folder; a folder that holds only the second copy of a file is measured again when opened and shows its own full size, so the sizes of sibling folders can add up to more than the parent.
 - A clone whose twin sits outside the measured folder still counts in full, though removing it frees nothing.
 - The freed total of a cleanup adds up row sizes, so two rows that share blocks count twice.
 

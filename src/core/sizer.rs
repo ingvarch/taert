@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use super::apfs::clone_identity;
+use super::apfs::{CloneIdentity, clone_identity};
 use super::cache::StorageCache;
 use super::safety::{FileIdentity, Safety};
 
@@ -54,6 +54,18 @@ impl Measurement {
             status,
             skipped_entries: 0,
         }
+    }
+}
+
+fn counts_in_full(
+    seen: &mut HashSet<(u64, u64)>,
+    dev: u64,
+    identity: Option<CloneIdentity>,
+) -> bool {
+    match identity {
+        None => true,
+        Some(id) if !id.shares_all_blocks => true,
+        Some(id) => seen.insert((dev, id.clone_id)),
     }
 }
 
@@ -167,6 +179,7 @@ impl DirSizer {
 
         let mut files_count = 0;
         let mut was_cancelled = false;
+        let mut deduplicated_ancestors = HashSet::new();
         for (idx, entry_res) in walker.into_iter().enumerate() {
             if let Some(c) = cancel
                 && c.load(Ordering::Relaxed)
@@ -189,11 +202,31 @@ impl DirSizer {
                             };
                             if m.nlink() > 1 && !seen_hardlinks.insert(identity) {
                                 // Already counted hardlink
+                                let mut curr = entry_path.parent();
+                                while let Some(ancestor) = curr {
+                                    if ancestor == path {
+                                        break;
+                                    }
+                                    deduplicated_ancestors.insert(ancestor.to_path_buf());
+                                    curr = ancestor.parent();
+                                }
                                 continue;
                             }
-                            let is_duplicate_clone = clone_identity(&entry_path).is_some_and(|c| {
-                                c.shares_all_blocks && !seen_clones.insert((m.dev(), c.clone_id))
-                            });
+                            let is_duplicate_clone = !counts_in_full(
+                                &mut seen_clones,
+                                m.dev(),
+                                clone_identity(&entry_path),
+                            );
+                            if is_duplicate_clone {
+                                let mut curr = entry_path.parent();
+                                while let Some(ancestor) = curr {
+                                    if ancestor == path {
+                                        break;
+                                    }
+                                    deduplicated_ancestors.insert(ancestor.to_path_buf());
+                                    curr = ancestor.parent();
+                                }
+                            }
                             let allocated = if is_duplicate_clone {
                                 0
                             } else {
@@ -220,9 +253,11 @@ impl DirSizer {
         }
 
         if !was_cancelled && let Some(c) = cache {
-            c.write()
-                .unwrap()
-                .populate_from_dir_tree(path, dirs, direct_bytes, direct_files);
+            let mut guard = c.write().unwrap();
+            guard.populate_from_dir_tree(path, dirs, direct_bytes, direct_files);
+            for dir in &deduplicated_ancestors {
+                guard.invalidate_path(dir);
+            }
         }
 
         Measurement {
@@ -457,5 +492,109 @@ mod tests {
 
         assert_eq!(parent.status, MeasurementStatus::Complete);
         assert_eq!(parent.bytes, single.bytes);
+    }
+
+    #[test]
+    fn subfolder_with_the_second_clone_shows_its_own_size() {
+        let temp = tempdir().unwrap();
+        let sub1 = temp.path().join("sub1");
+        let sub2 = temp.path().join("sub2");
+        fs::create_dir_all(&sub1).unwrap();
+        fs::create_dir_all(&sub2).unwrap();
+
+        let f1 = sub1.join("f1.bin");
+        let f2 = sub2.join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+        clone_file(&f1, &f2);
+
+        let cache = Arc::new(RwLock::new(StorageCache::new()));
+        let measurement = DirSizer::measure_with_progress_and_cache(
+            temp.path(),
+            None,
+            Some(&cache),
+            |_, _, _| {},
+        );
+        let single = DirSizer::measure(&f1);
+        assert_eq!(measurement.bytes, single.bytes);
+
+        for sub in [&sub1, &sub2] {
+            let cached = cache.read().unwrap().get_size(sub);
+            assert!(
+                cached.is_none() || cached == Some(DirSizer::measure(sub).bytes),
+                "subfolder {sub:?} had cached size {cached:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn counts_in_full_unknown_identity_is_true_twice() {
+        let mut seen = HashSet::new();
+        assert!(counts_in_full(&mut seen, 1, None));
+        assert!(counts_in_full(&mut seen, 1, None));
+    }
+
+    #[test]
+    fn counts_in_full_shares_all_blocks_false_is_true_twice() {
+        let mut seen = HashSet::new();
+        let id = CloneIdentity {
+            clone_id: 42,
+            shares_all_blocks: false,
+        };
+        assert!(counts_in_full(&mut seen, 1, Some(id)));
+        assert!(counts_in_full(&mut seen, 1, Some(id)));
+    }
+
+    #[test]
+    fn counts_in_full_different_device_is_true_both_times() {
+        let mut seen = HashSet::new();
+        let id = CloneIdentity {
+            clone_id: 42,
+            shares_all_blocks: true,
+        };
+        assert!(counts_in_full(&mut seen, 1, Some(id)));
+        assert!(counts_in_full(&mut seen, 2, Some(id)));
+    }
+
+    #[test]
+    fn counts_in_full_same_device_is_true_then_false() {
+        let mut seen = HashSet::new();
+        let id = CloneIdentity {
+            clone_id: 42,
+            shares_all_blocks: true,
+        };
+        assert!(counts_in_full(&mut seen, 1, Some(id)));
+        assert!(!counts_in_full(&mut seen, 1, Some(id)));
+    }
+
+    #[test]
+    fn subfolder_with_the_second_hardlink_shows_its_own_size() {
+        let temp = tempdir().unwrap();
+        let sub1 = temp.path().join("sub1");
+        let sub2 = temp.path().join("sub2");
+        fs::create_dir_all(&sub1).unwrap();
+        fs::create_dir_all(&sub2).unwrap();
+
+        let f1 = sub1.join("f1.bin");
+        let f2 = sub2.join("f2.bin");
+        fs::write(&f1, vec![1_u8; 65536]).unwrap();
+        fs::hard_link(&f1, &f2).unwrap();
+
+        let cache = Arc::new(RwLock::new(StorageCache::new()));
+        let measurement = DirSizer::measure_with_progress_and_cache(
+            temp.path(),
+            None,
+            Some(&cache),
+            |_, _, _| {},
+        );
+        let single = DirSizer::measure(&f1);
+        assert_eq!(measurement.bytes, single.bytes);
+
+        for sub in [&sub1, &sub2] {
+            let cached = cache.read().unwrap().get_size(sub);
+            assert!(
+                cached.is_none() || cached == Some(DirSizer::measure(sub).bytes),
+                "subfolder {sub:?} had cached size {cached:?}"
+            );
+        }
     }
 }

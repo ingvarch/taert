@@ -33,4 +33,4 @@ expression: select_screen(&state)
    Safari stays: Apple apps are part of macOS.
    Pages stays: App Store apps are managed by the App Store.
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ␣  Select    A  All    N  None    /  Search    ↑↓  Move    ⎋  Back    ?  More                            Slim app  ↵
+  ␣  Select    A  All    N  None    /  Search    O  Reveal    ↑↓  Move    ⎋  Back    ?  More               Slim app  ↵

@@ -118,6 +118,43 @@ fn test_cli_large_dry_run() {
 }
 
 #[test]
+fn older_than_above_100_years_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["large", "--older-than", "200000000000000"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("panicked").not());
+}
+
+#[test]
+fn relative_root_skips_credentials_and_library() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+
+    let ssh_dir = home_path.join(".ssh");
+    let lib_dir = home_path.join("Library/Containers/app");
+    let doc_dir = home_path.join("Documents");
+    std::fs::create_dir_all(&ssh_dir).unwrap();
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::create_dir_all(&doc_dir).unwrap();
+
+    let data = vec![0u8; 8192];
+    std::fs::write(ssh_dir.join("id_big"), &data).unwrap();
+    std::fs::write(lib_dir.join("big.bin"), &data).unwrap();
+    std::fs::write(doc_dir.join("ok.bin"), &data).unwrap();
+
+    taert(&home)
+        .current_dir(&home_path)
+        .args(["large", ".", "--json", "--min-size", "1K"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok.bin"))
+        .stdout(predicate::str::contains(".ssh").not())
+        .stdout(predicate::str::contains("Containers").not());
+}
+
+#[test]
 fn test_cli_schedule_refuses_purge_and_docker() {
     let home = tempfile::tempdir().unwrap();
     taert(&home)
