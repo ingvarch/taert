@@ -221,12 +221,12 @@ pub struct StartupArgs {
 pub enum StartupAction {
     /// Disable a startup service or login item
     Disable {
-        /// Label of the launchd service or name of the login item
+        /// Label of the launchd service, or the name or path of a login item
         label: String,
     },
     /// Enable a startup service or login item
     Enable {
-        /// Label of the launchd service or name of the login item
+        /// Label of the launchd service, or the name or path of a login item
         label: String,
     },
 }

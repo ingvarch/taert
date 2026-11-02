@@ -203,11 +203,24 @@ pub struct LaunchdServiceDetail {
     pub pid: Option<u32>,
 }
 
-/// Parses detailed attributes from `launchctl print <domain>/<label>`.
+/// Parses detailed attributes from `launchctl print <domain>/<label>`. Only the lines right
+/// inside the service's block count: a nested block, such as a socket, has its own `path`.
 pub fn parse_service_detail(output: &str) -> LaunchdServiceDetail {
     let mut detail = LaunchdServiceDetail::default();
+    let mut depth = 0usize;
     for line in output.lines() {
         let trimmed = line.trim();
+        if trimmed.ends_with("= {") {
+            depth += 1;
+            continue;
+        }
+        if trimmed == "}" {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if depth != 1 {
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("path = ") {
             let p = rest.trim();
             if !p.starts_with('(') {
@@ -910,8 +923,9 @@ pub fn scan_startup_with(
     scan
 }
 
-/// A service whose files sit in a system folder, or a daemon whose files launchd does not show.
-/// An agent an app registered shows no files either, so that rule is for daemons only.
+/// A service whose files sit in a system folder, or a daemon whose files launchd does not show
+/// and that names no app outside Apple as its parent. An agent an app registered shows no files
+/// either, so that rule is for daemons only.
 fn is_macos_owned(kind: StartupKind, detail: &LaunchdServiceDetail) -> bool {
     const SYSTEM_FOLDERS: [&str; 7] = [
         "/System/",
@@ -923,7 +937,11 @@ fn is_macos_owned(kind: StartupKind, detail: &LaunchdServiceDetail) -> bool {
         "/bin/",
     ];
     let paths = [&detail.path, &detail.program];
-    (kind == StartupKind::Daemon && paths.iter().all(|p| p.is_none()))
+    let app_parent = detail
+        .parent_bundle_id
+        .as_deref()
+        .is_some_and(|id| !id.starts_with("com.apple."));
+    (kind == StartupKind::Daemon && !app_parent && paths.iter().all(|p| p.is_none()))
         || paths
             .iter()
             .flat_map(|p| p.as_deref())
@@ -939,8 +957,8 @@ fn label_leaf_name(label: &str) -> String {
         .to_string()
 }
 
-/// Finds the item a command line names: a label, or a login item's name. A name that fits
-/// several items is an error that lists them.
+/// Finds the item a command line names: a label, or a login item's name or path. A name that
+/// fits several items is an error that lists them.
 pub fn resolve_item(items: &[StartupItem], query: &str) -> Result<StartupItem, String> {
     let by_label: Vec<&StartupItem> = items.iter().filter(|it| it.label == query).collect();
     let found = if by_label.is_empty() {
@@ -1392,6 +1410,43 @@ mod tests {
         );
         assert_eq!(detail.state, Some("running".to_string()));
         assert_eq!(detail.pid, Some(1234));
+    }
+
+    #[test]
+    fn a_path_inside_a_nested_block_is_not_the_service_path() {
+        let output = r#"system/org.cups.cupsd = {
+            active count = 0
+            path = /System/Library/LaunchDaemons/org.cups.cupsd.plist
+            type = LaunchDaemon
+            state = not running
+
+            program = /usr/sbin/cupsd
+            arguments = {
+                /usr/sbin/cupsd
+                -l
+            }
+
+            sockets = {
+                "Listeners" = {
+                    type = stream
+                    path = /private/var/run/cupsd
+                }
+            }
+        }
+        "#;
+
+        let detail = parse_service_detail(output);
+
+        assert_eq!(
+            detail.path.as_deref(),
+            Some(Path::new(
+                "/System/Library/LaunchDaemons/org.cups.cupsd.plist"
+            ))
+        );
+        assert_eq!(
+            detail.program.as_deref(),
+            Some(Path::new("/usr/sbin/cupsd"))
+        );
     }
 
     #[test]
@@ -1907,7 +1962,7 @@ mod tests {
         let host = FakeHost::idle();
         host.reply(
             "/bin/launchctl print system/com.test.bundled",
-            "program = /Library/PrivilegedHelperTools/com.test.bundled\n",
+            "system/com.test.bundled = {\n program = /Library/PrivilegedHelperTools/com.test.bundled\n}\n",
         );
         host.reply(
             "/bin/launchctl print system",
@@ -2316,17 +2371,21 @@ mod tests {
         // The detail replies go first: the domain list would also answer them.
         host.reply(
             "/bin/launchctl print system/org.cups.cupsd",
-            "path = /System/Library/LaunchDaemons/org.cups.cupsd.plist\nprogram = /usr/sbin/cupsd\n",
+            "system/org.cups.cupsd = {\n path = /System/Library/LaunchDaemons/org.cups.cupsd.plist\n program = /usr/sbin/cupsd\n}\n",
         );
         host.reply("/bin/launchctl print system/com.test.unknown", "");
         host.reply(
+            "/bin/launchctl print system/com.test.appleparent",
+            "system/com.test.appleparent = {\n path = (submitted by smd[346])\n parent bundle identifier = com.apple.Something\n}\n",
+        );
+        host.reply(
             "/bin/launchctl print system",
-            "system = {\n services = {\n 0 - org.cups.cupsd\n 0 - com.test.unknown\n }\n}\n",
+            "system = {\n services = {\n 0 - org.cups.cupsd\n 0 - com.test.unknown\n 0 - com.test.appleparent\n }\n}\n",
         );
 
         let scan = scan_startup(&host, &layout_in(&temp), &IgnoreStore::default(), true);
 
-        for label in ["org.cups.cupsd", "com.test.unknown"] {
+        for label in ["org.cups.cupsd", "com.test.unknown", "com.test.appleparent"] {
             let item = scan.items.iter().find(|it| it.label == label).unwrap();
             assert!(item.read_only_reason().is_some(), "{label}");
         }
@@ -2338,6 +2397,38 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_an_app_registered_shows_and_switches_through_system() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print system/com.acme.daemon",
+            "system/com.acme.daemon = {\n path = (submitted by smd[346])\n type = Submitted\n program identifier = Contents/MacOS/acmed (mode: 2)\n parent bundle identifier = com.acme.app\n}\n",
+        );
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - com.acme.daemon\n }\n}\n",
+        );
+        reply_disabled(&host, "system", "com.acme.daemon");
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let daemon = scan.items.iter().find(|it| it.label == "com.acme.daemon");
+        let daemon = daemon.expect("shown without --all");
+        assert_eq!(daemon.kind, StartupKind::Daemon);
+        assert_eq!(daemon.plist_path, None);
+        assert_eq!(daemon.read_only_reason(), None);
+        disable_item(&host, &layout, &IgnoreStore::default(), daemon, false).unwrap();
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains("disable system/") && s.contains("com.acme.daemon")),
+            "{scripts:?}"
+        );
+    }
+
+    #[test]
     fn an_agent_that_macos_ships_is_hidden_and_read_only() {
         let temp = tempdir().unwrap();
         let layout = layout_in(&temp);
@@ -2345,11 +2436,11 @@ mod tests {
         let uid = host_uid();
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.openssh.ssh-agent"),
-            "path = /System/Library/LaunchAgents/com.openssh.ssh-agent.plist\nprogram = /usr/bin/ssh-agent\n",
+            &format!("gui/{uid}/com.openssh.ssh-agent = {{\n path = /System/Library/LaunchAgents/com.openssh.ssh-agent.plist\n program = /usr/bin/ssh-agent\n}}\n"),
         );
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.acme.helper"),
-            "path = (submitted by smd.346)\nparent bundle identifier = com.acme.app\n",
+            &format!("gui/{uid}/com.acme.helper = {{\n path = (submitted by smd.346)\n parent bundle identifier = com.acme.app\n}}\n"),
         );
         host.reply(
             &format!("/bin/launchctl print gui/{uid}"),
