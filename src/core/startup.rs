@@ -771,9 +771,13 @@ pub fn scan_startup_with(
             .is_some_and(|p| Safety::is_ignored_or_protected(p, ignore));
 
         // A plist outside the scanned folders belongs to the app, so the row is read-only.
+        // Only the folder of the row's own domain counts, so root never bootstraps a user's file.
         let plist_path = detail.path.filter(|p| {
-            p.parent()
-                .is_some_and(|dir| plist_folders.iter().any(|(f, _)| f == dir))
+            p.parent().is_some_and(|dir| {
+                plist_folders
+                    .iter()
+                    .any(|(f, k)| f == dir && domain_for(*k) == domain)
+            })
         });
 
         scan.items.push(StartupItem {
@@ -2652,6 +2656,111 @@ mod tests {
                     .any(|c| c.starts_with(&format!("/bin/launchctl {verb} ")))
             });
         assert!(!switched, "{calls:?}");
+    }
+
+    /// A program outside the system folders, so the service does not count as Apple's.
+    fn vendor_program(layout: &Layout) -> PathBuf {
+        let program = layout.system("Library/Vendor/vendord");
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, b"").unwrap();
+        program
+    }
+
+    // Shaped after a daemon an admin loaded from the user's folder, whose plist a user
+    // process then gave another label. Root must never bootstrap that file.
+    #[test]
+    fn a_service_keeps_a_plist_only_from_a_folder_of_its_own_domain() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let agents = layout.user("Library/LaunchAgents");
+        write_plist(&agents, "com.test.bar", "/bin/sleep");
+        let user_plist = agents.join("com.test.foo.plist");
+        fs::rename(agents.join("com.test.bar.plist"), &user_plist).unwrap();
+        let daemons_plist = layout.system("Library/LaunchDaemons/com.test.agent.plist");
+        let program = vendor_program(&layout);
+        let host = FakeHost::idle();
+        let uid = host_uid();
+        host.reply(
+            "/bin/launchctl print system/com.test.foo",
+            &format!(
+                "system/com.test.foo = {{\n path = {}\n program = {}\n}}\n",
+                user_plist.display(),
+                program.display()
+            ),
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/com.test.agent"),
+            &format!(
+                "gui/{uid}/com.test.agent = {{\n path = {}\n program = {}\n}}\n",
+                daemons_plist.display(),
+                program.display()
+            ),
+        );
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - com.test.foo\n }\n}\n",
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}"),
+            "gui = {\n services = {\n 0 - com.test.agent\n }\n}\n",
+        );
+        reply_disabled(&host, "system", "com.test.foo");
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        for label in ["com.test.foo", "com.test.agent"] {
+            let item = scan.items.iter().find(|it| it.label == label).unwrap();
+            assert_eq!(item.plist_path, None, "{label}");
+            assert_eq!(item.read_only_reason(), Some(REGISTERED_BY_APP), "{label}");
+        }
+        let daemon = scan.items.iter().find(|it| it.label == "com.test.foo");
+        let ignore = IgnoreStore::default();
+        assert!(enable_item(&host, &layout, &ignore, daemon.unwrap(), false).is_err());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    // Shaped after a vendor daemon whose plist has mode 0600, so the scan cannot read it.
+    #[test]
+    fn a_daemon_launchd_lists_from_a_plist_the_scan_cannot_read_stays_switchable() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let folder = layout.system("Library/LaunchDaemons");
+        fs::create_dir_all(&folder).unwrap();
+        let plist = folder.join("com.vendor.d.plist");
+        fs::write(&plist, b"not a plist").unwrap();
+        let program = vendor_program(&layout);
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print system/com.vendor.d",
+            &format!(
+                "system/com.vendor.d = {{\n path = {}\n program = {}\n}}\n",
+                plist.display(),
+                program.display()
+            ),
+        );
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - com.vendor.d\n }\n}\n",
+        );
+        // The scan reads it disabled, the check after enable reads it enabled.
+        reply_disabled(&host, "system", "com.vendor.d");
+        host.reply(
+            "/bin/launchctl print-disabled system",
+            "disabled services = {\n \"com.vendor.d\" => enabled\n}\n",
+        );
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let daemon = scan.items.iter().find(|it| it.label == "com.vendor.d");
+        let daemon = daemon.unwrap();
+        assert_eq!(daemon.kind, StartupKind::Daemon);
+        assert_eq!(daemon.plist_path.as_deref(), Some(plist.as_path()));
+        assert_eq!(daemon.read_only_reason(), None);
+        let res = enable_item(&host, &layout, &IgnoreStore::default(), daemon, false);
+        assert!(res.is_ok(), "{res:?}");
+        let scripts = host.admin_scripts.lock().unwrap();
+        let bootstrap = format!("bootstrap system {}", shell_quote(&plist.to_string_lossy()));
+        assert!(scripts[0].contains(&bootstrap), "{}", scripts[0]);
     }
 
     #[test]

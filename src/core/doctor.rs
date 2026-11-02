@@ -1148,15 +1148,20 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "missing file".to_string());
+                    let (action, action_target) = match item.read_only_reason() {
+                        Some(reason) => (reason.to_string(), None),
+                        None => (
+                            format!("Switch it off with: taert startup disable {}", item.label),
+                            Some(FindingAction::DisableStartupItem { item: item.clone() }),
+                        ),
+                    };
                     findings.push(Finding {
                         id: "startup".to_string(),
                         severity: FindingSeverity::Warning,
                         title: format!("Startup item '{}' points to a missing program", item.name),
                         evidence: format!("Missing executable at {path_str}"),
-                        action: format!("Switch it off with: taert startup disable {}", item.label),
-                        action_target: Some(FindingAction::DisableStartupItem {
-                            item: item.clone(),
-                        }),
+                        action,
+                        action_target,
                     });
                 }
             }
@@ -1509,6 +1514,62 @@ syslogd.381,0,1000,
         assert!(json.contains("\"id\": \"network\""));
         assert!(json.contains("\"status\": \"skipped\""));
         assert!(json.contains("\"reason\": \"nettop timed out\""));
+    }
+
+    // Shaped after an agent an app bootstrapped from Application Support whose program is gone.
+    #[test]
+    fn a_broken_startup_item_taert_cannot_switch_gets_no_disable_action() {
+        let broken = |label: &str, plist: Option<&str>| StartupItem {
+            label: label.to_string(),
+            name: label.to_string(),
+            app_name: None,
+            app_bundle: None,
+            kind: startup::StartupKind::UserAgent,
+            state: StartupState::Broken,
+            program: Some(std::path::PathBuf::from("/missing/server")),
+            plist_path: plist.map(std::path::PathBuf::from),
+            pid: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        };
+        let registered = broken("com.acme.server", None);
+        let switchable = broken(
+            "com.acme.agent",
+            Some("/Users/x/Library/LaunchAgents/com.acme.agent.plist"),
+        );
+        let snapshot = DoctorSnapshot {
+            startup_items: Ok(vec![registered.clone(), switchable]),
+            ..Default::default()
+        };
+
+        let report = diagnose(&snapshot);
+
+        let finding = |label: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.title.contains(label))
+                .unwrap()
+        };
+        let read_only = finding("com.acme.server");
+        assert_eq!(
+            Some(read_only.action.as_str()),
+            registered.read_only_reason()
+        );
+        assert_eq!(read_only.action_target, None);
+        let offered = finding("com.acme.agent");
+        assert!(
+            offered
+                .action
+                .contains("taert startup disable com.acme.agent")
+        );
+        assert!(matches!(
+            offered.action_target,
+            Some(FindingAction::DisableStartupItem { .. })
+        ));
     }
 
     #[test]
