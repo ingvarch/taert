@@ -500,7 +500,7 @@ pub fn run_scheduled(
             &context,
             cat,
             category_title(cat),
-            Catalog::targets_in(&layout.home, cat),
+            Catalog::targets_in(layout, cat),
             &ignore,
             None,
             None,

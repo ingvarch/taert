@@ -21,12 +21,6 @@ impl IgnoreStore {
         dirs::config_dir().map(|p| p.join("taert").join("ignore.toml"))
     }
 
-    pub fn load_or_default() -> Self {
-        Self::default_path()
-            .and_then(|p| Self::load_from(&p).ok())
-            .unwrap_or_default()
-    }
-
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -157,12 +151,6 @@ impl Config {
         } else {
             toml_path
         }
-    }
-
-    pub fn load_or_default() -> Self {
-        Self::default_path()
-            .and_then(|p| Self::load_from(&p).ok())
-            .unwrap_or_default()
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {

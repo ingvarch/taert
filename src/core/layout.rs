@@ -87,7 +87,7 @@ impl Layout {
         roots
     }
 
-    fn volumes(&self) -> Vec<PathBuf> {
+    pub fn volumes(&self) -> Vec<PathBuf> {
         let Ok(volumes) = std::fs::read_dir(self.system("Volumes")) else {
             return Vec::new();
         };

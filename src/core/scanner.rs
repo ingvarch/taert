@@ -285,7 +285,7 @@ impl CategoryScanner {
             context,
             category_id,
             category_title,
-            Catalog::targets_in(&context.layout.home, category_id),
+            Catalog::targets_in(context.layout, category_id),
             ignore,
             progress_tx,
             is_cancelled,
