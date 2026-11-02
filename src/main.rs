@@ -21,7 +21,7 @@ use crate::core::date_utils::{format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
-use crate::core::host::MacHost;
+use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
 use crate::core::layout::Layout;
 use crate::core::path_utils::{expand_tilde, prettify_path};
@@ -76,7 +76,9 @@ fn main() -> ExitCode {
 
         Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore),
 
-        Some(Command::Slim(ref args)) => handle_slim(args, &cli, use_plain, &ignore),
+        Some(Command::Slim(ref args)) => {
+            handle_slim(args, &cli, use_plain, &ignore, &MacHost, &Layout::current())
+        }
 
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
@@ -86,7 +88,15 @@ fn main() -> ExitCode {
 
         Some(Command::Doctor(ref args)) => handle_doctor(args, &cli, use_plain, &ignore, &config),
 
-        Some(Command::Startup(ref args)) => handle_startup(args, &cli, use_plain, &ignore, &config),
+        Some(Command::Startup(ref args)) => handle_startup(
+            args,
+            &cli,
+            use_plain,
+            &ignore,
+            &config,
+            &MacHost,
+            &Layout::current(),
+        ),
 
         Some(Command::Ignore(args)) => handle_ignore(args.action, &ignore),
 
@@ -94,7 +104,9 @@ fn main() -> ExitCode {
 
         Some(Command::History(ref args)) => handle_history(args, &cli),
 
-        Some(Command::Schedule(ref args)) => handle_schedule(args, &config),
+        Some(Command::Schedule(ref args)) => {
+            handle_schedule(args, &config, &MacHost, &Layout::current())
+        }
     }
 }
 
@@ -685,17 +697,16 @@ fn handle_startup(
     use_plain: bool,
     ignore: &IgnoreStore,
     config: &Config,
+    host: &dyn Host,
+    layout: &Layout,
 ) -> ExitCode {
-    let host = MacHost;
-    let layout = Layout::current();
-
     if let Some(ref action) = args.action {
         let (label, is_enable) = match action {
             cli::StartupAction::Disable { label } => (label, false),
             cli::StartupAction::Enable { label } => (label, true),
         };
 
-        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        let scan = startup::scan_startup(host, layout, ignore, args.all);
         let Some(item) = scan
             .items
             .into_iter()
@@ -706,9 +717,9 @@ fn handle_startup(
         };
 
         let result = if is_enable {
-            startup::enable_item(&host, &layout, ignore, &item, cli.dry_run)
+            startup::enable_item(host, layout, ignore, &item, cli.dry_run)
         } else {
-            startup::disable_item(&host, &layout, ignore, &item, cli.dry_run)
+            startup::disable_item(host, layout, ignore, &item, cli.dry_run)
         };
 
         match result {
@@ -722,7 +733,7 @@ fn handle_startup(
             }
         }
     } else if cli.json {
-        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        let scan = startup::scan_startup(host, layout, ignore, args.all);
         match serde_json::to_string_pretty(&scan.items) {
             Ok(json) => {
                 println!("{json}");
@@ -734,7 +745,7 @@ fn handle_startup(
             }
         }
     } else if use_plain {
-        let scan = startup::scan_startup(&host, &layout, ignore, args.all);
+        let scan = startup::scan_startup(host, layout, ignore, args.all);
         println!("=== macOS Startup Items ===");
         if scan.items.is_empty() {
             println!("No startup items found.");
@@ -907,15 +918,18 @@ fn handle_history(args: &HistoryArgs, cli: &Cli) -> ExitCode {
     }
 }
 
-fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
-    let host = MacHost;
-    let layout = Layout::current();
+fn handle_schedule(
+    args: &ScheduleArgs,
+    config: &Config,
+    host: &dyn Host,
+    layout: &Layout,
+) -> ExitCode {
     let mut config = config.clone();
 
     match args.action {
         None | Some(ScheduleAction::Show) => {
-            let history = HistoryLog::default_log();
-            let text = schedule::show_schedule(&host, &layout, &config, &history);
+            let history = HistoryLog::new(layout.history_path());
+            let text = schedule::show_schedule(host, layout, &config, &history);
             print!("{text}");
             ExitCode::SUCCESS
         }
@@ -927,8 +941,8 @@ fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
                 .filter(|s| !s.is_empty())
                 .collect();
             match schedule::set_schedule(
-                &host,
-                &layout,
+                host,
+                layout,
                 &mut config,
                 set_args.every,
                 categories,
@@ -936,8 +950,8 @@ fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
                 None,
             ) {
                 Ok(()) => {
-                    let history = HistoryLog::default_log();
-                    let text = schedule::show_schedule(&host, &layout, &config, &history);
+                    let history = HistoryLog::new(layout.history_path());
+                    let text = schedule::show_schedule(host, layout, &config, &history);
                     print!("{text}");
                     ExitCode::SUCCESS
                 }
@@ -947,7 +961,7 @@ fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
                 }
             }
         }
-        Some(ScheduleAction::Off) => match schedule::remove_schedule(&host, &layout, &mut config) {
+        Some(ScheduleAction::Off) => match schedule::remove_schedule(host, layout, &mut config) {
             Ok(()) => {
                 println!("Scheduled cleanup turned off.");
                 ExitCode::SUCCESS
@@ -958,7 +972,7 @@ fn handle_schedule(args: &ScheduleArgs, config: &Config) -> ExitCode {
             }
         },
         Some(ScheduleAction::Run) => {
-            match schedule::run_scheduled(&host, &layout, &mut config, None, None) {
+            match schedule::run_scheduled(host, layout, &mut config, None) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => ExitCode::FAILURE,
             }
@@ -1018,20 +1032,25 @@ fn handle_compress(args: &CompressArgs, cli: &Cli, ignore: &IgnoreStore) -> Exit
     }
 }
 
-fn handle_slim(args: &SlimArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
-    let host = MacHost;
-    if !crate::core::slim::is_apple_silicon(&host) {
+fn handle_slim(
+    args: &SlimArgs,
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    host: &dyn Host,
+    layout: &Layout,
+) -> ExitCode {
+    if !crate::core::slim::is_apple_silicon(host) {
         eprintln!("Slimming universal apps requires an Apple Silicon Mac.");
         return ExitCode::FAILURE;
     }
 
     let skip_developer_id = std::env::var("TAERT_SLIM_ALLOW_ADHOC").is_ok();
-    let layout = Layout::current();
     if args.names.is_empty() {
-        return pick_apps_to_slim(cli, use_plain, ignore, &layout, skip_developer_id);
+        return pick_apps_to_slim(cli, use_plain, ignore, host, layout, skip_developer_id);
     }
 
-    let installed = apps::find_apps(&layout);
+    let installed = apps::find_apps(layout);
     let matching = if cli.force {
         Matching::Exact
     } else {
@@ -1045,14 +1064,14 @@ fn handle_slim(args: &SlimArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreStore
         }
     };
 
-    let rosetta = crate::core::slim::rosetta_bundle_ids(&layout);
-    let running = crate::core::slim::running_processes(&host);
+    let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
+    let running = crate::core::slim::running_processes(host);
 
     for app in &selected {
         let binaries = match crate::core::slim::check_eligibility(
             app,
-            &host,
-            &layout,
+            host,
+            layout,
             ignore,
             &rosetta,
             Some(&running),
@@ -1128,7 +1147,7 @@ fn handle_slim(args: &SlimArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreStore
             }
         }
 
-        match crate::core::slim::slim_app(app, &binaries, &host, skip_developer_id) {
+        match crate::core::slim::slim_app(app, &binaries, host, skip_developer_id) {
             Ok(saved) => {
                 if cli.json {
                     let report = serde_json::json!({
@@ -1180,6 +1199,7 @@ fn pick_apps_to_slim(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
+    host: &dyn Host,
     layout: &Layout,
     skip_developer_id: bool,
 ) -> ExitCode {
@@ -1190,20 +1210,19 @@ fn pick_apps_to_slim(
         return run_tui(&mut app);
     }
 
-    let host = MacHost;
-    let mut scan = crate::core::slim::slim_scan(layout, &host, ignore, None, None);
+    let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
 
     if cli.json {
         let installed = apps::find_apps(layout);
         let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
-        let running = crate::core::slim::running_processes(&host);
+        let running = crate::core::slim::running_processes(host);
 
         let infos: Vec<crate::core::slim::SlimAppInfo> = installed
             .into_iter()
             .map(|app| {
                 match crate::core::slim::check_eligibility(
                     &app,
-                    &host,
+                    host,
                     layout,
                     ignore,
                     &rosetta,
@@ -1294,7 +1313,7 @@ fn pick_apps_to_slim(
     let mut total_saved = 0u64;
     for app in &chosen {
         let (binaries, _) = crate::core::slim::find_universal_binaries(&app.path);
-        match crate::core::slim::slim_app(app, &binaries, &host, skip_developer_id) {
+        match crate::core::slim::slim_app(app, &binaries, host, skip_developer_id) {
             Ok(saved) => {
                 total_saved += saved;
                 println!(
@@ -1320,4 +1339,177 @@ fn pick_apps_to_slim(
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::apps::testing::sandbox;
+    use crate::core::host::fake::FakeHost;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("taert").chain(args.iter().copied())).unwrap()
+    }
+
+    fn succeeded(code: ExitCode) -> bool {
+        format!("{code:?}") == format!("{:?}", ExitCode::SUCCESS)
+    }
+
+    fn schedule(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+        let cli = parse(args);
+        let Some(Command::Schedule(ref schedule_args)) = cli.command else {
+            panic!("not a schedule command");
+        };
+        handle_schedule(
+            schedule_args,
+            &Config::load_from(&layout.config_path()).unwrap(),
+            host,
+            layout,
+        )
+    }
+
+    fn startup(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+        let cli = parse(args);
+        let Some(Command::Startup(ref startup_args)) = cli.command else {
+            panic!("not a startup command");
+        };
+        handle_startup(
+            startup_args,
+            &cli,
+            true,
+            &IgnoreStore::default(),
+            &Config::default(),
+            host,
+            layout,
+        )
+    }
+
+    fn slim(args: &[&str], host: &FakeHost, layout: &Layout) -> ExitCode {
+        let cli = parse(args);
+        let Some(Command::Slim(ref slim_args)) = cli.command else {
+            panic!("not a slim command");
+        };
+        handle_slim(slim_args, &cli, true, &IgnoreStore::default(), host, layout)
+    }
+
+    fn apple_silicon_host() -> FakeHost {
+        let host = FakeHost::idle();
+        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host
+    }
+
+    #[test]
+    fn schedule_set_and_off_use_the_given_host_and_layout() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let set = schedule(
+            &[
+                "schedule",
+                "set",
+                "--categories",
+                "dev,junk",
+                "--min-reclaim",
+                "1G",
+            ],
+            &host,
+            &layout,
+        );
+
+        assert!(succeeded(set));
+        assert!(host.ran("/bin/launchctl bootstrap"));
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.schedule.unwrap().categories, ["dev", "junk"]);
+
+        let off = schedule(&["schedule", "off"], &host, &layout);
+
+        assert!(succeeded(off));
+        assert!(host.ran("/bin/launchctl bootout"));
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert!(saved.schedule.is_none());
+    }
+
+    #[test]
+    fn schedule_refuses_purge_and_docker_before_it_runs_anything() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        for category in ["purge", "docker"] {
+            let code = schedule(
+                &["schedule", "set", "--categories", category],
+                &host,
+                &layout,
+            );
+            assert!(!succeeded(code));
+        }
+
+        assert!(host.calls.lock().unwrap().is_empty());
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn schedule_show_when_off_succeeds() {
+        let (_temp, layout) = sandbox();
+
+        let code = schedule(&["schedule"], &FakeHost::default(), &layout);
+
+        assert!(succeeded(code));
+    }
+
+    #[test]
+    fn startup_lists_items_in_plain_and_json() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+
+        assert!(succeeded(startup(&["startup", "--plain"], &host, &layout)));
+        assert!(succeeded(startup(&["startup", "--json"], &host, &layout)));
+    }
+
+    #[test]
+    fn startup_enable_and_disable_fail_for_an_unknown_item() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+
+        for action in ["enable", "disable"] {
+            let code = startup(
+                &["startup", action, "com.nonexistent.service"],
+                &host,
+                &layout,
+            );
+            assert!(!succeeded(code));
+        }
+
+        assert!(!host.ran("/bin/launchctl enable"));
+        assert!(!host.ran("/bin/launchctl disable"));
+    }
+
+    #[test]
+    fn slim_needs_an_apple_silicon_mac() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+
+        let code = slim(&["slim", "--dry-run"], &host, &layout);
+
+        assert!(!succeeded(code));
+        assert!(!host.ran("/usr/bin/codesign"));
+    }
+
+    #[test]
+    fn slim_lists_nothing_in_an_empty_applications_folder() {
+        let (_temp, layout) = sandbox();
+        let host = apple_silicon_host();
+
+        assert!(succeeded(slim(&["slim", "--json"], &host, &layout)));
+        assert!(succeeded(slim(&["slim", "--dry-run"], &host, &layout)));
+    }
+
+    #[test]
+    fn slim_fails_for_an_unknown_app_name() {
+        let (_temp, layout) = sandbox();
+        let host = apple_silicon_host();
+
+        let code = slim(&["slim", "NonExistentApp12345"], &host, &layout);
+
+        assert!(!succeeded(code));
+    }
 }

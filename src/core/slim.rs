@@ -843,7 +843,7 @@ pub fn slim_scan(
         }
 
         if !items.is_empty() {
-            items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
             scan.groups.push(ToolGroup {
                 tool: root.display().to_string(),
                 items,

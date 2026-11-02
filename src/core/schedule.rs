@@ -138,8 +138,8 @@ pub fn agent_plist_path(layout: &Layout) -> PathBuf {
 }
 
 /// Path to the schedule lock file preventing overlapping runs.
-pub fn schedule_lock_path() -> PathBuf {
-    Safety::home_dir().join(".config/taert/schedule.lock")
+pub fn schedule_lock_path(layout: &Layout) -> PathBuf {
+    layout.user(".config/taert/schedule.lock")
 }
 
 fn current_uid() -> u32 {
@@ -301,9 +301,7 @@ pub fn set_schedule(
         min_reclaim,
         last_skip: None,
     });
-    if let Some(path) = Config::default_path() {
-        let _ = config.save_to(&path);
-    }
+    let _ = config.save_to(&layout.config_path());
 
     Ok(())
 }
@@ -332,9 +330,7 @@ pub fn remove_schedule(
 
     // 3. Update config
     config.schedule = None;
-    if let Some(path) = Config::default_path() {
-        let _ = config.save_to(&path);
-    }
+    let _ = config.save_to(&layout.config_path());
 
     Ok(())
 }
@@ -508,14 +504,13 @@ pub fn run_scheduled(
     layout: &Layout,
     config: &mut Config,
     lock_path: Option<&Path>,
-    history_path: Option<&Path>,
 ) -> Result<(), String> {
     let Some(sched) = &config.schedule else {
         return Ok(());
     };
 
     // 1. Acquire non-overlapping lock
-    let default_lock = schedule_lock_path();
+    let default_lock = schedule_lock_path(layout);
     let lock_target = lock_path.unwrap_or(&default_lock);
     let _lock = match ScheduleLock::try_acquire(lock_target) {
         Ok(l) => l,
@@ -553,16 +548,12 @@ pub fn run_scheduled(
                 bytes: total_selected_bytes,
             });
         }
-        if let Some(path) = Config::default_path() {
-            let _ = config.save_to(&path);
-        }
+        let _ = config.save_to(&layout.config_path());
         return Ok(());
     }
 
     // 4. Remove selected rows only, through Cleaner
-    let history = history_path
-        .map(|p| HistoryLog::new(p.to_path_buf()))
-        .unwrap_or_else(HistoryLog::default_log);
+    let history = HistoryLog::new(layout.history_path());
 
     let session = history.start_run("schedule run", "schedule", Some(all_items.len()));
     let cleaner = Cleaner::new(host, RemovalMode::Permanent);
@@ -680,6 +671,48 @@ mod tests {
     }
 
     #[test]
+    fn set_saves_the_settings_inside_the_layout() {
+        let temp = tempdir().unwrap();
+        let layout = Layout {
+            home: temp.path().to_path_buf(),
+            root: temp.path().to_path_buf(),
+            user_cache: None,
+        };
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let mut config = Config::default();
+
+        set_schedule(
+            &FakeHost::default(),
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["dev".to_string()],
+            1_000_000,
+            Some(&bin),
+        )
+        .unwrap();
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.schedule.unwrap().min_reclaim, 1_000_000);
+    }
+
+    #[test]
+    fn off_saves_the_cleared_settings_inside_the_layout() {
+        let temp = tempdir().unwrap();
+        let layout = Layout {
+            home: temp.path().to_path_buf(),
+            root: temp.path().to_path_buf(),
+            user_cache: None,
+        };
+        let mut config = Config::default();
+
+        remove_schedule(&FakeHost::default(), &layout, &mut config).unwrap();
+
+        assert!(layout.config_path().exists());
+    }
+
+    #[test]
     fn off_removes_the_plist_after_bootout() {
         let temp = tempdir().unwrap();
         let layout = Layout {
@@ -706,7 +739,6 @@ mod tests {
     fn held_lock_exits_with_no_work_done() {
         let temp = tempdir().unwrap();
         let lock_path = temp.path().join("schedule.lock");
-        let history_path = temp.path().join("history.jsonl");
 
         let _guard = ScheduleLock::try_acquire(&lock_path).unwrap();
 
@@ -726,15 +758,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_scheduled(
-            &host,
-            &layout,
-            &mut config,
-            Some(&lock_path),
-            Some(&history_path),
-        );
+        let result = run_scheduled(&host, &layout, &mut config, Some(&lock_path));
         assert!(result.is_ok());
-        assert!(!history_path.exists());
+        assert!(!layout.history_path().exists());
     }
 
     #[test]
@@ -794,7 +820,6 @@ mod tests {
         fs::write(homebrew.join("cache.tar.gz"), vec![0u8; 2048]).unwrap();
 
         let host = FakeHost::idle();
-        let history_path = layout.user("history.jsonl");
         let lock_path = layout.user("schedule.lock");
 
         let mut config = Config {
@@ -807,14 +832,7 @@ mod tests {
             ..Default::default()
         };
 
-        run_scheduled(
-            &host,
-            &layout,
-            &mut config,
-            Some(&lock_path),
-            Some(&history_path),
-        )
-        .unwrap();
+        run_scheduled(&host, &layout, &mut config, Some(&lock_path)).unwrap();
 
         // Files were NOT removed
         assert!(homebrew.join("cache.tar.gz").exists());
@@ -827,8 +845,9 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(skip.bytes >= 2048);
-        // History was NOT written with schedule run
-        assert!(!history_path.exists());
+        assert!(!layout.history_path().exists());
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.schedule.unwrap().last_skip.unwrap().bytes, skip.bytes);
     }
 
     #[test]
@@ -839,7 +858,6 @@ mod tests {
         fs::write(homebrew.join("cache.tar.gz"), vec![0u8; 8192]).unwrap();
 
         let host = FakeHost::idle();
-        let history_path = layout.user("history.jsonl");
         let lock_path = layout.user("schedule.lock");
 
         let mut config = Config {
@@ -852,19 +870,12 @@ mod tests {
             ..Default::default()
         };
 
-        run_scheduled(
-            &host,
-            &layout,
-            &mut config,
-            Some(&lock_path),
-            Some(&history_path),
-        )
-        .unwrap();
+        run_scheduled(&host, &layout, &mut config, Some(&lock_path)).unwrap();
 
         // Files WERE removed
         assert!(!homebrew.join("cache.tar.gz").exists());
         // History was written with mode "schedule"
-        let history = HistoryLog::new(history_path);
+        let history = HistoryLog::new(layout.history_path());
         let runs = history.load_runs().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].mode, "schedule");

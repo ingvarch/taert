@@ -10,7 +10,8 @@ fn taert(home: &TempDir) -> Command {
 
 #[test]
 fn test_cli_help() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.arg("--help")
         .assert()
         .success()
@@ -21,7 +22,8 @@ fn test_cli_help() {
 
 #[test]
 fn test_cli_doctor_json() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.args(["doctor", "--seconds", "2", "--json"])
         .assert()
         .success()
@@ -32,7 +34,8 @@ fn test_cli_doctor_json() {
 
 #[test]
 fn test_cli_doctor_plain() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.args(["doctor", "--seconds", "2", "--plain"])
         .assert()
         .success()
@@ -42,7 +45,8 @@ fn test_cli_doctor_plain() {
 
 #[test]
 fn test_cli_config() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.arg("config")
         .assert()
         .success()
@@ -53,7 +57,8 @@ fn test_cli_config() {
 
 #[test]
 fn test_cli_config_invalid_appearance() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.args(["config", "--appearance", "neon"])
         .assert()
         .failure()
@@ -62,7 +67,8 @@ fn test_cli_config_invalid_appearance() {
 
 #[test]
 fn test_cli_ignore_list() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.args(["ignore", "list"])
         .assert()
         .success()
@@ -71,7 +77,8 @@ fn test_cli_ignore_list() {
 
 #[test]
 fn test_cli_purge_dry_run() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.args(["purge", ".", "--dry-run"])
         .assert()
         .success()
@@ -80,7 +87,8 @@ fn test_cli_purge_dry_run() {
 
 #[test]
 fn test_cli_docker_reports_an_unreachable_daemon() {
-    let mut cmd = Command::cargo_bin("taert").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = taert(&home);
     cmd.env("DOCKER_HOST", "tcp://127.0.0.1:1")
         .args(["docker", "--dry-run"])
         .assert()
@@ -449,80 +457,6 @@ mod uninstall {
     }
 
     #[test]
-    fn test_cli_startup_plain() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["startup", "--plain"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("=== macOS Startup Items ==="));
-    }
-
-    #[test]
-    fn test_cli_startup_json() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["startup", "--json"])
-            .assert()
-            .success()
-            .stdout(predicate::str::starts_with("["));
-    }
-
-    #[test]
-    fn test_cli_startup_disable_nonexistent() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["startup", "disable", "com.nonexistent.service"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains(
-                "Startup item 'com.nonexistent.service' not found",
-            ));
-    }
-
-    #[test]
-    fn test_cli_startup_enable_nonexistent() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["startup", "enable", "com.nonexistent.service"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains(
-                "Startup item 'com.nonexistent.service' not found",
-            ));
-    }
-
-    #[test]
-    fn test_cli_slim_json() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["slim", "--json"])
-            .assert()
-            .success()
-            .stdout(predicate::str::starts_with("["));
-    }
-
-    #[test]
-    fn test_cli_slim_dry_run() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["slim", "--dry-run"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Dry run completed."));
-    }
-
-    #[test]
-    fn test_cli_slim_nonexistent() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["slim", "NonExistentApp12345"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("NonExistentApp12345"));
-    }
-
-    #[test]
     fn test_cli_large_force_fails() {
         let home = tempfile::tempdir().unwrap();
         taert(&home)
@@ -555,16 +489,6 @@ mod uninstall {
     }
 
     #[test]
-    fn test_cli_schedule_show_when_off() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args(["schedule", "show"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Scheduled cleanup is off."));
-    }
-
-    #[test]
     fn test_cli_schedule_refuses_purge_and_docker() {
         let home = tempfile::tempdir().unwrap();
         taert(&home)
@@ -578,46 +502,5 @@ mod uninstall {
             .assert()
             .failure()
             .stderr(predicate::str::contains("cannot be scheduled"));
-    }
-
-    #[test]
-    fn test_cli_schedule_set_and_off() {
-        let home = tempfile::tempdir().unwrap();
-        taert(&home)
-            .args([
-                "schedule",
-                "set",
-                "--every",
-                "week",
-                "--categories",
-                "dev,junk",
-                "--min-reclaim",
-                "1G",
-            ])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(
-                "Every week: dev, junk, when at least 1 GB can be freed.",
-            ));
-
-        taert(&home)
-            .args(["schedule", "show"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(
-                "Every week: dev, junk, when at least 1 GB can be freed.",
-            ));
-
-        taert(&home)
-            .args(["schedule", "off"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Scheduled cleanup turned off."));
-
-        taert(&home)
-            .args(["schedule", "show"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Scheduled cleanup is off."));
     }
 }

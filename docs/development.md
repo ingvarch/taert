@@ -5,7 +5,7 @@ Local setup, checks, and project layout. For user guides and command references,
 ## Prerequisites
 
 - macOS 11 (Big Sur) or newer.
-- Rust stable 1.88 or newer:
+- Rust stable 1.88 or newer. CI always uses the newest stable, which can report lints an older Rust does not, so run `rustup update stable` before the checks:
 
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -51,9 +51,9 @@ The script runs `cargo build --release` for each target, combines them via `lipo
 Run these before submitting changes. All checks must pass with zero warnings and zero failures:
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
 ```
 
 CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). Releases are in [releasing.md](releasing.md).
@@ -61,6 +61,8 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 `cargo test --test docker_live -- --ignored` runs against the real Docker daemon. These tests remove only the objects they create, and they leave a few small entries in the build cache.
 
 `cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
+
+Tests never read or write your real taert files, launchd, Trash, or `/Applications`. They use a temporary `Layout` and the fake `Host`. Code that saves config or history takes its path from the `Layout` it gets (`config_path()`, `history_path()`). A test of the binary sets `HOME` to a temporary folder and runs only commands that read or that write inside it. Commands that call `launchctl`, `osascript`, or `codesign` are tested through the fake `Host` in `src/main.rs`. After the tests, CI fails if `~/.config/taert`, `~/Library/Application Support/taert`, or a loaded `io.github.ingvarch.taert.schedule` agent exists.
 
 Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table. A test of the binary has no fake `Host`, so it starts `/bin/sleep` with a bundle path as `arg0`: `ps` lists that path, and nothing runs from a bundle.
 

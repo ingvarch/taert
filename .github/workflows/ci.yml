@@ -21,6 +21,23 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run Tests
         run: cargo test --all-targets --all-features
+      - name: Tests Left Nothing Behind
+        run: |
+          left=0
+          for path in \
+            "$HOME/.config/taert" \
+            "$HOME/Library/Application Support/taert" \
+            "$HOME/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist"; do
+            if [ -e "$path" ]; then
+              echo "A test left $path"
+              left=1
+            fi
+          done
+          if launchctl print "gui/$(id -u)/io.github.ingvarch.taert.schedule" >/dev/null 2>&1; then
+            echo "A test left the schedule agent loaded"
+            left=1
+          fi
+          exit "$left"
 
   snapshot:
     name: Release Snapshot

@@ -145,13 +145,17 @@ impl Default for Config {
 
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
-        let dir = dirs::config_dir()?.join("taert");
+        Some(Self::path_in(&dirs::config_dir()?.join("taert")))
+    }
+
+    /// The config file inside `dir`. An old `config.json` stays in use until a TOML file exists.
+    pub fn path_in(dir: &Path) -> PathBuf {
         let toml_path = dir.join("config.toml");
         let json_path = dir.join("config.json");
         if json_path.exists() && !toml_path.exists() {
-            Some(json_path)
+            json_path
         } else {
-            Some(toml_path)
+            toml_path
         }
     }
 

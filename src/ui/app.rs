@@ -797,7 +797,7 @@ impl App {
                             "trash" => "clean trash".to_string(),
                             _ => "clean".to_string(),
                         };
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(self.layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(items.len()),
@@ -1509,7 +1509,7 @@ impl App {
                             plan.apps.iter().map(|a| a.app.name.as_str()).collect();
                         let command = format!("uninstall {}", app_names.join(", "));
                         let total = plan.scan.selected_items().len();
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(total),
@@ -1538,7 +1538,7 @@ impl App {
                             _ => "clean".to_string(),
                         };
                         let total = selected_items.len();
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(total),
@@ -1594,13 +1594,17 @@ impl App {
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
             let host = self.host.clone();
+            let layout = self.layout.clone();
 
             thread::spawn(move || {
                 let tx_prog = tx.clone();
                 let command = "analyze".to_string();
                 let total = scan_items.len();
-                let session =
-                    HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                let session = HistoryLog::new(layout.history_path()).start_run(
+                    &command,
+                    "interactive",
+                    Some(total),
+                );
                 let report = Cleaner::new(&*host, mode).remove_items_with_callbacks(
                     &scan_items,
                     &ignore,
@@ -2968,6 +2972,25 @@ mod tests {
 
             app.handle_key(KeyCode::Esc);
             assert_main_menu(&app, 3);
+        }
+
+        #[test]
+        fn an_uninstall_is_logged_in_the_history_of_the_layout() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            let runs = HistoryLog::new(app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "uninstall Foo");
         }
 
         #[test]
