@@ -144,10 +144,10 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 
 2. **Atomic 4-Step Safety Pipeline**:
    `compress_file` and `undo_file` build a copy beside the file and swap it in only when it checks out:
-   - **Step 1 (Temp file)**: Writes the data to a temporary file `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp` in the same folder. The file is created with mode `0600`, so no other user can read the copy while it is verified, and any ACL it inherits from the folder is cleared. A guard removes it on every error, including an undo that runs out of space. The guard clears flags and ACL before it unlinks, and the error names the file if the unlink still fails.
+   - **Step 1 (Temp file)**: Writes the data to a temporary file `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp` in the same folder. The file is created with mode `0600`, so no other user can read the copy while it is verified, and any ACL it inherits from the folder is cleared. Then it gets the extended attribute `io.github.ingvarch.taert.copy`, which marks it as taert's copy. A guard removes it on every error, including an undo that runs out of space. The guard clears flags and ACL before it unlinks, and the error names the file if the unlink still fails.
    - **Step 2 (Metadata)**: Copies ownership (`fchown`) and flags (`fchflags`), then the extended attributes. Any error fails the file and keeps the original.
    - **Step 3 (Byte-by-byte readback verification)**: Reads the temporary file back through the kernel, which decompresses it, and compares it block by block with the original.
-   - **Step 4 (Times, ACL, mode, swap)**: Sets access and modification times and the birth time after the flag, because setting `UF_COMPRESSED` resets the modification time. Then it copies the ACL (after the extended attributes, so an ACL that denies `writeextattr` cannot block them) and the mode.
+   - **Step 4 (Times, ACL, mode, swap)**: Sets access and modification times and the birth time after the flag, because setting `UF_COMPRESSED` resets the modification time. Then it removes the copy mark and copies the ACL (after the extended attributes, so an ACL that denies `writeextattr` cannot block them) and the mode.
    Right before the swap, the original's inode, size, and modification time must equal what they were when the file was opened. Otherwise the file is left as it is. Right after the swap `renamex_np(..., RENAME_SWAP)`, the old file, now at the temporary path, is checked again. If it changed, the swap is undone, so a program that wrote to the old inode loses nothing. The swap is undone only if the path still holds the new copy. If the file was renamed away or replaced in the meantime, the changed old file stays beside it as `<name>.taert-changed-<nanos>` and the error names it. Only then is the old file deleted.
    The check for open files is one `lsof` listing taken at the start of a run. A program that opens a file after that listing and writes only after the swap is not caught: its writes go to the old file and are lost. The refusals in the next section keep most such files out. Close programs that write to the folder before a long run.
 
@@ -161,12 +161,14 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    - Is an APFS clone sharing blocks with another file (`EF_SHARES_ALL_BLOCKS`).
    - Is a cloud or dataless placeholder (`SF_DATALESS`).
    - Is not owned by the current user.
-   - Has the `uchg`, `schg`, `uappnd`, or `sappnd` flag.
+   - Has the `uchg`, `schg`, `uappnd`, or `sappnd` flag, or sits in a folder that has one. In an append-only folder taert could create the temporary file but neither swap nor remove it.
    - Has an ACL that denies `delete`, or sits in a folder whose ACL denies `delete_child`. The swap and the removal of the temporary file would fail.
+   - Sits in a folder whose flags cannot be read.
    - Is open for writing. One `lsof` listing at the start of the run names these files. If `lsof` fails, the run changes nothing.
    - Net compression savings are less than 4 KB (or file is under 4 KB).
 
    Temporary files that earlier runs left behind are deleted when their folder is visited, unless the run that made them is still alive. Flags and ACL on such a file are cleared first. This keeps a stale file out of app bundles, where it would break `codesign --strict`.
+   Only a file with the copy mark is deleted. The mark comes off before the swap, so the original never has it, even when a crash or a failed swap back leaves the original at the temporary name. A leftover without the mark is kept and listed as a failure on every run, until you compare it with the file beside it and remove the one you do not need. A crash in the short moment between removing the mark and the swap leaves an unmarked copy, which is listed the same way.
 
 5. **Safety Gate (`Safety::can_compress`)**:
    Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. The path is made absolute before any check, and after the gate passes the walk starts from the real path, so `..` and a wrong letter case cannot get around the later checks. Compression is strictly limited to safe locations:

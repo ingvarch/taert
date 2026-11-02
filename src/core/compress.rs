@@ -40,6 +40,9 @@ const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
 const RENAME_SWAP: libc::c_uint = 0x0000_0002;
 const LSOF: &str = "/usr/sbin/lsof";
 const LSOF_TIMEOUT: Duration = Duration::from_secs(60);
+/// Marks taert's own copy until right before the swap. The cleanup of leftovers
+/// removes only marked files, so it never removes an original.
+const COPY_MARK: &str = "io.github.ingvarch.taert.copy";
 
 const COMPRESSION_LZFSE: i32 = 0x801;
 
@@ -259,42 +262,50 @@ fn kept_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.taert-changed-{nanos}"))
 }
 
+fn has_xattr(c_path: &CStr, name: &CStr) -> bool {
+    let res = unsafe {
+        getxattr(
+            c_path.as_ptr(),
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            XATTR_NOFOLLOW,
+        )
+    };
+    res >= 0
+}
+
 /// Checks whether `path` already carries compression-related xattrs.
 pub fn has_compression_xattrs(path: &Path) -> Result<bool, std::io::Error> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let c_file = c_path(path)?;
+    Ok(has_xattr(&c_file, c"com.apple.decmpfs") || has_xattr(&c_file, c"com.apple.ResourceFork"))
+}
 
-    let decmp = CString::new("com.apple.decmpfs").unwrap();
-    let res1 = unsafe {
-        getxattr(
-            c_path.as_ptr(),
-            decmp.as_ptr(),
-            std::ptr::null_mut(),
+fn mark_copy(file: &File) -> io::Result<()> {
+    let name = CString::new(COPY_MARK)?;
+    check(unsafe {
+        libc::fsetxattr(
+            file.as_raw_fd(),
+            name.as_ptr(),
+            b"".as_ptr().cast(),
             0,
             0,
-            XATTR_NOFOLLOW,
+            0,
         )
-    };
-    if res1 >= 0 {
-        return Ok(true);
-    }
+    })
+}
 
-    let rf = CString::new("com.apple.ResourceFork").unwrap();
-    let res2 = unsafe {
-        getxattr(
-            c_path.as_ptr(),
-            rf.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            0,
-            XATTR_NOFOLLOW,
-        )
-    };
-    if res2 >= 0 {
-        return Ok(true);
-    }
+fn unmark_copy(file: &File) -> io::Result<()> {
+    let name = CString::new(COPY_MARK)?;
+    check(unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr(), 0) })
+}
 
-    Ok(false)
+fn has_copy_mark(path: &Path) -> bool {
+    match (c_path(path), CString::new(COPY_MARK)) {
+        (Ok(c_file), Ok(name)) => has_xattr(&c_file, &name),
+        _ => false,
+    }
 }
 
 /// Compress a single buffer chunk into a valid decmpfs codec frame.
@@ -512,14 +523,18 @@ fn acl_denies(path: &Path, right: &str) -> bool {
     denied
 }
 
+fn is_locked(meta: &fs::Metadata) -> bool {
+    DarwinMetadataExt::st_flags(meta) & (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND) != 0
+}
+
 /// Whether the file or its folder stops a swap: flags, or an ACL that denies delete.
+/// A folder that cannot be read counts as locked.
 fn blocks_replacement(path: &Path, meta: &fs::Metadata) -> bool {
-    let flags = DarwinMetadataExt::st_flags(meta);
-    flags & (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND) != 0
-        || acl_denies(path, "delete")
-        || path
-            .parent()
-            .is_some_and(|parent| acl_denies(parent, "delete_child"))
+    let folder_blocks = |folder: &Path| {
+        fs::symlink_metadata(folder).map_or(true, |m| is_locked(&m))
+            || acl_denies(folder, "delete_child")
+    };
+    is_locked(meta) || acl_denies(path, "delete") || path.parent().is_none_or(folder_blocks)
 }
 
 /// Removes a file that may carry flags or an ACL that stop the removal.
@@ -728,6 +743,7 @@ impl<'a> Replacement<'a> {
             armed: true,
         };
         clear_acl(&c_path(&temp.path)?)?;
+        mark_copy(&file)?;
         let replacement = Self {
             path,
             meta,
@@ -772,6 +788,7 @@ impl<'a> Replacement<'a> {
         copy_times(self.file.as_raw_fd(), self.meta)?;
 
         self.step(Step::Permissions)?;
+        unmark_copy(&self.file)?;
         copy_acl(&c_path(self.path)?, &c_path(&self.temp.path)?)?;
         let mode = (self.meta.mode() & 0o7777) as libc::mode_t;
         check(unsafe { libc::fchmod(self.file.as_raw_fd(), mode) })?;
@@ -1245,13 +1262,24 @@ fn process_is_alive(pid: u32) -> bool {
     res == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Removes a temporary file that an earlier run left behind.
-fn remove_stale_temp(path: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
+/// Removes a temporary file that an earlier run left behind. A file without the
+/// copy mark may be an original that a swap moved there, so it stays.
+fn remove_stale_temp(path: &Path) -> Result<(), String> {
+    let failed =
+        |e: io::Error| format!("could not remove a temporary file from an earlier run: {e}");
+    let meta = fs::symlink_metadata(path).map_err(failed)?;
     if !meta.file_type().is_file() {
         return Ok(());
     }
-    force_remove(path)
+    if !has_copy_mark(path) {
+        return Err(
+            "a temporary file from an earlier run may hold the original with changes, \
+             so it was left in place. Compare it with the file beside it and remove the one \
+             you do not need"
+                .to_string(),
+        );
+    }
+    force_remove(path).map_err(failed)
 }
 
 /// What a run needs: commands, folders, and the ignore list.
@@ -1505,10 +1533,10 @@ impl Compressor<'_> {
             {
                 continue;
             }
-            if let Err(e) = remove_stale_temp(&entry.path()) {
+            if let Err(error) = remove_stale_temp(&entry.path()) {
                 report.failures.push(CompressFailure {
                     path: entry.path(),
-                    error: format!("could not remove a temporary file from an earlier run: {e}"),
+                    error,
                 });
             }
         }
@@ -2428,14 +2456,13 @@ mod tests {
     fn leftovers_of_finished_runs_are_removed_and_those_of_live_runs_stay() {
         let (_temp, layout) = sandbox();
         let dir = make(&layout.user("Projects/data"));
-        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
-        let dead_pid = child.id();
-        child.wait().unwrap();
+        let dead_pid = dead_pid();
         let stale = dir.join(format!(".a.txt.taert-tmp-{dead_pid}-1-2.tmp"));
         let locked = dir.join(format!(".b.txt.taert-tmp-{dead_pid}-1-3.tmp"));
         let live = dir.join(format!(".c.txt.taert-tmp-{}-1-4.tmp", std::process::id()));
         for file in [&stale, &locked, &live] {
             fs::write(file, b"x").unwrap();
+            write_attribute(file, COPY_MARK, b"");
         }
         set_flags(&locked, UF_IMMUTABLE);
         let host = host_with("    1     0 /sbin/launchd\n", "");
@@ -2599,6 +2626,29 @@ mod tests {
     }
 
     #[test]
+    fn a_file_in_an_append_only_or_locked_folder_is_skipped_and_leaves_nothing_behind() {
+        for flag in [UF_APPEND, UF_IMMUTABLE] {
+            let temp = tempdir().unwrap();
+            let dir = make(&temp.path().join("ap"));
+            let plain = make_repetitive_file(&dir, "plain.txt", 300_000);
+            let packed = make_repetitive_file(&dir, "packed.txt", 300_000);
+            compress_file(&packed, false).unwrap();
+            set_flags(&dir, flag);
+
+            let outcome = compress_file(&plain, false);
+            let undo = undo_file(&packed, false);
+            let mut leftovers = names_in(&dir);
+            leftovers.sort();
+            set_flags(&dir, 0);
+
+            let locked = FileOutcome::Skipped(SkipReason::Locked);
+            assert_eq!(outcome.unwrap(), locked, "{flag:#x}");
+            assert_eq!(undo.unwrap(), locked, "{flag:#x}");
+            assert_eq!(leftovers, ["packed.txt", "plain.txt"], "{flag:#x}");
+        }
+    }
+
+    #[test]
     fn an_acl_the_folder_hands_to_new_files_does_not_reach_the_copy() {
         let temp = tempdir().unwrap();
         let file = make_repetitive_file(temp.path(), "plain.txt", 300_000);
@@ -2727,6 +2777,62 @@ mod tests {
         let kept = kept_files(temp.path(), &expected, "live.log");
         assert_eq!(kept.len(), 1, "{:?}", names_in(temp.path()));
         assert!(stale_temp_owner(&kept[0]).is_none());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn a_changed_original_stuck_at_the_temporary_name_survives_a_later_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let file = make_repetitive_file(&dir, "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let write_and_freeze = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(&dir), b"appended record\n");
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &write_and_freeze);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let stuck = temp_file_in(&dir);
+        let left_by_a_gone_run = dir.join(format!(".live.log.taert-tmp-{}-1-2.tmp", dead_pid()));
+        fs::rename(&stuck, &left_by_a_gone_run).unwrap();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let report = run(&layout, &host, &dir, &real_run()).unwrap();
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&*stuck.to_string_lossy())
+        );
+        assert_eq!(fs::read(&left_by_a_gone_run).unwrap(), expected);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.failures[0].path, left_by_a_gone_run);
+    }
+
+    #[test]
+    fn the_copy_mark_never_reaches_the_finished_file() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "mark.txt", 300_000);
+
+        compress_file(&file, false).unwrap();
+        let after_compress = read_attribute(&file, COPY_MARK);
+        undo_file(&file, false).unwrap();
+        let after_undo = read_attribute(&file, COPY_MARK);
+
+        assert_eq!(after_compress, None);
+        assert_eq!(after_undo, None);
     }
 
     mod memory {

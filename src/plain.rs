@@ -366,7 +366,7 @@ impl PlainRunner {
             }
             if report.skipped.locked > 0 {
                 out.push_str(&format!(
-                    "  • Locked (uchg or schg): {}\n",
+                    "  • Locked by a flag or an ACL: {}\n",
                     report.skipped.locked
                 ));
             }
@@ -419,7 +419,7 @@ mod tests {
 
         let text = PlainRunner::compress_report_text(&report, std::path::Path::new("/x"));
 
-        assert!(text.contains("Locked (uchg or schg): 2"), "{text}");
+        assert!(text.contains("Locked by a flag or an ACL: 2"), "{text}");
         assert!(text.contains("Open for writing: 1"), "{text}");
     }
 
