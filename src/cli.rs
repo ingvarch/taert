@@ -61,6 +61,9 @@ pub enum Command {
     /// Free space with transparent APFS compression without deleting files
     Compress(CompressArgs),
 
+    /// Remove Intel code from universal apps
+    Slim(SlimArgs),
+
     /// Manage protected paths that cannot be scanned or cleaned
     Ignore(IgnoreArgs),
 
@@ -194,4 +197,10 @@ pub struct CompressArgs {
     /// Unpack compressed files back to normal files
     #[arg(long)]
     pub undo: bool,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct SlimArgs {
+    /// App to slim, by name or bundle id (shows the list of apps if omitted)
+    pub names: Vec<String>,
 }

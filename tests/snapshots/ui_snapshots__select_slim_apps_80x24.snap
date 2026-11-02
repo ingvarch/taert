@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: narrow
+---
+ taert › Optimize › Slim apps                           0 of 4 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ /Applications ──────────────────────────────────── 3 items · 810.7 MB ─╮
+   │ ▌ ○ Viscosity                                                   40.7 MB │
+   │   ○ Brave Browser                                              590.0 MB │
+   │   ○ Slack                                                      180.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ ~/Applications ───────────────────────────────────── 1 item · 35.0 MB ─╮
+   │   ○ Sublime Text                                                35.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+   Safari stays: Apple apps are part of macOS.
+   Pages stays: App Store apps are managed by the App Store.
+────────────────────────────────────────────────────────────────────────────────
+  ␣  Select    A  All    N  None    /  Search    ?  More           Slim app  ↵

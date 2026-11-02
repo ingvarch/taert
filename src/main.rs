@@ -3,7 +3,7 @@ pub mod core;
 pub mod plain;
 pub mod ui;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -11,7 +11,7 @@ use clap::Parser;
 
 use crate::cli::{
     CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
-    HistoryArgs, IgnoreAction, PurgeArgs, StartupArgs, UninstallArgs,
+    HistoryArgs, IgnoreAction, PurgeArgs, SlimArgs, StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -72,6 +72,8 @@ fn main() -> ExitCode {
         Some(Command::Uninstall(ref args)) => handle_uninstall(args, &cli, use_plain, &ignore),
 
         Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore),
+
+        Some(Command::Slim(ref args)) => handle_slim(args, &cli, use_plain, &ignore),
 
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
@@ -923,4 +925,308 @@ fn handle_compress(args: &CompressArgs, cli: &Cli, ignore: &IgnoreStore) -> Exit
             ExitCode::FAILURE
         }
     }
+}
+
+fn handle_slim(args: &SlimArgs, cli: &Cli, use_plain: bool, ignore: &IgnoreStore) -> ExitCode {
+    let host = MacHost;
+    if !crate::core::slim::is_apple_silicon(&host) {
+        eprintln!("Slimming universal apps requires an Apple Silicon Mac.");
+        return ExitCode::FAILURE;
+    }
+
+    let skip_developer_id = std::env::var("TAERT_SLIM_ALLOW_ADHOC").is_ok();
+    let layout = Layout::current();
+    if args.names.is_empty() {
+        return pick_apps_to_slim(cli, use_plain, ignore, &layout, skip_developer_id);
+    }
+
+    let installed = apps::find_apps(&layout);
+    let matching = if cli.force {
+        Matching::Exact
+    } else {
+        Matching::Partial
+    };
+    let selected = match apps::find_by_names(&installed, &args.names, matching) {
+        Ok(selected) => selected,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let rosetta = crate::core::slim::rosetta_bundle_ids(&layout);
+    let running = crate::core::slim::running_processes(&host);
+
+    for app in &selected {
+        let binaries = match crate::core::slim::check_eligibility(
+            app,
+            &host,
+            &layout,
+            ignore,
+            &rosetta,
+            Some(&running),
+            skip_developer_id,
+            true,
+        ) {
+            Ok(b) => b,
+            Err(reason) => {
+                if cli.json {
+                    let err = serde_json::json!({
+                        "error": reason,
+                        "app": app.name,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
+                } else {
+                    eprintln!("Error: {} cannot be slimmed: {reason}", app.name);
+                }
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let intel_size: u64 = binaries
+            .iter()
+            .filter_map(|p| {
+                crate::core::slim::parse_fat_header_from_file(p)
+                    .ok()
+                    .flatten()
+            })
+            .map(|h| {
+                h.slices
+                    .iter()
+                    .filter(|s| {
+                        s.cputype == crate::core::slim::CPU_TYPE_X86_64
+                            || s.cputype == crate::core::slim::CPU_TYPE_I386
+                    })
+                    .map(|s| s.size)
+                    .sum::<u64>()
+            })
+            .sum();
+
+        if cli.dry_run {
+            if cli.json {
+                let info = serde_json::json!({
+                    "dry_run": true,
+                    "name": app.name,
+                    "path": app.path,
+                    "intel_bytes": intel_size,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&info).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "Would slim {}, saving {} of Intel code. Original will go to Trash.",
+                    app.name,
+                    format_bytes(intel_size)
+                );
+                println!("Clones share blocks, so the space comes back when the Trash is emptied.");
+            }
+            continue;
+        }
+
+        if !cli.force && use_plain {
+            print!("Slim {}? [y/N]: ", app.name);
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_err()
+                || !input.trim().eq_ignore_ascii_case("y")
+            {
+                println!("Cancelled.");
+                return ExitCode::SUCCESS;
+            }
+        }
+
+        match crate::core::slim::slim_app(app, &binaries, &host, skip_developer_id) {
+            Ok(saved) => {
+                if cli.json {
+                    let report = serde_json::json!({
+                        "name": app.name,
+                        "path": app.path,
+                        "saved_bytes": saved,
+                        "success": true,
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_default()
+                    );
+                } else {
+                    println!(
+                        "Slimmed {}, saved {} of Intel code. Original was moved to Trash.",
+                        app.name,
+                        format_bytes(saved)
+                    );
+                    println!(
+                        "Clones share blocks, so the space comes back when the Trash is emptied."
+                    );
+                }
+            }
+            Err((step, error)) => {
+                if cli.json {
+                    let err = serde_json::json!({
+                        "name": app.name,
+                        "path": app.path,
+                        "step": step,
+                        "error": error,
+                        "success": false,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&err).unwrap_or_default());
+                } else {
+                    eprintln!(
+                        "Error: Slimming {} failed at step {step}: {error}",
+                        app.name
+                    );
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn pick_apps_to_slim(
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    layout: &Layout,
+    skip_developer_id: bool,
+) -> ExitCode {
+    if !use_plain && !cli.json && !cli.dry_run {
+        let mut app = ui::app::App::new(ignore.clone(), Config::load_or_default())
+            .with_permanent(cli.permanent);
+        app.launch_slim_scan();
+        return run_tui(&mut app);
+    }
+
+    let host = MacHost;
+    let mut scan = crate::core::slim::slim_scan(layout, &host, ignore, None, None);
+
+    if cli.json {
+        let installed = apps::find_apps(layout);
+        let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
+        let running = crate::core::slim::running_processes(&host);
+
+        let infos: Vec<crate::core::slim::SlimAppInfo> = installed
+            .into_iter()
+            .map(|app| {
+                match crate::core::slim::check_eligibility(
+                    &app,
+                    &host,
+                    layout,
+                    ignore,
+                    &rosetta,
+                    Some(&running),
+                    skip_developer_id,
+                    false,
+                ) {
+                    Ok(binaries) => {
+                        let intel_bytes: u64 = binaries
+                            .iter()
+                            .filter_map(|p| {
+                                crate::core::slim::parse_fat_header_from_file(p)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .map(|h| {
+                                h.slices
+                                    .iter()
+                                    .filter(|s| {
+                                        s.cputype == crate::core::slim::CPU_TYPE_X86_64
+                                            || s.cputype == crate::core::slim::CPU_TYPE_I386
+                                    })
+                                    .map(|s| s.size)
+                                    .sum::<u64>()
+                            })
+                            .sum();
+                        crate::core::slim::SlimAppInfo {
+                            name: app.name,
+                            path: app.path,
+                            bundle_id: app.bundle_id,
+                            intel_bytes,
+                            eligible: true,
+                            reason: None,
+                        }
+                    }
+                    Err(reason) => crate::core::slim::SlimAppInfo {
+                        name: app.name,
+                        path: app.path,
+                        bundle_id: app.bundle_id,
+                        intel_bytes: 0,
+                        eligible: false,
+                        reason: Some(reason),
+                    },
+                }
+            })
+            .collect();
+
+        return match serde_json::to_string_pretty(&infos) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    PlainRunner::print_scan_with_options(&scan, false);
+    if cli.dry_run {
+        println!("\nDry run completed. No apps were modified.");
+        return ExitCode::SUCCESS;
+    }
+
+    if let Err(error) = PlainRunner::prompt_selection(&mut scan) {
+        eprintln!("Selection error: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    let selected_paths: Vec<_> = scan
+        .selected_items()
+        .iter()
+        .map(|item| item.path.clone())
+        .collect();
+
+    if selected_paths.is_empty() {
+        println!("\nNothing selected for slimming.");
+        return ExitCode::SUCCESS;
+    }
+
+    let installed = apps::find_apps(layout);
+    let chosen: Vec<InstalledApp> = installed
+        .into_iter()
+        .filter(|app| selected_paths.contains(&app.path))
+        .collect();
+
+    let mut total_saved = 0u64;
+    for app in &chosen {
+        let (binaries, _) = crate::core::slim::find_universal_binaries(&app.path);
+        match crate::core::slim::slim_app(app, &binaries, &host, skip_developer_id) {
+            Ok(saved) => {
+                total_saved += saved;
+                println!(
+                    "Slimmed {}, saved {} of Intel code.",
+                    app.name,
+                    format_bytes(saved)
+                );
+            }
+            Err((step, error)) => {
+                eprintln!(
+                    "Error: Slimming {} failed at step {step}: {error}",
+                    app.name
+                );
+            }
+        }
+    }
+
+    if total_saved > 0 {
+        println!(
+            "\nTotal saved: {}. Clones share blocks, so the space comes back when the Trash is emptied.",
+            format_bytes(total_saved)
+        );
+    }
+
+    ExitCode::SUCCESS
 }

@@ -47,6 +47,7 @@ use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
 use crate::core::safety::Safety;
 use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
+use crate::core::slim;
 use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
@@ -737,6 +738,10 @@ impl App {
                     }
                     KeyCode::Enter if state.scan.id == apps::LIST_ID => self.start_review(),
                     KeyCode::Enter => {
+                        if state.scan.id == slim::SCAN_ID && state.scan.selected_items().is_empty()
+                        {
+                            state.toggle_current();
+                        }
                         state.open_confirmation();
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
@@ -1214,6 +1219,7 @@ impl App {
         match &self.screen {
             Screen::Workspace(state) => {
                 let quick_key = match state.items.len() {
+                    12 => "1-12",
                     11 => "1-11",
                     10 => "1-10",
                     _ => "1-9",
@@ -1397,6 +1403,67 @@ impl App {
                 return;
             }
 
+            if scan_id == slim::SCAN_ID {
+                thread::spawn(move || {
+                    let mut total_saved = 0u64;
+                    let mut total_trashed = 0u64;
+                    let mut apps_slimmed = 0usize;
+                    let total_candidates = selected_items.len();
+                    let mut failures = Vec::new();
+
+                    for (idx, item) in selected_items.iter().enumerate() {
+                        let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
+                            current_index: idx + 1,
+                            total_count: total_candidates,
+                            path: item.path.clone(),
+                        }));
+                        let app_name = item
+                            .path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "App".to_string());
+                        let app_size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+                        let installed_app = InstalledApp {
+                            name: app_name,
+                            path: item.path.clone(),
+                            bundle_id: None,
+                            executable: None,
+                            size_bytes: item.size_bytes,
+                            last_used: item.modified,
+                        };
+                        let (binaries, _) = slim::find_universal_binaries(&item.path);
+                        match slim::slim_app(&installed_app, &binaries, &*host, false) {
+                            Ok(saved) => {
+                                total_saved += saved;
+                                total_trashed += app_size;
+                                apps_slimmed += 1;
+                            }
+                            Err((step, err)) => {
+                                failures.push(crate::core::cleaner::RemovalFailure {
+                                    path: item.path.clone(),
+                                    error: format!("Step {step} failed: {err}"),
+                                });
+                            }
+                        }
+                    }
+
+                    let report = RemovalReport {
+                        freed_bytes: total_saved,
+                        trashed_bytes: total_trashed,
+                        removed_count: apps_slimmed,
+                        failures,
+                        notes: vec![
+                            "Clones share blocks, so the space comes back when the Trash is emptied."
+                                .to_string(),
+                        ],
+                    };
+                    let _ = tx.send(RemovalMessage::Finished(report));
+                });
+
+                self.removal_rx = Some(rx);
+                return;
+            }
+
             let plan = self
                 .plan
                 .clone()
@@ -1545,6 +1612,7 @@ impl App {
             MainMenuChoice::UninstallApps => self.launch_app_scan(),
             MainMenuChoice::Doctor => self.open_doctor(10),
             MainMenuChoice::StartupItems => self.open_startup(false),
+            MainMenuChoice::SlimApps => self.launch_slim_scan(),
             MainMenuChoice::Compress => self.launch_compress_scan(),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
@@ -1627,6 +1695,35 @@ impl App {
             ProgressState::new("Reading Candidates").top_level(),
             rx,
             Arc::new(AtomicBool::new(false)),
+        ));
+    }
+
+    pub fn launch_slim_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let layout = self.layout.clone();
+        let host = self.host.clone();
+        let ignore = self.ignore.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_scan = cancel.clone();
+
+        thread::spawn(move || {
+            let (progress, bridge) = forward_progress(tx.clone());
+            if !slim::is_apple_silicon(&*host) {
+                let _ = bridge.join();
+                let _ = tx.send(ScanMessage::Failed(
+                    "Slimming universal apps requires an Apple Silicon Mac.".to_string(),
+                ));
+                return;
+            }
+            let scan = slim::slim_scan(&layout, &*host, &ignore, Some(progress), Some(cancel_scan));
+            let _ = bridge.join();
+            let _ = tx.send(ScanMessage::Finished(scan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Scanning Universal Apps").top_level(),
+            rx,
+            cancel,
         ));
     }
 
@@ -1834,10 +1931,17 @@ mod tests {
     }
 
     #[test]
-    fn the_seventh_quick_key_opens_compress() {
+    fn the_seventh_quick_key_opens_slim_apps() {
         let mut state = WorkspaceState::new();
 
-        assert_eq!(state.select_by_number(7), Some(MainMenuChoice::Compress));
+        assert_eq!(state.select_by_number(7), Some(MainMenuChoice::SlimApps));
+    }
+
+    #[test]
+    fn the_eighth_quick_key_opens_compress() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(state.select_by_number(8), Some(MainMenuChoice::Compress));
     }
 
     fn select_app(scan: CategoryScan) -> App {
@@ -2107,7 +2211,7 @@ mod tests {
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
 
-        assert_main_menu(&app, 10);
+        assert_main_menu(&app, 11);
     }
 
     #[test]
@@ -2117,7 +2221,9 @@ mod tests {
         press(
             &mut app,
             &[
-                KeyCode::Char('0'),
+                KeyCode::End,
+                KeyCode::Up,
+                KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2133,7 +2239,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 9);
+        assert_main_menu(&app, 10);
     }
 
     #[test]
@@ -2188,7 +2294,9 @@ mod tests {
             &mut app,
             &[
                 KeyCode::Esc,
-                KeyCode::Char('0'),
+                KeyCode::End,
+                KeyCode::Up,
+                KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2443,7 +2551,7 @@ mod tests {
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('0'));
+        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
         app.handle_key(KeyCode::Down);
@@ -2500,7 +2608,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('9'));
+        app.handle_key(KeyCode::Char('0'));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();

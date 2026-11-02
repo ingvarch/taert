@@ -17,6 +17,7 @@ use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use taert::core::slim;
 use taert::core::startup::{StartupItem, StartupKind, StartupState};
 use taert::core::stores::{Config, IgnoreStore};
 use taert::core::telemetry::{
@@ -691,10 +692,11 @@ const DOCKER_CLEANUP: usize = 2;
 const _UNINSTALL_APPS: usize = 3;
 const _DOCTOR: usize = 4;
 const _STARTUP_ITEMS: usize = 5;
-const _COMPRESS: usize = 6;
-const EXPLORE_STORAGE: usize = 7;
-const SYSTEM_STATUS: usize = 8;
-const PREFERENCES: usize = 9;
+const _SLIM_APPS: usize = 6;
+const _COMPRESS: usize = 7;
+const EXPLORE_STORAGE: usize = 8;
+const SYSTEM_STATUS: usize = 9;
+const PREFERENCES: usize = 10;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -977,6 +979,61 @@ fn snapshot_select_apps() {
     assert_snapshot!("select_apps_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_apps_80x24", narrow);
+}
+
+fn slim_apps_list() -> CategoryScan {
+    CategoryScan {
+        notes: vec![
+            "Safari stays: Apple apps are part of macOS.".to_string(),
+            "Pages stays: App Store apps are managed by the App Store.".to_string(),
+        ],
+        id: slim::SCAN_ID.to_string(),
+        title: "Slim Universal Apps".to_string(),
+        groups: vec![
+            ToolGroup {
+                tool: "/Applications".to_string(),
+                items: vec![
+                    ScanItem::new(
+                        PathBuf::from("/Applications/Viscosity.app"),
+                        40_700_000,
+                        false,
+                        false,
+                    ),
+                    ScanItem::new(
+                        PathBuf::from("/Applications/Brave Browser.app"),
+                        590_000_000,
+                        false,
+                        false,
+                    ),
+                    ScanItem::new(
+                        PathBuf::from("/Applications/Slack.app"),
+                        180_000_000,
+                        false,
+                        false,
+                    ),
+                ],
+            },
+            ToolGroup {
+                tool: "~/Applications".to_string(),
+                items: vec![ScanItem::new(
+                    PathBuf::from("/Users/test/Applications/Sublime Text.app"),
+                    35_000_000,
+                    false,
+                    false,
+                )],
+            },
+        ],
+    }
+}
+
+#[test]
+fn snapshot_select_slim_apps() {
+    let state = SelectState::new(slim_apps_list());
+    let theme = snapshot_theme();
+
+    assert_snapshot!("select_slim_apps_120x32", select_screen(&state));
+    let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_slim_apps_80x24", narrow);
 }
 
 #[test]

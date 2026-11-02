@@ -12,6 +12,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Catalog | `crate::core::catalog` | Defines known cache paths, risk tiers, and auto-select defaults |
 | Cleaner | `crate::core::cleaner` | Executes safe deletions with live progress and safety checks |
 | Startup Manager | `crate::core::startup` | Scans, associates, inspects live metrics, and switches launchd/login items |
+| Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
@@ -98,6 +99,36 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
   - Apple system items (`com.apple.*`) are hidden by default, excluded from user scans unless `--all` is passed, and strictly refused for modification or deletion.
   - Security agents (CrowdStrike, SentinelOne, Jamf, Carbon Black, etc.) are protected and read-only.
   - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
+
+## Universal App Slimming
+
+[`slim.rs`](../src/core/slim.rs) removes Intel (`x86_64` / `i386`) architecture slices from universal macOS applications on Apple Silicon Macs, reducing application footprint while strictly preserving native ARM functionality and code signatures:
+
+1. **Direct Mach-O Fat Header Parsing**:
+   - Fat binary headers on disk are big-endian with magic `0xCAFEBABE` (32-bit `fat_arch`, 20 bytes per record) or `0xCAFEBABF` (64-bit `fat_arch_64`, 32 bytes per record).
+   - **Java Class Rejection**: Java bytecode `.class` files share the `0xCAFEBABE` magic but store version integers (e.g. `0x00000034` for Java 8) in the subsequent 4 bytes. `slim.rs` enforces `nfat_arch > 0 && nfat_arch < 8`, safely rejecting non-Mach-O files.
+
+2. **Slice Rewriting & Alignment**:
+   - Slices for ARM architectures (`CPU_TYPE_ARM64` and `CPU_TYPE_ARM64_32`) are kept; x86 slices (`CPU_TYPE_X86_64` and `CPU_TYPE_I386`) are stripped.
+   - Slices are extracted byte-for-byte and written to new offsets obeying standard Mach-O power-of-two page alignments (`1 << align`, typically 16 KiB / $2^{14}$).
+   - Binaries lacking any ARM slice are refused immediately without modification.
+
+3. **Code Signature & Resource Seal Integrity**:
+   - Files catalogued in `_CodeSignature/CodeResources` with whole-file hashes (`hash` / `hash2` without `cdhash`) are sealed resources. Modifying any file sealed by whole-file hash breaks the bundle's signature. `read_sealed_hashes` inspects `CodeResources` and skips rewriting any file whose whole-file hash is sealed.
+   - Mach-O code slices contain their own embedded signatures (`LC_CODE_SIGNATURE`) with individual slice `cdhash` values. Rewriting the outer fat binary header while preserving the ARM slice byte-for-byte keeps the embedded code signature valid.
+
+4. **Transactional 8-Step Pipeline**:
+   - **Step 1 (APFS Clone)**: Clones the app bundle to a temporary sibling directory using `ditto --clone` on APFS, sharing blocks with copy-on-write.
+   - **Step 2 (Thin Binaries)**: Rewrites fat binaries inside the clone, discarding Intel slices.
+   - **Step 3 (ARM Check)**: Verifies that rewritten binaries retain valid ARM code slices.
+   - **Step 4 (Codesign & Gatekeeper Verification)**: Runs `codesign --verify --deep --strict` and `spctl -a -t exec` on the clone. If macOS FinderInfo or ResourceFork extended attributes interfere, taert cleans them up and retries.
+   - **Step 5 (Original State Check)**: Confirms the original application bundle was not modified and has no processes currently running.
+   - **Step 6 (Atomic Swap)**: Atomically exchanges the clone and the original app bundle using `renamex_np(RENAME_SWAP)`.
+   - **Step 7 (Trash Original)**: Moves the original unslimmed app (now at the clone path) to the Trash using `Host::trash`.
+   - **Rollback**: Any error before Step 6 removes the temporary clone directory and leaves the original application completely untouched.
+
+5. **Block Reclamation**:
+   Because the cloned app initially shares blocks with the original via copy-on-write (`EF_SHARES_ALL_BLOCKS`), rewriting binary files copies only the modified fat header blocks. Moving the original to the Trash preserves recoverability, and the freed space is returned to APFS when the user empties the Trash.
 
 ## Transparent APFS Compression
 
