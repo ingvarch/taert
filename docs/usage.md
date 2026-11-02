@@ -429,6 +429,29 @@ Scheduled cleanup installs a user launch agent into `~/Library/LaunchAgents/io.g
 
 You can also switch on and adjust scheduled cleanup in the TUI workspace under **Preferences** → **Scheduled cleanup** using `←` and `→` to cycle between `Off`, `Every day`, `Every week`, and `Every month`.
 
+### Shell Completion (`taert completion`)
+
+Print completion scripts for your shell. `brew install` sets completions up by itself once the cask supports it. In fish, commands and flags complete, but the category names of `taert clean` do not.
+
+fish:
+
+```fish
+mkdir -p ~/.config/fish/completions
+taert completion fish > ~/.config/fish/completions/taert.fish
+```
+
+zsh:
+
+```bash
+taert completion zsh > "${fpath[1]}/_taert"
+```
+
+bash:
+
+```bash
+taert completion bash > "$(brew --prefix)/etc/bash_completion.d/taert"
+```
+
 ### Trash & Permanent Deletion
 
 By default, taert moves personal files and user apps to macOS Trash instead of deleting them immediately:
