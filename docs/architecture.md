@@ -12,6 +12,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Catalog | `crate::core::catalog` | Defines known cache paths, risk tiers, and auto-select defaults |
 | Cleaner | `crate::core::cleaner` | Executes safe deletions with live progress and safety checks |
 | Startup Manager | `crate::core::startup` | Scans, associates, inspects live metrics, and switches launchd/login items |
+| Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
 | TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
@@ -97,6 +98,42 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
   - Apple system items (`com.apple.*`) are hidden by default, excluded from user scans unless `--all` is passed, and strictly refused for modification or deletion.
   - Security agents (CrowdStrike, SentinelOne, Jamf, Carbon Black, etc.) are protected and read-only.
   - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
+
+## Transparent APFS Compression
+
+[`compress.rs`](../src/core/compress.rs) implements transparent APFS file compression utilizing macOS kernel-level decmpfs support:
+
+1. **decmpfs Format & ABI**:
+   - Files are compressed using Apple's `libcompression` framework (LZFSE type 12, with LZVN type 8 fallback).
+   - Data is partitioned into 64 KiB blocks. Each block is compressed independently; if a compressed block does not shrink, the uncompressed block is stored with a literal marker (0x06).
+   - The file's data fork is truncated to 0 bytes, and the compressed chunks along with chunk offsets are written directly to the resource fork stream via `path.join("..namedfork").join("rsrc")`. This bypasses the `setxattr` system call's 4 MB `E2BIG` limit, allowing files of arbitrary size to be compressed.
+   - The `com.apple.decmpfs` extended attribute (16-byte header: magic `0x636d7066`, compression type 12, uncompressed size `u64`) is attached, and BSD flag `UF_COMPRESSED` (`0x0020`) is set via `fchflags`.
+
+2. **Atomic 4-Step Safety Pipeline**:
+   Lossy or incomplete compression can corrupt executables and data. `compress_file` enforces strict transactional safety:
+   - **Step 1 (Temp file)**: Writes compressed data and metadata to a temporary file (`.taert.compress.<pid>.<salt>`) in the same folder as the target.
+   - **Step 2 (Metadata preservation)**: Mirrors exact permissions (`fchmod`), ownership (`fchown`), access/modification times (`futimens`), flags (`fchflags`), POSIX ACLs (`acl_get_file` / `acl_set_file`), and extended attributes (`listxattr` / `getxattr` / `setxattr`).
+   - **Step 3 (Byte-by-byte readback verification)**: Reads the temporary file back through standard kernel `read()`. The macOS decmpfs filter decompresses the stream on-the-fly. The decompressed bytes are compared against the original file byte-for-byte. If any mismatch or read error occurs, the temporary file is deleted and the original file remains untouched.
+   - **Step 4 (Atomic Swap)**: Performs an atomic swap using macOS `renamex_np(..., RENAME_SWAP)`. Once swapped, the old uncompressed copy (now at the temporary location) is deleted.
+
+3. **Safe Undo**:
+   `taert compress --undo` reads the decompressed kernel stream, writes it to a temporary file, verifies byte equality, copies metadata (preserving flags with `UF_COMPRESSED` cleared), and atomically swaps it back, restoring a standard plain uncompressed file.
+
+4. **Eligibility & Skip Rules**:
+   A file is skipped without modification if:
+   - Already compressed (`UF_COMPRESSED` or existing decmpfs/ResourceFork).
+   - Has multiple hardlinks (`st_nlink > 1`).
+   - Is an APFS clone sharing blocks with another file (`EF_SHARES_ALL_BLOCKS`).
+   - Is a cloud or dataless placeholder (`SF_DATALESS`).
+   - Is not owned by the current user.
+   - Net compression savings are less than 4 KB (or file is under 4 KB).
+
+5. **Safety Gate (`Safety::can_compress`)**:
+   Compression is strictly limited to safe locations:
+   - User home directory (`~`, including `~/.rustup`, `~/.cargo/bin`, toolchains).
+   - Application bundles in `/Applications` or `~/Applications`.
+   - Homebrew prefix (`/opt/homebrew`, `/usr/local`).
+   - Refuses system trees (`/System`, `/usr/bin`, `/sbin`), root trees, running application bundles, and user credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, etc.).
 
 ## APFS Space Accounting
 

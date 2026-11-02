@@ -41,17 +41,18 @@ pub enum MainMenuChoice {
     UninstallApps,  // 4
     Doctor,         // 5
     StartupItems,   // 6
-    ExploreStorage, // 7
-    SystemStatus,   // 8
-    Preferences,    // 9
-    ProtectedPaths, // 10
+    Compress,       // 7
+    ExploreStorage, // 8
+    SystemStatus,   // 9
+    Preferences,    // 10
+    ProtectedPaths, // 11
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3]),
-    ("Optimize", &[4, 5]),
-    ("Inspect", &[6, 7]),
-    ("Settings", &[8, 9]),
+    ("Optimize", &[4, 5, 6]),
+    ("Inspect", &[7, 8]),
+    ("Settings", &[9, 10]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +157,12 @@ impl WorkspaceState {
                     "Startup items",
                     "Review and switch off login and background items",
                     "Inspect launchd agents, daemons, and classic login items.\nDisable unneeded background services to save battery and\nfree CPU cycles. You'll review every change before\nanything is switched off.",
+                ),
+                (
+                    MainMenuChoice::Compress,
+                    "Compress",
+                    "Free space with transparent APFS compression",
+                    "Store files compressed on APFS and unpack on read.\nApps and tools keep working with the same bytes.\nReview candidates and estimated savings before\ncompressing.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
@@ -386,6 +393,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
         MainMenuChoice::Doctor => theme.g.icon_doctor,
         MainMenuChoice::StartupItems => theme.g.icon_startup,
+        MainMenuChoice::Compress => theme.g.icon_clean,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Preferences => theme.g.icon_prefs,
@@ -544,6 +552,7 @@ fn detail_data(
     match choice {
         MainMenuChoice::CleanCaches
         | MainMenuChoice::ProjectCleanup
+        | MainMenuChoice::Compress
         | MainMenuChoice::UninstallApps => storage_summary(system, width, theme),
         MainMenuChoice::ExploreStorage => {
             let mut lines = storage_summary(system, width, theme);

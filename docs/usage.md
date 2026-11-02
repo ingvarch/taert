@@ -12,8 +12,8 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Startup Items, Explore Storage, System Status, and Preferences. Keys `1` to `9` open a row directly (rows past the 9th have no digit key).
-- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Compress, Explore Storage, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
+- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup and compress items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
@@ -245,6 +245,43 @@ taert startup disable com.example.service --dry-run
 ```
 
 When disabling a launchd service, `taert` disables it before running `bootout` so launchd will not automatically restart it. When disabling a classic login item, `taert` removes it from System Events and saves its restore information in `~/.config/taert/disabled_login_items.json`. Apple system services and security agents (CrowdStrike, SentinelOne, Jamf) are strictly read-only and refused.
+
+### Transparent APFS Compression (`taert compress`)
+
+Reclaim gigabytes of APFS storage transparently using macOS kernel-level decmpfs compression. Compressed files remain completely transparent to apps, CLI tools, and the OS:
+- **Zero code or file format changes**: files decompress on-the-fly in-memory during read operations.
+- **Code signatures preserved**: `codesign --verify --deep --strict` passes without any modification or re-signing.
+- **Zero launch overhead**: apps launch at indistinguishable speeds.
+- **Transparent unpack on write**: if any application or tool writes to a compressed file, APFS automatically and transparently unpacks the file back to standard uncompressed storage.
+
+```bash
+# Preview compression savings on a directory or file
+taert compress ~/.rustup --dry-run
+
+# Compress a directory or bundle
+taert compress /opt/homebrew/Cellar
+
+# Output structured JSON report
+taert compress /opt/homebrew/Cellar --json
+
+# Undo compression, restoring plain uncompressed files
+taert compress ~/.rustup --undo
+```
+
+#### What gets compressed
+
+Ideal candidates for transparent compression:
+- Developer toolchains: `~/.rustup`, `~/.cargo/bin`, LLVM, Go toolchains.
+- Homebrew packages: `/opt/homebrew/Cellar` or `/usr/local/Cellar`.
+- Installed applications: `/Applications/*.app` and `~/Applications/*.app`.
+
+#### Safety and Skip Rules
+
+`taert compress` protects system integrity and data safety:
+- **Safety Gate**: Allowed in home directories (`~`), user-owned application bundles, and Homebrew prefixes. Strictly refuses system directories (`/System`, `/usr/bin`, `/sbin`), root trees, running application bundles, and credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`, etc.).
+- **Per-file skip rules**: Files already compressed (`UF_COMPRESSED`), files with hardlinks (`st_nlink > 1`), APFS clones sharing blocks (`EF_SHARES_ALL_BLOCKS`), cloud placeholders (`SF_DATALESS`), files not owned by the current user, or files saving less than 4 KB are automatically skipped without modification.
+- **Atomic 4-step pipeline**: Every file is compressed to a temporary sibling file, metadata (permissions, owner, utimens, flags, ACLs, xattrs) is copied, byte-for-byte readback verification is executed, and files are exchanged atomically via `renamex_np(RENAME_SWAP)`. Failure at any step leaves the original file unmodified.
+- **Interactive TUI**: The **Compress** row in the **Optimize** section of the workspace scans user-owned applications, Homebrew packages, and developer toolchains, showing estimated savings and letting you review candidates before compressing.
 
 ### Removal History (`taert history`)
 

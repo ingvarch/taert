@@ -13,16 +13,16 @@ expression: output
    ╭─ Optimize ─────────────────────╮  │                                                                             │
    │   ✚ Doctor                   › │  │ ↵ Open                                                                      │
    │   ▲ Startup items            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
-   ╰─────────────────────────╭────────────────────────────────────────────────────────────╮
-   ╭─ Inspect ───────────────│ Explore your home folder?                                  │───── 118.6 GB available ─╮
-   │   ◔ Explore storage     │                                                            │──── 375.8 GB of 494.4 GB │
-   │   ▤ System status       │ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   │   ✧ Compress            ╭────────────────────────────────────────────────────────────╮
+   ╰─────────────────────────│ Explore your home folder?                                  │───── 118.6 GB available ─╮
+   ╭─ Inspect ───────────────│                                                            │──── 375.8 GB of 494.4 GB │
+   │   ◔ Explore storage     │ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   │   ▤ System status       │                                                            │                          │
    ╰─────────────────────────│                                                            │                          │
-   ╭─ Settings ──────────────│                                                            │                          │
-   │   ⌥ Preferences         │                                           Cancel    Start  │──────────────────────────╯
-   │   ◈ Protected paths     │                                    Enter select   Esc back │
-   ╰─────────────────────────╰────────────────────────────────────────────────────────────╯
-
+   ╭─ Settings ──────────────│                                           Cancel    Start  │──────────────────────────╯
+   │   ⌥ Preferences         │                                    Enter select   Esc back │
+   │   ◈ Protected paths     ╰────────────────────────────────────────────────────────────╯
+   ╰────────────────────────────────╯
 
 
 

@@ -10,8 +10,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::{
-    CleanArgs, CleanCategory, Cli, Command, ConfigArgs, DoctorArgs, HistoryAction, HistoryArgs,
-    IgnoreAction, PurgeArgs, StartupArgs, UninstallArgs,
+    CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
+    HistoryArgs, IgnoreAction, PurgeArgs, StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -70,6 +70,8 @@ fn main() -> ExitCode {
         Some(Command::Docker) => handle_docker(&cli, use_plain, &ignore),
 
         Some(Command::Uninstall(ref args)) => handle_uninstall(args, &cli, use_plain, &ignore),
+
+        Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore),
 
         Some(Command::Analyze(ref args)) => {
             handle_analyze(args.path.clone(), args.depth, &cli, use_plain)
@@ -867,6 +869,58 @@ fn handle_history(args: &HistoryArgs, cli: &Cli) -> ExitCode {
                 println!("{}", run.format_line());
             }
             ExitCode::SUCCESS
+        }
+    }
+}
+
+fn handle_compress(args: &CompressArgs, cli: &Cli, ignore: &IgnoreStore) -> ExitCode {
+    let layout = Layout::current();
+    if let Err(e) = Safety::can_compress(&args.path, ignore, &layout) {
+        if cli.json {
+            let error_json = serde_json::json!({
+                "error": e.to_string(),
+                "path": args.path,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&error_json).unwrap_or_default()
+            );
+        } else {
+            eprintln!("Error: {e}");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let options = crate::core::compress::CompressOptions {
+        dry_run: cli.dry_run,
+        undo: args.undo,
+    };
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+
+    let report =
+        crate::core::compress::process_path(&args.path, &options, ignore, &cancelled, |_, _| {});
+
+    if cli.json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => {
+                println!("{json}");
+                if report.failures.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to serialize JSON: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    } else {
+        PlainRunner::print_compress_report(&report, &args.path);
+        if report.failures.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
         }
     }
 }

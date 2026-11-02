@@ -242,6 +242,135 @@ impl PlainRunner {
         Self::print_notes(&report.notes);
     }
 
+    pub fn print_compress_report(
+        report: &crate::core::compress::CompressReport,
+        target: &std::path::Path,
+    ) {
+        println!("{}", Self::compress_report_text(report, target));
+    }
+
+    pub fn compress_report_text(
+        report: &crate::core::compress::CompressReport,
+        target: &std::path::Path,
+    ) -> String {
+        let mut out = String::new();
+        let title = if report.undo {
+            if report.dry_run {
+                "=== APFS Decompression Estimate (Dry Run) ==="
+            } else {
+                "=== APFS Decompression (Undo) Report ==="
+            }
+        } else if report.dry_run {
+            "=== APFS Compression Estimate (Dry Run) ==="
+        } else {
+            "=== APFS Compression Report ==="
+        };
+
+        out.push_str(&format!("\n{title}\n"));
+        out.push_str(&format!("Target: {}\n", target.display()));
+        out.push_str(&format!("Scanned files: {}\n", report.scanned_files));
+
+        if report.undo {
+            out.push_str(&format!("Unpacked files: {}\n", report.processed_files));
+            out.push_str(&format!(
+                "Restored size: {}\n",
+                format_bytes(report.original_bytes)
+            ));
+        } else {
+            out.push_str(&format!("Compressed files: {}\n", report.processed_files));
+            out.push_str(&format!(
+                "Original size: {} ({} blocks)\n",
+                format_bytes(report.original_bytes),
+                report.original_blocks
+            ));
+            out.push_str(&format!(
+                "Compressed size: {} ({} blocks)\n",
+                format_bytes(report.compressed_bytes),
+                report.compressed_blocks
+            ));
+            let pct = if report.original_bytes > 0 {
+                (report.saved_bytes as f64 / report.original_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            out.push_str(&format!(
+                "Space saved: {} ({} blocks, {:.1}%)\n",
+                format_bytes(report.saved_bytes),
+                report.saved_blocks,
+                pct
+            ));
+        }
+
+        if report.skipped.total() > 0 {
+            out.push_str(&format!("\nSkipped: {} files\n", report.skipped.total()));
+            if report.skipped.already_compressed > 0 {
+                out.push_str(&format!(
+                    "  • Already compressed: {}\n",
+                    report.skipped.already_compressed
+                ));
+            }
+            if report.skipped.symlink_or_hardlink > 0 {
+                out.push_str(&format!(
+                    "  • Hardlinked or symlink: {}\n",
+                    report.skipped.symlink_or_hardlink
+                ));
+            }
+            if report.skipped.cloned > 0 {
+                out.push_str(&format!(
+                    "  • Cloned (shares blocks): {}\n",
+                    report.skipped.cloned
+                ));
+            }
+            if report.skipped.cloud_or_dataless > 0 {
+                out.push_str(&format!(
+                    "  • Cloud or dataless: {}\n",
+                    report.skipped.cloud_or_dataless
+                ));
+            }
+            if report.skipped.has_xattr > 0 {
+                out.push_str(&format!(
+                    "  • Has ResourceFork or decmpfs: {}\n",
+                    report.skipped.has_xattr
+                ));
+            }
+            if report.skipped.not_user_owned > 0 {
+                out.push_str(&format!(
+                    "  • Not owned by user: {}\n",
+                    report.skipped.not_user_owned
+                ));
+            }
+            if report.skipped.incompressible > 0 {
+                out.push_str(&format!(
+                    "  • Incompressible (<4 KB gain): {}\n",
+                    report.skipped.incompressible
+                ));
+            }
+            if report.skipped.not_compressed > 0 {
+                out.push_str(&format!(
+                    "  • Not compressed: {}\n",
+                    report.skipped.not_compressed
+                ));
+            }
+        }
+
+        if !report.failures.is_empty() {
+            out.push_str(&format!("\nFailures: {}\n", report.failures.len()));
+            for failure in &report.failures {
+                out.push_str(&format!(
+                    "  • {}: {}\n",
+                    failure.path.display(),
+                    failure.error
+                ));
+            }
+        }
+
+        if report.dry_run {
+            out.push_str("\nDry run completed. No files were modified.\n");
+        }
+
+        out
+    }
+
     pub fn print_notes(notes: &[String]) {
         print!("{}", Self::notes_text(notes));
     }
