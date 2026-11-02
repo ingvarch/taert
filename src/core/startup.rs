@@ -22,7 +22,7 @@ use super::telemetry::parse_processes;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Script to remove the login item with this name and path via System Events.
-pub const LOGIN_ITEM_SCRIPT: &[&str] = &[
+const LOGIN_ITEM_SCRIPT: &[&str] = &[
     "on run argv",
     "set target to item 1 of argv",
     "set target_path to item 2 of argv",
@@ -331,12 +331,18 @@ const BTM_TIMEOUT: Duration = Duration::from_secs(120);
 const BTM_SCRIPT: &str = "/usr/bin/sfltool dumpbtm";
 const BTM_PROMPT: &str = "Read Background Task Management records";
 
-/// An `osascript` argument list: each script line after `-e`, then the arguments after `--`.
+/// An `osascript` argument list: each script line after `-e`, then the arguments after `--`,
+/// so an argument that starts with a dash is not read as an option.
 fn osascript_args<'a>(script: &[&'a str], args: &[&'a str]) -> Vec<&'a str> {
     let mut all: Vec<&str> = script.iter().flat_map(|line| ["-e", *line]).collect();
     all.push("--");
     all.extend_from_slice(args);
     all
+}
+
+/// The `osascript` arguments that remove the login item with this name and path.
+pub fn remove_login_item_args<'a>(name: &'a str, path: &'a str) -> Vec<&'a str> {
+    osascript_args(LOGIN_ITEM_SCRIPT, &[name, path])
 }
 
 /// One record from `sfltool dumpbtm`.
@@ -709,8 +715,7 @@ pub fn scan_startup_with(
             LaunchdServiceDetail::default()
         };
 
-        let is_apple = label.starts_with("com.apple.")
-            || (kind == StartupKind::Daemon && is_macos_owned(&detail));
+        let is_apple = label.starts_with("com.apple.") || is_macos_owned(kind, &detail);
         if is_apple && !include_all {
             continue;
         }
@@ -905,8 +910,9 @@ pub fn scan_startup_with(
     scan
 }
 
-/// A daemon whose files sit in a system folder, or whose files launchd does not show.
-fn is_macos_owned(detail: &LaunchdServiceDetail) -> bool {
+/// A service whose files sit in a system folder, or a daemon whose files launchd does not show.
+/// An agent an app registered shows no files either, so that rule is for daemons only.
+fn is_macos_owned(kind: StartupKind, detail: &LaunchdServiceDetail) -> bool {
     const SYSTEM_FOLDERS: [&str; 7] = [
         "/System/",
         "/usr/sbin/",
@@ -917,7 +923,7 @@ fn is_macos_owned(detail: &LaunchdServiceDetail) -> bool {
         "/bin/",
     ];
     let paths = [&detail.path, &detail.program];
-    paths.iter().all(|p| p.is_none())
+    (kind == StartupKind::Daemon && paths.iter().all(|p| p.is_none()))
         || paths
             .iter()
             .flat_map(|p| p.as_deref())
@@ -1091,7 +1097,7 @@ pub fn disable_item(
                 })?;
             }
             let path_text = path.to_string_lossy();
-            let args = osascript_args(LOGIN_ITEM_SCRIPT, &[&item.name, &path_text]);
+            let args = remove_login_item_args(&item.name, &path_text);
             let out = host.run(OSASCRIPT, &args, TIMEOUT);
             if !out.ok {
                 return Err(format!("Failed to remove login item: {}", out.stderr));
@@ -2307,13 +2313,15 @@ mod tests {
     fn a_daemon_that_macos_ships_is_read_only() {
         let temp = tempdir().unwrap();
         let host = FakeHost::idle();
-        host.reply(
-            "/bin/launchctl print system",
-            "system = {\n services = {\n 0 - org.cups.cupsd\n 0 - com.test.unknown\n }\n}\n",
-        );
+        // The detail replies go first: the domain list would also answer them.
         host.reply(
             "/bin/launchctl print system/org.cups.cupsd",
             "path = /System/Library/LaunchDaemons/org.cups.cupsd.plist\nprogram = /usr/sbin/cupsd\n",
+        );
+        host.reply("/bin/launchctl print system/com.test.unknown", "");
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - org.cups.cupsd\n 0 - com.test.unknown\n }\n}\n",
         );
 
         let scan = scan_startup(&host, &layout_in(&temp), &IgnoreStore::default(), true);
@@ -2322,6 +2330,43 @@ mod tests {
             let item = scan.items.iter().find(|it| it.label == label).unwrap();
             assert!(item.read_only_reason().is_some(), "{label}");
         }
+        let cupsd = scan.items.iter().find(|it| it.label == "org.cups.cupsd");
+        assert_eq!(
+            cupsd.and_then(|it| it.program.as_deref()),
+            Some(Path::new("/usr/sbin/cupsd"))
+        );
+    }
+
+    #[test]
+    fn an_agent_that_macos_ships_is_hidden_and_read_only() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        let uid = host_uid();
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/com.openssh.ssh-agent"),
+            "path = /System/Library/LaunchAgents/com.openssh.ssh-agent.plist\nprogram = /usr/bin/ssh-agent\n",
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/com.acme.helper"),
+            "path = (submitted by smd.346)\nparent bundle identifier = com.acme.app\n",
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}"),
+            "gui = {\n services = {\n 0 - com.openssh.ssh-agent\n 0 - com.acme.helper\n }\n}\n",
+        );
+
+        let shown = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+        let all = scan_startup(&host, &layout, &IgnoreStore::default(), true);
+
+        let labels: Vec<&str> = shown.items.iter().map(|it| it.label.as_str()).collect();
+        assert_eq!(labels, ["com.acme.helper"]);
+        assert_eq!(shown.items[0].read_only_reason(), None);
+        let ssh = all
+            .items
+            .iter()
+            .find(|it| it.label == "com.openssh.ssh-agent");
+        assert!(ssh.unwrap().read_only_reason().is_some());
     }
 
     #[test]
@@ -2340,15 +2385,38 @@ mod tests {
         );
 
         assert!(res.is_ok(), "{res:?}");
-        assert!(host.ran("/usr/bin/osascript -e on run argv -e set target to item 1 of argv"));
+        let removal = remove_login_item_args("Twin", "/Applications/A.app").join(" ");
         assert!(
-            host.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|c| c.ends_with("-- Twin /Applications/A.app")),
+            host.ran(&format!("/usr/bin/osascript {removal}")),
             "{:?}",
             host.calls.lock().unwrap()
+        );
+        assert_eq!(
+            load_disabled_login_items(&layout),
+            [DisabledLoginItem {
+                name: "Twin".into(),
+                path: PathBuf::from("/Applications/A.app"),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_removal_script_deletes_only_the_item_with_this_name_and_path() {
+        let args = remove_login_item_args("Twin", "/Applications/A.app");
+
+        let end = args.iter().position(|a| *a == "--").unwrap();
+        assert_eq!(args[end + 1..], ["Twin", "/Applications/A.app"]);
+        let script = &args[..end];
+        assert!(script.contains(&"set target to item 1 of argv"));
+        assert!(script.contains(&"set target_path to item 2 of argv"));
+        let delete = script
+            .iter()
+            .find(|line| line.contains("delete login item"))
+            .unwrap();
+        assert!(
+            delete
+                .contains("name of login item i is target and path of login item i is target_path"),
+            "{delete}"
         );
     }
 
@@ -2511,32 +2579,60 @@ mod tests {
         assert!(err.contains("still running"), "{err}");
     }
 
-    #[test]
-    fn a_daemon_that_fails_to_load_after_enable_is_a_failure() {
-        let temp = tempdir().unwrap();
-        let layout = layout_in(&temp);
-        write_plist(
-            &layout.system("Library/LaunchDaemons"),
-            "com.test.daemon",
-            "/bin/sleep",
-        );
-        let host = FakeHost::idle();
-        *host.admin_result.lock().unwrap() = Some("Bootstrap failed: 5".into());
+    fn disabled_daemon_with_plist(layout: &Layout) -> StartupItem {
+        let folder = layout.system("Library/LaunchDaemons");
+        write_plist(&folder, "com.test.daemon", "/bin/sleep");
         let mut item = test_item(
             "com.test.daemon",
             StartupKind::Daemon,
             StartupState::Disabled,
         );
-        item.plist_path = Some(
-            layout
-                .system("Library/LaunchDaemons")
-                .join("com.test.daemon.plist"),
+        item.plist_path = Some(folder.join("com.test.daemon.plist"));
+        item
+    }
+
+    #[test]
+    fn a_daemon_that_fails_to_load_after_enable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let item = disabled_daemon_with_plist(&layout);
+        let host = FakeHost::idle();
+        *host.admin_result.lock().unwrap() = Some("Bootstrap failed: 5".into());
+        host.reply(
+            "/bin/launchctl print-disabled system",
+            "disabled services = {\n \"com.test.daemon\" => enabled\n}\n",
+        );
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n }\n}\n",
         );
 
         let res = enable_item(&host, &layout, &IgnoreStore::default(), &item, false);
 
-        assert!(res.is_err(), "{res:?}");
+        let err = res.unwrap_err();
+        assert!(err.contains("Failed to start daemon"), "{err}");
         let scripts = host.admin_scripts.lock().unwrap();
         assert!(!scripts[0].contains("|| true"), "{}", scripts[0]);
+    }
+
+    #[test]
+    fn a_daemon_that_stays_disabled_after_enable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let item = disabled_daemon_with_plist(&layout);
+        let host = FakeHost::idle();
+        reply_disabled(&host, "system", "com.test.daemon");
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n }\n}\n",
+        );
+
+        let res = enable_item(&host, &layout, &IgnoreStore::default(), &item, false);
+
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("still lists com.test.daemon as disabled"),
+            "{err}"
+        );
     }
 }
