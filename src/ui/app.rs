@@ -3207,26 +3207,28 @@ mod tests {
         }
 
         #[test]
-        fn esc_during_a_compress_run_sets_the_cancel_flag() {
-            let (_temp, mut app, _made) = prepare(&["Idle"], &[]);
-            let flag = Arc::new(AtomicBool::new(false));
-            let Screen::Select(state) = &mut app.screen else {
-                panic!("expected the select screen");
-            };
-            state.overlay = ModalOverlay::Removing {
-                progress: RemovalProgress {
-                    current_index: 1,
-                    total_count: 2,
-                    path: "/x".into(),
-                },
-                spinner_idx: 0,
-                cancel: Some(flag.clone()),
-            };
+        fn esc_during_a_compress_run_stops_the_worker_before_the_next_path() {
+            let (_temp, mut app, made) = prepare(&["First", "Second"], &[]);
+            let host = FakeHost::default();
+            host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+            host.reply("/usr/sbin/lsof", "");
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let held = std::sync::Mutex::new(held);
+            host.when("/usr/sbin/lsof", move || {
+                let _ = held.lock().unwrap().recv();
+            });
+            app.host = Arc::new(host);
 
-            assert!(screen_text(&app).contains("Esc stops"));
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
             app.handle_key(KeyCode::Esc);
+            drop(release);
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
 
-            assert!(flag.load(Ordering::Relaxed));
+            assert!(!is_compressed(&made[1].1));
+            assert!(outcome(&app).notes.iter().any(|n| n.contains("Cancelled")));
         }
     }
 }

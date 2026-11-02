@@ -144,12 +144,12 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 
 2. **Atomic 4-Step Safety Pipeline**:
    `compress_file` and `undo_file` build a copy beside the file and swap it in only when it checks out:
-   - **Step 1 (Temp file)**: Writes the data to a temporary file `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp` in the same folder. A guard removes it on every error, including an undo that runs out of space.
+   - **Step 1 (Temp file)**: Writes the data to a temporary file `.<name>.taert-tmp-<pid>-<nanos>-<seq>.tmp` in the same folder. The file is created with mode `0600`, so no other user can read the copy while it is verified, and any ACL it inherits from the folder is cleared. A guard removes it on every error, including an undo that runs out of space. The guard clears flags and ACL before it unlinks, and the error names the file if the unlink still fails.
    - **Step 2 (Metadata)**: Copies ownership (`fchown`) and flags (`fchflags`), then the extended attributes. Any error fails the file and keeps the original.
    - **Step 3 (Byte-by-byte readback verification)**: Reads the temporary file back through the kernel, which decompresses it, and compares it block by block with the original.
    - **Step 4 (Times, ACL, mode, swap)**: Sets access and modification times and the birth time after the flag, because setting `UF_COMPRESSED` resets the modification time. Then it copies the ACL (after the extended attributes, so an ACL that denies `writeextattr` cannot block them) and the mode.
-   Right before the swap, the original's inode, size, and modification time must equal what they were when the file was opened. Otherwise the file is left as it is. Right after the swap `renamex_np(..., RENAME_SWAP)`, the old file, now at the temporary path, is checked again. If it changed, the swap is undone, so a program that wrote to the old inode loses nothing. Only then is the old file deleted.
-   A program that opens the file after the last check and writes later is not caught. The refusals in the next section keep most such files out.
+   Right before the swap, the original's inode, size, and modification time must equal what they were when the file was opened. Otherwise the file is left as it is. Right after the swap `renamex_np(..., RENAME_SWAP)`, the old file, now at the temporary path, is checked again. If it changed, the swap is undone, so a program that wrote to the old inode loses nothing. The swap is undone only if the path still holds the new copy. If the file was renamed away or replaced in the meantime, the changed old file stays beside it as `<name>.taert-changed-<nanos>` and the error names it. Only then is the old file deleted.
+   The check for open files is one `lsof` listing taken at the start of a run. A program that opens a file after that listing and writes only after the swap is not caught: its writes go to the old file and are lost. The refusals in the next section keep most such files out. Close programs that write to the folder before a long run.
 
 3. **Safe Undo**:
    `taert compress --undo` copies the decompressed kernel stream to a temporary file block by block, runs the same metadata, verification, and swap steps with `UF_COMPRESSED` cleared.
@@ -161,14 +161,15 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    - Is an APFS clone sharing blocks with another file (`EF_SHARES_ALL_BLOCKS`).
    - Is a cloud or dataless placeholder (`SF_DATALESS`).
    - Is not owned by the current user.
-   - Has the `uchg` or `schg` flag.
+   - Has the `uchg`, `schg`, `uappnd`, or `sappnd` flag.
+   - Has an ACL that denies `delete`, or sits in a folder whose ACL denies `delete_child`. The swap and the removal of the temporary file would fail.
    - Is open for writing. One `lsof` listing at the start of the run names these files. If `lsof` fails, the run changes nothing.
    - Net compression savings are less than 4 KB (or file is under 4 KB).
 
-   Temporary files that earlier runs left behind are deleted when their folder is visited, unless the run that made them is still alive. A `uchg` flag on such a file is cleared first. This keeps a stale file out of app bundles, where it would break `codesign --strict`.
+   Temporary files that earlier runs left behind are deleted when their folder is visited, unless the run that made them is still alive. Flags and ACL on such a file are cleared first. This keeps a stale file out of app bundles, where it would break `codesign --strict`.
 
 5. **Safety Gate (`Safety::can_compress`)**:
-   Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. The path is made absolute before any check. Compression is strictly limited to safe locations:
+   Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. The path is made absolute before any check, and after the gate passes the walk starts from the real path, so `..` and a wrong letter case cannot get around the later checks. Compression is strictly limited to safe locations:
    - User home directory (`~`, including `~/.rustup`, `~/.cargo/bin`, toolchains).
    - Application bundles in `/Applications` or `~/Applications`.
    - Homebrew prefix (`/opt/homebrew`, `/usr/local`).
@@ -180,7 +181,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    The TUI estimate for an app, the Homebrew Cellar, or the Rust toolchains compresses a sample of 48 files in memory, picked by size across the tree, and applies the saved fraction to the folder size. Candidates that would save nothing are not listed. `taert compress --dry-run` estimates every file the same way.
 
 7. **Tests in CI**:
-   The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. In run 41431241077 (2026-11-02) that runner was image `macos-26-arm64`, version 20261021.0445.8, which is macOS 26. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
+   The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. In run 41431241077 (2026-11-02) that runner was image `macos-26-arm64`, version 20261021.0445.8, which is macOS 26. That run is of the branch `fix/test-isolation`, so the tests of the compress fixes had not run in CI at the time. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
 
 ## APFS Space Accounting
 

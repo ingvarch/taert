@@ -1,17 +1,18 @@
 //! APFS transparent per-file compression (`decmpfs`) engine.
 //!
-//! Compresses files in place using macOS `decmpfs` with LZFSE (type 12) or LZVN (type 8)
+//! Compresses files in place using macOS `decmpfs` with LZFSE (type 12)
 //! chunks stored in the file's resource fork, verified via read-back and atomically
 //! swapped via `renamex_np(RENAME_SWAP)`.
 
 use std::collections::HashSet;
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -31,6 +32,7 @@ pub const UF_COMPRESSED: u32 = 0x0000_0020;
 const UF_IMMUTABLE: u32 = 0x0000_0002;
 const UF_APPEND: u32 = 0x0000_0004;
 const SF_IMMUTABLE: u32 = 0x0002_0000;
+const SF_APPEND: u32 = 0x0004_0000;
 pub const DECMPFS_MAGIC: u32 = 0x636d_7066; // 'cmpf' in LE
 
 const XATTR_NOFOLLOW: libc::c_int = 0x0001;
@@ -40,7 +42,6 @@ const LSOF: &str = "/usr/sbin/lsof";
 const LSOF_TIMEOUT: Duration = Duration::from_secs(60);
 
 const COMPRESSION_LZFSE: i32 = 0x801;
-const COMPRESSION_LZVN: i32 = 0x900;
 
 #[link(name = "compression")]
 unsafe extern "C" {
@@ -90,26 +91,25 @@ unsafe extern "C" {
         acl: *mut libc::c_void,
     ) -> libc::c_int;
     fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_to_text(acl: *mut libc::c_void, len: *mut isize) -> *mut libc::c_char;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Lzfse,
-    Lzvn,
 }
 
 impl Codec {
     pub const fn type_id(self) -> u32 {
         match self {
             Self::Lzfse => 12,
-            Self::Lzvn => 8,
         }
     }
 
     pub const fn algorithm(self) -> i32 {
         match self {
             Self::Lzfse => COMPRESSION_LZFSE,
-            Self::Lzvn => COMPRESSION_LZVN,
         }
     }
 }
@@ -246,6 +246,17 @@ fn temp_path_for(path: &Path) -> Result<PathBuf, std::io::Error> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     Ok(parent.join(format!(".{name}.taert-tmp-{pid}-{nanos}-{seq}.tmp")))
+}
+
+/// A name beside `path` for a changed original that must stay. The cleanup of
+/// leftovers does not match it.
+fn kept_path_for(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    path.with_file_name(format!("{name}.taert-changed-{nanos}"))
 }
 
 /// Checks whether `path` already carries compression-related xattrs.
@@ -453,6 +464,76 @@ fn copy_acl(c_src: &CString, c_dst: &CString) -> io::Result<()> {
     if res == 0 { Ok(()) } else { Err(error) }
 }
 
+/// Removes every ACL entry from `c_path`.
+fn clear_acl(c_path: &CString) -> io::Result<()> {
+    let existing = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if existing.is_null() {
+        return Ok(());
+    }
+    unsafe { acl_free(existing) };
+    let empty = unsafe { acl_init(0) };
+    if empty.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let res = unsafe { acl_set_file(c_path.as_ptr(), ACL_TYPE_EXTENDED, empty) };
+    let error = io::Error::last_os_error();
+    unsafe { acl_free(empty) };
+    if res == 0 { Ok(()) } else { Err(error) }
+}
+
+/// Whether an ACL text has a deny entry for `right`.
+fn text_denies(text: &str, right: &str) -> bool {
+    text.lines().any(|line| {
+        let mut fields = line.rsplitn(3, ':');
+        let (Some(rights), Some(kind)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        kind.starts_with("deny") && rights.split(',').any(|r| r == right)
+    })
+}
+
+fn acl_denies(path: &Path, right: &str) -> bool {
+    let Ok(c_file) = c_path(path) else {
+        return false;
+    };
+    let acl = unsafe { acl_get_file(c_file.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return false;
+    }
+    let text = unsafe { acl_to_text(acl, std::ptr::null_mut()) };
+    let denied =
+        !text.is_null() && text_denies(&unsafe { CStr::from_ptr(text) }.to_string_lossy(), right);
+    unsafe {
+        if !text.is_null() {
+            acl_free(text.cast());
+        }
+        acl_free(acl);
+    }
+    denied
+}
+
+/// Whether the file or its folder stops a swap: flags, or an ACL that denies delete.
+fn blocks_replacement(path: &Path, meta: &fs::Metadata) -> bool {
+    let flags = DarwinMetadataExt::st_flags(meta);
+    flags & (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND) != 0
+        || acl_denies(path, "delete")
+        || path
+            .parent()
+            .is_some_and(|parent| acl_denies(parent, "delete_child"))
+}
+
+/// Removes a file that may carry flags or an ACL that stop the removal.
+fn force_remove(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    let c_file = c_path(path)?;
+    let flags = DarwinMetadataExt::st_flags(&meta);
+    if flags & (UF_IMMUTABLE | UF_APPEND) != 0 {
+        check(unsafe { libc::chflags(c_file.as_ptr(), flags & !(UF_IMMUTABLE | UF_APPEND)) })?;
+    }
+    let _ = clear_acl(&c_file);
+    fs::remove_file(path)
+}
+
 /// Sets access, modification, and birth times. The birth time goes last,
 /// because an earlier modification time pulls it back.
 fn copy_times(fd: libc::c_int, meta: &fs::Metadata) -> io::Result<()> {
@@ -598,11 +679,22 @@ struct TempGuard {
     armed: bool,
 }
 
+impl TempGuard {
+    fn remove(&mut self) -> io::Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        self.armed = false;
+        match force_remove(&self.path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
 impl Drop for TempGuard {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
+        let _ = self.remove();
     }
 }
 
@@ -629,11 +721,13 @@ impl<'a> Replacement<'a> {
             .read(true)
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&temp_path)?;
         let temp = TempGuard {
             path: temp_path,
             armed: true,
         };
+        clear_acl(&c_path(&temp.path)?)?;
         let replacement = Self {
             path,
             meta,
@@ -673,7 +767,7 @@ impl<'a> Replacement<'a> {
 
     /// Sets the times, ACL, and mode, swaps the copy in, and checks again that
     /// nobody wrote to the original. A changed original goes back in place.
-    fn finish(mut self) -> io::Result<()> {
+    fn finish(&mut self) -> io::Result<()> {
         self.step(Step::SetTimes)?;
         copy_times(self.file.as_raw_fd(), self.meta)?;
 
@@ -688,6 +782,7 @@ impl<'a> Replacement<'a> {
         }
 
         self.step(Step::Swap)?;
+        let copy = self.file.metadata()?;
         swap(&self.temp.path, self.path)?;
 
         let unchanged =
@@ -698,21 +793,47 @@ impl<'a> Replacement<'a> {
                 });
         match unchanged {
             Ok(()) => Ok(()),
-            Err(error) => Err(self.swap_back(error)),
+            Err(error) => Err(self.swap_back(error, (copy.dev(), copy.ino()))),
         }
     }
 
-    fn swap_back(&mut self, error: io::Error) -> io::Error {
-        match swap(&self.temp.path, self.path) {
-            Ok(()) => error,
-            Err(back) => {
-                self.temp.armed = false;
-                io::Error::other(format!(
-                    "{error}; swapping back failed ({back}); the changed file is at {}",
-                    self.temp.path.display()
-                ))
-            }
+    /// Puts the changed original back, if `path` still holds the copy. Otherwise the
+    /// changed original is kept under a name that the cleanup does not match.
+    fn swap_back(&mut self, error: io::Error, copy: (u64, u64)) -> io::Error {
+        let holds_copy = fs::symlink_metadata(self.path).is_ok_and(|m| (m.dev(), m.ino()) == copy);
+        if holds_copy && swap(&self.temp.path, self.path).is_ok() {
+            return error;
         }
+        self.temp.armed = false;
+        let kept = kept_path_for(self.path);
+        match fs::rename(&self.temp.path, &kept) {
+            Ok(()) => io::Error::other(format!(
+                "{error}; the changed file is kept at {}",
+                kept.display()
+            )),
+            Err(back) => io::Error::other(format!(
+                "{error}; the changed file is at {} ({back})",
+                self.temp.path.display()
+            )),
+        }
+    }
+
+    /// Removes the temporary file and adds a failure to do so to `result`.
+    fn cleanup<T>(
+        mut self,
+        result: Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let Err(e) = self.temp.remove() else {
+            return result;
+        };
+        let leftover = format!(
+            "the temporary file {} could not be removed: {e}",
+            self.temp.path.display()
+        );
+        Err(match result {
+            Ok(_) => leftover.into(),
+            Err(error) => format!("{error}; {leftover}").into(),
+        })
     }
 }
 
@@ -727,12 +848,11 @@ pub fn check_eligibility_compress(path: &Path, meta: &fs::Metadata) -> Result<()
         return Err(SkipReason::NotUserOwned);
     }
 
-    let flags = DarwinMetadataExt::st_flags(meta);
-    if flags & (UF_IMMUTABLE | SF_IMMUTABLE) != 0 {
+    if blocks_replacement(path, meta) {
         return Err(SkipReason::Locked);
     }
 
-    if flags & UF_COMPRESSED != 0 {
+    if DarwinMetadataExt::st_flags(meta) & UF_COMPRESSED != 0 {
         return Err(SkipReason::AlreadyCompressed);
     }
 
@@ -925,10 +1045,22 @@ fn compress_file_probed(
         return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
     }
 
+    let (mut replacement, mut source) = Replacement::begin(path, &meta, probe)?;
+    let result = compress_into(&mut replacement, &mut source, &meta, probe);
+    replacement.cleanup(result)
+}
+
+fn compress_into(
+    replacement: &mut Replacement,
+    source: &mut File,
+    meta: &fs::Metadata,
+    probe: Probe,
+) -> Result<FileOutcome, Box<dyn std::error::Error>> {
+    let raw_len = meta.len();
+
     // Step 1: Write to temporary file in same folder
-    let (replacement, mut source) = Replacement::begin(path, &meta, probe)?;
     let rsrc_path = replacement.temp.path.join("..namedfork").join("rsrc");
-    let Some(encoded_len) = write_compressed_fork(&mut source, &rsrc_path, raw_len, probe)? else {
+    let Some(encoded_len) = write_compressed_fork(source, &rsrc_path, raw_len, probe)? else {
         return Ok(FileOutcome::Skipped(SkipReason::Incompressible));
     };
 
@@ -1002,7 +1134,7 @@ fn undo_file_probed(
     if flags & UF_COMPRESSED == 0 {
         return Ok(FileOutcome::Skipped(SkipReason::NotCompressed));
     }
-    if flags & (UF_IMMUTABLE | SF_IMMUTABLE) != 0 {
+    if blocks_replacement(path, &meta) {
         return Ok(FileOutcome::Skipped(SkipReason::Locked));
     }
 
@@ -1018,13 +1150,29 @@ fn undo_file_probed(
         });
     }
 
-    // Step 1: Write decompressed bytes to plain data fork of temp file
     let (mut replacement, mut source) = Replacement::begin(path, &meta, probe)?;
+    let result = undo_into(&mut replacement, &mut source, len, probe);
+    replacement.cleanup(result)?;
+    let restored_blocks = fs::symlink_metadata(path)?.blocks();
+    Ok(FileOutcome::Unpacked {
+        original_bytes: len,
+        original_blocks: orig_blocks,
+        restored_blocks,
+    })
+}
+
+fn undo_into(
+    replacement: &mut Replacement,
+    source: &mut File,
+    len: u64,
+    probe: Probe,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Step 1: Write decompressed bytes to plain data fork of temp file
     let mut buf = vec![0u8; BLOCK_SIZE];
     let mut copied = 0u64;
     loop {
         probe(Step::WriteData)?;
-        let n = read_full(&mut source, &mut buf)?;
+        let n = read_full(source, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -1044,13 +1192,7 @@ fn undo_file_probed(
 
     // Step 4: Set times, ACL, and mode, then swap and check the original again
     replacement.finish()?;
-
-    let new_meta = fs::symlink_metadata(path)?;
-    Ok(FileOutcome::Unpacked {
-        original_bytes: len,
-        original_blocks: orig_blocks,
-        restored_blocks: new_meta.blocks(),
-    })
+    Ok(())
 }
 
 /// Files that a program holds open for writing, from one `lsof` listing.
@@ -1103,19 +1245,13 @@ fn process_is_alive(pid: u32) -> bool {
     res == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Removes a temporary file that an earlier run left behind. A copy of a file
-/// with `uchg` carries the flag, so it is cleared first.
+/// Removes a temporary file that an earlier run left behind.
 fn remove_stale_temp(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() {
         return Ok(());
     }
-    let flags = DarwinMetadataExt::st_flags(&meta);
-    if flags & (UF_IMMUTABLE | UF_APPEND) != 0 {
-        let c_file = c_path(path)?;
-        check(unsafe { libc::chflags(c_file.as_ptr(), flags & !(UF_IMMUTABLE | UF_APPEND)) })?;
-    }
-    fs::remove_file(path)
+    force_remove(path)
 }
 
 /// What a run needs: commands, folders, and the ignore list.
@@ -1174,6 +1310,7 @@ impl Compressor<'_> {
     {
         let path = Safety::absolute(path);
         Safety::can_compress_with_host(&path, self.ignore, self.layout, self.host)?;
+        let path = path.canonicalize().unwrap_or(path);
 
         let mut report = CompressReport {
             dry_run: options.dry_run,
@@ -1625,6 +1762,8 @@ mod tests {
             );
         }
 
+        let old = (1_600_000_000, 0);
+        set_times(&file, old, old, old);
         let meta_before = fs::symlink_metadata(&file).unwrap();
         let mode_before = meta_before.mode() & 0o7777;
         let mtime_before = meta_before.mtime();
@@ -2394,6 +2533,292 @@ mod tests {
         }
     }
 
+    fn lift_acl(path: &Path) {
+        let status = std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn flags_of(path: &Path) -> u32 {
+        DarwinMetadataExt::st_flags(&fs::symlink_metadata(path).unwrap())
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_file_with_uappnd_is_skipped_and_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "append.log", 300_000);
+        set_flags(&file, UF_APPEND);
+        let outcome = compress_file(&file, false);
+        set_flags(&file, 0);
+        compress_file(&file, false).unwrap();
+        set_flags(&file, flags_of(&file) | UF_APPEND);
+        let undo = undo_file(&file, false);
+        set_flags(&file, flags_of(&file) & !UF_APPEND);
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(undo.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert!(only_file_left(temp.path(), "append.log"));
+    }
+
+    #[test]
+    fn a_file_whose_acl_denies_delete_is_skipped_and_leaves_nothing_behind() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        deny(&file, "delete");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        lift_acl(&file);
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(leftovers, ["acl.txt"]);
+    }
+
+    #[test]
+    fn a_folder_that_denies_deleting_its_files_is_skipped() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
+        deny(temp.path(), "delete_child");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        lift_acl(temp.path());
+
+        assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
+        assert_eq!(leftovers, ["acl.txt"]);
+    }
+
+    #[test]
+    fn an_acl_the_folder_hands_to_new_files_does_not_reach_the_copy() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "plain.txt", 300_000);
+        deny(temp.path(), "delete,file_inherit");
+
+        let outcome = compress_file(&file, false);
+        let leftovers = names_in(temp.path());
+        let acl = unsafe { acl_get_file(c_path(&file).unwrap().as_ptr(), ACL_TYPE_EXTENDED) };
+        let has_acl = !acl.is_null();
+        lift_acl(temp.path());
+
+        assert!(matches!(outcome.unwrap(), FileOutcome::Compressed { .. }));
+        assert_eq!(leftovers, ["plain.txt"]);
+        assert!(!has_acl);
+    }
+
+    #[test]
+    fn a_temporary_file_with_the_append_flag_is_still_removed() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+        let fail = |at: Step| {
+            if at == Step::Verify {
+                set_flags(&temp_file_in(temp.path()), UF_APPEND);
+                return Err(io::Error::other("injected"));
+            }
+            Ok(())
+        };
+
+        assert!(compress_file_probed(&file, false, &fail).is_err());
+
+        assert!(only_file_left(temp.path(), "safe.txt"));
+    }
+
+    #[test]
+    fn a_temporary_file_that_cannot_be_removed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
+        let fail = |at: Step| {
+            if at == Step::Verify {
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o555)).unwrap();
+                return Err(io::Error::other("injected"));
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &fail);
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("injected"), "{message}");
+        assert!(message.contains("could not be removed"), "{message}");
+    }
+
+    #[test]
+    fn the_temporary_file_is_private_until_the_swap() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "secret.env", 300_000);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let modes = std::cell::RefCell::new(Vec::new());
+        let look = |at: Step| {
+            if at == Step::Verify {
+                let mode = fs::metadata(temp_file_in(temp.path())).unwrap().mode();
+                modes.borrow_mut().push(mode & 0o777);
+            }
+            Ok(())
+        };
+
+        compress_file_probed(&file, false, &look).unwrap();
+        undo_file_probed(&file, false, &look).unwrap();
+
+        assert_eq!(*modes.borrow(), [0o600, 0o600]);
+        assert_eq!(fs::metadata(&file).unwrap().mode() & 0o777, 0o600);
+    }
+
+    fn kept_files(dir: &Path, expected: &[u8], not: &str) -> Vec<String> {
+        names_in(dir)
+            .into_iter()
+            .filter(|name| name != not && fs::read(dir.join(name)).is_ok_and(|b| b == expected))
+            .collect()
+    }
+
+    #[test]
+    fn a_changed_original_is_kept_when_the_file_is_moved_away_after_the_swap() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let rotate = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(temp.path()), b"appended record\n");
+                fs::rename(&file, temp.path().join("live.log.1")).unwrap();
+            }
+            Ok(())
+        };
+
+        let result = compress_file_probed(&file, false, &rotate);
+
+        assert!(result.is_err());
+        let kept = kept_files(temp.path(), &expected, "live.log.1");
+        assert_eq!(kept.len(), 1, "{:?}", names_in(temp.path()));
+        assert!(stale_temp_owner(&kept[0]).is_none());
+        assert!(result.unwrap_err().to_string().contains(&kept[0]));
+    }
+
+    #[test]
+    fn a_changed_original_is_kept_when_another_file_took_its_place() {
+        let temp = tempdir().unwrap();
+        let file = make_repetitive_file(temp.path(), "live.log", 300_000);
+        let mut expected = fs::read(&file).unwrap();
+        expected.extend_from_slice(b"appended record\n");
+        let replace = |at: Step| {
+            if at == Step::AfterSwap {
+                append(&temp_file_in(temp.path()), b"appended record\n");
+                let other = temp.path().join("new.log");
+                fs::write(&other, b"saved by an editor").unwrap();
+                fs::rename(&other, &file).unwrap();
+            }
+            Ok(())
+        };
+
+        assert!(compress_file_probed(&file, false, &replace).is_err());
+
+        assert_eq!(fs::read(&file).unwrap(), b"saved by an editor");
+        let kept = kept_files(temp.path(), &expected, "live.log");
+        assert_eq!(kept.len(), 1, "{:?}", names_in(temp.path()));
+        assert!(stale_temp_owner(&kept[0]).is_none());
+    }
+
+    mod memory {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static BIGGEST: Cell<usize> = const { Cell::new(0) };
+        }
+
+        pub struct Tracker;
+
+        fn note(size: usize) {
+            BIGGEST.with(|biggest| biggest.set(biggest.get().max(size)));
+        }
+
+        unsafe impl GlobalAlloc for Tracker {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                note(layout.size());
+                unsafe { System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                note(new_size);
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+        }
+
+        /// The largest single allocation of this thread since the last call.
+        pub fn take_biggest() -> usize {
+            BIGGEST.with(|biggest| biggest.replace(0))
+        }
+    }
+
+    #[global_allocator]
+    static TRACKER: memory::Tracker = memory::Tracker;
+
+    #[test]
+    fn compressing_and_unpacking_never_hold_the_whole_file_in_memory() {
+        let temp = tempdir().unwrap();
+        let size = 8 * 1024 * 1024;
+        let file = make_repetitive_file(temp.path(), "large.txt", size);
+
+        memory::take_biggest();
+        let compressed = compress_file(&file, false).unwrap();
+        let compress_peak = memory::take_biggest();
+        let unpacked = undo_file(&file, false).unwrap();
+        let undo_peak = memory::take_biggest();
+
+        assert!(matches!(compressed, FileOutcome::Compressed { .. }));
+        assert!(matches!(unpacked, FileOutcome::Unpacked { .. }));
+        assert!(
+            compress_peak < size / 4,
+            "compress allocated {compress_peak}"
+        );
+        assert!(undo_peak < size / 4, "undo allocated {undo_peak}");
+    }
+
+    #[test]
+    fn a_root_with_dots_does_not_skip_the_live_data_check() {
+        let (_temp, layout) = sandbox();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let brew = layout.system("opt/homebrew");
+        let live = make_repetitive_file(&make(&brew.join("var/db")), "store.db", 300_000);
+        let plain = make_repetitive_file(&make(&brew.join("Cellar/foo")), "foo.txt", 300_000);
+
+        let report = run(&layout, &host, &brew.join("Cellar/.."), &real_run()).unwrap();
+
+        assert!(!is_compressed(&live));
+        assert!(is_compressed(&plain));
+        assert_eq!(report.processed_files, 1);
+    }
+
+    #[test]
+    fn a_root_in_the_wrong_letter_case_does_not_skip_the_live_data_check() {
+        let (_temp, layout) = sandbox();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let brew = layout.system("opt/homebrew");
+        let live = make_repetitive_file(&make(&brew.join("var/db")), "store.db", 300_000);
+        let plain = make_repetitive_file(&make(&brew.join("Cellar/foo")), "foo.txt", 300_000);
+
+        let report = run(&layout, &host, &layout.system("opt/HomeBrew"), &real_run()).unwrap();
+
+        assert!(!is_compressed(&live));
+        assert!(is_compressed(&plain));
+        assert_eq!(report.processed_files, 1);
+    }
+
     #[test]
     #[ignore]
     fn live_test_on_signed_app() {
@@ -2407,8 +2832,9 @@ mod tests {
             return;
         };
 
-        let temp = tempdir().unwrap();
-        let dest = temp.path().join("Test.app");
+        let (_sandbox, layout) = sandbox();
+        let dest = layout.user("Applications/Test.app");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
 
         let status = std::process::Command::new("cp")
             .arg("-R")
@@ -2425,7 +2851,6 @@ mod tests {
             dry_run: false,
             undo: false,
         };
-        let layout = Layout::current();
         let compressor = Compressor {
             host: &crate::core::host::MacHost,
             layout: &layout,
