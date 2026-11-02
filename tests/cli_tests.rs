@@ -292,3 +292,75 @@ fn completion_leaves_the_home_folder_empty() {
         "home folder should have no entries after completion"
     );
 }
+
+#[test]
+fn status_json_prints_one_valid_document() {
+    let home = tempfile::tempdir().unwrap();
+    let assert = taert(&home).args(["status", "--json"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(val["schema_version"], 1);
+    let collected_at = val["collected_at"]
+        .as_str()
+        .expect("collected_at is a string");
+    assert!(collected_at.ends_with('Z'));
+    assert!(val.get("health").is_some());
+    assert!(val.get("machine").is_some());
+    assert!(val.get("memory").is_some());
+    assert!(val.get("storage").is_some());
+    assert!(val.get("live").is_some());
+    let macos_version = val["machine"]["macos_version"]
+        .as_str()
+        .expect("macos_version string");
+    assert!(!macos_version.is_empty());
+}
+
+#[test]
+fn status_json_reads_the_cpu_twice() {
+    let home = tempfile::tempdir().unwrap();
+    let assert = taert(&home).args(["status", "--json"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(val["live"]["cpu"]["usage_percent"].is_number());
+}
+
+#[test]
+fn status_json_has_no_escape_codes() {
+    let home = tempfile::tempdir().unwrap();
+    let assert = taert(&home).args(["status", "--json"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(!stdout.contains('\u{1b}'));
+}
+
+#[test]
+fn status_without_flags_is_plain_when_piped() {
+    let home = tempfile::tempdir().unwrap();
+    let assert = taert(&home).args(["status"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.starts_with("Health:"));
+    assert!(stdout.contains("CPU:"));
+    assert!(!stdout.contains('\u{1b}'));
+    assert!(serde_json::from_str::<serde_json::Value>(&stdout).is_err());
+}
+
+#[test]
+fn status_json_wins_over_plain() {
+    let home = tempfile::tempdir().unwrap();
+    let assert = taert(&home)
+        .args(["status", "--json", "--plain"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let val = serde_json::from_str::<serde_json::Value>(&stdout);
+    assert!(val.is_ok());
+}
+
+#[test]
+fn status_appears_in_help() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status"));
+}

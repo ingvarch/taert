@@ -108,14 +108,15 @@ pub struct LiveStatus {
     pub memory_processes: Vec<ProcessStatus>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Severity {
     Good,
     Warning,
     Critical,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Health {
     pub severity: Severity,
     pub message: String,
@@ -941,5 +942,30 @@ mod tests {
         let receiver = spawn_sampler();
 
         assert!(receiver.recv_timeout(Duration::from_secs(10)).is_ok());
+    }
+
+    #[test]
+    fn severity_serializes_in_snake_case() {
+        assert_eq!(serde_json::to_string(&Severity::Good).unwrap(), "\"good\"");
+        assert_eq!(
+            serde_json::to_string(&Severity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Severity::Critical).unwrap(),
+            "\"critical\""
+        );
+    }
+
+    #[test]
+    fn health_serializes_with_severity_and_message() {
+        let health = Health {
+            severity: Severity::Warning,
+            message: "Disk space low".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&health).unwrap(),
+            "{\"severity\":\"warning\",\"message\":\"Disk space low\"}"
+        );
     }
 }

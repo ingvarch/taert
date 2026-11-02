@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **System status**: `taert status` prints a live snapshot of CPU, memory, storage, battery, processes, and network in plain text or JSON (`--json`).
 - **Orphaned app files**: `taert clean orphans` finds files and containers in `~/Library` left behind by apps that are gone and moves them to the Trash.
 - **Shell completions**: `taert completion` prints completion scripts for bash, fish, and zsh.
 
