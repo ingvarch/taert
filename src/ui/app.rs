@@ -1214,6 +1214,7 @@ impl App {
         match &self.screen {
             Screen::Workspace(state) => {
                 let quick_key = match state.items.len() {
+                    11 => "1-11",
                     10 => "1-10",
                     _ => "1-9",
                 };
@@ -1349,6 +1350,53 @@ impl App {
             let scan_id = select.scan.id.clone();
             let (layout, host, permanent) =
                 (self.layout.clone(), self.host.clone(), self.permanent);
+
+            if scan_id == "compress" {
+                thread::spawn(move || {
+                    let mut total_saved = 0u64;
+                    let mut files_compressed = 0usize;
+                    let total_candidates = selected_items.len();
+                    let options = crate::core::compress::CompressOptions {
+                        dry_run: false,
+                        undo: false,
+                    };
+                    let cancelled = Arc::new(AtomicBool::new(false));
+
+                    for (idx, item) in selected_items.iter().enumerate() {
+                        let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
+                            current_index: idx + 1,
+                            total_count: total_candidates,
+                            path: item.path.clone(),
+                        }));
+                        let rep = crate::core::compress::process_path(
+                            &item.path,
+                            &options,
+                            &ignore,
+                            &cancelled,
+                            |_, _| {},
+                        );
+                        total_saved += rep.saved_bytes;
+                        files_compressed += rep.processed_files;
+                    }
+
+                    let report = RemovalReport {
+                        freed_bytes: total_saved,
+                        trashed_bytes: 0,
+                        removed_count: files_compressed,
+                        failures: Vec::new(),
+                        notes: vec![format!(
+                            "Compressed {} files, freed {} via APFS transparent compression.",
+                            files_compressed,
+                            crate::core::bytes::format_bytes(total_saved)
+                        )],
+                    };
+                    let _ = tx.send(RemovalMessage::Finished(report));
+                });
+
+                self.removal_rx = Some(rx);
+                return;
+            }
+
             let plan = self
                 .plan
                 .clone()
@@ -1497,6 +1545,7 @@ impl App {
             MainMenuChoice::UninstallApps => self.launch_app_scan(),
             MainMenuChoice::Doctor => self.open_doctor(10),
             MainMenuChoice::StartupItems => self.open_startup(false),
+            MainMenuChoice::Compress => self.launch_compress_scan(),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
@@ -1560,6 +1609,22 @@ impl App {
 
         self.open(Screen::Scanning(
             ProgressState::new("Reading Docker").top_level(),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+    }
+
+    fn launch_compress_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let layout = self.layout.clone();
+
+        thread::spawn(move || {
+            let scan = crate::core::compress::compress_candidates_scan(&layout);
+            let _ = tx.send(ScanMessage::Finished(scan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Reading Candidates").top_level(),
             rx,
             Arc::new(AtomicBool::new(false)),
         ));
@@ -1766,6 +1831,13 @@ mod tests {
             state.select_by_number(6),
             Some(MainMenuChoice::StartupItems)
         );
+    }
+
+    #[test]
+    fn the_seventh_quick_key_opens_compress() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(state.select_by_number(7), Some(MainMenuChoice::Compress));
     }
 
     fn select_app(scan: CategoryScan) -> App {
@@ -2023,19 +2095,19 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Char('7'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('8'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 6);
+        assert_main_menu(&app, 7);
     }
 
     #[test]
     fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('0'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
 
-        assert_main_menu(&app, 9);
+        assert_main_menu(&app, 10);
     }
 
     #[test]
@@ -2045,7 +2117,7 @@ mod tests {
         press(
             &mut app,
             &[
-                KeyCode::Char('9'),
+                KeyCode::Char('0'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2061,7 +2133,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 8);
+        assert_main_menu(&app, 9);
     }
 
     #[test]
@@ -2109,14 +2181,14 @@ mod tests {
     fn protected_paths_name_preferences_only_when_opened_there() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('0'));
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert!(!screen_text(&app).contains("Preferences"));
 
         press(
             &mut app,
             &[
                 KeyCode::Esc,
-                KeyCode::Char('9'),
+                KeyCode::Char('0'),
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Enter,
@@ -2371,7 +2443,7 @@ mod tests {
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        app.handle_key(KeyCode::Char('9'));
+        app.handle_key(KeyCode::Char('0'));
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
 
         app.handle_key(KeyCode::Down);
@@ -2382,13 +2454,13 @@ mod tests {
     fn a_path_list_offers_removal_only_when_it_has_paths() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
 
-        press(&mut app, &[KeyCode::Char('0')]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
 
         app.handle_key(KeyCode::Esc);
         app.ignore.roots.push("/nowhere/protected".to_string());
 
-        app.handle_key(KeyCode::Char('0'));
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
     }
 
@@ -2428,7 +2500,7 @@ mod tests {
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
         let mut app = App::new(IgnoreStore::default(), Config::default());
-        app.handle_key(KeyCode::Char('8'));
+        app.handle_key(KeyCode::Char('9'));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();

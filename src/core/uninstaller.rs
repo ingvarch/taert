@@ -55,7 +55,6 @@ const BREW_PATHS: &[&str] = &["opt/homebrew/bin/brew", "usr/local/bin/brew"];
 const DOCK_DOMAIN: &str = "com.apple.dock";
 const DOCK_LISTS: &[&str] = &["persistent-apps", "persistent-others", "recent-apps"];
 const CONTAINER_METADATA: &str = ".com.apple.containermanagerd.metadata.plist";
-const WRITE_PROBE: &str = ".taert-write-probe";
 const LOCKED_FLAGS: u32 =
     libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
 
@@ -525,14 +524,7 @@ pub fn user_can_remove(path: &Path) -> bool {
 /// App Management can keep a terminal out of an app it owns. Finding that out
 /// now, with one empty file, saves stopping the app and asking for a password twice.
 pub fn can_write_inside(bundle: &Path) -> bool {
-    let contents = bundle.join("Contents");
-    if bundle.is_symlink() || !contents.is_dir() {
-        return true;
-    }
-    let probe = contents.join(WRITE_PROBE);
-    let writable = fs::File::create(&probe).is_ok();
-    let _ = fs::remove_file(&probe);
-    writable
+    Safety::can_write_inside(bundle)
 }
 
 /// Determines if removing an item requires root privileges.

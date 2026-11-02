@@ -58,6 +58,9 @@ pub enum Command {
     /// Review and switch off login and background items
     Startup(StartupArgs),
 
+    /// Free space with transparent APFS compression without deleting files
+    Compress(CompressArgs),
+
     /// Manage protected paths that cannot be scanned or cleaned
     Ignore(IgnoreArgs),
 
@@ -181,4 +184,14 @@ pub enum HistoryAction {
         /// Identifier or prefix of the run to show
         run: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct CompressArgs {
+    /// Path to file or folder to compress
+    pub path: PathBuf,
+
+    /// Unpack compressed files back to normal files
+    #[arg(long)]
+    pub undo: bool,
 }

@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
+use super::host::{Host, MacHost};
 use super::layout::Layout;
 use super::stores::IgnoreStore;
 
@@ -55,6 +56,12 @@ pub enum SafetyError {
     UnsafeName,
     #[error("path is not an app or a place apps keep their files")]
     OutsideUninstallScope,
+    #[error("app is currently running")]
+    AppIsRunning,
+    #[error(
+        "app bundle requires App Management permission: allow terminal in System Settings > Privacy & Security > App Management"
+    )]
+    AppManagementPermission,
 }
 
 /// Where a path allowed for uninstalling sits, which decides how it is removed.
@@ -509,6 +516,220 @@ impl Safety {
         Ok(UninstallScope::System)
     }
 
+    /// Checks whether an app bundle allows writes inside, verifying App Management permission.
+    pub fn can_write_inside(bundle: &Path) -> bool {
+        let contents = bundle.join("Contents");
+        if bundle.is_symlink() || !contents.is_dir() {
+            return true;
+        }
+        let probe = contents.join(".taert-write-probe");
+        let writable = fs::File::create(&probe).is_ok();
+        let _ = fs::remove_file(&probe);
+        writable
+    }
+
+    /// Checks if a path is inside Homebrew prefix.
+    pub fn is_homebrew_path(path: &Path) -> bool {
+        Self::is_homebrew_path_in(path, &Layout::current())
+    }
+
+    pub fn is_homebrew_path_in(path: &Path, layout: &Layout) -> bool {
+        let brew_roots = [
+            layout.system("opt/homebrew"),
+            layout.system("usr/local/Cellar"),
+            layout.system("usr/local/Caskroom"),
+            layout.system("usr/local/opt"),
+            layout.system("usr/local/Homebrew"),
+            PathBuf::from("/opt/homebrew"),
+            PathBuf::from("/usr/local/Cellar"),
+            PathBuf::from("/usr/local/Caskroom"),
+            PathBuf::from("/usr/local/opt"),
+            PathBuf::from("/usr/local/Homebrew"),
+        ];
+        brew_roots
+            .iter()
+            .any(|root| path == root || path.starts_with(root))
+    }
+
+    /// Credential roots refused by compress (.ssh, .aws, .gnupg, .kube, .claude, Keychains).
+    pub fn is_compress_credential_root(path: &Path, home: &Path) -> bool {
+        let sensitive = [
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".gpg",
+            ".kube",
+            ".claude",
+            "Library/Keychains",
+        ];
+        for dir in sensitive {
+            let target = home.join(dir);
+            if path == target || path.starts_with(&target) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Finds enclosing `.app` bundle if `path` is an app bundle or inside one.
+    pub fn enclosing_app_bundle(path: &Path) -> Option<PathBuf> {
+        let mut curr = path.to_path_buf();
+        loop {
+            if curr
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+            {
+                return Some(curr);
+            }
+            if !curr.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Check if path is within an app bundle located in recognized app roots.
+    pub fn is_app_in_app_roots(path: &Path, layout: &Layout) -> bool {
+        if let Some(bundle) = Self::enclosing_app_bundle(path) {
+            Self::is_app_bundle(&bundle, layout)
+        } else {
+            false
+        }
+    }
+
+    /// Can this path be safely compressed?
+    ///
+    /// Allows the home folder, app bundles in app folders, and the Homebrew prefix.
+    /// Refuses credential folders, system paths, running apps, and app bundles lacking
+    /// App Management permission.
+    pub fn can_compress(
+        path: &Path,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+    ) -> Result<(), SafetyError> {
+        Self::can_compress_with_host(path, ignore, layout, &MacHost)
+    }
+
+    pub fn can_compress_with_host(
+        path: &Path,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+        host: &dyn Host,
+    ) -> Result<(), SafetyError> {
+        if path.as_os_str().is_empty() || path == Path::new("/") {
+            return Err(SafetyError::RootPath);
+        }
+
+        if !path.exists() {
+            return Err(SafetyError::NotFound);
+        }
+
+        if Self::has_symlink_component(path) {
+            return Err(SafetyError::SymlinkDetected);
+        }
+
+        let canonical = match path.canonicalize() {
+            Ok(c) => c,
+            Err(_) => path.to_path_buf(),
+        };
+
+        if canonical == Path::new("/") {
+            return Err(SafetyError::RootPath);
+        }
+
+        let home = &layout.home;
+        let critical = Self::critical_roots_in(home);
+        if critical.contains(path)
+            || critical.contains(&canonical)
+            || path == layout.system("Applications")
+            || canonical == layout.system("Applications")
+            || path == layout.system("System")
+            || canonical == layout.system("System")
+            || path == layout.system("Library")
+            || canonical == layout.system("Library")
+        {
+            return Err(SafetyError::ProtectedRoot);
+        }
+
+        if (canonical.starts_with("/Users/") || path.starts_with("/Users/"))
+            && !canonical.starts_with(home)
+            && !path.starts_with(home)
+        {
+            return Err(SafetyError::AnotherUserFiles);
+        }
+
+        if Self::is_compress_credential_root(path, home)
+            || Self::is_compress_credential_root(&canonical, home)
+        {
+            return Err(SafetyError::CredentialRoot);
+        }
+
+        if Self::is_cloud_or_dataless_in(path, home)
+            || Self::is_cloud_or_dataless_in(&canonical, home)
+        {
+            return Err(SafetyError::CloudOrDataless);
+        }
+
+        if Self::is_ignored_or_protected(path, ignore)
+            || Self::is_ignored_or_protected(&canonical, ignore)
+        {
+            return Err(SafetyError::Ignored);
+        }
+
+        let in_home = canonical.starts_with(home) || path.starts_with(home);
+        let is_app = Self::is_app_in_app_roots(&canonical, layout)
+            || Self::is_app_in_app_roots(path, layout);
+        let is_homebrew = Self::is_homebrew_path_in(&canonical, layout)
+            || Self::is_homebrew_path_in(path, layout);
+
+        if !in_home && !is_app && !is_homebrew {
+            let denied_trees = [
+                layout.system("System"),
+                layout.system("Library"),
+                layout.system("usr"),
+                layout.system("bin"),
+                layout.system("sbin"),
+                layout.system("etc"),
+                layout.system("private/etc"),
+                layout.system("cores"),
+                PathBuf::from("/System"),
+                PathBuf::from("/Library"),
+                PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
+                PathBuf::from("/etc"),
+                PathBuf::from("/private/etc"),
+                PathBuf::from("/cores"),
+            ];
+            for tree_path in &denied_trees {
+                if canonical == *tree_path || canonical.starts_with(tree_path) {
+                    return Err(SafetyError::ProtectedSystemPath);
+                }
+            }
+            return Err(SafetyError::ProtectedSystemPath);
+        }
+
+        if let Some(bundle) =
+            Self::enclosing_app_bundle(path).or_else(|| Self::enclosing_app_bundle(&canonical))
+            && is_app
+        {
+            if let Some(processes) = crate::core::uninstaller::checked_process_table(host) {
+                let bundle_str = bundle.to_string_lossy();
+                for (_pid, _ppid, comm) in processes {
+                    if comm.starts_with(bundle_str.as_ref()) {
+                        return Err(SafetyError::AppIsRunning);
+                    }
+                }
+            }
+
+            if !Self::can_write_inside(&bundle) {
+                return Err(SafetyError::AppManagementPermission);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check if path is valid to scan as a project root (for purge and analyze)
     pub fn validate_scan_root(path: &Path) -> Result<PathBuf, SafetyError> {
         let abs = if path.is_absolute() {
@@ -907,5 +1128,56 @@ mod tests {
                 Err(SafetyError::CredentialRoot) | Err(SafetyError::ProtectedRoot)
             ));
         }
+    }
+
+    #[test]
+    fn can_compress_allows_home_rustup_and_homebrew() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+
+        let doc = make(&layout.user("Documents/report.txt"));
+        assert_eq!(Safety::can_compress(&doc, &ignore, &layout), Ok(()));
+
+        let rustup = make(&layout.user(".rustup/toolchains/stable"));
+        assert_eq!(Safety::can_compress(&rustup, &ignore, &layout), Ok(()));
+
+        let cargo = make(&layout.user(".cargo/bin/foo"));
+        assert_eq!(Safety::can_compress(&cargo, &ignore, &layout), Ok(()));
+
+        let app = make(&layout.system("Applications/Test.app/Contents/MacOS/Test"));
+        assert_eq!(Safety::can_compress(&app, &ignore, &layout), Ok(()));
+
+        let brew = make(&layout.root.join("opt/homebrew/Cellar/foo/1.0/bin/foo"));
+        assert_eq!(Safety::can_compress(&brew, &ignore, &layout), Ok(()));
+    }
+
+    #[test]
+    fn can_compress_refuses_system_and_credentials() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+
+        let ssh = make(&layout.user(".ssh/id_rsa"));
+        assert_eq!(
+            Safety::can_compress(&ssh, &ignore, &layout),
+            Err(SafetyError::CredentialRoot)
+        );
+
+        let aws = make(&layout.user(".aws/credentials"));
+        assert_eq!(
+            Safety::can_compress(&aws, &ignore, &layout),
+            Err(SafetyError::CredentialRoot)
+        );
+
+        let sys = make(&layout.system("usr/bin/some_binary"));
+        assert_eq!(
+            Safety::can_compress(&sys, &ignore, &layout),
+            Err(SafetyError::ProtectedSystemPath)
+        );
+
+        let root_dir = make(&layout.system("Applications"));
+        assert_eq!(
+            Safety::can_compress(&root_dir, &ignore, &layout),
+            Err(SafetyError::ProtectedRoot)
+        );
     }
 }

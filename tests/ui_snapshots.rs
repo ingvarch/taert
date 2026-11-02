@@ -691,9 +691,10 @@ const DOCKER_CLEANUP: usize = 2;
 const _UNINSTALL_APPS: usize = 3;
 const _DOCTOR: usize = 4;
 const _STARTUP_ITEMS: usize = 5;
-const EXPLORE_STORAGE: usize = 6;
-const SYSTEM_STATUS: usize = 7;
-const PREFERENCES: usize = 8;
+const _COMPRESS: usize = 6;
+const EXPLORE_STORAGE: usize = 7;
+const SYSTEM_STATUS: usize = 8;
+const PREFERENCES: usize = 9;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
