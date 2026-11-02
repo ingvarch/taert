@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::safety::Safety;
+use super::stores::Config;
 
 fn user_cache_dir() -> Option<PathBuf> {
     let output = Command::new("/usr/bin/getconf")
@@ -39,6 +40,26 @@ impl Layout {
         self.root.join(relative)
     }
 
+    fn data_dir(&self) -> PathBuf {
+        self.user("Library/Application Support/taert")
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        Config::path_in(&self.data_dir())
+    }
+
+    pub fn ignore_path(&self) -> PathBuf {
+        self.data_dir().join("ignore.toml")
+    }
+
+    pub fn projects_path(&self) -> PathBuf {
+        self.data_dir().join("projects")
+    }
+
+    pub fn history_path(&self) -> PathBuf {
+        self.user(".config/taert/history.jsonl")
+    }
+
     /// Folders that hold app bundles, external volumes included.
     pub fn app_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![
@@ -66,7 +87,7 @@ impl Layout {
         roots
     }
 
-    fn volumes(&self) -> Vec<PathBuf> {
+    pub fn volumes(&self) -> Vec<PathBuf> {
         let Ok(volumes) = std::fs::read_dir(self.system("Volumes")) else {
             return Vec::new();
         };
@@ -95,5 +116,73 @@ impl Layout {
         self.user_cache
             .as_deref()
             .is_some_and(|cache| path.parent() == Some(cache))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::history::HistoryLog;
+    use crate::core::projects_store::ProjectFoldersStore;
+    use crate::core::stores::{Config, IgnoreStore};
+
+    fn layout_at(home: &str) -> Layout {
+        Layout {
+            home: PathBuf::from(home),
+            root: PathBuf::from("/"),
+            user_cache: None,
+        }
+    }
+
+    #[test]
+    fn config_and_history_live_under_the_home_of_the_layout() {
+        let layout = layout_at("/sandbox");
+
+        assert_eq!(
+            layout.config_path(),
+            PathBuf::from("/sandbox/Library/Application Support/taert/config.toml")
+        );
+        assert_eq!(
+            layout.history_path(),
+            PathBuf::from("/sandbox/.config/taert/history.jsonl")
+        );
+    }
+
+    #[test]
+    fn ignore_list_and_project_folders_live_next_to_the_config() {
+        let layout = layout_at("/sandbox");
+
+        assert_eq!(
+            layout.ignore_path(),
+            PathBuf::from("/sandbox/Library/Application Support/taert/ignore.toml")
+        );
+        assert_eq!(
+            layout.projects_path(),
+            PathBuf::from("/sandbox/Library/Application Support/taert/projects")
+        );
+    }
+
+    #[test]
+    fn an_old_json_config_is_kept_until_a_toml_one_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = layout_at(temp.path().to_str().unwrap());
+        let dir = layout.config_path().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "{}").unwrap();
+
+        assert_eq!(layout.config_path(), dir.join("config.json"));
+    }
+
+    #[test]
+    fn the_current_layout_agrees_with_the_default_paths() {
+        let layout = Layout::current();
+
+        assert_eq!(Some(layout.config_path()), Config::default_path());
+        assert_eq!(layout.history_path(), HistoryLog::default_path());
+        assert_eq!(Some(layout.ignore_path()), IgnoreStore::default_path());
+        assert_eq!(
+            Some(layout.projects_path()),
+            ProjectFoldersStore::default_path()
+        );
     }
 }

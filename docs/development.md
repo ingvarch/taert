@@ -5,7 +5,7 @@ Local setup, checks, and project layout. For user guides and command references,
 ## Prerequisites
 
 - macOS 11 (Big Sur) or newer.
-- Rust stable 1.88 or newer:
+- Rust stable 1.88 or newer. CI always uses the newest stable, which can report lints an older Rust does not, so run `rustup update stable` before the checks:
 
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -51,9 +51,9 @@ The script runs `cargo build --release` for each target, combines them via `lipo
 Run these before submitting changes. All checks must pass with zero warnings and zero failures:
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
 ```
 
 CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). Releases are in [releasing.md](releasing.md).
@@ -62,7 +62,15 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 
 `cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
 
-Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table. A test of the binary has no fake `Host`, so it starts `/bin/sleep` with a bundle path as `arg0`: `ps` lists that path, and nothing runs from a bundle.
+Unit tests and TUI tests use a temporary `Layout` and the fake `Host`, so they do not touch your taert files, launchd, Trash, or `/Applications`. Code that saves config, history, the ignore list, or project folders takes its path from the `Layout` it gets (`config_path()`, `history_path()`, `ignore_path()`, `projects_path()`). Scans read the Trash of each volume under the `Layout`'s `Volumes` folder.
+
+The command handlers in `src/main.rs` take the `Host` and `Layout` they need and a `Console` that holds the input, output, and error streams. Their tests run on the fake `Host` and a temporary `Layout`, type the answers to prompts, and check what the handler writes to each stream. A test that removes files first checks that every row of the scan lies in the temporary folder.
+
+A test of the binary sets `HOME` to a temporary folder. The binary has no fake `Host` and reads the real system folders, so these tests run only commands that read inside `HOME` or the repository, or that stop with an error before they reach the system. The ignored live tests use the real Mac on purpose and remove files for good, so nothing reaches the real Trash.
+
+After the tests, CI fails if `~/.config/taert`, `~/Library/Application Support/taert`, the file `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`, or a loaded `io.github.ingvarch.taert.schedule` agent exists.
+
+Tests never start a program from a fake app bundle. macOS checks the bundle's signature and shows a "damaged" alert for each run. To test a running app, give the fake `Host` a process table.
 
 ## Project structure
 

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::layout::Layout;
 use super::safety::Safety;
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,13 @@ impl Target {
 }
 
 pub struct Catalog;
+
+fn move_home(path: PathBuf, home: &Path) -> PathBuf {
+    match path.strip_prefix(Safety::home_dir()) {
+        Ok(rest) => home.join(rest),
+        Err(_) => path,
+    }
+}
 
 impl Catalog {
     fn h(rel: &str) -> PathBuf {
@@ -266,19 +274,18 @@ impl Catalog {
         ]
     }
 
-    pub fn trash() -> Vec<Target> {
-        let mut paths = vec![Self::h(".Trash")];
+    pub fn trash(layout: &Layout) -> Vec<Target> {
+        let mut paths = vec![layout.user(".Trash")];
 
         // Also discover mounted volume trashes: /Volumes/*/.Trashes/<uid>
-        let uid = unsafe { libc::getuid() };
-        if let Ok(entries) = std::fs::read_dir("/Volumes") {
-            for entry in entries.flatten() {
-                let volume_trash = entry.path().join(".Trashes").join(uid.to_string());
-                if volume_trash.exists() {
-                    paths.push(volume_trash);
-                }
-            }
-        }
+        let uid = unsafe { libc::getuid() }.to_string();
+        paths.extend(
+            layout
+                .volumes()
+                .into_iter()
+                .map(|volume| volume.join(".Trashes").join(&uid))
+                .filter(|volume_trash| volume_trash.exists()),
+        );
 
         vec![Target::contents_only("Trash", paths)]
     }
@@ -294,38 +301,88 @@ impl Catalog {
 
     /// The same paths with `home` in place of the real home folder.
     pub fn named_paths_in(home: &Path) -> Vec<PathBuf> {
-        let real = Safety::home_dir();
         Self::named_paths()
             .into_iter()
-            .map(|path| match path.strip_prefix(&real) {
-                Ok(rest) => home.join(rest),
-                Err(_) => path,
-            })
+            .map(|path| move_home(path, home))
             .collect()
     }
 
-    pub fn targets_for(category: &str) -> Vec<Target> {
-        match category {
+    /// The targets of `category` in the folders of `layout`.
+    pub fn targets_in(layout: &Layout, category: &str) -> Vec<Target> {
+        let targets = match category {
             "dev" => Self::dev(),
             "junk" => Self::junk(),
             "ai" => Self::ai(),
-            "trash" => Self::trash(),
+            "trash" => return Self::trash(layout),
             _ => Vec::new(),
-        }
+        };
+        targets
+            .into_iter()
+            .map(|target| Target {
+                paths: target
+                    .paths
+                    .into_iter()
+                    .map(|path| move_home(path, &layout.home))
+                    .collect(),
+                ..target
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::apps::testing::sandbox;
 
     #[test]
     fn test_catalog_targets_exist_or_safe() {
-        let targets = Catalog::targets_for("dev");
+        let targets = Catalog::dev();
         assert!(!targets.is_empty());
         for t in &targets {
             assert!(!t.paths.is_empty());
         }
+    }
+
+    #[test]
+    fn targets_in_move_the_home_folder_of_every_path() {
+        let layout = Layout {
+            home: PathBuf::from("/sandbox"),
+            root: PathBuf::from("/nonexistent/root"),
+            user_cache: None,
+        };
+
+        for category in ["dev", "junk", "ai", "trash"] {
+            let real = Safety::home_dir();
+            for target in Catalog::targets_in(&layout, category) {
+                assert!(
+                    target.paths.iter().all(|path| !path.starts_with(&real)),
+                    "{category}: {}",
+                    target.tool
+                );
+            }
+        }
+        let homebrew = Catalog::targets_in(&layout, "dev")
+            .into_iter()
+            .find(|target| target.tool == "Homebrew")
+            .unwrap();
+        assert_eq!(
+            homebrew.paths,
+            vec![PathBuf::from("/sandbox/Library/Caches/Homebrew")]
+        );
+    }
+
+    #[test]
+    fn trash_lists_only_the_volumes_of_the_layout() {
+        let (_temp, layout) = sandbox();
+        let uid = unsafe { libc::getuid() }.to_string();
+        let volume_trash = layout.system("Volumes/Ext/.Trashes").join(uid);
+        std::fs::create_dir_all(&volume_trash).unwrap();
+        std::fs::create_dir_all(layout.system("Volumes/Empty")).unwrap();
+
+        let trash = Catalog::targets_in(&layout, "trash");
+
+        assert_eq!(trash[0].paths, vec![layout.user(".Trash"), volume_trash]);
     }
 
     #[test]

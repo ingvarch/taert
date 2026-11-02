@@ -255,10 +255,6 @@ impl HistoryLog {
             .join("history.jsonl")
     }
 
-    pub fn default_log() -> Self {
-        Self::new(Self::default_path())
-    }
-
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,

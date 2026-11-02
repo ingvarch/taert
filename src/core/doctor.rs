@@ -1173,36 +1173,40 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
     }
 }
 
-/// Formats and prints the plain text doctor report.
-pub fn print_plain_report(report: &DoctorReport) {
-    println!("Checked for {} seconds.", report.seconds);
-    println!();
+/// The plain text doctor report.
+pub fn plain_report(report: &DoctorReport) -> String {
+    let mut text = format!("Checked for {} seconds.\n\n", report.seconds);
 
     if !report.findings.is_empty() {
         for finding in &report.findings {
-            println!("{}", finding.title);
-            println!("  {}", finding.evidence);
-            println!("  {}", finding.action);
-            println!();
+            text.push_str(&format!(
+                "{}\n  {}\n  {}\n\n",
+                finding.title, finding.evidence, finding.action
+            ));
         }
-        println!("Nothing else stands out. CPU, memory, disk, heat, and network look normal.");
+        text.push_str(
+            "Nothing else stands out. CPU, memory, disk, heat, and network look normal.\n",
+        );
     } else {
-        println!("Nothing stands out. CPU, memory, disk, heat, and network look normal.");
+        text.push_str("Nothing stands out. CPU, memory, disk, heat, and network look normal.\n");
     }
 
-    // Print notes for any skipped checks
     let skipped_checks: Vec<_> = report
         .checks
         .iter()
         .filter(|c| c.status == "skipped")
         .collect();
     if !skipped_checks.is_empty() {
-        println!();
+        text.push('\n');
         for check in skipped_checks {
             let reason = check.reason.as_deref().unwrap_or("unknown error");
-            println!("Note: Check '{}' was skipped ({}).", check.id, reason);
+            text.push_str(&format!(
+                "Note: Check '{}' was skipped ({}).\n",
+                check.id, reason
+            ));
         }
     }
+    text
 }
 
 #[cfg(test)]

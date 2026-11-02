@@ -38,12 +38,14 @@ pub struct PreferencesState {
 }
 
 impl PreferencesState {
-    pub fn new(config: &Config, ignore: &IgnoreStore) -> Self {
+    pub fn new(config: &Config, ignore: &IgnoreStore, layout: &Layout) -> Self {
         Self {
             focus: PreferencesFocus::AgeThreshold,
             older_than_days: config.older_than_days,
             schedule: config.schedule.as_ref().map(|s| s.every),
-            folder_count: ProjectFoldersStore::load_or_default().roots.len(),
+            folder_count: ProjectFoldersStore::load_or_default_at(&layout.projects_path())
+                .roots
+                .len(),
             path_count: ignore.roots.len(),
             save_notice: None,
         }
@@ -67,7 +69,7 @@ impl PreferencesState {
         };
     }
 
-    pub fn step_age_left(&mut self, config: &mut Config) {
+    pub fn step_age_left(&mut self, config: &mut Config, layout: &Layout) {
         if self.focus == PreferencesFocus::AgeThreshold
             && let Some(&prev) = AGE_PRESETS
                 .iter()
@@ -76,18 +78,18 @@ impl PreferencesState {
         {
             self.older_than_days = prev;
             config.older_than_days = prev;
-            let _ = config.save_to(&Config::default_path().unwrap());
+            let _ = config.save_to(&layout.config_path());
             self.save_notice = Some("Saved age threshold");
         }
     }
 
-    pub fn step_age_right(&mut self, config: &mut Config) {
+    pub fn step_age_right(&mut self, config: &mut Config, layout: &Layout) {
         if self.focus == PreferencesFocus::AgeThreshold
             && let Some(&next) = AGE_PRESETS.iter().find(|&&d| d > self.older_than_days)
         {
             self.older_than_days = next;
             config.older_than_days = next;
-            let _ = config.save_to(&Config::default_path().unwrap());
+            let _ = config.save_to(&layout.config_path());
             self.save_notice = Some("Saved age threshold");
         }
     }
@@ -326,4 +328,41 @@ fn render_presets_labels(_width: usize, theme: &Theme) -> Line<'static> {
     }
 
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::apps::testing::sandbox;
+
+    #[test]
+    fn the_age_threshold_is_saved_in_the_layout() {
+        let (_temp, layout) = sandbox();
+        let mut config = Config::default();
+        let mut state = PreferencesState::new(&config, &IgnoreStore::default(), &layout);
+
+        state.step_age_right(&mut config, &layout);
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.older_than_days, config.older_than_days);
+        assert_ne!(saved.older_than_days, Config::default().older_than_days);
+
+        state.step_age_left(&mut config, &layout);
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.older_than_days, Config::default().older_than_days);
+    }
+
+    #[test]
+    fn the_folder_count_comes_from_the_layout() {
+        let (temp, layout) = sandbox();
+        let folder = temp.path().canonicalize().unwrap().display().to_string();
+        ProjectFoldersStore::new(vec![folder])
+            .save_to(&layout.projects_path())
+            .unwrap();
+
+        let state = PreferencesState::new(&Config::default(), &IgnoreStore::default(), &layout);
+
+        assert_eq!(state.folder_count, 1);
+    }
 }

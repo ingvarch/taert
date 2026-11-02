@@ -46,8 +46,9 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
-use crate::core::safety::Safety;
-use crate::core::scanner::{CategoryScan, CategoryScanner, ScanItem, ScanProgressEvent};
+use crate::core::scanner::{
+    CategoryScan, CategoryScanner, ScanContext, ScanItem, ScanProgressEvent,
+};
 use crate::core::slim;
 use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
@@ -460,7 +461,7 @@ impl App {
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
             }
             Some(ReturnPoint::Preferences(focus)) => {
-                let mut state = PreferencesState::new(&self.config, &self.ignore);
+                let mut state = PreferencesState::new(&self.config, &self.ignore, &self.layout);
                 state.focus = focus;
                 Screen::Preferences(state)
             }
@@ -797,7 +798,7 @@ impl App {
                             "trash" => "clean trash".to_string(),
                             _ => "clean".to_string(),
                         };
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(self.layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(items.len()),
@@ -1097,7 +1098,7 @@ impl App {
                                         state.remove_selected_finding();
                                     }
                                     DoctorActionConfirm::ExploreStorage => {
-                                        let home = Safety::home_dir();
+                                        let home = self.layout.home.clone();
                                         self.open(Screen::Analyze(Box::new(
                                             AnalyzeState::with_cache(
                                                 home,
@@ -1140,11 +1141,11 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => state.previous(),
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
                 KeyCode::Left => {
-                    state.step_age_left(&mut self.config);
+                    state.step_age_left(&mut self.config, &self.layout);
                     state.step_schedule_left(&mut self.config, &*self.host, &self.layout);
                 }
                 KeyCode::Right => {
-                    state.step_age_right(&mut self.config);
+                    state.step_age_right(&mut self.config, &self.layout);
                     state.step_schedule_right(&mut self.config, &*self.host, &self.layout);
                 }
                 KeyCode::Enter => match state.focus {
@@ -1153,12 +1154,14 @@ impl App {
                         self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProjectFolders,
                             &self.ignore,
+                            &self.layout,
                         )));
                     }
                     PreferencesFocus::ProtectedPaths => {
                         self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProtectedPaths,
                             &self.ignore,
+                            &self.layout,
                         )));
                     }
                 },
@@ -1509,7 +1512,7 @@ impl App {
                             plan.apps.iter().map(|a| a.app.name.as_str()).collect();
                         let command = format!("uninstall {}", app_names.join(", "));
                         let total = plan.scan.selected_items().len();
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(total),
@@ -1538,7 +1541,7 @@ impl App {
                             _ => "clean".to_string(),
                         };
                         let total = selected_items.len();
-                        let session = HistoryLog::default_log().start_run(
+                        let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
                             "interactive",
                             Some(total),
@@ -1594,13 +1597,17 @@ impl App {
             let (tx, rx) = mpsc::channel();
             let ignore = self.ignore.clone();
             let host = self.host.clone();
+            let layout = self.layout.clone();
 
             thread::spawn(move || {
                 let tx_prog = tx.clone();
                 let command = "analyze".to_string();
                 let total = scan_items.len();
-                let session =
-                    HistoryLog::default_log().start_run(&command, "interactive", Some(total));
+                let session = HistoryLog::new(layout.history_path()).start_run(
+                    &command,
+                    "interactive",
+                    Some(total),
+                );
                 let report = Cleaner::new(&*host, mode).remove_items_with_callbacks(
                     &scan_items,
                     &ignore,
@@ -1617,6 +1624,10 @@ impl App {
         }
     }
 
+    fn project_folders(&self) -> ProjectFoldersStore {
+        ProjectFoldersStore::load_or_default_at(&self.layout.projects_path())
+    }
+
     fn handle_main_menu_choice(&mut self, choice: MainMenuChoice) {
         match choice {
             MainMenuChoice::CleanCaches => {
@@ -1625,7 +1636,7 @@ impl App {
                 }
             }
             MainMenuChoice::ProjectCleanup => {
-                let folder_count = ProjectFoldersStore::load_or_default().roots.len();
+                let folder_count = self.project_folders().roots.len();
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ProjectCleanup(folder_count));
                 }
@@ -1649,12 +1660,17 @@ impl App {
                 self.open(Screen::Preferences(PreferencesState::new(
                     &self.config,
                     &self.ignore,
+                    &self.layout,
                 )));
             }
             MainMenuChoice::ProtectedPaths => {
                 self.open(Screen::PathListEditor(
-                    PathListEditorState::new(PathListKind::ProtectedPaths, &self.ignore)
-                        .top_level(),
+                    PathListEditorState::new(
+                        PathListKind::ProtectedPaths,
+                        &self.ignore,
+                        &self.layout,
+                    )
+                    .top_level(),
                 ));
             }
         }
@@ -1673,7 +1689,7 @@ impl App {
     fn execute_start_confirmed(&mut self, kind: StartConfirmKind) {
         match kind {
             StartConfirmKind::ExploreHome => {
-                let home = Safety::home_dir();
+                let home = self.layout.home.clone();
                 self.open(Screen::Analyze(Box::new(AnalyzeState::with_cache(
                     home,
                     self.ignore.clone(),
@@ -1681,7 +1697,7 @@ impl App {
                 ))));
             }
             StartConfirmKind::ProjectCleanup(_) => {
-                let roots = ProjectFoldersStore::load_or_default().existing_roots();
+                let roots = self.project_folders().existing_roots();
                 self.launch_purge_scan(roots);
             }
         }
@@ -1756,7 +1772,7 @@ impl App {
         let ignore = self.ignore.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_scan = cancel.clone();
-        let home = Safety::home_dir();
+        let home = self.layout.home.clone();
 
         thread::spawn(move || {
             let (progress, bridge) = forward_progress(tx.clone());
@@ -1783,6 +1799,7 @@ impl App {
     fn launch_category_scan(&mut self, cat_id: &'static str, cat_title: &'static str) {
         let (fwd_tx, fwd_rx) = mpsc::channel();
         let ignore = self.ignore.clone();
+        let (layout, host) = (self.layout.clone(), self.host.clone());
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_clone = Arc::clone(&cancel_flag);
 
@@ -1802,6 +1819,10 @@ impl App {
             }));
 
             let scan = CategoryScanner::scan(
+                &ScanContext {
+                    layout: &layout,
+                    host: &*host,
+                },
                 cat_id,
                 cat_title,
                 &ignore,
@@ -1822,6 +1843,7 @@ impl App {
     fn launch_all_categories_scan(&mut self) {
         let (fwd_tx, fwd_rx) = mpsc::channel();
         let ignore = self.ignore.clone();
+        let (layout, host) = (self.layout.clone(), self.host.clone());
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_clone = Arc::clone(&cancel_flag);
 
@@ -1855,6 +1877,10 @@ impl App {
                 });
 
                 scans.push(CategoryScanner::scan(
+                    &ScanContext {
+                        layout: &layout,
+                        host: &*host,
+                    },
                     id,
                     title,
                     &ignore,
@@ -1926,8 +1952,23 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
+    /// An app that sees an empty Mac: no files at its home and a host that runs nothing.
+    fn offline(mut app: App) -> App {
+        app.layout = Layout {
+            home: "/nonexistent/home".into(),
+            root: "/nonexistent/root".into(),
+            user_cache: None,
+        };
+        app.host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        app
+    }
+
+    fn new_app() -> App {
+        offline(App::new(IgnoreStore::default(), Config::default()))
+    }
+
     fn analyze_app(dir: &Path) -> App {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
         app.screen = Screen::Analyze(Box::new(AnalyzeState::new_sync(
             dir.to_path_buf(),
             IgnoreStore::default(),
@@ -1944,7 +1985,7 @@ mod tests {
 
     #[test]
     fn help_counts_every_row_of_the_main_menu() {
-        let app = App::new(IgnoreStore::default(), Config::default());
+        let app = new_app();
         let rows = WorkspaceState::new().items.len();
 
         let sections = app.help_sections();
@@ -2015,7 +2056,7 @@ mod tests {
     }
 
     fn select_app(scan: CategoryScan) -> App {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
         app.screen = Screen::Select(SelectState::with_preserved_selection(scan));
         app
     }
@@ -2215,7 +2256,7 @@ mod tests {
 
     #[test]
     fn esc_from_an_empty_scan_walks_back_through_the_submenu_and_the_menu() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
         let ai_tools = 3;
 
         press(
@@ -2244,7 +2285,7 @@ mod tests {
 
     #[test]
     fn esc_during_a_scan_returns_to_the_row_of_the_submenu() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(
             &mut app,
@@ -2256,7 +2297,7 @@ mod tests {
 
     #[test]
     fn esc_returns_to_the_menu_row_a_screen_was_opened_from() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::Char('6'), KeyCode::Esc]);
 
@@ -2265,7 +2306,7 @@ mod tests {
 
     #[test]
     fn esc_from_explore_does_not_reopen_its_start_dialog() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(
             &mut app,
@@ -2277,7 +2318,7 @@ mod tests {
 
     #[test]
     fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
 
@@ -2286,7 +2327,7 @@ mod tests {
 
     #[test]
     fn esc_from_a_list_opened_in_preferences_keeps_the_row_and_refreshes_counts() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(
             &mut app,
@@ -2315,7 +2356,11 @@ mod tests {
 
     #[test]
     fn esc_on_a_list_opened_from_the_command_line_opens_the_main_menu() {
-        let mut app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+        let mut app = offline(App::with_select(
+            empty_scan(),
+            IgnoreStore::default(),
+            Config::default(),
+        ));
 
         app.handle_key(KeyCode::Esc);
 
@@ -2356,7 +2401,7 @@ mod tests {
 
     #[test]
     fn protected_paths_name_preferences_only_when_opened_there() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert!(!screen_text(&app).contains("Preferences"));
@@ -2378,20 +2423,36 @@ mod tests {
     }
 
     #[test]
+    fn the_age_threshold_set_in_preferences_is_saved_in_the_layout() {
+        let (_temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Right],
+        );
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.older_than_days, app.config.older_than_days);
+        assert_ne!(saved.older_than_days, Config::default().older_than_days);
+    }
+
+    #[test]
     fn scans_started_in_the_menu_are_not_shown_under_clean_caches() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::Char('2'), KeyCode::Enter]);
         assert!(!screen_text(&app).contains("Clean caches"));
 
-        press(&mut app, &[KeyCode::Esc, KeyCode::Char('3')]);
+        press(&mut app, &[KeyCode::Esc, KeyCode::Char('4')]);
         assert!(!screen_text(&app).contains("Clean caches"));
         app.handle_key(KeyCode::Esc);
     }
 
     #[test]
     fn scans_started_in_clean_caches_are_shown_under_it() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
         assert!(screen_text(&app).contains("Clean caches"));
@@ -2420,7 +2481,11 @@ mod tests {
 
     #[test]
     fn the_outcome_shows_even_when_the_list_ended_up_empty() {
-        let mut app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+        let mut app = offline(App::with_select(
+            empty_scan(),
+            IgnoreStore::default(),
+            Config::default(),
+        ));
         let Screen::Select(state) = &mut app.screen else {
             panic!("expected the select screen");
         };
@@ -2474,7 +2539,11 @@ mod tests {
 
     #[test]
     fn an_empty_list_offers_only_back_and_help() {
-        let app = App::with_select(empty_scan(), IgnoreStore::default(), Config::default());
+        let app = offline(App::with_select(
+            empty_scan(),
+            IgnoreStore::default(),
+            Config::default(),
+        ));
 
         assert_footer(&app, &["⎋  Back", "?  More"], &LIST_HINTS);
     }
@@ -2621,7 +2690,7 @@ mod tests {
 
     #[test]
     fn preferences_show_the_arrows_only_on_the_threshold_row() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
         assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
@@ -2634,7 +2703,7 @@ mod tests {
 
     #[test]
     fn a_path_list_offers_removal_only_when_it_has_paths() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
@@ -2648,7 +2717,7 @@ mod tests {
 
     #[test]
     fn the_main_menu_says_esc_quits_and_the_submenu_says_it_goes_back() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         assert_footer(&app, &["⎋  Quit"], &["Back"]);
 
@@ -2663,7 +2732,7 @@ mod tests {
             "Quit", "Move", "More", "Open", "Select", "All", "Review", "Delete",
         ];
 
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
         app.handle_key(KeyCode::Char('2'));
         assert_footer(&app, &[], &toolbar);
 
@@ -2681,7 +2750,7 @@ mod tests {
 
     #[test]
     fn help_mentions_scrolling_only_when_status_can_scroll() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
         app.open(Screen::SystemStatus(Box::default()));
         let draw = |app: &App, width, height| {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2705,7 +2774,7 @@ mod tests {
 
         fn app_in_sandbox() -> (TempDir, App) {
             let (temp, layout) = sandbox();
-            let mut app = App::new(IgnoreStore::default(), Config::default());
+            let mut app = new_app();
             app.layout = layout;
             let host = FakeHost::default();
             host.simulate_trash();
@@ -2971,13 +3040,36 @@ mod tests {
         }
 
         #[test]
+        fn an_uninstall_is_logged_in_the_history_of_the_layout() {
+            let (_temp, mut app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            app_list(&mut app, vec![foo]);
+            app.handle_key(KeyCode::Enter);
+            deliver(&mut app, ScanMessage::Planned(plan));
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            let runs = HistoryLog::new(app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "uninstall Foo");
+        }
+
+        #[test]
         fn a_review_opened_from_the_command_line_runs_too() {
             let (_temp, mut app) = app_in_sandbox();
             let foo = installed(&app, "Foo", "com.acme.foo");
             let bundle = foo.path.clone();
             let plan = plan_for(&foo, &app);
             let (layout, host) = (app.layout.clone(), app.host.clone());
-            app = App::with_plan(plan, IgnoreStore::default(), Config::default());
+            app = offline(App::with_plan(
+                plan,
+                IgnoreStore::default(),
+                Config::default(),
+            ));
             app.layout = layout;
             app.host = host;
 
@@ -3013,7 +3105,7 @@ mod tests {
 
     #[test]
     fn help_in_the_clean_submenu_says_esc_goes_back() {
-        let mut app = App::new(IgnoreStore::default(), Config::default());
+        let mut app = new_app();
 
         assert_eq!(help_row(&app, "Quit"), Some("⎋ / q"));
 
