@@ -282,19 +282,16 @@ impl Safety {
             }
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            use std::ffi::CString;
-            use std::mem::MaybeUninit;
-            if let Ok(c_path) = CString::new(path_str.as_bytes()) {
-                let mut stat_buf = MaybeUninit::<libc::stat>::uninit();
-                let res = unsafe { libc::lstat(c_path.as_ptr(), stat_buf.as_mut_ptr()) };
-                if res == 0 {
-                    let stat = unsafe { stat_buf.assume_init() };
-                    // SF_DATALESS flag on macOS is 0x40000000
-                    if stat.st_flags & 0x4000_0000 != 0 {
-                        return true;
-                    }
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+        if let Ok(c_path) = CString::new(path_str.as_bytes()) {
+            let mut stat_buf = MaybeUninit::<libc::stat>::uninit();
+            let res = unsafe { libc::lstat(c_path.as_ptr(), stat_buf.as_mut_ptr()) };
+            if res == 0 {
+                let stat = unsafe { stat_buf.assume_init() };
+                // SF_DATALESS flag on macOS is 0x40000000
+                if stat.st_flags & 0x4000_0000 != 0 {
+                    return true;
                 }
             }
         }
@@ -913,7 +910,6 @@ mod tests {
         fs::create_dir_all(&real_dir).unwrap();
 
         let symlink_path = temp.path().join("link_to_dir");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real_dir, &symlink_path).unwrap();
 
         let ignore = IgnoreStore::default();

@@ -17,6 +17,8 @@ Local setup, checks, and project layout. For user guides and command references,
   xcode-select --install
   ```
 
+taert builds only on macOS, and the crate stops with a compile error elsewhere. `Cargo.lock` lists `windows-*` crates because the `trash` crate depends on them for Windows, Cargo keeps one lock file for all platforms, and they are not built on macOS.
+
 ## Build
 
 Compile debug build:

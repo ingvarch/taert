@@ -32,6 +32,7 @@ pub trait Host: Send + Sync {
     fn pause(&self, duration: Duration);
     /// Moves a file or folder to the system Trash.
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
+    fn uid(&self) -> u32;
 }
 
 pub struct MacHost;
@@ -143,12 +144,13 @@ impl Host for MacHost {
 
     fn trash(&self, path: &std::path::Path) -> Result<(), String> {
         let mut ctx = trash::TrashContext::default();
-        #[cfg(target_os = "macos")]
-        {
-            use trash::macos::{DeleteMethod, TrashContextExtMacos};
-            ctx.set_delete_method(DeleteMethod::NsFileManager);
-        }
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
         ctx.delete(path).map_err(|e| e.to_string())
+    }
+
+    fn uid(&self) -> u32 {
+        unsafe { libc::getuid() }
     }
 }
 
@@ -180,6 +182,7 @@ pub mod fake {
         pub trashed: Mutex<Vec<PathBuf>>,
         pub trash_error: Mutex<Option<String>>,
         pub simulate_trash: Mutex<bool>,
+        pub uid: Mutex<Option<u32>>,
     }
 
     impl FakeHost {
@@ -270,6 +273,10 @@ pub mod fake {
         pub fn simulate_trash(&self) {
             *self.simulate_trash.lock().unwrap() = true;
         }
+
+        pub fn set_uid(&self, uid: u32) {
+            *self.uid.lock().unwrap() = Some(uid);
+        }
     }
 
     impl Host for FakeHost {
@@ -336,6 +343,10 @@ pub mod fake {
             }
             Ok(())
         }
+
+        fn uid(&self) -> u32 {
+            self.uid.lock().unwrap().unwrap_or(501)
+        }
     }
 }
 
@@ -384,6 +395,14 @@ mod tests {
 
         assert!(output.ok);
         assert_eq!(output.stdout.len(), 300_000);
+    }
+
+    #[test]
+    fn fake_host_reports_501_without_a_set_uid() {
+        let host = fake::FakeHost::default();
+        assert_eq!(host.uid(), 501);
+        host.set_uid(777);
+        assert_eq!(host.uid(), 777);
     }
 
     #[test]

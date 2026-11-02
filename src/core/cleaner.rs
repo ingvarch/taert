@@ -155,7 +155,7 @@ impl<'a> Cleaner<'a> {
         self.remove_with_callbacks(items, ignore, progress_cb, outcome_cb, connect_docker)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn remove_with<F, C>(
         &self,
         items: &[ScanItem],

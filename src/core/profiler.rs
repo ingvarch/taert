@@ -264,7 +264,6 @@ impl SystemProfiler {
 
         // Query Darwin Mach host_statistics64 for accurate VM breakdown
         #[allow(deprecated)]
-        #[cfg(target_os = "macos")]
         unsafe {
             use libc::{mach_port_t, mach_task_self, natural_t};
 
@@ -412,7 +411,6 @@ impl SystemProfiler {
     }
 
     // Foundation autoreleases what it returns, and these threads have no pool to drain it.
-    #[cfg(target_os = "macos")]
     fn query_foundation_volume_capacities(path_str: &str) -> Option<(u64, u64, u64)> {
         use std::ffi::c_void;
 
@@ -430,7 +428,6 @@ impl SystemProfiler {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn read_foundation_volume_capacities(path_str: &str) -> Option<(u64, u64, u64)> {
         use std::ffi::c_void;
 
@@ -526,11 +523,6 @@ impl SystemProfiler {
 
             Some((avail, imp, total))
         }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn query_foundation_volume_capacities(_path_str: &str) -> Option<(u64, u64, u64)> {
-        None
     }
 
     pub fn current_full_status() -> FullSystemStatus {

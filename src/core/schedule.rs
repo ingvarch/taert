@@ -141,17 +141,6 @@ pub fn schedule_lock_path(layout: &Layout) -> PathBuf {
     layout.user(".config/taert/schedule.lock")
 }
 
-fn current_uid() -> u32 {
-    #[cfg(unix)]
-    {
-        unsafe { libc::getuid() }
-    }
-    #[cfg(not(unix))]
-    {
-        501
-    }
-}
-
 /// Checks whether the launchd agent is currently loaded via `launchctl print gui/<uid>/<label>`.
 pub fn is_agent_loaded(host: &dyn Host, uid: u32) -> bool {
     let output = host.run(
@@ -251,7 +240,7 @@ pub fn set_schedule(
     validate_categories(&categories)?;
 
     let plist_path = agent_plist_path(layout);
-    let uid = current_uid();
+    let uid = host.uid();
 
     // If agent already exists on disk, bootout first
     if plist_path.exists() {
@@ -312,7 +301,7 @@ pub fn remove_schedule(
     config: &mut Config,
 ) -> Result<(), String> {
     let plist_path = agent_plist_path(layout);
-    let uid = current_uid();
+    let uid = host.uid();
 
     // 1. Unload agent with bootout
     let _ = host.run(
@@ -357,7 +346,7 @@ pub fn show_schedule(
     let mut out = String::new();
 
     let plist_path = agent_plist_path(layout);
-    let uid = current_uid();
+    let uid = host.uid();
 
     // 1. Current settings
     let Some(sched) = &config.schedule else {
@@ -641,6 +630,42 @@ mod tests {
         let bootout_pos = host.position("/bin/launchctl bootout").unwrap();
         let bootstrap_pos = host.position("/bin/launchctl bootstrap").unwrap();
         assert!(bootout_pos < bootstrap_pos);
+    }
+
+    #[test]
+    fn schedule_uses_the_uid_of_the_host() {
+        let temp = tempdir().unwrap();
+        let layout = Layout {
+            home: temp.path().to_path_buf(),
+            root: temp.path().to_path_buf(),
+            user_cache: None,
+        };
+        let host = FakeHost::default();
+        host.set_uid(777);
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let mut config = Config::default();
+
+        set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["dev".to_string()],
+            1_000_000,
+            Some(&bin),
+        )
+        .unwrap();
+
+        let calls = host.calls.lock().unwrap();
+        let gui_calls: Vec<&String> = calls.iter().filter(|c| c.contains("gui/")).collect();
+        assert!(!gui_calls.is_empty(), "No gui/ calls found in {calls:?}");
+        for call in gui_calls {
+            assert!(
+                call.contains("gui/777"),
+                "Call {call} does not name gui/777"
+            );
+        }
     }
 
     #[test]

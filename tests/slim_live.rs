@@ -52,6 +52,10 @@ impl Host for TempTrashHost {
         let name = path.file_name().ok_or("path has no name")?;
         fs::rename(path, self.trash.join(name)).map_err(|e| e.to_string())
     }
+
+    fn uid(&self) -> u32 {
+        MacHost.uid()
+    }
 }
 
 /// Runs a copy of the executable outside the bundle.
