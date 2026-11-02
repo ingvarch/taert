@@ -1,10 +1,13 @@
 name: CI
 
+# A change to docs only builds nothing, so it skips CI. A change with any other file runs it.
 on:
   push:
     branches: [ "main" ]
+    paths-ignore: [ "**.md", "docs/**", "LICENSE" ]
   pull_request:
     branches: [ "main" ]
+    paths-ignore: [ "**.md", "docs/**", "LICENSE" ]
 
 jobs:
   check:
