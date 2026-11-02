@@ -772,13 +772,22 @@ pub fn scan_startup_with(
 
         // A plist outside the scanned folders belongs to the app, so the row is read-only.
         // Only the folder of the row's own domain counts, so root never bootstraps a user's file.
-        let plist_path = detail.path.filter(|p| {
-            p.parent().is_some_and(|dir| {
+        // A plist section 1 read under another label belongs to that row.
+        let folder_kind = detail
+            .path
+            .as_deref()
+            .filter(|p| !seen_plists.contains(*p))
+            .and_then(Path::parent)
+            .and_then(|dir| {
                 plist_folders
                     .iter()
-                    .any(|(f, k)| f == dir && domain_for(*k) == domain)
+                    .find(|(f, k)| f == dir && domain_for(*k) == domain)
             })
-        });
+            .map(|(_, k)| *k);
+        let (plist_path, kind) = match folder_kind {
+            Some(folder_kind) => (detail.path, folder_kind),
+            None => (None, kind),
+        };
 
         scan.items.push(StartupItem {
             label,
@@ -2761,6 +2770,79 @@ mod tests {
         let scripts = host.admin_scripts.lock().unwrap();
         let bootstrap = format!("bootstrap system {}", shell_quote(&plist.to_string_lossy()));
         assert!(scripts[0].contains(&bootstrap), "{}", scripts[0]);
+    }
+
+    // Shaped after an updater that rewrote a plist in place under a new label while
+    // launchd still runs the old label from it. Removing it as broken would break the new one.
+    #[test]
+    fn a_plist_the_scan_read_under_another_label_stays_with_that_row() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let agents = layout.user("Library/LaunchAgents");
+        let program = vendor_program(&layout);
+        write_plist(&agents, "com.vendor.helper2", &program.to_string_lossy());
+        let shared = agents.join("com.vendor.helper.plist");
+        fs::rename(agents.join("com.vendor.helper2.plist"), &shared).unwrap();
+        let gone = layout.user("Applications/Old.app/Contents/MacOS/helper");
+        let host = FakeHost::idle();
+        let uid = host_uid();
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/com.vendor.helper"),
+            &format!(
+                "gui/{uid}/com.vendor.helper = {{\n path = {}\n program = {}\n}}\n",
+                shared.display(),
+                gone.display()
+            ),
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}"),
+            "gui = {\n services = {\n 0 - com.vendor.helper\n }\n}\n",
+        );
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let old = scan.items.iter().find(|it| it.label == "com.vendor.helper");
+        let old = old.unwrap();
+        assert_eq!(old.state, StartupState::Broken);
+        assert_eq!(old.plist_path, None);
+        assert_eq!(old.read_only_reason(), Some(REGISTERED_BY_APP));
+        let new = scan
+            .items
+            .iter()
+            .find(|it| it.label == "com.vendor.helper2");
+        assert_eq!(new.unwrap().plist_path.as_deref(), Some(shared.as_path()));
+    }
+
+    #[test]
+    fn an_agent_launchd_lists_from_the_system_agents_folder_is_a_system_agent() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let folder = layout.system("Library/LaunchAgents");
+        fs::create_dir_all(&folder).unwrap();
+        let plist = folder.join("com.vendor.a.plist");
+        fs::write(&plist, b"not a plist").unwrap();
+        let program = vendor_program(&layout);
+        let host = FakeHost::idle();
+        let uid = host_uid();
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/com.vendor.a"),
+            &format!(
+                "gui/{uid}/com.vendor.a = {{\n path = {}\n program = {}\n}}\n",
+                plist.display(),
+                program.display()
+            ),
+        );
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}"),
+            "gui = {\n services = {\n 0 - com.vendor.a\n }\n}\n",
+        );
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let agent = scan.items.iter().find(|it| it.label == "com.vendor.a");
+        let agent = agent.unwrap();
+        assert_eq!(agent.kind, StartupKind::SystemAgent);
+        assert_eq!(agent.plist_path.as_deref(), Some(plist.as_path()));
     }
 
     #[test]
