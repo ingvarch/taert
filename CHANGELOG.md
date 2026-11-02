@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Startup items**: `taert startup --json` prints an object with `items` and `notes` instead of a list of items.
+
+### Fixed
+- **Startup items**: `taert startup --all` no longer lets root write to a path in the home folder, shows the Background Task Management entries, and times out on its own. `disable` and `enable` read the state again and report it. Daemons come from `launchctl print system` without `--all`. A name that fits several items is refused. A login item's path is saved before the item is removed, and a `disabled_login_items.json` that taert cannot read is never written over. Security login items are read-only. Notes show in the TUI and in `--json`. A disabled item that still runs offers "stop". Login item paths reach AppleScript as arguments. A login item can be named by its path. Services that macOS ships under a label outside `com.apple.`, such as `com.openssh.ssh-agent`, are hidden and read-only, and so are daemons whose files launchd does not show, unless an app outside Apple registered them. A service with no plist in `~/Library/LaunchAgents`, `/Library/LaunchAgents`, or `/Library/LaunchDaemons`, such as one an app registered, is read-only and says where to switch it, because launchd forgets it once it stops. A daemon keeps its plist only from `/Library/LaunchDaemons`, and an agent only from a `LaunchAgents` folder, so root never loads a plist from the home folder. `taert doctor` offers to switch off a broken item only when taert can switch it, and otherwise says why. NetworkExtension services are named after their extension, not the last number of their version.
+- **Uninstall**: `taert uninstall` removes only the login item that opens the copy it removes, and keeps other login items with the same name.
+
 ## [0.1.0] - 2026-10-30
 
 ### Added

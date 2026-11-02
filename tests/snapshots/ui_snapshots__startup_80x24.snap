@@ -2,15 +2,14 @@
 source: tests/ui_snapshots.rs
 expression: output
 ---
- taert › Optimize › Startup items                                       3 items
+ taert › Optimize › Startup items                                       5 items
 ────────────────────────────────────────────────────────────────────────────────
-   ╭─ Startup items (3) ─────────────────────────────────────────────────────╮
+   ╭─ Startup items (5) ─────────────────────────────────────────────────────╮
    │ ▌ ● Docker                                     running (1.2% · 47.2 MB) │
    │   · Spotify Web Helper (Spotify)                               disabled │
    │   ✕ Old Broken Service                                           broken │
-   │                                                                         │
-   │                                                                         │
-   │                                                                         │
+   │   · Stuck Updater                              disabled · still running │
+   │   ○ Example Sync                                                enabled │
    │                                                                         │
    │                                                                         │
    │                                                                         │
@@ -24,5 +23,6 @@ expression: output
    │                                                                         │
    │                                                                         │
    ╰─────────────────────────────────────────────────────────────────────────╯
+   Note: System Events login items unavailable: macOS Automation permission r…
 ────────────────────────────────────────────────────────────────────────────────
   ␣  Toggle / Action    ↑↓  Navigate    ⎋  Back

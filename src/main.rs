@@ -808,13 +808,12 @@ fn handle_startup(
         };
 
         let scan = startup::scan_startup(host, layout, ignore, args.all);
-        let Some(item) = scan
-            .items
-            .into_iter()
-            .find(|it| it.label == *label || it.name == *label)
-        else {
-            let _ = writeln!(console.err, "Error: Startup item '{label}' not found");
-            return ExitCode::FAILURE;
+        let item = match startup::resolve_item(&scan.items, label) {
+            Ok(item) => item,
+            Err(err) => {
+                let _ = writeln!(console.err, "Error: {err}");
+                return ExitCode::FAILURE;
+            }
         };
 
         let result = if is_enable {
@@ -835,7 +834,7 @@ fn handle_startup(
         }
     } else if cli.json {
         let scan = startup::scan_startup(host, layout, ignore, args.all);
-        match serde_json::to_string_pretty(&scan.items) {
+        match serde_json::to_string_pretty(&scan) {
             Ok(json) => {
                 let _ = writeln!(out, "{json}");
                 ExitCode::SUCCESS
@@ -866,6 +865,9 @@ fn handle_startup(
                         }
                     }
                     startup::StartupState::Enabled => "enabled".to_string(),
+                    startup::StartupState::Disabled if item.is_disabled_but_running() => {
+                        "disabled (still running)".to_string()
+                    }
                     startup::StartupState::Disabled => "disabled".to_string(),
                     startup::StartupState::Broken => "broken (missing executable)".to_string(),
                 };
@@ -1796,8 +1798,38 @@ mod tests {
         let json = startup(&["startup", "--json"], &host, &layout);
 
         assert!(json.ok);
-        let items: serde_json::Value = serde_json::from_str(&json.out).unwrap();
-        assert_eq!(items[0]["label"], "com.example.demo");
+        let scan: serde_json::Value = serde_json::from_str(&json.out).unwrap();
+        assert_eq!(scan["items"][0]["label"], "com.example.demo");
+    }
+
+    #[test]
+    fn startup_json_carries_the_notes() {
+        let (_temp, layout) = layout_with_a_launch_agent();
+        let host = FakeHost::idle();
+        host.fail("/usr/bin/osascript", "Not authorized (-1743)");
+
+        let json = startup(&["startup", "--json"], &host, &layout);
+
+        let scan: serde_json::Value = serde_json::from_str(&json.out).unwrap();
+        let note = scan["notes"][0].as_str().unwrap();
+        assert!(note.contains("Automation permission"), "{note}");
+    }
+
+    #[test]
+    fn startup_disable_refuses_a_name_that_fits_two_items() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::idle();
+        host.reply(
+            "/usr/bin/osascript",
+            "Twin\t/Applications/A.app\nTwin\t/Applications/B.app\n",
+        );
+
+        let ran = startup(&["startup", "disable", "Twin"], &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(ran.err.contains("fits several items"), "{}", ran.err);
+        assert!(ran.err.contains("loginitem.Twin"));
+        assert!(!host.ran("/bin/launchctl disable"));
     }
 
     #[test]

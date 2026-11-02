@@ -227,9 +227,10 @@ pub fn render_doctor(frame: &mut Frame, state: &DoctorScreenState, theme: &Theme
         }
     };
 
-    let status_text = match &state.phase {
-        DoctorPhase::Checking { .. } => "Checking...".to_string(),
-        DoctorPhase::Done(report) => {
+    let status_text = match (&state.message, &state.phase) {
+        (Some((message, _)), _) => message.clone(),
+        (None, DoctorPhase::Checking { .. }) => "Checking...".to_string(),
+        (None, DoctorPhase::Done(report)) => {
             if report.findings.is_empty() {
                 "All clear".to_string()
             } else {

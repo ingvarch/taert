@@ -20,6 +20,14 @@ pub trait Host: Send + Sync {
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Output;
     /// Runs a shell script as root, asking for a password at most once.
     fn run_admin(&self, script: &str, prompt: &str) -> Result<(), String>;
+    /// Like `run_admin`, and returns what the script printed. The output comes through a pipe,
+    /// so root never writes to a path the user controls.
+    fn run_admin_output(
+        &self,
+        script: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<String, String>;
     fn signal(&self, pid: u32, signal: i32);
     fn pause(&self, duration: Duration);
     /// Moves a file or folder to the system Trash.
@@ -82,11 +90,21 @@ impl Host for MacHost {
     }
 
     fn run_admin(&self, script: &str, prompt: &str) -> Result<(), String> {
+        self.run_admin_output(script, prompt, ADMIN_TIMEOUT)
+            .map(drop)
+    }
+
+    fn run_admin_output(
+        &self,
+        script: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let output = if unsafe { libc::geteuid() } == 0 {
-            self.run("/bin/sh", &["-c", script], ADMIN_TIMEOUT)
+            self.run("/bin/sh", &["-c", script], timeout)
         } else if self.run("/usr/bin/sudo", &["-n", "true"], SUDO_PROBE).ok {
             let args = ["-n", "/bin/sh", "-c", script];
-            self.run("/usr/bin/sudo", &args, ADMIN_TIMEOUT)
+            self.run("/usr/bin/sudo", &args, timeout)
         } else {
             // The dialog works over the full-screen TUI, where sudo has no prompt to show.
             let args = [
@@ -100,11 +118,11 @@ impl Host for MacHost {
                 script,
                 prompt,
             ];
-            self.run("/usr/bin/osascript", &args, ADMIN_TIMEOUT)
+            self.run("/usr/bin/osascript", &args, timeout)
         };
 
         if output.ok {
-            return Ok(());
+            return Ok(output.stdout);
         }
         Err(if output.stderr.contains("-128") {
             "The administrator password was not given".to_string()
@@ -155,6 +173,7 @@ pub mod fake {
         pub replies: Mutex<Vec<(String, VecDeque<Output>)>>,
         pub admin_scripts: Mutex<Vec<String>>,
         pub admin_result: Mutex<Option<String>>,
+        pub admin_stdout: Mutex<String>,
         pub admin_effect: Mutex<Option<Effect>>,
         pub run_effects: Mutex<Vec<(String, Effect)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
@@ -285,6 +304,16 @@ pub mod fake {
                 Some(error) => Err(error),
                 None => Ok(()),
             }
+        }
+
+        fn run_admin_output(
+            &self,
+            script: &str,
+            prompt: &str,
+            _timeout: Duration,
+        ) -> Result<String, String> {
+            self.run_admin(script, prompt)?;
+            Ok(self.admin_stdout.lock().unwrap().clone())
         }
 
         fn signal(&self, pid: u32, signal: i32) {

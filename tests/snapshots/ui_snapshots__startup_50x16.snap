@@ -2,19 +2,19 @@
 source: tests/ui_snapshots.rs
 expression: output
 ---
- Startup items                            3 items
+ Startup items                            5 items
 ──────────────────────────────────────────────────
-   ╭─ Startup items (3) ───────────────────────╮
+   ╭─ Startup items (5) ───────────────────────╮
    │ ▌ ● Docker       running (1.2% · 47.2 MB) │
    │   · Spotify Web Helper (Spotify) disabled │
    │   ✕ Old Broken Service             broken │
-   │                                           │
-   │                                           │
-   │                                           │
+   │   · Stuck…pdater disabled · still running │
+   │   ○ Example Sync                  enabled │
    │                                           │
    │                                           │
    │                                           │
    │                                           │
    ╰───────────────────────────────────────────╯
+   Note: System Events login items unavailable:…
 ──────────────────────────────────────────────────
   ␣  Toggle / Action    ↑↓  Navigate    ⎋  Back

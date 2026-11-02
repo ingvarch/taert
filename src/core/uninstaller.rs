@@ -32,7 +32,7 @@ use super::path_utils::prettify_path;
 use super::safety::{Safety, SafetyError};
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
 use super::sizer::DirSizer;
-use super::startup::LOGIN_ITEM_SCRIPT;
+use super::startup::remove_login_item_args;
 use super::stores::IgnoreStore;
 
 pub const PLAN_ID: &str = "uninstall";
@@ -1115,12 +1115,8 @@ impl Uninstaller<'_> {
     }
 
     fn remove_login_items(&self, plan: &AppPlan) {
-        let mut args: Vec<&str> = Vec::new();
-        for line in LOGIN_ITEM_SCRIPT {
-            args.extend(["-e", line]);
-        }
-        // Without `--` a name that starts with a dash is read as an option.
-        args.extend(["--", &plan.app.name]);
+        let path = plan.app.path.to_string_lossy();
+        let args = remove_login_item_args(&plan.app.name, &path);
         self.host.run(OSASCRIPT, &args, TEARDOWN_TIMEOUT);
 
         let uid = unsafe { libc::getuid() };
@@ -2469,7 +2465,7 @@ mod run_tests {
     }
 
     #[test]
-    fn the_login_item_of_the_app_is_removed_by_its_name() {
+    fn the_login_item_of_the_app_is_removed_by_its_name_and_path() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let host = FakeHost::default();
@@ -2481,7 +2477,8 @@ mod run_tests {
             .iter()
             .find(|line| line.contains("System Events"))
             .unwrap();
-        assert!(script.ends_with(" -- Foo"), "{script}");
+        let args = format!(" -- Foo {}", foo.path.display());
+        assert!(script.ends_with(&args), "{script}");
     }
 
     #[test]

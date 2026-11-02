@@ -21,6 +21,18 @@ fn test_cli_help() {
 }
 
 #[test]
+fn startup_disable_and_enable_help_name_the_path_of_a_login_item() {
+    let home = tempfile::tempdir().unwrap();
+    for action in ["disable", "enable"] {
+        taert(&home)
+            .args(["startup", action, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("path of a login item"));
+    }
+}
+
+#[test]
 fn test_cli_config() {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = taert(&home);

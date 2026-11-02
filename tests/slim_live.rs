@@ -30,6 +30,15 @@ impl Host for TempTrashHost {
         MacHost.run_admin(script, prompt)
     }
 
+    fn run_admin_output(
+        &self,
+        script: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        MacHost.run_admin_output(script, prompt, timeout)
+    }
+
     fn signal(&self, pid: u32, signal: i32) {
         MacHost.signal(pid, signal);
     }
