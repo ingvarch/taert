@@ -1008,7 +1008,8 @@ impl App {
                                     }
                                     StartupConfirm::Stop { index } => {
                                         if let Some(item) = state.items.get(index) {
-                                            let res = startup::stop_item(&*self.host, item);
+                                            let res =
+                                                startup::stop_item(&*self.host, &self.layout, item);
                                             state.finish_action(res);
                                             state.apply_scan(startup::scan_startup_with(
                                                 &*self.host,
@@ -3272,6 +3273,9 @@ mod tests {
         *host.admin_result.lock().unwrap() = Some("denied".into());
         let mut app = new_app();
         app.host = Arc::new(host);
+        // taert saves a daemon without a plist before it disables it, so the home must exist.
+        let dir = tempdir().unwrap();
+        app.layout.home = dir.path().to_path_buf();
         let mut state = DoctorScreenState::new_done(report);
         state.confirm = Some(DoctorActionConfirm::DisableStartupItem { item });
         app.screen = Screen::Doctor(state);
