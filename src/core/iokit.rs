@@ -43,20 +43,8 @@ impl Value {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub use darwin::{entry, services};
 
-#[cfg(not(target_os = "macos"))]
-pub fn services(_class: &str) -> Vec<Properties> {
-    Vec::new()
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn entry(_path: &str) -> Option<Properties> {
-    None
-}
-
-#[cfg(target_os = "macos")]
 mod darwin {
     use std::ffi::{CString, c_void};
     use std::ptr;
@@ -234,7 +222,7 @@ mod darwin {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

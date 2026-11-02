@@ -322,17 +322,6 @@ pub fn save_disabled_login_items(
     Ok(())
 }
 
-fn host_uid() -> u32 {
-    #[cfg(unix)]
-    {
-        unsafe { libc::getuid() }
-    }
-    #[cfg(not(unix))]
-    {
-        501
-    }
-}
-
 const BACKGROUND_READ_ONLY: &str = "Background task entries are read-only";
 const REGISTERED_BY_APP: &str = "Registered by the app. Switch it in System Settings > General > Login Items & Extensions, or in the app.";
 const LAUNCHCTL: &str = "/bin/launchctl";
@@ -547,7 +536,7 @@ pub fn scan_startup_with(
     btm: &Btm,
 ) -> StartupScan {
     let mut scan = StartupScan::default();
-    let uid = host_uid();
+    let uid = host.uid();
     let apps = apps::find_apps(layout);
 
     // Read running processes from `ps` to correlate pid, cpu, and memory
@@ -726,7 +715,7 @@ pub fn scan_startup_with(
         }
 
         // Query detailed info from launchctl print <domain>/<label>
-        let domain = domain_for(kind);
+        let domain = domain_for(host, kind);
         let detail_out = host.run(LAUNCHCTL, &["print", &format!("{domain}/{label}")], TIMEOUT);
         let detail = if detail_out.ok {
             parse_service_detail(&detail_out.stdout)
@@ -781,7 +770,7 @@ pub fn scan_startup_with(
             .and_then(|dir| {
                 plist_folders
                     .iter()
-                    .find(|(f, k)| f == dir && domain_for(*k) == domain)
+                    .find(|(f, k)| f == dir && domain_for(host, *k) == domain)
             })
             .map(|(_, k)| *k);
         let (plist_path, kind) = match folder_kind {
@@ -1074,10 +1063,10 @@ impl StartupItem {
     }
 }
 
-fn domain_for(kind: StartupKind) -> String {
+fn domain_for(host: &dyn Host, kind: StartupKind) -> String {
     match kind {
         StartupKind::Daemon => "system".to_string(),
-        _ => format!("gui/{}", host_uid()),
+        _ => format!("gui/{}", host.uid()),
     }
 }
 
@@ -1093,7 +1082,7 @@ fn read_launchd_state(
     kind: StartupKind,
     label: &str,
 ) -> Result<LaunchdState, String> {
-    let domain = domain_for(kind);
+    let domain = domain_for(host, kind);
     let again = |what: &str, out: &Output| {
         format!(
             "Could not read the launchd {what} again: {}",
@@ -1198,7 +1187,7 @@ pub fn disable_item(
             Ok(format!("Disabled system daemon {label}"))
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
-            let target = format!("{}/{label}", domain_for(item.kind));
+            let target = format!("{}/{label}", domain_for(host, item.kind));
             // 1. disable first so launchd can't restart it
             let dis_out = host.run(LAUNCHCTL, &["disable", &target], TIMEOUT);
             if !dis_out.ok {
@@ -1249,7 +1238,7 @@ pub fn stop_item(host: &dyn Host, item: &StartupItem) -> Result<String, String> 
                 .map_err(|e| format!("Failed to stop daemon: {e}"))?;
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
-            let target = format!("{}/{label}", domain_for(item.kind));
+            let target = format!("{}/{label}", domain_for(host, item.kind));
             let out = host.run(LAUNCHCTL, &["bootout", &target], TIMEOUT);
             if !out.ok && read_launchd_state(host, item.kind, label)?.pid.is_some() {
                 return Err(format!("launchctl bootout failed: {}", out.stderr.trim()));
@@ -1344,7 +1333,7 @@ pub fn enable_item(
             }
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
-            let domain = domain_for(item.kind);
+            let domain = domain_for(host, item.kind);
             let target = format!("{domain}/{label}");
             let en_out = host.run(LAUNCHCTL, &["enable", &target], TIMEOUT);
             if !en_out.ok {
@@ -2624,6 +2613,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_uid_reaches_the_launchctl_domain() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let folder = layout.user("Library/Application Support/acme/servers/1f2e");
+        let program = folder.join("acme-server");
+        write_plist(&folder, "com.acme.server", &program.to_string_lossy());
+        let host = FakeHost::idle();
+        host.set_uid(777);
+        host.reply(
+            "/bin/launchctl print gui/777/com.acme.server",
+            &format!(
+                "gui/777/com.acme.server = {{\n path = {}\n program = {}\n}}\n",
+                folder.join("com.acme.server.plist").display(),
+                program.display()
+            ),
+        );
+        host.reply(
+            "/bin/launchctl print gui/777",
+            "gui = {\n services = {\n 0 - com.acme.server\n }\n}\n",
+        );
+        let _scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let calls = host.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "/bin/launchctl print gui/777/com.acme.server"),
+            "Expected calls to contain '/bin/launchctl print gui/777/com.acme.server', got: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("gui/501")),
+            "Calls should not contain gui/501: {calls:?}"
+        );
+    }
+
     // Shaped after an agent an app bootstrapped from its own folder in Application Support.
     #[test]
     fn an_agent_whose_plist_is_outside_the_scanned_folders_is_read_only() {
@@ -2633,7 +2658,7 @@ mod tests {
         let program = folder.join("acme-server");
         write_plist(&folder, "com.acme.server", &program.to_string_lossy());
         let host = FakeHost::idle();
-        let uid = host_uid();
+        let uid = host.uid();
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.acme.server"),
             &format!(
@@ -2688,7 +2713,7 @@ mod tests {
         let daemons_plist = layout.system("Library/LaunchDaemons/com.test.agent.plist");
         let program = vendor_program(&layout);
         let host = FakeHost::idle();
-        let uid = host_uid();
+        let uid = host.uid();
         host.reply(
             "/bin/launchctl print system/com.test.foo",
             &format!(
@@ -2785,7 +2810,7 @@ mod tests {
         fs::rename(agents.join("com.vendor.helper2.plist"), &shared).unwrap();
         let gone = layout.user("Applications/Old.app/Contents/MacOS/helper");
         let host = FakeHost::idle();
-        let uid = host_uid();
+        let uid = host.uid();
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.vendor.helper"),
             &format!(
@@ -2823,7 +2848,7 @@ mod tests {
         fs::write(&plist, b"not a plist").unwrap();
         let program = vendor_program(&layout);
         let host = FakeHost::idle();
-        let uid = host_uid();
+        let uid = host.uid();
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.vendor.a"),
             &format!(
@@ -2850,7 +2875,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = layout_in(&temp);
         let host = FakeHost::idle();
-        let uid = host_uid();
+        let uid = host.uid();
         host.reply(
             &format!("/bin/launchctl print gui/{uid}/com.openssh.ssh-agent"),
             &format!("gui/{uid}/com.openssh.ssh-agent = {{\n path = /System/Library/LaunchAgents/com.openssh.ssh-agent.plist\n program = /usr/bin/ssh-agent\n}}\n"),

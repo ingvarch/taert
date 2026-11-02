@@ -9,7 +9,6 @@ pub struct CloneIdentity {
     pub shares_all_blocks: bool,
 }
 
-#[cfg(target_os = "macos")]
 mod sys {
     use super::CloneIdentity;
     use std::ffi::CString;
@@ -72,20 +71,12 @@ mod sys {
 
 /// Query APFS clone identity for the file at `path`.
 ///
-/// Returns `None` if the call fails, the filesystem does not support clone queries,
-/// or the OS is not macOS.
-#[cfg(target_os = "macos")]
+/// Returns `None` if the call fails or the filesystem does not support clone queries.
 pub fn clone_identity(path: &Path) -> Option<CloneIdentity> {
     sys::clone_identity(path)
 }
 
-/// Fallback for non-macOS systems.
-#[cfg(not(target_os = "macos"))]
-pub fn clone_identity(_path: &Path) -> Option<CloneIdentity> {
-    None
-}
-
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::File;

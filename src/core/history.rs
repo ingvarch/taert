@@ -566,46 +566,26 @@ fn open_for_append(path: &Path) -> io::Result<File> {
         fs::create_dir_all(parent)?;
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.create(true).append(true).mode(0o600);
-        let file = options.open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true).mode(0o600);
+    let file = options.open(path)?;
 
-        if let Ok(meta) = file.metadata() {
-            use std::os::unix::fs::PermissionsExt;
-            if meta.permissions().mode() & 0o777 != 0o600 {
-                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-            }
+    if let Ok(meta) = file.metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o777 != 0o600 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
-        Ok(file)
     }
-
-    #[cfg(not(unix))]
-    {
-        OpenOptions::new().create(true).append(true).open(path)
-    }
+    Ok(file)
 }
 
 fn create_with_mode_0600(path: &Path) -> io::Result<File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.create(true).write(true).truncate(true).mode(0o600);
-        let file = options.open(path)?;
-        Ok(file)
-    }
-
-    #[cfg(not(unix))]
-    {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true).mode(0o600);
+    let file = options.open(path)?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -711,12 +691,9 @@ another corrupted line!
         let session = log.start_run("clean dev", "force", None);
         session.finish();
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let meta = fs::metadata(&log_file).unwrap();
-            assert_eq!(meta.mode() & 0o777, 0o600);
-        }
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&log_file).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o600);
     }
 
     #[test]
@@ -750,12 +727,9 @@ another corrupted line!
         assert_eq!(runs[0].run, id2);
         assert_eq!(runs[1].run, id3);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let meta = fs::metadata(&log_file).unwrap();
-            assert_eq!(meta.mode() & 0o777, 0o600);
-        }
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&log_file).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o600);
     }
 
     #[test]

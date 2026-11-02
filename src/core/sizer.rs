@@ -355,7 +355,6 @@ mod tests {
         assert!(measurement.bytes >= 8192, "{measurement:?}");
     }
 
-    #[cfg(target_os = "macos")]
     fn clone_file(src: &Path, dst: &Path) {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -371,7 +370,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn two_clones_in_one_folder_measure_as_one_file() {
         let temp = tempdir().unwrap();
         let f1 = temp.path().join("f1.bin");
@@ -388,7 +386,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn clone_changed_afterwards_counts_as_well() {
         let temp = tempdir().unwrap();
         let f1 = temp.path().join("f1.bin");
@@ -442,7 +439,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
     fn clones_in_different_subfolders_count_once_in_parent_total() {
         let temp = tempdir().unwrap();
         let sub1 = temp.path().join("sub1");
