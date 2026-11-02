@@ -10,7 +10,7 @@ taert stores user settings in standard macOS configuration directories:
 - **Protected Paths (Ignore List)**: `~/.config/taert/ignore.json`
 - **Project Folder Roots**: `~/.config/taert/project_folders.json`
 - **History Log**: `~/.config/taert/history.jsonl` (mode `0600`)
-- **Switched-off Startup Items**: `~/.config/taert/disabled_login_items.json` and `~/.config/taert/disabled_services.json`
+- **Switched-off Login Items**: `~/.config/taert/disabled_login_items.json`
 - **LaunchAgent Plist**: `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`
 - **Schedule Lock**: `~/.config/taert/schedule.lock`
 

@@ -443,8 +443,10 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
             ("Security vendor service · Protected", theme.warning())
         } else if item.is_ignored {
             ("Protected path · Excluded by rules", theme.footnote())
-        } else {
+        } else if item.kind == StartupKind::Background {
             ("Background task entry · Read-only", theme.footnote())
+        } else {
+            ("Registered by the app · Read-only", theme.footnote())
         };
         lines.push(Line::from(Span::styled(note_text, note_style)));
     }
@@ -664,7 +666,7 @@ mod tests {
             kind,
             state,
             program: None,
-            plist_path: None,
+            plist_path: Some("/Library/LaunchDaemons/com.example.item.plist".into()),
             pid,
             cpu_percent: None,
             memory_bytes: None,
@@ -682,6 +684,23 @@ mod tests {
         state.request_toggle();
 
         assert_eq!(state.confirm, Some(StartupConfirm::Stop { index: 0 }));
+    }
+
+    #[test]
+    fn the_detail_card_says_an_app_registered_the_service() {
+        let mut registered = item(StartupKind::Daemon, StartupState::Enabled, None);
+        registered.plist_path = None;
+        let state = StartupScreenState::new(vec![registered], false);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|f| render_startup(f, &state, &Theme::new()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Registered by the app · Read-only"), "{text}");
     }
 
     #[test]
