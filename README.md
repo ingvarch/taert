@@ -18,6 +18,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Live system status: CPU, GPU, memory, storage, battery, processes, and network
 - Project artifact purger for build targets (`target`, `node_modules`, `.venv`) with age thresholds
 - App cache and browser cache cleanup that leaves profiles, cookies, and passwords alone and keeps the caches of browsers and apps it sees running
+- Orphaned file detector (`taert clean orphans`) that finds files left behind in `~/Library` by apps that are gone and moves them safely to the Trash
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
 - Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics

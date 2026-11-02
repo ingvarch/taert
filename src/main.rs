@@ -152,11 +152,13 @@ fn handle_clean(
         Some(CleanCategory::Junk) => vec![("junk", "System Junk")],
         Some(CleanCategory::Ai) => vec![("ai", "AI Tool Caches")],
         Some(CleanCategory::Trash) => vec![("trash", "Trash")],
+        Some(CleanCategory::Orphans) => vec![("orphans", "Orphaned App Files")],
         None => vec![
             ("dev", "Developer Caches"),
             ("junk", "System Junk"),
             ("ai", "AI Tool Caches"),
             ("trash", "Trash"),
+            ("orphans", "Orphaned App Files"),
         ],
     };
 
@@ -165,12 +167,23 @@ fn handle_clean(
         Some(CleanCategory::Junk) => "clean junk",
         Some(CleanCategory::Ai) => "clean ai",
         Some(CleanCategory::Trash) => "clean trash",
+        Some(CleanCategory::Orphans) => "clean orphans",
         None => "clean",
     };
 
     let scans = categories
         .into_iter()
-        .map(|(id, title)| CategoryScanner::scan(context, id, title, ignore, None, None))
+        .map(|(id, title)| {
+            let mut s = CategoryScanner::scan(context, id, title, ignore, None, None);
+            if args.category.is_none() && id == "orphans" {
+                for group in &mut s.groups {
+                    for item in &mut group.items {
+                        item.selected = false;
+                    }
+                }
+            }
+            s
+        })
         .collect();
     let mut scan = CategoryScan::combined("Clean Review", scans);
 
@@ -2254,6 +2267,82 @@ mod tests {
         assert!(ran.out.contains("Clean complete"));
         assert!(chrome.join("data").exists());
         assert!(!stale.exists());
+    }
+
+    #[test]
+    fn clean_orphans_dry_run_lists_rows_and_removes_nothing() {
+        let (_temp, layout) = sandbox();
+        let orphan = fill(&layout, "Library/Caches/com.gone.app");
+        age(&orphan, 40);
+
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+
+        let ran = clean(
+            &["clean", "orphans", "--dry-run", "--plain"],
+            "",
+            &host,
+            &layout,
+        );
+        assert!(ran.ok);
+        assert!(ran.out.contains("com.gone.app"));
+        assert!(ran.out.contains("(Trash)"));
+        assert!(orphan.exists());
+    }
+
+    #[test]
+    fn clean_orphans_json_has_the_group() {
+        let (_temp, layout) = sandbox();
+        let orphan = fill(&layout, "Library/Caches/com.gone.app");
+        age(&orphan, 40);
+
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+
+        let ran = clean(&["clean", "orphans", "--json"], "", &host, &layout);
+        assert!(ran.ok);
+        let scan: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let has_group = scan["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["tool"] == "com.gone.app");
+        assert!(has_group);
+    }
+
+    #[test]
+    fn clean_without_a_category_includes_orphans() {
+        let (_temp, layout) = sandbox();
+        let orphan = fill(&layout, "Library/Caches/com.gone.app");
+        age(&orphan, 40);
+
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+
+        let ran = clean(&["clean", "--json"], "", &host, &layout);
+        assert!(ran.ok);
+        let scan: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let has_group = scan["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["tool"] == "com.gone.app");
+        assert!(has_group);
+    }
+
+    #[test]
+    fn orphans_start_unselected_without_the_category() {
+        let (_temp, layout) = sandbox();
+        let orphan = fill(&layout, "Library/Caches/com.gone.app");
+        age(&orphan, 40);
+
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+
+        let ran = clean(&["clean", "--force"], "", &host, &layout);
+        assert!(ran.ok);
+        assert!(host.trashed().is_empty());
+        assert!(orphan.exists());
     }
 
     #[test]

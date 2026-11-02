@@ -21,6 +21,16 @@ fn test_cli_help() {
 }
 
 #[test]
+fn clean_help_mentions_orphans() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["clean", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("orphans"));
+}
+
+#[test]
 fn startup_disable_and_enable_help_name_the_path_of_a_login_item() {
     let home = tempfile::tempdir().unwrap();
     for action in ["disable", "enable"] {
@@ -250,12 +260,12 @@ fn completion_values_come_from_clap() {
         .args(["completion", "zsh"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("(dev junk ai trash)"));
+        .stdout(predicate::str::contains("(dev junk ai trash orphans)"));
     taert(&home)
         .args(["completion", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("dev junk ai trash"));
+        .stdout(predicate::str::contains("dev junk ai trash orphans"));
 }
 
 #[test]

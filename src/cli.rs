@@ -133,11 +133,12 @@ pub enum CleanCategory {
     Junk,
     Ai,
     Trash,
+    Orphans,
 }
 
 #[derive(Debug, Args)]
 pub struct CleanArgs {
-    /// Specific category to scan: dev, junk, ai, or trash (scans all if omitted)
+    /// Specific category to scan: dev, junk, ai, trash, or orphans (scans all if omitted)
     pub category: Option<CleanCategory>,
 }
 

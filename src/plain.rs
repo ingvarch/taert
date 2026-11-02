@@ -4,7 +4,7 @@ use std::io::{self, BufRead, Write};
 
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{
-    Cleaner, RemovalMode, RemovalProgress, RemovalReport, item_removal_mode, scan_removal_mode,
+    RemovalMode, RemovalProgress, RemovalReport, item_removal_mode, remove_selected,
 };
 use crate::core::history::ItemOutcome;
 use crate::core::host::Host;
@@ -200,10 +200,12 @@ impl PlainRunner {
     where
         O: FnMut(&ItemOutcome),
     {
-        let mode = scan_removal_mode(&scan.id, permanent);
         let items: Vec<_> = scan.selected_items().into_iter().cloned().collect();
-        Cleaner::new(host, mode).remove_items_with_callbacks(
+        remove_selected(
+            host,
+            &scan.id,
             &items,
+            permanent,
             ignore,
             None::<fn(RemovalProgress)>,
             Some(on_outcome),
