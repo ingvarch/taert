@@ -183,7 +183,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    The TUI estimate for an app, the Homebrew Cellar, or the Rust toolchains compresses a sample of 48 files in memory, picked by size across the tree, and applies the saved fraction to the folder size. Candidates that would save nothing are not listed. `taert compress --dry-run` estimates every file the same way.
 
 7. **Tests in CI**:
-   The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. In run 41431241077 (2026-11-02) that runner was image `macos-26-arm64`, version 20261021.0445.8, which is macOS 26. That run is of the branch `fix/test-isolation`, so the tests of the compress fixes had not run in CI at the time. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
+   The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. A comment on issue #38 records the runner image of the first run that included the tests of the compress fixes. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
 
 ## APFS Space Accounting
 
