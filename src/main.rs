@@ -20,7 +20,7 @@ use crate::core::cleaner::{RemovalMode, RemovalReport};
 use crate::core::date_utils::{format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
-use crate::core::history::HistoryLog;
+use crate::core::history::{HistoryLog, ItemOutcome};
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
 use crate::core::layout::Layout;
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             } else {
                 let mut app = ui::app::App::new(ignore, config).with_permanent(cli.permanent);
-                run_tui(&mut app, console)
+                run_tui(&mut app, &cli, console)
             }
         }
 
@@ -103,6 +103,7 @@ fn main() -> ExitCode {
             use_plain,
             &ignore,
             &config,
+            console,
         ),
 
         Some(Command::Large(ref args)) => {
@@ -390,7 +391,7 @@ fn process_scan_result(
         let mut app =
             ui::app::App::with_select(scan.clone(), ignore.clone(), saved_config(context.layout))
                 .with_permanent(cli.permanent);
-        run_tui(&mut app, console)
+        run_tui(&mut app, cli, console)
     }
 }
 
@@ -460,7 +461,7 @@ fn pick_apps_to_uninstall(
         let mut app = ui::app::App::new(ignore.clone(), saved_config(context.layout))
             .with_permanent(cli.permanent);
         app.launch_app_scan();
-        return run_tui(&mut app, console);
+        return run_tui(&mut app, cli, console);
     }
 
     apps::measure_apps(installed, context.host, None, None);
@@ -511,7 +512,14 @@ fn pick_apps_to_uninstall(
     finish_uninstall(plan, cli, use_plain, ignore, context, console)
 }
 
-fn run_tui(app: &mut ui::app::App, console: &mut Console) -> ExitCode {
+fn run_tui(app: &mut ui::app::App, cli: &Cli, console: &mut Console) -> ExitCode {
+    if cli.dry_run {
+        let _ = writeln!(
+            console.err,
+            "Error: --dry-run does not work in the interactive screen. Add --plain to see the preview."
+        );
+        return ExitCode::FAILURE;
+    }
     match app.run() {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
@@ -601,7 +609,7 @@ fn finish_uninstall(
     if !use_plain {
         let mut app = ui::app::App::with_plan(plan, ignore.clone(), saved_config(context.layout))
             .with_permanent(cli.permanent);
-        return run_tui(&mut app, console);
+        return run_tui(&mut app, cli, console);
     }
 
     let _ = write!(
@@ -634,11 +642,17 @@ fn handle_analyze(
     use_plain: bool,
     ignore: &IgnoreStore,
     config: &Config,
+    console: &mut Console,
 ) -> ExitCode {
     let scan_root = match Safety::validate_scan_root(&path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error: Cannot analyze '{}': {}", path.display(), e);
+            let _ = writeln!(
+                console.err,
+                "Error: Cannot analyze '{}': {}",
+                path.display(),
+                e
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -646,16 +660,14 @@ fn handle_analyze(
     if !use_plain && !cli.json {
         let mut app = ui::app::App::with_analyze(scan_root, ignore.clone(), config.clone())
             .with_permanent(cli.permanent);
-        return match app.run() {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("TUI Error: {e}");
-                ExitCode::FAILURE
-            }
-        };
+        return run_tui(&mut app, cli, console);
     }
 
-    println!("Analyzing disk usage for: {}\n", scan_root.display());
+    let _ = writeln!(
+        console.out,
+        "Analyzing disk usage for: {}\n",
+        scan_root.display()
+    );
 
     // Compute entries up to requested depth
     let mut entries = Vec::new();
@@ -677,13 +689,17 @@ fn handle_analyze(
             .iter()
             .map(|(p, s)| serde_json::json!({ "path": p, "bytes": s }))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_entries).unwrap());
+        let _ = writeln!(
+            console.out,
+            "{}",
+            serde_json::to_string_pretty(&json_entries).unwrap()
+        );
         return ExitCode::SUCCESS;
     }
 
     for (p, size) in entries.iter().take(depth * 25) {
         let name = p.file_name().unwrap_or_default().to_string_lossy();
-        println!("{:>10}  {}", format_bytes(*size), name);
+        let _ = writeln!(console.out, "{:>10}  {}", format_bytes(*size), name);
     }
 
     ExitCode::SUCCESS
@@ -718,7 +734,7 @@ fn handle_doctor(
         ExitCode::SUCCESS
     } else {
         let mut app = ui::app::App::new_doctor(ignore.clone(), config.clone(), args.seconds);
-        run_tui(&mut app, console)
+        run_tui(&mut app, cli, console)
     }
 }
 
@@ -930,7 +946,7 @@ fn handle_startup(
         ExitCode::SUCCESS
     } else {
         let mut app = ui::app::App::new_startup(ignore.clone(), config.clone(), args.all);
-        run_tui(&mut app, console)
+        run_tui(&mut app, cli, console)
     }
 }
 
@@ -1153,6 +1169,14 @@ fn handle_compress(
         }
     };
 
+    if !options.undo && !options.dry_run && report.processed_files > 0 {
+        let history = HistoryLog::new(context.layout.history_path());
+        let mode = if cli.force { "force" } else { "interactive" };
+        let session = history.start_run("compress", mode, Some(1));
+        session.record_item(&ItemOutcome::changed(args.path.clone(), report.saved_bytes));
+        session.finish();
+    }
+
     if cli.json {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => {
@@ -1217,6 +1241,12 @@ fn handle_slim(
     let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
     let running = crate::core::slim::running_processes(host);
 
+    let history_session = (!cli.dry_run).then(|| {
+        let history = HistoryLog::new(layout.history_path());
+        let mode = if cli.force { "force" } else { "interactive" };
+        history.start_run("slim", mode, Some(selected.len()))
+    });
+
     for app in &selected {
         let binaries = match crate::core::slim::check_eligibility(
             app,
@@ -1246,6 +1276,9 @@ fn handle_slim(
                         "Error: {} cannot be slimmed: {reason}",
                         app.name
                     );
+                }
+                if let Some(session) = history_session {
+                    session.finish();
                 }
                 return ExitCode::FAILURE;
             }
@@ -1306,11 +1339,19 @@ fn handle_slim(
                 || !input.trim().eq_ignore_ascii_case("y")
             {
                 let _ = writeln!(console.out, "Cancelled.");
+                if let Some(session) = history_session {
+                    session.finish();
+                }
                 return ExitCode::SUCCESS;
             }
         }
 
-        match crate::core::slim::slim_app(app, &binaries, host, skip_developer_id) {
+        let slim_res = if let Some(ref session) = history_session {
+            crate::core::slim::slim_app_logged(session, app, &binaries, host, skip_developer_id)
+        } else {
+            crate::core::slim::slim_app(app, &binaries, host, skip_developer_id)
+        };
+        match slim_res {
             Ok(saved) => {
                 if cli.json {
                     let report = serde_json::json!({
@@ -1358,9 +1399,16 @@ fn handle_slim(
                         app.name
                     );
                 }
+                if let Some(session) = history_session {
+                    session.finish();
+                }
                 return ExitCode::FAILURE;
             }
         }
+    }
+
+    if let Some(session) = history_session {
+        session.finish();
     }
 
     ExitCode::SUCCESS
@@ -1379,7 +1427,7 @@ fn pick_apps_to_slim(
         let mut app =
             ui::app::App::new(ignore.clone(), saved_config(layout)).with_permanent(cli.permanent);
         app.launch_slim_scan();
-        return run_tui(&mut app, console);
+        return run_tui(&mut app, cli, console);
     }
 
     let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
@@ -1486,10 +1534,15 @@ fn pick_apps_to_slim(
         .filter(|app| selected_paths.contains(&app.path))
         .collect();
 
+    let mode = if cli.force { "force" } else { "interactive" };
+    let history = HistoryLog::new(layout.history_path());
+    let session = history.start_run("slim", mode, Some(chosen.len()));
+
     let mut total_saved = 0u64;
     for app in &chosen {
         let (binaries, _) = crate::core::slim::find_universal_binaries(&app.path);
-        match crate::core::slim::slim_app(app, &binaries, host, skip_developer_id) {
+        match crate::core::slim::slim_app_logged(&session, app, &binaries, host, skip_developer_id)
+        {
             Ok(saved) => {
                 total_saved += saved;
                 let _ = writeln!(
@@ -1508,6 +1561,7 @@ fn pick_apps_to_slim(
             }
         }
     }
+    session.finish();
 
     if total_saved > 0 {
         let _ = writeln!(
@@ -2554,5 +2608,47 @@ mod tests {
 
         assert!(!ran.ok);
         assert_eq!(ran.err, "Error: Run '20260101-000000-abcd' not found\n");
+    }
+
+    #[test]
+    fn a_dry_run_never_opens_the_interactive_screen() {
+        let cli = parse(&["--dry-run"]);
+        let mut app = ui::app::App::new(IgnoreStore::default(), Config::default());
+        let ran = run("", |console| run_tui(&mut app, &cli, console));
+
+        assert!(!ran.ok);
+        assert_eq!(
+            ran.err,
+            "Error: --dry-run does not work in the interactive screen. Add --plain to see the preview.\n"
+        );
+        assert!(ran.out.is_empty());
+    }
+
+    #[test]
+    fn analyze_with_dry_run_in_a_terminal_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path_str = temp.path().display().to_string();
+        let cli = parse(&["analyze", &path_str, "--dry-run"]);
+        let Some(Command::Analyze(ref args)) = cli.command else {
+            panic!("not an analyze command");
+        };
+        let ran = run("", |console| {
+            handle_analyze(
+                args.path.clone(),
+                args.depth,
+                &cli,
+                false,
+                &IgnoreStore::default(),
+                &Config::default(),
+                console,
+            )
+        });
+
+        assert!(!ran.ok);
+        assert_eq!(
+            ran.err,
+            "Error: --dry-run does not work in the interactive screen. Add --plain to see the preview.\n"
+        );
+        assert!(ran.out.is_empty());
     }
 }

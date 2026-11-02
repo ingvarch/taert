@@ -73,7 +73,7 @@ pub enum Command {
     /// Show current configuration and paths
     Config(ConfigArgs),
 
-    /// Keep a log of removals and show it with taert history
+    /// Show what taert removed or changed
     History(HistoryArgs),
 
     /// Manage automatic background cleanup schedule

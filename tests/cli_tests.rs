@@ -21,6 +21,19 @@ fn test_cli_help() {
 }
 
 #[test]
+fn the_history_help_says_what_it_does() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Show what taert removed or changed",
+        ))
+        .stdout(predicate::str::contains("Keep a log of removals").not());
+}
+
+#[test]
 fn clean_help_mentions_orphans() {
     let home = tempfile::tempdir().unwrap();
     taert(&home)

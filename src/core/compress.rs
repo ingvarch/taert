@@ -1426,6 +1426,7 @@ impl Compressor<'_> {
         paths: &[PathBuf],
         cancelled: &AtomicBool,
         mut on_progress: impl FnMut(usize, &Path),
+        mut on_path_done: impl FnMut(&Path, u64),
     ) -> RemovalReport {
         let options = CompressOptions::default();
         let mut result = RemovalReport::default();
@@ -1436,6 +1437,9 @@ impl Compressor<'_> {
             on_progress(index, path);
             match self.process_path(path, &options, cancelled, |_, _| {}) {
                 Ok(report) => {
+                    if report.processed_files > 0 {
+                        on_path_done(path, report.saved_bytes);
+                    }
                     result.freed_bytes += report.saved_bytes;
                     result.removed_count += report.processed_files;
                     result
@@ -2486,11 +2490,16 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let paths = [first.clone(), second.clone()];
 
-        let report = compressor.compress_selected(&paths, &cancelled, |index, _| {
-            if index == 0 {
-                cancelled.store(true, Ordering::Relaxed);
-            }
-        });
+        let report = compressor.compress_selected(
+            &paths,
+            &cancelled,
+            |index, _| {
+                if index == 0 {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+            },
+            |_, _| {},
+        );
 
         assert!(report.notes[0].contains("Cancelled"));
         assert!(!is_compressed(&second));
@@ -2511,11 +2520,48 @@ mod tests {
             std::slice::from_ref(&data),
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
         );
 
         assert_eq!(report.removed_count, 0);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].path, data);
+    }
+
+    #[test]
+    fn compress_selected_reports_each_path_that_changed() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let first = make_repetitive_file(&make(&dir.join("one")), "a.txt", 300_000);
+        let second = make_repetitive_file(&make(&dir.join("two")), "b.txt", 300_000);
+        let refused = make(&layout.user("Library/Application Support/Foo"));
+
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let compressor = Compressor {
+            host: &host,
+            layout: &layout,
+            ignore: &IgnoreStore::default(),
+        };
+
+        let paths = [first.clone(), second.clone(), refused.clone()];
+        let mut reported = Vec::new();
+
+        let report = compressor.compress_selected(
+            &paths,
+            &AtomicBool::new(false),
+            |_, _| {},
+            |path, saved| {
+                reported.push((path.to_path_buf(), saved));
+            },
+        );
+
+        assert_eq!(reported.len(), 2);
+        assert_eq!(reported[0].0, first);
+        assert!(reported[0].1 > 0);
+        assert_eq!(reported[1].0, second);
+        assert!(reported[1].1 > 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, refused);
     }
 
     fn make_random_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {

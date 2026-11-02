@@ -1404,13 +1404,23 @@ impl App {
                     };
                     let paths: Vec<_> = selected_items.iter().map(|i| i.path.clone()).collect();
                     let total_count = paths.len();
-                    let report = compressor.compress_selected(&paths, &cancelled, |index, path| {
-                        let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
-                            current_index: index + 1,
-                            total_count,
-                            path: path.to_path_buf(),
-                        }));
-                    });
+                    let history = HistoryLog::new(layout.history_path());
+                    let session = history.start_run("compress", "interactive", Some(total_count));
+                    let report = compressor.compress_selected(
+                        &paths,
+                        &cancelled,
+                        |index, path| {
+                            let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
+                                current_index: index + 1,
+                                total_count,
+                                path: path.to_path_buf(),
+                            }));
+                        },
+                        |path, saved| {
+                            session.record_item(&ItemOutcome::changed(path.to_path_buf(), saved));
+                        },
+                    );
+                    session.finish();
                     let _ = tx.send(RemovalMessage::Finished(report));
                 });
 
@@ -1425,6 +1435,8 @@ impl App {
                     let mut apps_slimmed = 0usize;
                     let total_candidates = selected_items.len();
                     let mut failures = Vec::new();
+                    let history = HistoryLog::new(layout.history_path());
+                    let session = history.start_run("slim", "interactive", Some(total_candidates));
 
                     for (idx, item) in selected_items.iter().enumerate() {
                         let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
@@ -1447,7 +1459,13 @@ impl App {
                             last_used: item.modified,
                         };
                         let (binaries, _) = slim::find_universal_binaries(&item.path);
-                        match slim::slim_app(&installed_app, &binaries, &*host, false) {
+                        match slim::slim_app_logged(
+                            &session,
+                            &installed_app,
+                            &binaries,
+                            &*host,
+                            false,
+                        ) {
                             Ok(saved) => {
                                 total_saved += saved;
                                 total_trashed += app_size;
@@ -1461,6 +1479,7 @@ impl App {
                             }
                         }
                     }
+                    session.finish();
 
                     let report = RemovalReport {
                         freed_bytes: total_saved,

@@ -297,3 +297,70 @@ fn unwritable_log_warns_and_cleanup_finishes() {
     let _ = fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o755));
     let _ = fs::set_permissions(&history_file, fs::Permissions::from_mode(0o644));
 }
+
+#[test]
+fn compress_logs_a_changed_item() {
+    let home = TempDir::new().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+
+    let data_dir = home_path.join("Projects/data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let file_path = data_dir.join("notes.txt");
+    let pattern = b"Hello APFS transparent decmpfs compression!\n";
+    let mut data = Vec::with_capacity(300_000);
+    while data.len() < 300_000 {
+        let chunk_len = pattern.len().min(300_000 - data.len());
+        data.extend_from_slice(&pattern[..chunk_len]);
+    }
+    fs::write(&file_path, &data).unwrap();
+
+    taert(&home)
+        .args(["compress", data_dir.to_str().unwrap(), "--plain"])
+        .assert()
+        .success();
+
+    let output = taert(&home)
+        .args(["history", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json_str = String::from_utf8(output).unwrap();
+    let runs: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let runs_arr = runs.as_array().expect("array of runs");
+    assert_eq!(runs_arr.len(), 1);
+    assert_eq!(runs_arr[0]["command"], "compress");
+    let items = runs_arr[0]["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["outcome"], "changed");
+    assert!(items[0]["bytes"].as_u64().unwrap() > 0);
+    assert!(
+        items[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Projects/data")
+    );
+
+    // Second test runs the same with --dry-run and asserts the history file does not exist
+    let home2 = TempDir::new().unwrap();
+    let home2_path = home2.path().canonicalize().unwrap();
+
+    let data_dir2 = home2_path.join("Projects/data");
+    fs::create_dir_all(&data_dir2).unwrap();
+    let file_path2 = data_dir2.join("notes.txt");
+    fs::write(&file_path2, &data).unwrap();
+
+    taert(&home2)
+        .args([
+            "compress",
+            data_dir2.to_str().unwrap(),
+            "--dry-run",
+            "--plain",
+        ])
+        .assert()
+        .success();
+
+    let history_file = home2_path.join(".config/taert/history.jsonl");
+    assert!(!history_file.exists());
+}

@@ -10,6 +10,8 @@ Launch the interactive workspace by running:
 taert
 ```
 
+`--dry-run` does not open the interactive screen. Add `--plain` to see the preview.
+
 ### Workspace Navigation
 
 - **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
@@ -416,10 +418,11 @@ Example history summary:
 2026-10-27 22:03  purge ~/Projects interactive  interrupted after 3 of 9
 ```
 
-- **Format & Location**: Stored as line-delimited JSON at `~/.config/taert/history.jsonl` with permissions `0600`. Because `~/.config` is protected by the safety engine, no cleanup can ever touch or delete this file.
+- **Format & Location**: Stored as line-delimited JSON at `~/.config/taert/history.jsonl` with permissions `0600`. Because `~/.config` is protected by the safety engine, no cleanup can ever touch or delete this file. The history file's folder is locked with an exclusive `flock` while a line is written or while the file is pruned, so concurrent runs keep their lines.
+- **Compress and slim**: Successful compress and slim operations appear in the log with their saved bytes and outcome `changed`.
 - **Interrupted runs**: Events are logged as they happen. An interrupted cleanup or process kill leaves a readable trail showing what completed before the interruption.
 - **Bounded size**: Keeps the last 1,000 runs automatically.
-- **Overrides**: `--dry-run` writes nothing to the log. Set `TAERT_NO_HISTORY=1` to disable recording completely.
+- **Overrides**: `--dry-run` does not open the interactive screen; add `--plain` to see the preview. `--dry-run` writes nothing to the log. Set `TAERT_NO_HISTORY=1` to disable recording completely.
 
 ### Scheduled Cleanup (`taert schedule`)
 
