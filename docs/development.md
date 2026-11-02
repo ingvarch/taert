@@ -56,7 +56,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 ```
 
-CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). Releases are in [releasing.md](releasing.md).
+CI runs these checks and a release snapshot on every push to `main` and all pull requests (`.github/workflows/ci.yml`). A change that touches only Markdown files, `docs/`, or `LICENSE` skips CI. Releases are in [releasing.md](releasing.md).
 
 `cargo test --test docker_live -- --ignored` runs against the real Docker daemon. These tests remove only the objects they create, and they leave a few small entries in the build cache.
 
