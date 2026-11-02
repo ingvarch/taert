@@ -78,6 +78,9 @@ pub enum Command {
 
     /// Manage automatic background cleanup schedule
     Schedule(ScheduleArgs),
+
+    /// Print a shell completion script
+    Completion { shell: clap_complete::Shell },
 }
 
 #[derive(Debug, Args, Default)]

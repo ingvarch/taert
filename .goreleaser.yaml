@@ -54,6 +54,14 @@ homebrew_casks:
     description: Fast, transparent, and keyboard-driven macOS disk cleanup and storage explorer
     license: MIT
     skip_upload: auto
+    generate_completions_from_executable:
+      args:
+        - completion
+      shell_parameter_format: arg
+      shells:
+        - bash
+        - zsh
+        - fish
     uninstall:
       launchctl:
         - io.github.ingvarch.taert.schedule

@@ -152,3 +152,83 @@ fn compress_refuses_a_folder_where_apps_keep_live_data() {
             "where apps keep data that changes while they run",
         ));
 }
+
+#[test]
+fn completion_fish_prints_a_fish_script() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["completion", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -c taert"))
+        .stdout(predicate::str::contains("-a \"clean\""))
+        .stdout(predicate::str::contains("-l dry-run"));
+}
+
+#[test]
+fn completion_zsh_prints_a_zsh_script() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["completion", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef taert"));
+}
+
+#[test]
+fn completion_bash_prints_a_bash_script() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["completion", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_taert"));
+}
+
+#[test]
+fn completion_of_an_unknown_shell_fails() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["completion", "nosuchshell"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn completion_without_a_shell_fails() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["completion"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("<SHELL>"));
+}
+
+#[test]
+fn completion_values_come_from_clap() {
+    let home = tempfile::tempdir().unwrap();
+    // The fish generator does not complete positional values, so zsh and bash prove it.
+    taert(&home)
+        .args(["completion", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(dev junk ai trash)"));
+    taert(&home)
+        .args(["completion", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev junk ai trash"));
+}
+
+#[test]
+fn completion_leaves_the_home_folder_empty() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home).args(["completion", "zsh"]).assert().success();
+
+    assert_eq!(
+        std::fs::read_dir(home.path()).unwrap().count(),
+        0,
+        "home folder should have no entries after completion"
+    );
+}

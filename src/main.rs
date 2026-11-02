@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use crate::cli::{
     CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
@@ -37,6 +37,10 @@ use crate::plain::{Console, PlainRunner};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(Command::Completion { shell }) = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "taert", &mut std::io::stdout());
+        return ExitCode::SUCCESS;
+    }
     let is_tty = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
 
     // Plain mode is forced if explicitly specified or if not running in an interactive TTY
@@ -122,6 +126,8 @@ fn main() -> ExitCode {
         Some(Command::Schedule(ref args)) => {
             handle_schedule(args, &config, &MacHost, &layout, console)
         }
+
+        Some(Command::Completion { .. }) => ExitCode::SUCCESS,
     }
 }
 

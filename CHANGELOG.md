@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Shell completions**: `taert completion` prints completion scripts for bash, fish, and zsh.
+
 ### Changed
 - **Startup items**: `taert startup --json` prints an object with `items` and `notes` instead of a list of items.
 
