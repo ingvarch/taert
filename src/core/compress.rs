@@ -42,7 +42,7 @@ const LSOF: &str = "/usr/sbin/lsof";
 const LSOF_TIMEOUT: Duration = Duration::from_secs(60);
 /// Marks taert's own copy until right before the swap. The cleanup of leftovers
 /// removes only marked files, so it never removes an original.
-const COPY_MARK: &str = "io.github.ingvarch.taert.copy";
+const COPY_MARK: &CStr = c"io.github.ingvarch.taert.copy";
 
 const COMPRESSION_LZFSE: i32 = 0x801;
 
@@ -283,11 +283,10 @@ pub fn has_compression_xattrs(path: &Path) -> Result<bool, std::io::Error> {
 }
 
 fn mark_copy(file: &File) -> io::Result<()> {
-    let name = CString::new(COPY_MARK)?;
     check(unsafe {
         libc::fsetxattr(
             file.as_raw_fd(),
-            name.as_ptr(),
+            COPY_MARK.as_ptr(),
             b"".as_ptr().cast(),
             0,
             0,
@@ -297,15 +296,11 @@ fn mark_copy(file: &File) -> io::Result<()> {
 }
 
 fn unmark_copy(file: &File) -> io::Result<()> {
-    let name = CString::new(COPY_MARK)?;
-    check(unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr(), 0) })
+    check(unsafe { libc::fremovexattr(file.as_raw_fd(), COPY_MARK.as_ptr(), 0) })
 }
 
 fn has_copy_mark(path: &Path) -> bool {
-    match (c_path(path), CString::new(COPY_MARK)) {
-        (Ok(c_file), Ok(name)) => has_xattr(&c_file, &name),
-        _ => false,
-    }
+    c_path(path).is_ok_and(|c_file| has_xattr(&c_file, COPY_MARK))
 }
 
 /// Compress a single buffer chunk into a valid decmpfs codec frame.
@@ -2462,7 +2457,7 @@ mod tests {
         let live = dir.join(format!(".c.txt.taert-tmp-{}-1-4.tmp", std::process::id()));
         for file in [&stale, &locked, &live] {
             fs::write(file, b"x").unwrap();
-            write_attribute(file, COPY_MARK, b"");
+            write_attribute(file, COPY_MARK.to_str().unwrap(), b"");
         }
         set_flags(&locked, UF_IMMUTABLE);
         let host = host_with("    1     0 /sbin/launchd\n", "");
@@ -2827,9 +2822,9 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "mark.txt", 300_000);
 
         compress_file(&file, false).unwrap();
-        let after_compress = read_attribute(&file, COPY_MARK);
+        let after_compress = read_attribute(&file, COPY_MARK.to_str().unwrap());
         undo_file(&file, false).unwrap();
-        let after_undo = read_attribute(&file, COPY_MARK);
+        let after_undo = read_attribute(&file, COPY_MARK.to_str().unwrap());
 
         assert_eq!(after_compress, None);
         assert_eq!(after_undo, None);
