@@ -1075,6 +1075,7 @@ impl App {
                             if state.confirm_button == 1 {
                                 state.cancel_confirm();
                             } else if let Some(action) = state.confirm.take() {
+                                state.message = None;
                                 match action {
                                     DoctorActionConfirm::QuitApp {
                                         name, bundle_id, ..
@@ -1094,14 +1095,20 @@ impl App {
                                         state.remove_selected_finding();
                                     }
                                     DoctorActionConfirm::DisableStartupItem { item } => {
-                                        let _ = startup::disable_item(
+                                        let res = startup::disable_item(
                                             &*self.host,
                                             &self.layout,
                                             &self.ignore,
                                             &item,
                                             false,
                                         );
-                                        state.remove_selected_finding();
+                                        if res.is_ok() {
+                                            state.remove_selected_finding();
+                                        }
+                                        state.message = Some(match res {
+                                            Ok(msg) => (msg, false),
+                                            Err(err) => (err, true),
+                                        });
                                     }
                                     DoctorActionConfirm::ExploreStorage => {
                                         let home = self.layout.home.clone();
@@ -3226,5 +3233,55 @@ mod tests {
             assert!(!is_compressed(&made[1].1));
             assert!(outcome(&app).notes.iter().any(|n| n.contains("Cancelled")));
         }
+    }
+
+    #[test]
+    fn a_failed_disable_in_doctor_keeps_the_finding_and_shows_the_error() {
+        use crate::core::doctor::{DoctorReport, Finding, FindingSeverity};
+        use crate::core::startup::{StartupItem, StartupKind, StartupState};
+        let item = StartupItem {
+            label: "com.test.daemon".into(),
+            name: "Test".into(),
+            app_name: None,
+            app_bundle: None,
+            kind: StartupKind::Daemon,
+            state: StartupState::Running,
+            program: None,
+            plist_path: None,
+            pid: Some(9),
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        };
+        let finding = Finding {
+            id: "x".into(),
+            severity: FindingSeverity::Warning,
+            title: "t".into(),
+            evidence: "e".into(),
+            action: "a".into(),
+            action_target: None,
+        };
+        let report = DoctorReport {
+            seconds: 1,
+            findings: vec![finding],
+            checks: Vec::new(),
+        };
+        let host = crate::core::host::fake::FakeHost::idle();
+        *host.admin_result.lock().unwrap() = Some("denied".into());
+        let mut app = new_app();
+        app.host = Arc::new(host);
+        let mut state = DoctorScreenState::new_done(report);
+        state.confirm = Some(DoctorActionConfirm::DisableStartupItem { item });
+        app.screen = Screen::Doctor(state);
+
+        app.handle_key(KeyCode::Enter);
+
+        let Screen::Doctor(state) = &app.screen else {
+            panic!("expected the doctor screen");
+        };
+        assert_eq!(state.findings().len(), 1);
+        assert!(matches!(&state.message, Some((m, true)) if m.contains("denied")));
     }
 }

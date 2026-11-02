@@ -21,13 +21,14 @@ use super::telemetry::parse_processes;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Script to remove a login item by name via System Events.
+/// Script to remove the login item with this name and path via System Events.
 pub const LOGIN_ITEM_SCRIPT: &[&str] = &[
     "on run argv",
     "set target to item 1 of argv",
+    "set target_path to item 2 of argv",
     "tell application \"System Events\"",
     "repeat with i from (count of login items) to 1 by -1",
-    "if name of login item i is target then delete login item i",
+    "if name of login item i is target and path of login item i is target_path then delete login item i",
     "end repeat",
     "end tell",
     "end run",
@@ -367,7 +368,7 @@ pub fn parse_btm(output: &str) -> Vec<BtmEntry> {
             entries.push(entry);
         }
     };
-    for line in output.lines() {
+    for line in output.split(['\n', '\r']) {
         let line = line.trim();
         let is_item_header = line
             .strip_prefix('#')
@@ -695,8 +696,7 @@ pub fn scan_startup_with(
         if !seen_labels.insert(label.clone()) {
             continue;
         }
-        let is_apple = label.starts_with("com.apple.");
-        if is_apple && !include_all {
+        if label.starts_with("com.apple.") && !include_all {
             continue;
         }
 
@@ -708,6 +708,12 @@ pub fn scan_startup_with(
         } else {
             LaunchdServiceDetail::default()
         };
+
+        let is_apple = label.starts_with("com.apple.")
+            || (kind == StartupKind::Daemon && is_macos_owned(&detail));
+        if is_apple && !include_all {
+            continue;
+        }
 
         let pid = service.pid.or(detail.pid);
         let (cpu_percent, memory_bytes) = metrics(pid, &pid_map);
@@ -803,11 +809,11 @@ pub fn scan_startup_with(
 
     // 4. Disabled classic login items from ~/.config/taert/disabled_login_items.json
     for disabled in load_disabled_login_items(layout) {
-        if !scan
-            .items
-            .iter()
-            .any(|it| it.kind == StartupKind::LoginItem && it.name == disabled.name)
-        {
+        if !scan.items.iter().any(|it| {
+            it.kind == StartupKind::LoginItem
+                && it.name == disabled.name
+                && it.program.as_ref() == Some(&disabled.path)
+        }) {
             let state = startup_state(!disabled.path.exists(), true, false);
             let label = format!("loginitem.{}", disabled.name);
             scan.items.push(StartupItem {
@@ -899,6 +905,25 @@ pub fn scan_startup_with(
     scan
 }
 
+/// A daemon whose files sit in a system folder, or whose files launchd does not show.
+fn is_macos_owned(detail: &LaunchdServiceDetail) -> bool {
+    const SYSTEM_FOLDERS: [&str; 7] = [
+        "/System/",
+        "/usr/sbin/",
+        "/usr/libexec/",
+        "/usr/bin/",
+        "/usr/lib/",
+        "/sbin/",
+        "/bin/",
+    ];
+    let paths = [&detail.path, &detail.program];
+    paths.iter().all(|p| p.is_none())
+        || paths
+            .iter()
+            .flat_map(|p| p.as_deref())
+            .any(|p| SYSTEM_FOLDERS.iter().any(|f| p.starts_with(f)))
+}
+
 fn label_leaf_name(label: &str) -> String {
     label
         .split('.')
@@ -915,7 +940,11 @@ pub fn resolve_item(items: &[StartupItem], query: &str) -> Result<StartupItem, S
     let found = if by_label.is_empty() {
         items
             .iter()
-            .filter(|it| it.kind == StartupKind::LoginItem && it.name == query)
+            .filter(|it| {
+                it.kind == StartupKind::LoginItem
+                    && (it.name == query
+                        || it.program.as_deref().is_some_and(|p| p == Path::new(query)))
+            })
             .collect()
     } else {
         by_label
@@ -924,10 +953,18 @@ pub fn resolve_item(items: &[StartupItem], query: &str) -> Result<StartupItem, S
         [] => Err(format!("Startup item '{query}' not found")),
         [item] => Ok((*item).clone()),
         several => {
-            let labels: Vec<&str> = several.iter().map(|it| it.label.as_str()).collect();
+            let names: Vec<String> = several
+                .iter()
+                .map(|it| match (&it.kind, &it.program) {
+                    (StartupKind::LoginItem, Some(path)) => {
+                        format!("{} ({})", it.label, path.display())
+                    }
+                    _ => it.label.clone(),
+                })
+                .collect();
             Err(format!(
-                "'{query}' fits several items: {}. Use a label.",
-                labels.join(", ")
+                "'{query}' fits several items: {}. Use a label, or the path of a login item.",
+                names.join(", ")
             ))
         }
     }
@@ -999,7 +1036,7 @@ fn read_launchd_state(
     })
 }
 
-fn login_item_listed(host: &dyn Host, name: &str) -> Result<bool, String> {
+fn login_item_listed(host: &dyn Host, name: &str, path: &Path) -> Result<bool, String> {
     let out = host.run(OSASCRIPT, &["-e", LIST_LOGIN_ITEMS_SCRIPT], TIMEOUT);
     if !out.ok {
         return Err(format!(
@@ -1009,7 +1046,7 @@ fn login_item_listed(host: &dyn Host, name: &str) -> Result<bool, String> {
     }
     Ok(parse_login_items(&out.stdout)
         .iter()
-        .any(|(listed, _)| listed == name))
+        .any(|(listed, listed_path)| listed == name && listed_path == path))
 }
 
 /// Disables a startup item and reports the state launchd or System Events shows afterwards.
@@ -1038,10 +1075,13 @@ pub fn disable_item(
             let Some(ref path) = item.program else {
                 return Err("The login item has no saved path, so it was left in place".to_string());
             };
-            // Save the path first: a failed save must leave the item where it is.
-            let before = load_disabled_login_items(layout);
-            let mut disabled = before.clone();
-            if !disabled.iter().any(|d| d.name == item.name) {
+            // Save the path first: a failed save must leave the item where it is. The saved
+            // entry stays when the removal fails: it is hidden while the item is listed.
+            let mut disabled = load_disabled_login_items(layout);
+            if !disabled
+                .iter()
+                .any(|d| d.name == item.name && d.path == *path)
+            {
                 disabled.push(DisabledLoginItem {
                     name: item.name.clone(),
                     path: path.clone(),
@@ -1050,13 +1090,13 @@ pub fn disable_item(
                     format!("Could not save the login item path, so it was left in place: {e}")
                 })?;
             }
-            let args = osascript_args(LOGIN_ITEM_SCRIPT, &[&item.name]);
+            let path_text = path.to_string_lossy();
+            let args = osascript_args(LOGIN_ITEM_SCRIPT, &[&item.name, &path_text]);
             let out = host.run(OSASCRIPT, &args, TIMEOUT);
             if !out.ok {
-                let _ = save_disabled_login_items(layout, &before);
                 return Err(format!("Failed to remove login item: {}", out.stderr));
             }
-            if login_item_listed(host, &item.name)? {
+            if login_item_listed(host, &item.name, path)? {
                 return Err(format!("Login item {} is still listed", item.name));
             }
             Ok(format!("Disabled login item {}", item.name))
@@ -1165,17 +1205,18 @@ pub fn enable_item(
             let Some(ref path) = item.program else {
                 return Err("The login item has no saved path to restore".to_string());
             };
+            let path_buf = path.clone();
             let path = path.to_string_lossy();
             let args = osascript_args(ADD_LOGIN_ITEM_SCRIPT, &[&path, &item.name]);
             let out = host.run(OSASCRIPT, &args, TIMEOUT);
             if !out.ok {
                 return Err(format!("Failed to enable login item: {}", out.stderr));
             }
-            if !login_item_listed(host, &item.name)? {
+            if !login_item_listed(host, &item.name, &path_buf)? {
                 return Err(format!("Login item {} is not listed", item.name));
             }
             let mut disabled = load_disabled_login_items(layout);
-            disabled.retain(|d| d.name != item.name);
+            disabled.retain(|d| !(d.name == item.name && d.path == path_buf));
             save_disabled_login_items(layout, &disabled).map_err(|e| {
                 format!("Enabled, but could not update the saved login item list: {e}")
             })?;
@@ -1187,16 +1228,32 @@ pub fn enable_item(
                 && plist.exists()
             {
                 script.push_str(&format!(
-                    " && {{ {LAUNCHCTL} bootstrap system {} || true; }}",
+                    " && {LAUNCHCTL} bootstrap system {}",
                     shell_quote(&plist.to_string_lossy())
                 ));
             }
-            host.run_admin(&script, &format!("Enable system daemon {label}"))
-                .map_err(|e| format!("Failed to enable daemon: {e}"))?;
-            if read_launchd_state(host, item.kind, label)?.disabled {
-                return Err(format!("launchd still lists {label} as disabled"));
+            let admin = host.run_admin(&script, &format!("Enable system daemon {label}"));
+            let state = match read_launchd_state(host, item.kind, label) {
+                Ok(state) => state,
+                Err(e) => {
+                    return Err(admin
+                        .err()
+                        .map_or(e, |a| format!("Failed to enable daemon: {a}")));
+                }
+            };
+            if state.disabled {
+                return Err(match admin {
+                    Err(e) => format!("Failed to enable daemon: {e}"),
+                    Ok(()) => format!("launchd still lists {label} as disabled"),
+                });
             }
-            Ok(format!("Enabled system daemon {label}"))
+            match admin {
+                Err(e) if !state.loaded => Err(format!("Failed to start daemon: {e}")),
+                _ if state.loaded => Ok(format!("Enabled system daemon {label}")),
+                _ => Ok(format!(
+                    "Enabled system daemon {label} (will start at next boot)"
+                )),
+            }
         }
         StartupKind::UserAgent | StartupKind::SystemAgent => {
             let domain = domain_for(item.kind);
@@ -1843,6 +1900,10 @@ mod tests {
         );
         let host = FakeHost::idle();
         host.reply(
+            "/bin/launchctl print system/com.test.bundled",
+            "program = /Library/PrivilegedHelperTools/com.test.bundled\n",
+        );
+        host.reply(
             "/bin/launchctl print system",
             "system = {\n services = {\n 77 - com.test.plistd\n 78 - com.test.bundled\n }\n}\n",
         );
@@ -2222,5 +2283,260 @@ mod tests {
         assert!(res.is_ok(), "{res:?}");
         assert!(seen.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(load_disabled_login_items(&layout).len(), 1);
+    }
+
+    fn twin(path: &str) -> StartupItem {
+        let mut item = test_item(
+            "loginitem.Twin",
+            StartupKind::LoginItem,
+            StartupState::Enabled,
+        );
+        item.name = "Twin".to_string();
+        item.program = Some(PathBuf::from(path));
+        item
+    }
+
+    #[test]
+    fn a_dump_with_carriage_return_line_ends_is_read() {
+        let entries = parse_btm(&BTM_FIXTURE.replace('\n', "\r"));
+
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn a_daemon_that_macos_ships_is_read_only() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - org.cups.cupsd\n 0 - com.test.unknown\n }\n}\n",
+        );
+        host.reply(
+            "/bin/launchctl print system/org.cups.cupsd",
+            "path = /System/Library/LaunchDaemons/org.cups.cupsd.plist\nprogram = /usr/sbin/cupsd\n",
+        );
+
+        let scan = scan_startup(&host, &layout_in(&temp), &IgnoreStore::default(), true);
+
+        for label in ["org.cups.cupsd", "com.test.unknown"] {
+            let item = scan.items.iter().find(|it| it.label == label).unwrap();
+            assert!(item.read_only_reason().is_some(), "{label}");
+        }
+    }
+
+    #[test]
+    fn removing_one_login_item_names_its_path_and_saves_it() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "Twin\t/Users/x/Applications/B.app\n");
+
+        let res = disable_item(
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &twin("/Applications/A.app"),
+            false,
+        );
+
+        assert!(res.is_ok(), "{res:?}");
+        assert!(host.ran("/usr/bin/osascript -e on run argv -e set target to item 1 of argv"));
+        assert!(
+            host.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.ends_with("-- Twin /Applications/A.app")),
+            "{:?}",
+            host.calls.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_saved_twin_with_another_path_does_not_hide_the_new_path() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        save_disabled_login_items(
+            &layout,
+            &[DisabledLoginItem {
+                name: "Twin".into(),
+                path: PathBuf::from("/Applications/Old.app"),
+            }],
+        )
+        .unwrap();
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "");
+
+        let res = disable_item(
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &twin("/Applications/A.app"),
+            false,
+        );
+
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(load_disabled_login_items(&layout).len(), 2);
+    }
+
+    #[test]
+    fn a_failed_removal_keeps_the_saved_path() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let host = FakeHost::idle();
+        host.fail("/usr/bin/osascript", "timed out");
+
+        let res = disable_item(
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &twin("/Applications/A.app"),
+            false,
+        );
+
+        assert!(res.is_err());
+        assert_eq!(load_disabled_login_items(&layout).len(), 1);
+    }
+
+    #[test]
+    fn enabling_one_twin_keeps_the_saved_path_of_the_other() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        let saved = |path: &str| DisabledLoginItem {
+            name: "Twin".into(),
+            path: PathBuf::from(path),
+        };
+        save_disabled_login_items(&layout, &[saved("/Applications/A.app"), saved("/B.app")])
+            .unwrap();
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "Twin\t/Applications/A.app\n");
+
+        let res = enable_item(
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &twin("/Applications/A.app"),
+            false,
+        );
+
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(load_disabled_login_items(&layout), vec![saved("/B.app")]);
+    }
+
+    #[test]
+    fn a_saved_twin_shows_next_to_the_listed_one_with_another_path() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        save_disabled_login_items(
+            &layout,
+            &[DisabledLoginItem {
+                name: "Twin".into(),
+                path: PathBuf::from("/Applications/A.app"),
+            }],
+        )
+        .unwrap();
+        let host = FakeHost::idle();
+        host.reply("/usr/bin/osascript", "Twin\t/Applications/B.app\n");
+
+        let scan = scan_startup(&host, &layout, &IgnoreStore::default(), false);
+
+        let twins = scan.items.iter().filter(|it| it.name == "Twin").count();
+        assert_eq!(twins, 2);
+    }
+
+    #[test]
+    fn login_items_with_one_name_are_told_apart_by_path() {
+        let (a, b) = (twin("/Applications/A.app"), twin("/Applications/B.app"));
+        let items = [a.clone(), b];
+
+        let err = resolve_item(&items, "Twin").map(|_| ()).unwrap_err();
+        assert!(err.contains("/Applications/A.app") && err.contains("/Applications/B.app"));
+
+        let chosen = resolve_item(&items, "/Applications/A.app").unwrap();
+        assert_eq!(chosen, a);
+    }
+
+    #[test]
+    fn an_agent_that_keeps_running_after_disable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        reply_disabled(&host, "gui/", "com.test.agent");
+        host.reply(
+            "/bin/launchctl print gui/",
+            "gui/501 = {\n services = {\n 55 - com.test.agent\n }\n}\n",
+        );
+        host.reply("/bin/launchctl", "");
+        let item = test_item(
+            "com.test.agent",
+            StartupKind::UserAgent,
+            StartupState::Running,
+        );
+
+        let res = disable_item(
+            &host,
+            &layout_in(&temp),
+            &IgnoreStore::default(),
+            &item,
+            false,
+        );
+
+        let err = res.unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+    }
+
+    #[test]
+    fn a_daemon_that_keeps_running_after_disable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let host = FakeHost::idle();
+        reply_disabled(&host, "system", "com.test.daemon");
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 9 - com.test.daemon\n }\n}\n",
+        );
+        let item = test_item(
+            "com.test.daemon",
+            StartupKind::Daemon,
+            StartupState::Running,
+        );
+
+        let res = disable_item(
+            &host,
+            &layout_in(&temp),
+            &IgnoreStore::default(),
+            &item,
+            false,
+        );
+
+        let err = res.unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+    }
+
+    #[test]
+    fn a_daemon_that_fails_to_load_after_enable_is_a_failure() {
+        let temp = tempdir().unwrap();
+        let layout = layout_in(&temp);
+        write_plist(
+            &layout.system("Library/LaunchDaemons"),
+            "com.test.daemon",
+            "/bin/sleep",
+        );
+        let host = FakeHost::idle();
+        *host.admin_result.lock().unwrap() = Some("Bootstrap failed: 5".into());
+        let mut item = test_item(
+            "com.test.daemon",
+            StartupKind::Daemon,
+            StartupState::Disabled,
+        );
+        item.plist_path = Some(
+            layout
+                .system("Library/LaunchDaemons")
+                .join("com.test.daemon.plist"),
+        );
+
+        let res = enable_item(&host, &layout, &IgnoreStore::default(), &item, false);
+
+        assert!(res.is_err(), "{res:?}");
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert!(!scripts[0].contains("|| true"), "{}", scripts[0]);
     }
 }
