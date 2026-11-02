@@ -12,14 +12,15 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Compress, Explore Storage, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
-- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup and compress items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
+- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
 - **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Personal files and apps move to the Trash by default (recoverable), while root files are permanently deleted. Use `--permanent` to skip Trash. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
 - **Startup Items**: Review launch agents, launch daemons, and classic login items. Shows the owning app, service kind, live CPU% and memory if active, and whether the service is enabled, disabled, or broken (missing executable on disk). On wide terminals (≥100 columns), details appear in a side card. `Space` toggles an item (opens a confirmation modal naming the owning app before anything is switched off) or removes a broken user agent plist. Apple system services (`com.apple.*`) are hidden by default and read-only.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and deletion via `D` or `Backspace` (offering "Move to Trash" by default or "Delete Permanently").
+- **Large Files**: Flat list of the largest and oldest files and packages across your home folder (or any given path) to answer "what big things did I forget about?". Shows item name, enclosing top-level folder, size, and last used date (queried via Spotlight, fallback to modified date). `⇧S`, `⇧N`, and `⇧D` sort by size, name, or last used date. Filter interactively with `/`, reveal in Finder with `O`, and select with `Space`. Selected items move to the Trash upon confirmation.
 - **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights.
 
 Every screen shows its sections in colored frames. While taert scans or measures, a framed card in the middle of the window shows the progress.
@@ -32,13 +33,13 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `Space` | Select / Explore / Startup | Toggle focused item selection / toggle startup service |
 | `A` / `N` | Select / Explore | Select all visible / clear selection |
 | `D` / `Backspace` / `Delete` | Explore Storage | Delete selected item(s) with confirmation dialog |
-| `⇧S` / `⇧N` / `⇧D` | Explore Storage / Docker / Uninstall Apps | Sort by size / name / date |
+| `⇧S` / `⇧N` / `⇧D` | Explore Storage / Large Files / Docker / Uninstall Apps | Sort by size / name / date |
 | `↵` (Enter) | Select / Review | Review selection / Confirm cleanup / Review the focused app in Uninstall Apps |
 | `↵` / `→` | Explore Storage | Enter selected folder |
 | `⎋` (Esc) / `←` | Explore Storage | Go up one directory level; from the top folder, leave Explore Storage |
 | `q` | Explore Storage | Leave Explore Storage from any folder |
 | `R` | Explore Storage | Refresh and re-scan current folder |
-| `O` | Explore Storage | Reveal selected item in Finder (`open -R`) |
+| `O` | Explore Storage / Select | Reveal selected item in Finder (`open -R`) |
 | `/` | Select / Search | Live search filter |
 | `?` | All screens | Toggle keyboard shortcuts help sheet |
 | `⎋` (Esc) / `q` | All screens | Cancel dialog / Go back to the previous screen, on the row you left / Quit from the main menu |
@@ -169,6 +170,43 @@ An app in `/Applications` that is a link goes alone: the link is removed, and th
 taert never edits your configuration. If `~/.zshrc`, `~/.config/fish/config.fish`, or a similar file still mentions a removed path, taert names the file and line.
 
 If macOS refuses a removal, give your terminal **Full Disk Access** for files in `~/Library`, and **App Management** for app bundles, in System Settings > Privacy & Security.
+
+### Large Files (`taert large`)
+
+Answers "what big things did I forget about?" with a flat list of the largest and oldest files and packages across your home directory (or any specified path).
+
+```bash
+# Scan largest files in home directory (default: >= 100 MB, up to 100 items)
+taert large
+
+# Scan a specific directory
+taert large ~/Downloads
+
+# Filter by minimum size (supports KB, MB, GB, etc.)
+taert large --min-size 500M
+
+# Filter files older than a given number of days (Spotlight last-used date, fallback to modified)
+taert large --older-than 180
+
+# Limit the number of items returned (default: 100)
+taert large --limit 50
+
+# Plain text output for scripts or terminals
+taert large --plain
+
+# Structured JSON output
+taert large --json
+
+# Dry-run preview
+taert large --dry-run
+```
+
+#### Safety and Exclusions
+
+- **Safety First**: Items start unselected. `taert large --force` is explicitly refused with an error to protect personal files from unattended deletion.
+- **Trash Default**: Selected items move to Trash (recoverable), never permanently deleted, unless `--permanent` is explicitly provided.
+- **Skip Rules**: Automatically skips `~/Library`, `.Trash`, `.git`, `node_modules`, standard build artifacts, cloud dataless files, symlinks, and credential stores (`~/.ssh`, `~/.aws`, `~/.gnupg`).
+- **Packages as Single Items**: macOS bundles and packages (`.app`, `.photoslibrary`, `.fcpbundle`, `.logicx`, `.imovielibrary`, `.band`) are counted as single units with their total allocated size and are never walked into.
 
 ### Storage Directory Analysis (`taert analyze`)
 
@@ -363,6 +401,7 @@ Example history summary:
 
 By default, taert moves personal files and user apps to macOS Trash instead of deleting them immediately:
 - **Explore Storage (`taert analyze`)**: Dialog offers **Move to Trash** (default) and **Delete Permanently**.
+- **Large Files (`taert large`)**: Selected files and packages move to Trash (default).
 - **Uninstall Apps (`taert uninstall`)**: User-level app bundles and leftovers in home folders move to Trash. Files requiring root (`/Library/...`) and package receipts are deleted permanently because root has no Trash.
 - **Caches, Build Artifacts & Docker**: Caches (`taert clean`), project artifacts (`taert purge`), Docker items (`taert docker`), and emptying the Trash are always permanently removed.
 - **`--permanent` flag**: Global CLI flag (`taert --permanent ...`) that skips Trash and deletes files and apps permanently.

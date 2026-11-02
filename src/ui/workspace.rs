@@ -44,16 +44,17 @@ pub enum MainMenuChoice {
     SlimApps,       // 7
     Compress,       // 8
     ExploreStorage, // 9
-    SystemStatus,   // 10
-    Preferences,    // 11
-    ProtectedPaths, // 12
+    LargeFiles,     // 10
+    SystemStatus,   // 11
+    Preferences,    // 12
+    ProtectedPaths, // 13
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3]),
     ("Optimize", &[4, 5, 6, 7]),
-    ("Inspect", &[8, 9]),
-    ("Settings", &[10, 11]),
+    ("Inspect", &[8, 9, 10]),
+    ("Settings", &[11, 12]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +177,12 @@ impl WorkspaceState {
                     "Explore storage",
                     "Browse folders and find what takes up space",
                     "Interactive directory size analyzer with breadcrumb\nnavigation. Inspect deep subfolders and reveal large\nfiles directly in Finder.",
+                ),
+                (
+                    MainMenuChoice::LargeFiles,
+                    "Large files",
+                    "Find the largest and oldest files",
+                    "Find the largest and oldest files in your home folder.\nReview deep files before removing them to the Trash,\nor reveal them in Finder.",
                 ),
                 (
                     MainMenuChoice::SystemStatus,
@@ -403,6 +410,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::SlimApps => theme.g.icon_uninstall,
         MainMenuChoice::Compress => theme.g.icon_clean,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
+        MainMenuChoice::LargeFiles => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Preferences => theme.g.icon_prefs,
         MainMenuChoice::ProtectedPaths => theme.g.icon_protected,
@@ -562,6 +570,7 @@ fn detail_data(
         | MainMenuChoice::ProjectCleanup
         | MainMenuChoice::Compress
         | MainMenuChoice::SlimApps
+        | MainMenuChoice::LargeFiles
         | MainMenuChoice::UninstallApps => storage_summary(system, width, theme),
         MainMenuChoice::ExploreStorage => {
             let mut lines = storage_summary(system, width, theme);

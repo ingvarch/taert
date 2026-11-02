@@ -18,13 +18,13 @@ expression: output
    ╰─────────────────────────│                                                            │──── 375.8 GB of 494.4 GB │
    ╭─ Inspect ───────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
    │   ◔ Explore storage     │                                                            │                          │
-   │   ▤ System status       │                                                            │                          │
-   ╰─────────────────────────│                                           Cancel    Start  │──────────────────────────╯
-   ╭─ Settings ──────────────│                                    Enter select   Esc back │
-   │   ⌥ Preferences         ╰────────────────────────────────────────────────────────────╯
+   │   ◔ Large files         │                                                            │                          │
+   │   ▤ System status       │                                           Cancel    Start  │──────────────────────────╯
+   ╰─────────────────────────│                                    Enter select   Esc back │
+   ╭─ Settings ──────────────╰────────────────────────────────────────────────────────────╯
+   │   ⌥ Preferences              › │
    │   ◈ Protected paths          › │
    ╰────────────────────────────────╯
-
 
 
 

@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod history;
 pub mod host;
 pub mod iokit;
+pub mod large_files;
 pub mod layout;
 pub mod leftovers;
 pub mod path_utils;

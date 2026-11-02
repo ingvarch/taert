@@ -54,8 +54,18 @@ const ARTIFACT_PREFIXES: &[&str] = &["cmake-build"];
 pub struct Purger;
 
 impl Purger {
-    pub fn is_artifact(name: &str, artifact_names: &[String], parent: &Path) -> bool {
+    pub fn is_standard_artifact(name: &str, parent: &Path) -> bool {
         if ARTIFACT_PREFIXES.iter().any(|&p| name.starts_with(p)) {
+            return true;
+        }
+        if STANDARD_ARTIFACTS.contains(&name) {
+            return Self::is_valid_artifact_marker(name, parent);
+        }
+        false
+    }
+
+    pub fn is_artifact(name: &str, artifact_names: &[String], parent: &Path) -> bool {
+        if Self::is_standard_artifact(name, parent) {
             return true;
         }
         if artifact_names.iter().any(|a| a == name) {
