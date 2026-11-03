@@ -389,3 +389,42 @@ fn status_appears_in_help() {
         .success()
         .stdout(predicate::str::contains("status"));
 }
+
+#[test]
+fn ignore_add_with_dry_run_saves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let keep = home.path().canonicalize().unwrap().join("keep");
+    taert(&home)
+        .args(["ignore", "add"])
+        .arg(&keep)
+        .arg("--dry-run")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Error: --dry-run does not work with taert ignore",
+        ));
+    assert!(
+        !home
+            .path()
+            .join("Library/Application Support/taert/ignore.toml")
+            .exists()
+    );
+}
+
+#[test]
+fn config_with_dry_run_saves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["config", "--appearance", "dark", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Error: --dry-run does not work with taert config",
+        ));
+    assert!(
+        !home
+            .path()
+            .join("Library/Application Support/taert/config.toml")
+            .exists()
+    );
+}

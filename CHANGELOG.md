@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `taert optimize` is gone; `taert doctor` replaces it (removed in 5a80563, never recorded).
 
 ### Fixed
+- **Flags that do nothing**: `taert schedule`, `taert ignore` and `taert config` now stop with an error when given `--dry-run` or `--json`. Before, `--dry-run` still ran the scheduled cleanup, wrote the schedule agent, and saved the ignore list and settings.
 - **Uninstall**: an app with package receipts or root files goes to the Trash as you, as the review says, and no longer gets deleted as root. Root files follow once the app is gone, and a refused password keeps only them.
 - **Uninstall**: a refused Trash call never reaches root, in any language of macOS. The report keeps the app and its files and shows the App Management or Full Disk Access hint.
 - **Uninstall**: the review no longer writes into the app on every redraw, and works out where each row goes once.

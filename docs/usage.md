@@ -53,7 +53,9 @@ The bottom row lists the keys that work right now. In a narrow window the less i
 
 ## Non-Interactive CLI Commands
 
-Every action can run directly from the command line without launching the full TUI:
+Every action can run directly from the command line without launching the full TUI.
+
+`taert schedule`, `taert ignore` and `taert config` have no preview and no JSON output. They stop with an error when given `--dry-run` or `--json`, and change nothing.
 
 ### Clean Caches (`taert clean`)
 

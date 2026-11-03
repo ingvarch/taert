@@ -43,6 +43,10 @@ fn main() -> ExitCode {
         clap_complete::generate(shell, &mut Cli::command(), "taert", &mut std::io::stdout());
         return ExitCode::SUCCESS;
     }
+    if let Some(error) = unsupported_flag(&cli) {
+        eprintln!("Error: {error}");
+        return ExitCode::FAILURE;
+    }
     let is_tty = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
 
     // Plain mode is forced if explicitly specified or if not running in an interactive TTY
@@ -152,6 +156,29 @@ fn saved_config(layout: &Layout) -> Config {
 
 fn saved_ignore_list(layout: &Layout) -> IgnoreStore {
     IgnoreStore::load_from(&layout.ignore_path()).unwrap_or_default()
+}
+
+/// The name of a command that reads neither `--dry-run` nor `--json`.
+fn flagless_command(command: &Option<Command>) -> Option<&'static str> {
+    match command {
+        Some(Command::Schedule(_)) => Some("schedule"),
+        Some(Command::Ignore(_)) => Some("ignore"),
+        Some(Command::Config(_)) => Some("config"),
+        _ => None,
+    }
+}
+
+/// The error for a flag the command would ignore, so it is refused instead.
+fn unsupported_flag(cli: &Cli) -> Option<String> {
+    let name = flagless_command(&cli.command)?;
+    let flag = if cli.dry_run {
+        "--dry-run"
+    } else if cli.json {
+        "--json"
+    } else {
+        return None;
+    };
+    Some(format!("{flag} does not work with taert {name}"))
 }
 
 fn handle_clean(
@@ -1779,6 +1806,51 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("taert").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn flags_that_do_nothing_are_refused() {
+        let commands: [(&[&str], &str); 10] = [
+            (&["schedule"], "schedule"),
+            (&["schedule", "show"], "schedule"),
+            (&["schedule", "set"], "schedule"),
+            (&["schedule", "off"], "schedule"),
+            (&["schedule", "run"], "schedule"),
+            (&["ignore", "list"], "ignore"),
+            (&["ignore", "add", "/tmp/x"], "ignore"),
+            (&["ignore", "remove", "/tmp/x"], "ignore"),
+            (&["config"], "config"),
+            (&["config", "--appearance", "dark"], "config"),
+        ];
+        for (command, name) in commands {
+            let with = |flags: &[&str]| unsupported_flag(&parse(&[command, flags].concat()));
+            let error = |flag: &str| Some(format!("{flag} does not work with taert {name}"));
+            assert_eq!(with(&["--dry-run"]), error("--dry-run"), "{command:?}");
+            assert_eq!(with(&["--json"]), error("--json"), "{command:?}");
+            assert_eq!(
+                with(&["--dry-run", "--json"]),
+                error("--dry-run"),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flags_stay_accepted_where_commands_use_them() {
+        let commands: [&[&str]; 9] = [
+            &["clean", "--dry-run"],
+            &["clean", "junk", "--json"],
+            &["startup", "disable", "com.acme.agent", "--dry-run"],
+            &["brew", "uninstall", "fd", "--json"],
+            &["history", "--json"],
+            &["uninstall", "Foo", "--dry-run", "--force"],
+            &["schedule", "set"],
+            &["ignore", "list", "--plain"],
+            &["config", "--force"],
+        ];
+        for command in commands {
+            assert_eq!(unsupported_flag(&parse(command)), None, "{command:?}");
+        }
     }
 
     fn succeeded(code: ExitCode) -> bool {
