@@ -341,7 +341,7 @@ taert analyze ~/Downloads --plain
 
 Answers "why is my Mac slow, hot, or draining its battery?" with named causes and evidence. `taert doctor` watches the Mac for a few seconds, lists what stands out, and suggests one action for each finding.
 
-The tone stays factual. There is no health score, no red counters, and no claim to speed anything up. If nothing stands out, it says so and lists what was checked.
+The tone stays factual. There is no health score, no red counters, and no claim to speed anything up. If nothing stands out, it says so and lists the checks that ran. A check that could not run shows as skipped with its reason in plain text, in JSON, and in the terminal screen.
 
 ```bash
 # 10 second check
@@ -367,7 +367,7 @@ taert doctor --json
   - `softwareupdated`: macOS downloading or preparing updates.
   - `kernel_task`: macOS throttling CPU cycles to help cool down.
   - `WindowServer`: Display compositor rendering graphics or external displays.
-- **Background energy & wakeups**: Catches background processes high on energy or wakeups per second while CPU usage appears low.
+- **Background energy & wakeups**: Catches background processes with more than 500 wakeups per second while CPU usage stays low. The rate comes from the change in the `IDLEW` counter of `top` between samples, so the check needs at least 4 seconds. A shorter check skips it.
 - **Memory & Swap**: Checks memory pressure and active swap growth, listing the largest memory-consuming processes.
 - **Low disk space**: Warns when APFS available space drops below 10% (critical below 5%) and suggests Explore Storage (`taert analyze`).
 - **Sleep blockers**: Detects power assertions (`PreventUserIdleSystemSleep`, `PreventUserIdleDisplaySleep`, `PreventSystemSleep`) held for over 10 minutes. Ignores display sleep assertions from `powerd` and `UserIsActive`.
@@ -375,6 +375,8 @@ taert doctor --json
 - **Thermal throttling**: Detects thermal or performance warnings recorded by the system.
 - **Network traffic**: Highlights background processes transferring data above 1 MB/s over the observation window.
 - **Broken startup items**: Flags launch agents or daemons whose target executable files no longer exist. It suggests `taert startup disable` only for an item taert can switch. For any other item it says why taert leaves it alone.
+
+Evidence and the suggested action show at every terminal width. In plain output, a finding that stops a process or frees disk space also prints a command: `kill <pid>` to stop a process, or `taert analyze` for disk space. In the terminal screen, stopping a process sends `SIGTERM` after you confirm. The dialog starts on Cancel, and a failed signal shows its error and keeps the finding.
 
 ### System Status (`taert status`)
 

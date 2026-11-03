@@ -13,18 +13,18 @@ use super::profiler::{DetailedMemoryStatus, MemoryPressureLevel, SystemProfiler}
 use super::startup::{self, StartupItem, StartupState};
 use super::stores::IgnoreStore;
 use super::sysinfo::{DiskUsage, SysInfo};
-use super::telemetry::disk_severity;
+use super::telemetry::{Severity, disk_severity};
 use crate::core::bytes::format_bytes;
 
 // Threshold constants
 pub const CPU_THRESHOLD_PERCENT: f64 = 80.0;
 pub const ENERGY_LOW_CPU_THRESHOLD: f64 = 20.0;
 pub const ENERGY_HIGH_WAKEUPS_THRESHOLD: u64 = 500;
-pub const ENERGY_HIGH_POWER_THRESHOLD: f64 = 20.0;
 pub const SLEEP_BLOCKER_DURATION_THRESHOLD: Duration = Duration::from_secs(600); // 10 minutes
 pub const WAKE_COUNT_THRESHOLD: usize = 10;
 pub const NETWORK_RATE_THRESHOLD_BYTES_PER_SEC: u64 = 1_000_000; // 1 MB/s
 pub const DEFAULT_DOCTOR_SECONDS: u64 = 10;
+const TOP_INTERVAL_SECONDS: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,18 +37,8 @@ pub enum FindingSeverity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FindingAction {
-    AskAppToQuit {
-        name: String,
-        bundle_id: Option<String>,
-        pid: Option<u32>,
-    },
-    KillProcess {
-        pid: u32,
-        name: String,
-    },
-    DisableStartupItem {
-        item: StartupItem,
-    },
+    KillProcess { pid: u32, name: String },
+    DisableStartupItem { item: StartupItem },
     ExploreStorage,
 }
 
@@ -77,6 +67,21 @@ impl CheckResult {
             id: id.to_string(),
             status: "ok".to_string(),
             reason: None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self.id.as_str() {
+            "sustained_cpu" => "Sustained CPU usage",
+            "energy" => "Background energy and wakeups",
+            "memory" => "Memory pressure and swap activity",
+            "disk_space" => "Disk space headroom",
+            "sleep_blockers" => "Power assertions (sleep blockers)",
+            "wake_reasons" => "Wake reasons and wake requests (last 24h)",
+            "heat" => "Thermal throttling and performance warnings",
+            "network" => "Sustained network bandwidth",
+            "startup" => "Launchd agents and login items",
+            _ => "Unknown check",
         }
     }
 
@@ -416,17 +421,25 @@ pub fn parse_pmset_assertions(stdout: &str) -> Vec<SleepBlocker> {
     blockers
 }
 
-/// Parses timestamps like "2026-10-26 09:11:16" to epoch seconds.
-fn parse_log_timestamp(ts_str: &str) -> Option<u64> {
-    if ts_str.len() < 19 {
-        return None;
-    }
-    let year = ts_str[0..4].parse::<i32>().ok()?;
-    let month = ts_str[5..7].parse::<i32>().ok()?;
-    let day = ts_str[8..10].parse::<i32>().ok()?;
-    let hour = ts_str[11..13].parse::<i32>().ok()?;
-    let min = ts_str[14..16].parse::<i32>().ok()?;
-    let sec = ts_str[17..19].parse::<i32>().ok()?;
+/// Parses the start of a log line like "2026-10-26 09:11:16 -0800" to UTC epoch seconds.
+fn parse_log_timestamp(line: &str) -> Option<u64> {
+    let number = |range: std::ops::Range<usize>| line.get(range)?.parse::<i32>().ok();
+    let year = number(0..4)?;
+    let month = number(5..7)?;
+    let day = number(8..10)?;
+    let hour = number(11..13)?;
+    let min = number(14..16)?;
+    let sec = number(17..19)?;
+
+    let zone = line.get(19..25)?;
+    let sign = match zone.get(0..2)? {
+        " +" => 1,
+        " -" => -1,
+        _ => return None,
+    };
+    let zone_hours = zone.get(2..4)?.parse::<i64>().ok()?;
+    let zone_minutes = zone.get(4..6)?.parse::<i64>().ok()?;
+    let offset = sign * (zone_hours * 3600 + zone_minutes * 60);
 
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     tm.tm_year = year - 1900;
@@ -437,8 +450,8 @@ fn parse_log_timestamp(ts_str: &str) -> Option<u64> {
     tm.tm_sec = sec;
     tm.tm_isdst = -1;
 
-    let time = unsafe { libc::timegm(&mut tm) };
-    if time >= 0 { Some(time as u64) } else { None }
+    let local = unsafe { libc::timegm(&mut tm) } as i64;
+    u64::try_from(local - offset).ok()
 }
 
 /// Parses output of `pmset -g log` filtered to the last 24 hours.
@@ -448,10 +461,7 @@ pub fn parse_pmset_log(stdout: &str, reference_time_secs: u64) -> WakeDiagnostic
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.len() < 19 {
-            continue;
-        }
-        let Some(timestamp) = parse_log_timestamp(&trimmed[0..19]) else {
+        let Some(timestamp) = parse_log_timestamp(trimmed) else {
             continue;
         };
         if timestamp < cutoff {
@@ -529,17 +539,16 @@ pub fn parse_pmset_therm(stdout: &str) -> ThermalDiagnostics {
 
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with("Note: No ") && trimmed.ends_with("has been recorded") {
-            continue;
-        }
+        let level_of = |key: &str| {
+            trimmed
+                .strip_prefix(key)
+                .and_then(|rest| rest.split('=').nth(1))
+                .map(str::trim)
+        };
+        let is_warning = |level: &str| level != "0" && !level.eq_ignore_ascii_case("normal");
 
-        // Recorded thermal status or limit
-        if trimmed.contains("CPU_Speed_Limit") {
-            if let Some(val_str) = trimmed.split('=').nth(1)
-                && let Ok(limit) = val_str.trim().parse::<u32>()
+        if let Some(val) = level_of("CPU_Speed_Limit") {
+            if let Ok(limit) = val.parse::<u32>()
                 && limit < 100
             {
                 diagnostics.warning_recorded = true;
@@ -547,36 +556,27 @@ pub fn parse_pmset_therm(stdout: &str) -> ThermalDiagnostics {
                     .details
                     .push(format!("CPU speed limited to {limit}%"));
             }
-        } else if trimmed.contains("Thermal_Warning_Level") {
-            if let Some(val_str) = trimmed.split('=').nth(1) {
-                let level = val_str.trim();
-                if level != "0" && !level.eq_ignore_ascii_case("normal") {
-                    diagnostics.warning_recorded = true;
-                    diagnostics
-                        .details
-                        .push(format!("Thermal warning level: {level}"));
-                }
+        } else if let Some(level) = level_of("Thermal_Warning_Level") {
+            if is_warning(level) {
+                diagnostics.warning_recorded = true;
+                diagnostics
+                    .details
+                    .push(format!("Thermal warning level: {level}"));
             }
-        } else if trimmed.contains("Performance_Warning_Level") {
-            if let Some(val_str) = trimmed.split('=').nth(1) {
-                let level = val_str.trim();
-                if level != "0" && !level.eq_ignore_ascii_case("normal") {
-                    diagnostics.warning_recorded = true;
-                    diagnostics
-                        .details
-                        .push(format!("Performance warning level: {level}"));
-                }
-            }
-        } else if !trimmed.starts_with("Note:") {
+        } else if let Some(level) = level_of("Performance_Warning_Level")
+            && is_warning(level)
+        {
             diagnostics.warning_recorded = true;
-            diagnostics.details.push(trimmed.to_string());
+            diagnostics
+                .details
+                .push(format!("Performance warning level: {level}"));
         }
     }
 
     diagnostics
 }
 
-/// Parses output of `nettop -P -L 2 -s 2 -x -J bytes_in,bytes_out`.
+/// Parses output of `nettop -P -L 2 -s <seconds> -x -J bytes_in,bytes_out`.
 pub fn parse_nettop_output(
     stdout: &str,
     sample_seconds: u64,
@@ -670,12 +670,14 @@ pub fn collect(
     ignore: &IgnoreStore,
 ) -> DoctorSnapshot {
     let watch_seconds = seconds.max(2);
-    // Samples for top: (seconds / 2) + 1, skipping sample 1
-    let n_samples = (watch_seconds / 2) + 1;
+    // Samples for top, skipping sample 1
+    let n_samples = (watch_seconds / TOP_INTERVAL_SECONDS) + 1;
     let n_samples_str = n_samples.to_string();
+    let top_interval_str = TOP_INTERVAL_SECONDS.to_string();
+    let watch_seconds_str = watch_seconds.to_string();
 
     let top_timeout = Duration::from_secs(watch_seconds + 5);
-    let nettop_timeout = Duration::from_secs(6);
+    let nettop_timeout = Duration::from_secs(watch_seconds + 5);
     let pmset_timeout = Duration::from_secs(3);
 
     // Run probes concurrently within a thread scope
@@ -688,7 +690,7 @@ pub fn collect(
                         "-l",
                         &n_samples_str,
                         "-s",
-                        "2",
+                        &top_interval_str,
                         "-n",
                         "30",
                         "-o",
@@ -755,11 +757,20 @@ pub fn collect(
             let nettop_handle = s.spawn(|| {
                 let out = host.run(
                     "/usr/bin/nettop",
-                    &["-P", "-L", "2", "-s", "2", "-x", "-J", "bytes_in,bytes_out"],
+                    &[
+                        "-P",
+                        "-L",
+                        "2",
+                        "-s",
+                        &watch_seconds_str,
+                        "-x",
+                        "-J",
+                        "bytes_in,bytes_out",
+                    ],
                     nettop_timeout,
                 );
                 if out.ok {
-                    parse_nettop_output(&out.stdout, 2)
+                    parse_nettop_output(&out.stdout, watch_seconds)
                 } else {
                     Err(if out.stderr.is_empty() {
                         "nettop timed out".to_string()
@@ -791,12 +802,12 @@ pub fn collect(
     // Gather largest memory processes
     let ps_out = host.run(
         "/bin/ps",
-        &["-Aceo", "pid=,rss=,comm=", "-r"],
+        &["-Aceo", "pid=,rss=,comm="],
         Duration::from_secs(2),
     );
     let mut largest_memory_processes = Vec::new();
     if ps_out.ok {
-        for line in ps_out.stdout.lines().take(15) {
+        for line in ps_out.stdout.lines() {
             let tokens: Vec<&str> = line.split_whitespace().collect();
             if tokens.len() >= 3
                 && let (Ok(pid), Ok(rss_kb)) = (tokens[0].parse::<u32>(), tokens[1].parse::<u64>())
@@ -805,6 +816,8 @@ pub fn collect(
                 largest_memory_processes.push((pid, name, rss_kb.saturating_mul(1024)));
             }
         }
+        largest_memory_processes.sort_by_key(|(_, _, bytes)| std::cmp::Reverse(*bytes));
+        largest_memory_processes.truncate(15);
     }
 
     DoctorSnapshot {
@@ -831,13 +844,17 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
     match &snapshot.top {
         Ok(top_diag) => {
             checks.push(CheckResult::ok("sustained_cpu"));
-            checks.push(CheckResult::ok("energy"));
-
             // Skip sample 1 as its rates are unreliable
-            if top_diag.samples.len() >= 2 {
-                let evaluated_samples = &top_diag.samples[1..];
-                let num_samples = evaluated_samples.len();
+            let evaluated_samples = top_diag.samples.get(1..).unwrap_or_default();
+            let num_samples = evaluated_samples.len();
+            let energy_readable = num_samples >= 2;
+            checks.push(if energy_readable {
+                CheckResult::ok("energy")
+            } else {
+                CheckResult::skipped("energy", "needs a check of at least 4 seconds")
+            });
 
+            if num_samples >= 1 {
                 // Track processes across evaluated samples
                 let mut pid_samples: HashMap<u32, Vec<&TopProcess>> = HashMap::new();
                 for sample in evaluated_samples {
@@ -846,8 +863,6 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                     }
                 }
 
-                let mut reported_pids = Vec::new();
-
                 for (&pid, procs) in &pid_samples {
                     // Must be present in EVERY evaluated sample
                     if procs.len() == num_samples {
@@ -855,7 +870,6 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                         let all_above_cpu_threshold =
                             procs.iter().all(|p| p.cpu > CPU_THRESHOLD_PERCENT);
                         if all_above_cpu_threshold {
-                            reported_pids.push(pid);
                             let avg_cpu: f64 =
                                 procs.iter().map(|p| p.cpu).sum::<f64>() / num_samples as f64;
                             let cmd = &procs[0].command;
@@ -889,25 +903,30 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                             continue;
                         }
 
-                        // Check for high energy with low CPU
-                        let all_low_cpu = procs.iter().all(|p| p.cpu < ENERGY_LOW_CPU_THRESHOLD);
-                        let avg_power: f64 =
-                            procs.iter().map(|p| p.power).sum::<f64>() / num_samples as f64;
-                        let avg_idlew: u64 =
-                            procs.iter().map(|p| p.idlew).sum::<u64>() / num_samples as u64;
+                        if !energy_readable {
+                            continue;
+                        }
 
-                        if all_low_cpu
-                            && (avg_power > ENERGY_HIGH_POWER_THRESHOLD
-                                || avg_idlew > ENERGY_HIGH_WAKEUPS_THRESHOLD)
+                        // IDLEW counts wakeups since the process started
+                        let (first, last) = (procs[0].idlew, procs[num_samples - 1].idlew);
+                        if last < first {
+                            continue;
+                        }
+                        let span = ((num_samples - 1) as u64 * TOP_INTERVAL_SECONDS) as f64;
+                        let wakeups_per_second = (last - first) as f64 / span;
+                        let all_low_cpu = procs.iter().all(|p| p.cpu < ENERGY_LOW_CPU_THRESHOLD);
+
+                        if all_low_cpu && wakeups_per_second > ENERGY_HIGH_WAKEUPS_THRESHOLD as f64
                         {
                             let cmd = &procs[0].command;
-                            reported_pids.push(pid);
                             findings.push(Finding {
                                 id: "energy".to_string(),
                                 severity: FindingSeverity::Notice,
-                                title: format!("{cmd} is using significant energy in the background"),
+                                title: format!(
+                                    "{cmd} is using significant energy in the background"
+                                ),
                                 evidence: format!(
-                                    "pid {pid}, power score {avg_power:.1}, {avg_idlew} wakeups/s while CPU is low"
+                                    "pid {pid}, {wakeups_per_second:.0} wakeups/s while CPU is low"
                                 ),
                                 action: "Quit it to save battery.".to_string(),
                                 action_target: Some(FindingAction::KillProcess {
@@ -943,7 +962,14 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
         Some(MemoryPressureLevel::Warning) | Some(MemoryPressureLevel::Critical)
     );
 
-    checks.push(CheckResult::ok("memory"));
+    if snapshot.memory_pressure.is_none() && snapshot.top.is_err() {
+        checks.push(CheckResult::skipped(
+            "memory",
+            "memory pressure could not be read",
+        ));
+    } else {
+        checks.push(CheckResult::ok("memory"));
+    }
     if is_pressure_warning || swap_growing {
         let (title, severity) = if snapshot.memory_pressure == Some(MemoryPressureLevel::Critical) {
             ("Memory pressure is critical", FindingSeverity::Critical)
@@ -953,7 +979,7 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
             ("Memory pressure is high", FindingSeverity::Warning)
         };
 
-        let evidence = if !snapshot.largest_memory_processes.is_empty() {
+        let mut evidence = if !snapshot.largest_memory_processes.is_empty() {
             let top_names: Vec<String> = snapshot
                 .largest_memory_processes
                 .iter()
@@ -964,6 +990,14 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
         } else {
             "System is low on free physical memory".to_string()
         };
+        if let Some(memory) = &snapshot.detailed_memory
+            && memory.swap_used_bytes > 0
+        {
+            evidence.push_str(&format!(
+                "; swap used {}",
+                format_bytes(memory.swap_used_bytes)
+            ));
+        }
 
         findings.push(Finding {
             id: "memory".to_string(),
@@ -976,36 +1010,42 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
     }
 
     // 3. Disk space check
-    checks.push(CheckResult::ok("disk_space"));
-    if let Some(disk) = &snapshot.disk_usage
-        && disk.total_bytes > 0
-    {
-        let free_fraction = disk.available_bytes as f64 / disk.total_bytes as f64;
-        let severity_level = disk_severity(free_fraction);
-        if severity_level != super::telemetry::Severity::Good {
-            let is_critical = free_fraction < 0.05;
-            let title = if is_critical {
-                "Disk is almost full"
-            } else {
-                "Disk space is low"
-            };
-            findings.push(Finding {
-                id: "disk_space".to_string(),
-                severity: if is_critical {
-                    FindingSeverity::Critical
+    match snapshot.disk_usage.as_ref().filter(|d| d.total_bytes > 0) {
+        Some(disk) => {
+            checks.push(CheckResult::ok("disk_space"));
+            let free_fraction = disk.available_bytes as f64 / disk.total_bytes as f64;
+            let severity_level = disk_severity(free_fraction);
+            if severity_level != Severity::Good {
+                let is_critical = severity_level == Severity::Critical;
+                let title = if is_critical {
+                    "Disk is almost full"
                 } else {
-                    FindingSeverity::Warning
-                },
-                title: title.to_string(),
-                evidence: format!(
-                    "Only {} ({:.1}%) free space available on {}",
-                    format_bytes(disk.available_bytes),
-                    free_fraction * 100.0,
-                    disk.mount_point
-                ),
-                action: "Free space with Explore Storage (taert analyze).".to_string(),
-                action_target: Some(FindingAction::ExploreStorage),
-            });
+                    "Disk space is low"
+                };
+                findings.push(Finding {
+                    id: "disk_space".to_string(),
+                    severity: if is_critical {
+                        FindingSeverity::Critical
+                    } else {
+                        FindingSeverity::Warning
+                    },
+                    title: title.to_string(),
+                    evidence: format!(
+                        "Only {} ({:.1}%) free space available on {}",
+                        format_bytes(disk.available_bytes),
+                        free_fraction * 100.0,
+                        disk.mount_point
+                    ),
+                    action: "Free space with Explore Storage (taert analyze).".to_string(),
+                    action_target: Some(FindingAction::ExploreStorage),
+                });
+            }
+        }
+        None => {
+            checks.push(CheckResult::skipped(
+                "disk_space",
+                "disk usage could not be read",
+            ));
         }
     }
 
@@ -1047,11 +1087,18 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                     .max_by_key(|(_, cnt)| *cnt)
                     .map(|(r, cnt)| (r.as_str(), *cnt));
 
-                let evidence = if let Some((reason, count)) = top_reason {
+                let mut evidence = if let Some((reason, count)) = top_reason {
                     format!("{count} times for {reason}")
                 } else {
                     format!("Frequent wakeups ({})", wake_diag.total_wakes_24h)
                 };
+                if let Some((name, count)) = wake_diag
+                    .wake_requests_by_process
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                {
+                    evidence.push_str(&format!(" Most wake requests: {name} ({count})."));
+                }
 
                 let action = if top_reason
                     .is_some_and(|(r, _)| r == "wifibt" || r.contains("network"))
@@ -1178,23 +1225,45 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
     }
 }
 
+/// The command that does what a finding suggests, when there is one.
+fn action_command(target: &FindingAction) -> Option<String> {
+    match target {
+        FindingAction::KillProcess { pid, .. } => Some(format!("kill {pid}")),
+        FindingAction::ExploreStorage => Some("taert analyze".to_string()),
+        _ => None,
+    }
+}
+
 /// The plain text doctor report.
 pub fn plain_report(report: &DoctorReport) -> String {
     let mut text = format!("Checked for {} seconds.\n\n", report.seconds);
 
-    if !report.findings.is_empty() {
-        for finding in &report.findings {
-            text.push_str(&format!(
-                "{}\n  {}\n  {}\n\n",
-                finding.title, finding.evidence, finding.action
-            ));
+    for finding in &report.findings {
+        text.push_str(&format!(
+            "{}\n  {}\n  {}\n",
+            finding.title, finding.evidence, finding.action
+        ));
+        if let Some(command) = finding.action_target.as_ref().and_then(action_command) {
+            text.push_str(&format!("  Command: {command}\n"));
         }
-        text.push_str(
-            "Nothing else stands out. CPU, memory, disk, heat, and network look normal.\n",
-        );
-    } else {
-        text.push_str("Nothing stands out. CPU, memory, disk, heat, and network look normal.\n");
+        text.push('\n');
     }
+    if report.findings.is_empty() {
+        text.push_str("No findings.\n");
+    }
+
+    let ran: Vec<&str> = report
+        .checks
+        .iter()
+        .filter(|c| c.status == "ok")
+        .map(CheckResult::label)
+        .collect();
+    let ran = if ran.is_empty() {
+        "none".to_string()
+    } else {
+        ran.join(", ")
+    };
+    text.push_str(&format!("Checks that ran: {ran}.\n"));
 
     let skipped_checks: Vec<_> = report
         .checks
@@ -1246,6 +1315,20 @@ Disks: 1000/100K read, 1000/100K written.
 PID    COMMAND          %CPU POWER IDLEW
 100    Finder           1.2  1.2   12    
 101    Dock             0.4  0.4   4     
+Processes: 800 total, 2 running, 798 sleeping, 3000 threads 
+2026/11/01 10:00:04
+Load Avg: 1.20, 1.10, 1.05 
+CPU usage: 2.0% user, 2.0% sys, 96.0% idle 
+SharedLibs: 1200M resident, 200M data, 200M linkedit.
+MemRegions: 200000 total, 10G resident, 1000M private, 4000M shared.
+PhysMem: 20G used (4000M wired, 200M compressor), 12G unused.
+VM: 400T vsize, 50G framework vsize, 0(0) swapins, 0(0) swapouts.
+Networks: packets: 1000/100K in, 1000/100K out.
+Disks: 1000/100K read, 1000/100K written.
+
+PID    COMMAND          %CPU POWER IDLEW
+100    Finder           1.1  1.1   14    
+101    Dock             0.3  0.3   6     
 "#;
 
     const FIXTURE_TOP_SUSTAINED: &str = r#"Processes: 800 total, 2 running, 798 sleeping, 3000 threads 
@@ -1347,7 +1430,7 @@ syslogd.381,0,1000,
     #[test]
     fn test_parse_top_quiet() {
         let diag = parse_top_output(FIXTURE_TOP_QUIET).unwrap();
-        assert_eq!(diag.samples.len(), 2);
+        assert_eq!(diag.samples.len(), 3);
         assert_eq!(diag.samples[0].processes.len(), 2);
     }
 
@@ -1413,7 +1496,7 @@ syslogd.381,0,1000,
     #[test]
     fn test_wake_reasons_grouped_and_24h_limited() {
         // Reference time: 2026-11-01 12:00:00 UTC
-        let ref_time = parse_log_timestamp("2026-11-01 12:00:00").unwrap();
+        let ref_time = secs("2026-11-01T12:00:00Z");
         let diag = parse_pmset_log(FIXTURE_PMSET_LOG, ref_time);
 
         // 12 wifibt + 2 Notification = 14 wakes within 24h
@@ -1742,34 +1825,428 @@ test.100,1999998,0,
         assert_eq!(deltas_below.len(), 0);
     }
 
+    fn secs(rfc3339: &str) -> u64 {
+        crate::core::date_utils::parse_rfc3339(rfc3339)
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
     #[test]
-    fn test_energy_thresholds() {
-        // Low CPU (10%), high power (25.0 > 20.0) -> energy finding
-        let sample_energy = TopSample {
+    fn pmset_log_times_use_their_zone() {
+        let a = "2026-11-01 08:00:00 -0800 DarkWake            \tDarkWake from Deep Idle [CDNP] : due to smc.sysState.Wake(0x70070000) wifibt SMC.OutboxNotEmpty bluetooth-pcie/ Using BATT (Charge:80%) 20 secs";
+        let b = "2026-11-01 16:59:59 +0200 Wake                \tWake from Deep Idle [CDNVA] : due to lid/ Using AC (Charge:80%) 2 secs";
+        let c = a.replace("2026-11-01 08:00:00 -0800", "2026-11-01 15:00:00 +0000");
+        let log = format!("{a}\n{b}\n{c}\n");
+
+        let wake = parse_pmset_log(&log, secs("2026-11-02T15:00:00Z"));
+
+        assert_eq!(wake.total_wakes_24h, 2);
+        assert_eq!(
+            wake.reasons_count,
+            HashMap::from([("wifibt".to_string(), 2)])
+        );
+    }
+
+    #[test]
+    fn a_log_line_without_a_zone_is_skipped() {
+        let line =
+            "2026-11-01 15:00:00 DarkWake \tDarkWake from Deep Idle : due to wifibt/ Using BATT";
+
+        let wake = parse_pmset_log(line, secs("2026-11-02T15:00:00Z"));
+
+        assert_eq!(wake.total_wakes_24h, 0);
+    }
+
+    fn temp_layout(temp: &tempfile::TempDir) -> Layout {
+        Layout {
+            home: temp.path().to_path_buf(),
+            root: temp.path().to_path_buf(),
+            user_cache: None,
+        }
+    }
+
+    #[test]
+    fn largest_apps_are_the_largest_by_memory() {
+        let host = crate::core::host::fake::FakeHost::default();
+        let mut ps = String::new();
+        for pid in 1..=20 {
+            ps.push_str(&format!("{pid} 1000 app{pid}\n"));
+        }
+        ps.push_str("99 9000000 Safari\n98 4000000 Xcode\n");
+        host.reply("/bin/ps -Aceo pid=,rss=,comm=", &ps);
+        let temp = tempfile::tempdir().unwrap();
+
+        let snapshot = collect(&host, 4, &temp_layout(&temp), &IgnoreStore::default());
+
+        let apps = snapshot.largest_memory_processes;
+        assert_eq!(apps.len(), 15);
+        assert_eq!(apps[0], (99, "Safari".to_string(), 9_000_000 * 1024));
+        assert_eq!(apps[1].1, "Xcode");
+    }
+
+    #[test]
+    fn therm_ignores_unknown_lines_and_limits_at_100() {
+        let quiet = "CPU Power notify\n\tCPU_Scheduler_Limit \t= 100\n\tCPU_Available_CPUs \t= 8\n\tCPU_Speed_Limit \t= 100\n";
+        assert!(!parse_pmset_therm(quiet).warning_recorded);
+
+        let limited = parse_pmset_therm("\tCPU_Speed_Limit \t= 99\n");
+        assert!(limited.warning_recorded);
+        assert_eq!(limited.details, ["CPU speed limited to 99%"]);
+
+        assert!(!parse_pmset_therm("Thermal_Warning_Level = 0\n").warning_recorded);
+        assert!(parse_pmset_therm("Performance_Warning_Level = 2\n").warning_recorded);
+    }
+
+    #[test]
+    fn network_rate_covers_the_whole_check() {
+        let host = crate::core::host::fake::FakeHost::default();
+        host.reply(
+            "/usr/bin/nettop -P -L 2 -s 10",
+            ",bytes_in,bytes_out,\ndownloader.4000,0,0,\n,bytes_in,bytes_out,\ndownloader.4000,20000000,0,\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+
+        let snapshot = collect(&host, 10, &temp_layout(&temp), &IgnoreStore::default());
+
+        assert!(host.ran("/usr/bin/nettop -P -L 2 -s 10"));
+        let deltas = snapshot.network.unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].rate_bytes_per_sec, 2_000_000);
+    }
+
+    #[test]
+    fn a_failed_nettop_keeps_the_other_probes() {
+        let host = crate::core::host::fake::FakeHost::default();
+        host.fail("/usr/bin/nettop", "nettop timed out");
+        host.reply("/usr/bin/pmset -g assertions", FIXTURE_ASSERTIONS);
+        let temp = tempfile::tempdir().unwrap();
+
+        let snapshot = collect(&host, 4, &temp_layout(&temp), &IgnoreStore::default());
+
+        assert_eq!(snapshot.network.unwrap_err(), "nettop timed out");
+        assert_eq!(snapshot.assertions.unwrap().len(), 1);
+    }
+
+    fn energy_sample(idlew: u64, cpu: f64, power: f64) -> TopSample {
+        TopSample {
             processes: vec![TopProcess {
                 pid: 2000,
                 command: "background_sync".to_string(),
-                cpu: 10.0,
-                power: 25.0,
-                idlew: 100,
+                cpu,
+                power,
+                idlew,
             }],
             swapins: 0,
             swapouts: 0,
-        };
+        }
+    }
 
-        let snapshot = DoctorSnapshot {
-            top: Ok(TopDiagnostics {
-                samples: vec![sample_energy.clone(), sample_energy],
-            }),
+    fn energy_report(idlews: &[u64], power: f64) -> DoctorReport {
+        let samples = idlews
+            .iter()
+            .map(|&idlew| energy_sample(idlew, 10.0, power))
+            .collect();
+        diagnose(&DoctorSnapshot {
+            top: Ok(TopDiagnostics { samples }),
             ..Default::default()
-        };
-        let report = diagnose(&snapshot);
-        let energy_findings: Vec<_> = report
+        })
+    }
+
+    fn energy_findings(report: &DoctorReport) -> Vec<&Finding> {
+        report
             .findings
             .iter()
             .filter(|f| f.id == "energy")
-            .collect();
-        assert_eq!(energy_findings.len(), 1);
-        assert!(energy_findings[0].title.contains("background_sync"));
+            .collect()
+    }
+
+    #[test]
+    fn energy_follows_the_change_in_idlew() {
+        let at_limit = energy_report(&[0, 100_000, 101_000, 102_000], 5.0);
+        assert!(energy_findings(&at_limit).is_empty());
+
+        let above = energy_report(&[0, 100_000, 101_000, 102_004], 5.0);
+        let found = energy_findings(&above);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].evidence.contains("501 wakeups/s"));
+        assert_eq!(
+            found[0].evidence,
+            "pid 2000, 501 wakeups/s while CPU is low"
+        );
+
+        let flat = energy_report(&[1994, 1994, 1994, 1994], 5.0);
+        assert!(energy_findings(&flat).is_empty());
+
+        let hot = energy_report(&[10, 10, 10, 10], 90.0);
+        assert!(energy_findings(&hot).is_empty());
+
+        let restarted = energy_report(&[0, 5000, 4000, 100], 5.0);
+        assert!(energy_findings(&restarted).is_empty());
+    }
+
+    #[test]
+    fn energy_is_skipped_for_a_short_check() {
+        let report = energy_report(&[0, 10], 5.0);
+
+        let energy = report.checks.iter().find(|c| c.id == "energy").unwrap();
+        assert_eq!(energy.status, "skipped");
+        assert_eq!(
+            energy.reason.as_deref(),
+            Some("needs a check of at least 4 seconds")
+        );
+        let cpu = report
+            .checks
+            .iter()
+            .find(|c| c.id == "sustained_cpu")
+            .unwrap();
+        assert_eq!(cpu.status, "ok");
+    }
+
+    fn check<'a>(report: &'a DoctorReport, id: &str) -> &'a CheckResult {
+        report.checks.iter().find(|c| c.id == id).unwrap()
+    }
+
+    #[test]
+    fn memory_is_skipped_when_nothing_can_be_read() {
+        let mut snapshot = DoctorSnapshot {
+            top: Err("top command timed out".to_string()),
+            memory_pressure: None,
+            ..Default::default()
+        };
+        let report = diagnose(&snapshot);
+        assert_eq!(check(&report, "memory").status, "skipped");
+        assert_eq!(
+            check(&report, "memory").reason.as_deref(),
+            Some("memory pressure could not be read")
+        );
+
+        snapshot.memory_pressure = Some(MemoryPressureLevel::Normal);
+        assert_eq!(check(&diagnose(&snapshot), "memory").status, "ok");
+    }
+
+    #[test]
+    fn disk_is_skipped_without_disk_data() {
+        let no_data = diagnose(&DoctorSnapshot::default());
+        let empty = diagnose(&DoctorSnapshot {
+            disk_usage: Some(DiskUsage {
+                mount_point: "/".to_string(),
+                total_bytes: 0,
+                free_bytes: 0,
+                available_bytes: 0,
+            }),
+            ..Default::default()
+        });
+
+        for report in [no_data, empty] {
+            let disk = check(&report, "disk_space");
+            assert_eq!(disk.status, "skipped");
+            assert_eq!(disk.reason.as_deref(), Some("disk usage could not be read"));
+        }
+    }
+
+    #[test]
+    fn disk_critical_limit_has_both_sides() {
+        use crate::core::telemetry::{DISK_CRITICAL_FREE, DISK_WARNING_FREE};
+        let total = 1_000_000_000_000u64;
+        let report_at = |fraction: f64| {
+            diagnose(&DoctorSnapshot {
+                disk_usage: Some(DiskUsage {
+                    mount_point: "/".to_string(),
+                    total_bytes: total,
+                    free_bytes: 0,
+                    available_bytes: (total as f64 * fraction) as u64,
+                }),
+                ..Default::default()
+            })
+        };
+        let severity = |report: &DoctorReport| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.id == "disk_space")
+                .map(|f| f.severity)
+        };
+
+        assert_eq!(
+            severity(&report_at(DISK_CRITICAL_FREE - 0.001)),
+            Some(FindingSeverity::Critical)
+        );
+        assert_eq!(
+            severity(&report_at(DISK_CRITICAL_FREE + 0.001)),
+            Some(FindingSeverity::Warning)
+        );
+        assert_eq!(
+            severity(&report_at(DISK_WARNING_FREE - 0.001)),
+            Some(FindingSeverity::Warning)
+        );
+        assert_eq!(severity(&report_at(DISK_WARNING_FREE + 0.001)), None);
+    }
+
+    #[test]
+    fn plain_report_names_only_the_checks_that_ran() {
+        let report = diagnose(&DoctorSnapshot {
+            network: Err("nettop timed out".to_string()),
+            memory_pressure: Some(MemoryPressureLevel::Normal),
+            disk_usage: Some(DiskUsage {
+                mount_point: "/".to_string(),
+                total_bytes: 100,
+                free_bytes: 50,
+                available_bytes: 50,
+            }),
+            ..Default::default()
+        });
+
+        let text = plain_report(&report);
+
+        assert!(text.contains("No findings."));
+        assert!(text.contains("Note: Check 'network' was skipped (nettop timed out)."));
+        assert!(text.contains(
+            "Checks that ran: Sustained CPU usage, Memory pressure and swap activity, Disk space headroom, Power assertions (sleep blockers), Wake reasons and wake requests (last 24h), Thermal throttling and performance warnings, Launchd agents and login items."
+        ), "{text}");
+        assert!(!text.contains("Sustained network bandwidth"));
+        assert!(!text.contains("look normal"));
+    }
+
+    #[test]
+    fn plain_report_says_none_when_no_check_ran() {
+        let report = DoctorReport {
+            checks: Vec::new(),
+            ..diagnose(&DoctorSnapshot::default())
+        };
+
+        assert!(plain_report(&report).contains("Checks that ran: none."));
+    }
+
+    #[test]
+    fn check_labels_are_unique() {
+        let ids = [
+            "sustained_cpu",
+            "energy",
+            "memory",
+            "disk_space",
+            "sleep_blockers",
+            "wake_reasons",
+            "heat",
+            "network",
+            "startup",
+        ];
+        let labels: std::collections::HashSet<_> =
+            ids.iter().map(|id| CheckResult::ok(id).label()).collect();
+
+        assert_eq!(labels.len(), 9);
+        assert!(!labels.contains("Unknown check"));
+        assert_eq!(CheckResult::ok("zzz").label(), "Unknown check");
+    }
+
+    fn wake_report(requests: &[(&str, usize)]) -> DoctorReport {
+        diagnose(&DoctorSnapshot {
+            wake: Ok(WakeDiagnostics {
+                total_wakes_24h: 10,
+                reasons_count: HashMap::from([("wifibt".to_string(), 10)]),
+                wake_requests_by_process: requests
+                    .iter()
+                    .map(|(name, count)| (name.to_string(), *count))
+                    .collect(),
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn wake_finding_names_the_process_that_asked() {
+        let report = wake_report(&[("mDNSResponder", 7), ("backupd", 2)]);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.id == "wake_reasons")
+            .unwrap();
+        assert!(
+            finding
+                .evidence
+                .ends_with(" Most wake requests: mDNSResponder (7).")
+        );
+
+        let report = wake_report(&[]);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.id == "wake_reasons")
+            .unwrap();
+        assert_eq!(finding.evidence, "10 times for wifibt");
+
+        let report = wake_report(&[("zeta", 3), ("alpha", 3)]);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.id == "wake_reasons")
+            .unwrap();
+        assert!(finding.evidence.ends_with("alpha (3)."));
+    }
+
+    #[test]
+    fn memory_finding_shows_swap_used() {
+        let report_with = |swap_used_bytes: u64| {
+            diagnose(&DoctorSnapshot {
+                memory_pressure: Some(MemoryPressureLevel::Warning),
+                detailed_memory: Some(DetailedMemoryStatus {
+                    total_bytes: 0,
+                    free_bytes: 0,
+                    app_bytes: 0,
+                    wired_bytes: 0,
+                    compressed_bytes: 0,
+                    cached_bytes: 0,
+                    swap_used_bytes,
+                    pressure: None,
+                }),
+                ..Default::default()
+            })
+        };
+
+        let report = report_with(3_221_225_472);
+        let finding = report.findings.iter().find(|f| f.id == "memory").unwrap();
+        assert!(
+            finding
+                .evidence
+                .contains(&format!("; swap used {}", format_bytes(3_221_225_472)))
+        );
+
+        let report = report_with(0);
+        let finding = report.findings.iter().find(|f| f.id == "memory").unwrap();
+        assert!(!finding.evidence.contains("swap used"));
+    }
+
+    #[test]
+    fn plain_report_prints_a_command_for_actions() {
+        let finding = |id: &str, target: Option<FindingAction>| Finding {
+            id: id.to_string(),
+            severity: FindingSeverity::Warning,
+            title: format!("title {id}"),
+            evidence: "evidence".to_string(),
+            action: "action".to_string(),
+            action_target: target,
+        };
+        let report = DoctorReport {
+            seconds: 4,
+            findings: vec![
+                finding(
+                    "a",
+                    Some(FindingAction::KillProcess {
+                        pid: 4123,
+                        name: "node".to_string(),
+                    }),
+                ),
+                finding("b", Some(FindingAction::ExploreStorage)),
+                finding("c", None),
+            ],
+            checks: Vec::new(),
+        };
+
+        let text = plain_report(&report);
+
+        assert!(text.contains("  Command: kill 4123\n"));
+        assert!(text.contains("  Command: taert analyze\n"));
+        assert_eq!(text.matches("Command:").count(), 2);
     }
 }

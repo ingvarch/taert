@@ -1175,7 +1175,7 @@ impl Uninstaller<'_> {
         }
         for signal in [libc::SIGTERM, libc::SIGKILL] {
             for pid in &pids {
-                self.host.signal(*pid, signal);
+                let _ = self.host.signal(*pid, signal);
             }
             if self.wait_for_exit(plan, EXIT_POLLS) {
                 return;

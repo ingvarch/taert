@@ -9,11 +9,11 @@ expression: output
    │   ! Something is keeping the Mac awake                                › │
    │   ● The Mac woke 14 times in the last 24 hours                        › │
    ╰─────────────────────────────────────────────────────────────────────────╯
-
-
-
-
-
+   ╭─ Details ───────────────────────────────────────────────────────────────╮
+   │ node is using 190% CPU                                                  │
+   │ Evidence: pid 4123, for the whole check                                 │
+   │ Action: Quit it if you don't need it.                                   │
+   ╰─────────────────────────────────────────────────────────────────────────╯
 
 
 
