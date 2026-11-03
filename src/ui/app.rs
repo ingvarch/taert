@@ -763,6 +763,20 @@ impl App {
                 }
 
                 match code {
+                    KeyCode::Enter if state.scan.id == homebrew::SCAN_ID => {
+                        state.toggle_focused();
+                    }
+                    KeyCode::Right if state.scan.id == homebrew::SCAN_ID => {
+                        state.expand_focused();
+                    }
+                    KeyCode::Left if state.scan.id == homebrew::SCAN_ID => {
+                        state.collapse_focused();
+                    }
+                    KeyCode::Char('D' | 'd') | KeyCode::Backspace | KeyCode::Delete
+                        if state.scan.id == homebrew::SCAN_ID =>
+                    {
+                        state.uninstall_focused();
+                    }
                     KeyCode::Up | KeyCode::Char('k') => state.previous_selectable(),
                     KeyCode::Down | KeyCode::Char('j') => state.next_selectable(),
                     KeyCode::PageUp => state.page_up(),
@@ -796,9 +810,6 @@ impl App {
                         state.search_query.clear();
                     }
                     KeyCode::Enter if state.scan.id == apps::LIST_ID => self.start_review(),
-                    KeyCode::Enter if state.scan.id == homebrew::SCAN_ID => {
-                        state.uninstall_focused();
-                    }
                     KeyCode::Enter => {
                         if state.scan.id == slim::SCAN_ID && state.scan.selected_items().is_empty()
                         {
@@ -1319,7 +1330,11 @@ impl App {
                     .iter()
                     .any(|group| !group.items.is_empty())
                 {
-                    hints.push(Hint::new("↵", "Uninstall"));
+                    hints.extend([
+                        Hint::new("↵ / →", "Expand"),
+                        Hint::new("↵ / ←", "Collapse"),
+                        Hint::new("D / ⌫", "Uninstall"),
+                    ]);
                 }
                 vec![
                     HelpSection::new("Homebrew", hints),
@@ -3694,6 +3709,7 @@ mod tests {
         use crate::core::host::fake::FakeHost;
         use crate::core::sizer::DirSizer;
         use crate::ui::components::toast::ToastKind;
+        use crate::ui::select::RowKind;
 
         const BREW_START: &str =
             "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1";
@@ -4104,7 +4120,7 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_a_refused_row_shows_why_and_changes_nothing() {
+        fn d_on_a_refused_row_shows_why_and_changes_nothing() {
             let refusals = [
                 (
                     "ghostty",
@@ -4120,7 +4136,7 @@ mod tests {
                 app.host = host.clone();
                 focus_on(&mut app, name);
 
-                app.handle_key(KeyCode::Enter);
+                app.handle_key(KeyCode::Char('D'));
 
                 let state = select(&app);
                 let toast = state.toast.as_ref().expect(name);
@@ -4134,11 +4150,11 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_a_plain_formula_asks_to_remove_only_that_row_and_says_homebrew_does_it() {
+        fn d_on_a_plain_formula_asks_to_remove_only_that_row_and_says_homebrew_does_it() {
             let mut app = refusal_app();
             focus_on(&mut app, "fd");
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('D'));
 
             let state = select(&app);
             assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
@@ -4154,38 +4170,17 @@ mod tests {
         }
 
         #[test]
-        fn a_cancelled_question_does_not_carry_its_row_into_the_next_enter() {
+        fn a_cancelled_question_does_not_carry_its_row_into_the_next_d() {
             let mut app = refusal_app();
             focus_on(&mut app, "fd");
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('D'));
             app.handle_key(KeyCode::Esc);
 
             focus_on(&mut app, "lib");
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('D'));
 
             assert_eq!(selected(&app), 0);
             assert!(select(&app).toast.is_some());
-        }
-
-        #[test]
-        fn the_primary_action_names_a_removable_formula_and_is_off_for_the_rest() {
-            let mut app = refusal_app();
-
-            focus_on(&mut app, "fd");
-            let action = crate::ui::select::homebrew_primary(select(&app), "↵");
-            assert!(action.enabled);
-            assert_eq!(action.label, "Uninstall fd");
-            assert!(footer(&app).contains("Uninstall fd"), "{}", footer(&app));
-
-            for name in ["ghostty", "pin", "lib"] {
-                focus_on(&mut app, name);
-                let action = crate::ui::select::homebrew_primary(select(&app), "↵");
-                assert!(!action.enabled, "{name}");
-                assert_eq!(action.label, "Uninstall", "{name}");
-                assert!(footer(&app).contains("Uninstall"), "{name}");
-                let named = format!("Uninstall {name}");
-                assert!(!footer(&app).contains(&named), "{name}: {}", footer(&app));
-            }
         }
 
         #[test]
@@ -4201,7 +4196,7 @@ mod tests {
                 Config::default(),
             ));
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('D'));
 
             assert_eq!(
                 select(&app).toast.as_ref().unwrap().text,
@@ -4249,7 +4244,7 @@ mod tests {
             for (name, text) in refusals {
                 focus_on(&mut app, name);
 
-                app.handle_key(KeyCode::Enter);
+                app.handle_key(KeyCode::Char('D'));
 
                 let state = select(&app);
                 let toast = state.toast.as_ref().expect(name);
@@ -4262,11 +4257,488 @@ mod tests {
             assert!(!host.ran(&format!("{BREW_START} HOMEBREW_NO_AUTOREMOVE=1")));
         }
 
-        #[test]
-        fn the_help_sheet_lists_enter_as_uninstall() {
-            let app = brew_app();
+        /// Two formulae that use `go`, one that uses `shellcheck`, which needs `gmp`, a plain one,
+        /// and one that nothing needs.
+        fn tree_inventory() -> Inventory {
+            let formula = |name: &str, bytes: u64, on_request: bool, deps: &[&str], by: &[&str]| {
+                let mut package = package(PackageKind::Formula, name, bytes);
+                package.on_request = on_request;
+                package.dependencies = deps.iter().map(|d| d.to_string()).collect();
+                package.used_by = by.iter().map(|u| u.to_string()).collect();
+                package
+            };
+            Inventory {
+                packages: vec![
+                    formula("actionlint", 9_000, true, &["shellcheck"], &[]),
+                    formula("golangci-lint", 8_000, true, &["go"], &[]),
+                    formula("go", 6_000, true, &[], &["golangci-lint", "gosec"]),
+                    formula("gosec", 4_000, true, &["go"], &[]),
+                    formula("shellcheck", 3_000, true, &["gmp"], &["actionlint"]),
+                    formula("fd", 2_000, true, &[], &[]),
+                    formula("gmp", 500, false, &[], &["shellcheck"]),
+                    formula("orphan", 100, false, &[], &[]),
+                    package(PackageKind::Cask, "ghostty", 9_000),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            }
+        }
 
-            assert_eq!(help_row(&app, "Uninstall"), Some("↵"));
+        fn tree_app() -> App {
+            brew_list_app(&tree_inventory())
+        }
+
+        /// The item rows as the tree draws them: indent, `▸` or `▾` when it can open, the name.
+        fn shown(app: &App) -> Vec<String> {
+            select(app)
+                .flattened_rows()
+                .iter()
+                .filter(|row| row.is_item())
+                .map(|row| {
+                    let name = row.display_path.split(' ').next().unwrap();
+                    let Some(tree) = &row.tree else {
+                        return name.to_string();
+                    };
+                    let mark = match (tree.expandable, tree.expanded) {
+                        (false, _) => " ",
+                        (true, false) => "▸",
+                        (true, true) => "▾",
+                    };
+                    format!("{}{mark} {name}", "  ".repeat(tree.depth()))
+                })
+                .collect()
+        }
+
+        fn focus_path(app: &mut App, path: &[&str]) {
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            let path: Vec<String> = path.iter().map(|name| name.to_string()).collect();
+            state.focused_index = state
+                .flattened_rows()
+                .iter()
+                .position(|row| row.tree.as_ref().is_some_and(|tree| tree.path == path))
+                .unwrap_or_else(|| panic!("no row {path:?}"));
+        }
+
+        fn focused_path(app: &App) -> Vec<String> {
+            let state = select(app);
+            state.flattened_rows()[state.focused_index]
+                .tree
+                .as_ref()
+                .expect("a tree row")
+                .path
+                .clone()
+        }
+
+        #[test]
+        fn the_list_starts_collapsed_with_the_formulae_you_installed_first() {
+            let app = tree_app();
+
+            assert_eq!(
+                shown(&app),
+                [
+                    "▸ actionlint",
+                    "▸ golangci-lint",
+                    "  go",
+                    "▸ gosec",
+                    "▸ shellcheck",
+                    "  fd",
+                    "  orphan",
+                    "  ghostty"
+                ]
+            );
+            let sections: Vec<String> = select(&app)
+                .flattened_rows()
+                .iter()
+                .filter(|row| row.kind == RowKind::Section)
+                .map(|row| row.group_name.clone())
+                .collect();
+            assert_eq!(
+                sections,
+                [
+                    "Formulae",
+                    "Not needed by anything you installed",
+                    "Casks · Remove with taert uninstall"
+                ]
+            );
+        }
+
+        #[test]
+        fn enter_and_right_expand_and_enter_and_left_collapse_without_moving_the_focus() {
+            let mut app = tree_app();
+            let row = vec!["actionlint".to_string()];
+
+            app.handle_key(KeyCode::Enter);
+            assert_eq!(
+                &shown(&app)[..3],
+                ["▾ actionlint", "  ▸ shellcheck", "▸ golangci-lint"]
+            );
+            assert_eq!(focused_path(&app), row);
+
+            app.handle_key(KeyCode::Enter);
+            assert_eq!(&shown(&app)[..2], ["▸ actionlint", "▸ golangci-lint"]);
+            assert_eq!(focused_path(&app), row);
+
+            app.handle_key(KeyCode::Right);
+            assert_eq!(&shown(&app)[..2], ["▾ actionlint", "  ▸ shellcheck"]);
+            assert_eq!(focused_path(&app), row);
+
+            app.handle_key(KeyCode::Left);
+            assert_eq!(&shown(&app)[..2], ["▸ actionlint", "▸ golangci-lint"]);
+            assert_eq!(focused_path(&app), row);
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+            assert_eq!(selected(&app), 0);
+        }
+
+        #[test]
+        fn left_on_a_child_goes_to_its_parent_and_at_the_top_does_nothing() {
+            let mut app = tree_app();
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint", "shellcheck"]);
+
+            app.handle_key(KeyCode::Left);
+
+            assert_eq!(focused_path(&app), ["actionlint"]);
+            assert_eq!(shown(&app)[1], "  ▸ shellcheck");
+
+            focus_path(&mut app, &["golangci-lint"]);
+            let before = shown(&app);
+            app.handle_key(KeyCode::Left);
+            assert_eq!(focused_path(&app), ["golangci-lint"]);
+            assert_eq!(shown(&app), before);
+        }
+
+        #[test]
+        fn left_on_an_open_child_closes_it_before_it_goes_to_the_parent() {
+            let mut app = tree_app();
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint", "shellcheck"]);
+            app.handle_key(KeyCode::Enter);
+            assert_eq!(
+                &shown(&app)[..3],
+                ["▾ actionlint", "  ▾ shellcheck", "      gmp"]
+            );
+
+            app.handle_key(KeyCode::Left);
+            assert_eq!(focused_path(&app), ["actionlint", "shellcheck"]);
+            assert_eq!(shown(&app)[1], "  ▸ shellcheck");
+
+            app.handle_key(KeyCode::Left);
+            assert_eq!(focused_path(&app), ["actionlint"]);
+        }
+
+        #[test]
+        fn enter_on_a_row_with_no_dependencies_does_nothing() {
+            let mut app = tree_app();
+            let before = shown(&app);
+            focus_on(&mut app, "fd");
+
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(shown(&app), before);
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+            assert!(select(&app).toast.is_none());
+            assert_eq!(selected(&app), 0);
+
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint"]);
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint", "shellcheck"]);
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint", "shellcheck", "gmp"]);
+            let before = shown(&app);
+            app.handle_key(KeyCode::Enter);
+            assert_eq!(shown(&app), before);
+        }
+
+        #[test]
+        fn a_dependency_shows_under_every_formula_that_uses_it() {
+            let mut app = tree_app();
+            focus_path(&mut app, &["golangci-lint"]);
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(
+                &shown(&app)[..5],
+                [
+                    "▸ actionlint",
+                    "▾ golangci-lint",
+                    "    go",
+                    "  go",
+                    "▸ gosec"
+                ]
+            );
+
+            focus_path(&mut app, &["gosec"]);
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(
+                &shown(&app)[..6],
+                [
+                    "▸ actionlint",
+                    "▾ golangci-lint",
+                    "    go",
+                    "  go",
+                    "▾ gosec",
+                    "    go"
+                ]
+            );
+            focus_path(&mut app, &["gosec", "go"]);
+            app.handle_key(KeyCode::Left);
+            assert_eq!(focused_path(&app), ["gosec"]);
+        }
+
+        #[test]
+        fn a_dependency_cycle_stops_at_the_formula_that_is_already_open() {
+            let mut a = package(PackageKind::Formula, "a", 9_000);
+            a.dependencies = vec!["b".to_string()];
+            let mut b = package(PackageKind::Formula, "b", 3_000);
+            b.dependencies = vec!["a".to_string()];
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![a, b],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["a", "b"]);
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(shown(&app), ["▾ a", "  ▾ b", "      a", "▸ b"]);
+            focus_path(&mut app, &["a", "b", "a"]);
+            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Right);
+            assert_eq!(shown(&app), ["▾ a", "  ▾ b", "      a", "▸ b"]);
+        }
+
+        #[test]
+        fn d_backspace_and_delete_ask_to_remove_a_formula_and_enter_does_not() {
+            for key in [
+                KeyCode::Char('D'),
+                KeyCode::Char('d'),
+                KeyCode::Backspace,
+                KeyCode::Delete,
+            ] {
+                let mut app = refusal_app();
+                focus_on(&mut app, "fd");
+
+                app.handle_key(key);
+
+                let state = select(&app);
+                assert!(matches!(state.overlay, ModalOverlay::Confirm(_)), "{key:?}");
+                assert!(state.toast.is_none(), "{key:?}");
+                assert_eq!(selected(&app), 1, "{key:?}");
+            }
+
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+            app.handle_key(KeyCode::Enter);
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+            assert!(select(&app).toast.is_none());
+            assert_eq!(selected(&app), 0);
+        }
+
+        #[test]
+        fn every_removal_key_shows_the_refusal_and_calls_nothing() {
+            let refusals = [
+                (
+                    "ghostty",
+                    "ghostty is a cask. Remove it with taert uninstall.",
+                ),
+                ("pin", "pin is pinned. Run brew unpin pin first."),
+                ("lib", "lib stays: app, tool use it."),
+            ];
+            for key in [KeyCode::Char('D'), KeyCode::Backspace, KeyCode::Delete] {
+                for (name, text) in refusals {
+                    let mut app = refusal_app();
+                    let host = Arc::new(FakeHost::default());
+                    app.host = host.clone();
+                    focus_on(&mut app, name);
+
+                    app.handle_key(key);
+
+                    let state = select(&app);
+                    assert_eq!(state.toast.as_ref().expect(name).text, text);
+                    assert!(matches!(state.overlay, ModalOverlay::None), "{name}");
+                    assert_eq!(selected(&app), 0, "{name}");
+                    assert!(host.calls.lock().unwrap().is_empty(), "{name}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_nested_row_is_refused_the_same_way_as_its_top_level_row() {
+            let mut app = tree_app();
+            focus_path(&mut app, &["golangci-lint"]);
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["golangci-lint", "go"]);
+
+            app.handle_key(KeyCode::Char('D'));
+
+            let state = select(&app);
+            assert_eq!(
+                state.toast.as_ref().unwrap().text,
+                "go stays: golangci-lint, gosec use it."
+            );
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert_eq!(selected(&app), 0);
+        }
+
+        #[test]
+        fn d_on_a_nested_row_asks_to_remove_that_formula() {
+            let mut app_formula = package(PackageKind::Formula, "app", 9_000);
+            app_formula.dependencies = vec!["lib".to_string()];
+            let mut lib = package(PackageKind::Formula, "lib", 3_000);
+            lib.on_request = false;
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![app_formula, lib],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["app", "lib"]);
+
+            app.handle_key(KeyCode::Char('D'));
+
+            let state = select(&app);
+            assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
+            let chosen = state.scan.selected_items();
+            assert_eq!(chosen.len(), 1);
+            assert!(chosen[0].path.to_string_lossy().starts_with("lib "));
+            assert!(screen_text(&app).contains("Homebrew will remove lib"));
+        }
+
+        #[test]
+        fn after_a_removal_the_rows_that_were_open_stay_open() {
+            let mut app = tree_app();
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["actionlint", "shellcheck"]);
+            app.handle_key(KeyCode::Enter);
+            focus_on(&mut app, "fd");
+            app.handle_key(KeyCode::Char('D'));
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            state.overlay = ModalOverlay::Outcome(RemovalReport {
+                removed_count: 1,
+                ..RemovalReport::default()
+            });
+
+            state.close_homebrew_outcome();
+
+            assert_eq!(
+                shown(&app),
+                [
+                    "▾ actionlint",
+                    "  ▾ shellcheck",
+                    "      gmp",
+                    "▸ golangci-lint",
+                    "  go",
+                    "▸ gosec",
+                    "▸ shellcheck",
+                    "  orphan",
+                    "  ghostty"
+                ]
+            );
+        }
+
+        #[test]
+        fn a_search_lists_every_match_flat_and_clearing_it_brings_the_open_rows_back() {
+            let mut app = tree_app();
+            focus_path(&mut app, &["golangci-lint"]);
+            app.handle_key(KeyCode::Enter);
+
+            press(
+                &mut app,
+                &[KeyCode::Char('/'), KeyCode::Char('g'), KeyCode::Char('m')],
+            );
+            assert_eq!(shown(&app), ["gmp"]);
+
+            press(&mut app, &[KeyCode::Backspace, KeyCode::Char('o')]);
+            assert_eq!(shown(&app), ["golangci-lint", "go", "gosec"]);
+            assert!(
+                select(&app)
+                    .flattened_rows()
+                    .iter()
+                    .all(|row| row.tree.is_none())
+            );
+
+            app.handle_key(KeyCode::Esc);
+
+            assert_eq!(select(&app).search_query, "");
+            assert_eq!(
+                &shown(&app)[..5],
+                [
+                    "▸ actionlint",
+                    "▾ golangci-lint",
+                    "    go",
+                    "  go",
+                    "▸ gosec"
+                ]
+            );
+        }
+
+        #[test]
+        fn a_search_shows_a_dependency_you_need_flat_under_needed_by_what_you_installed() {
+            let mut app = tree_app();
+
+            press(
+                &mut app,
+                &[
+                    KeyCode::Char('/'),
+                    KeyCode::Char('g'),
+                    KeyCode::Char('m'),
+                    KeyCode::Char('p'),
+                ],
+            );
+
+            let rows = select(&app).flattened_rows();
+            let sections: Vec<&str> = rows
+                .iter()
+                .filter(|row| row.kind == RowKind::Section)
+                .map(|row| row.group_name.as_str())
+                .collect();
+            assert_eq!(sections, ["Needed by what you installed"]);
+            let items: Vec<_> = rows.iter().filter(|row| row.is_item()).collect();
+            assert_eq!(items.len(), 1);
+            assert!(items[0].display_path.starts_with("gmp "));
+            assert!(items[0].tree.is_none());
+            let screen = screen_text(&app);
+            let line = screen
+                .lines()
+                .find(|line| line.contains("gmp 1.0"))
+                .expect("the gmp row on the screen");
+            assert!(!line.contains('▸') && !line.contains('▾'), "{line}");
+        }
+
+        #[test]
+        fn the_footer_and_the_primary_action_name_expand_collapse_and_uninstall() {
+            let mut app = tree_app();
+
+            assert_footer(&app, &["↵", "Expand", "D  Uninstall"], &["Collapse"]);
+            let action = crate::ui::select::homebrew_primary(select(&app), "↵");
+            assert!(action.enabled);
+            assert_eq!(action.label, "Expand");
+
+            app.handle_key(KeyCode::Enter);
+            assert_footer(&app, &["Collapse", "D  Uninstall"], &["Expand"]);
+            let action = crate::ui::select::homebrew_primary(select(&app), "↵");
+            assert!(action.enabled);
+            assert_eq!(action.label, "Collapse");
+
+            focus_on(&mut app, "fd");
+            let action = crate::ui::select::homebrew_primary(select(&app), "↵");
+            assert!(!action.enabled);
+            assert_footer(&app, &["D  Uninstall"], &[]);
+        }
+
+        #[test]
+        fn the_help_sheet_names_the_tree_keys_and_uninstall() {
+            let app = tree_app();
+
+            assert_eq!(help_row(&app, "Expand"), Some("↵ / →"));
+            assert_eq!(help_row(&app, "Collapse"), Some("↵ / ←"));
+            assert_eq!(help_row(&app, "Uninstall"), Some("D / ⌫"));
         }
 
         #[test]
@@ -4276,11 +4748,10 @@ mod tests {
                 ..Inventory::default()
             });
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('D'));
 
             assert!(matches!(select(&app).overlay, ModalOverlay::None));
             assert!(select(&app).toast.is_none());
-            assert!(!crate::ui::select::homebrew_primary(select(&app), "↵").enabled);
         }
 
         fn info_deps(formulae: &[(&str, &[&str])]) -> String {
@@ -4366,10 +4837,10 @@ mod tests {
                     .count()
             }
 
-            /// Enter and y on the focused row, then waits for the outcome.
+            /// D and y on the focused row, then waits for the outcome.
             fn remove(&mut self, name: &str) {
                 focus_on(&mut self.app, name);
-                self.app.handle_key(KeyCode::Enter);
+                self.app.handle_key(KeyCode::Char('D'));
                 self.app.handle_key(KeyCode::Char('y'));
                 while self.app.removal_rx.is_some() {
                     self.app.poll_removal();
@@ -4453,7 +4924,7 @@ mod tests {
             let mut run = Removal::open(&[("app", &["lib"]), ("lib", &[])], false);
             focus_on(&mut run.app, "lib");
             assert!(labels(&run.app).iter().any(|l| l.contains("used by 1")));
-            run.app.handle_key(KeyCode::Enter);
+            run.app.handle_key(KeyCode::Char('D'));
             assert_eq!(
                 select(&run.app).toast.as_ref().unwrap().text,
                 "lib stays: app use it."
@@ -4465,7 +4936,7 @@ mod tests {
             assert_eq!(labels(&run.app).len(), 1);
             assert!(!labels(&run.app)[0].contains("used by"));
             focus_on(&mut run.app, "lib");
-            run.app.handle_key(KeyCode::Enter);
+            run.app.handle_key(KeyCode::Char('D'));
             let state = select(&run.app);
             assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
             assert!(state.toast.is_none());
