@@ -38,7 +38,7 @@ use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::core::purger;
 use crate::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use crate::core::slim;
-use crate::core::uninstaller;
+use crate::core::uninstaller::{self, Route};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmButton {
@@ -72,8 +72,8 @@ pub struct SelectState {
     pub notes: Vec<String>,
     pub asks_password: bool,
     permanent: bool,
-    /// Worked out once per plan, because a bundle check reads the disk.
-    modes: HashMap<PathBuf, RemovalMode>,
+    /// Worked out once per uninstall plan, because a bundle check reads the disk.
+    routes: HashMap<PathBuf, Route>,
     /// Why the Homebrew list leaves a row alone, by the label of the row.
     pub refusals: HashMap<PathBuf, String>,
     /// What the Homebrew list was built from, so a removal can update it without reading brew.
@@ -182,39 +182,29 @@ impl SelectState {
             notes,
             asks_password: false,
             permanent: false,
-            modes: HashMap::new(),
+            routes: HashMap::new(),
             refusals: HashMap::new(),
             homebrew: None,
             expanded: HashSet::new(),
             toast: None,
         };
-        state.work_out_modes();
         state.move_to_start();
         state
     }
 
-    fn work_out_modes(&mut self) {
-        self.modes = if self.scan.id == uninstaller::PLAN_ID {
-            self.scan
-                .groups
-                .iter()
-                .flat_map(|group| &group.items)
-                .map(|item| {
-                    let mode = item_removal_mode(item, &self.scan.id, self.permanent);
-                    (item.path.clone(), mode)
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
+    /// The routes of an uninstall plan, worked out when it was built.
+    pub fn with_routes(mut self, routes: HashMap<PathBuf, Route>) -> Self {
+        self.routes = routes;
+        self
     }
 
-    /// Where an item goes. An uninstall plan reads the answer worked out when it was built.
+    /// Where an item goes. A row of an uninstall plan goes by its route.
     fn removal_mode(&self, item: &ScanItem) -> RemovalMode {
-        self.modes
-            .get(&item.path)
-            .copied()
-            .unwrap_or_else(|| item_removal_mode(item, &self.scan.id, self.permanent))
+        if self.scan.id == uninstaller::PLAN_ID {
+            uninstaller::route_of(&self.routes, item).mode(self.permanent)
+        } else {
+            item_removal_mode(item, &self.scan.id, self.permanent)
+        }
     }
 
     /// The Homebrew list, with the reason each row cannot be uninstalled.
@@ -288,7 +278,6 @@ impl SelectState {
 
     pub fn with_permanent(mut self, permanent: bool) -> Self {
         self.permanent = permanent;
-        self.work_out_modes();
         self
     }
 
@@ -722,7 +711,8 @@ impl SelectState {
 
     pub fn open_confirmation(&mut self) {
         if !self.scan.selected_items().is_empty() {
-            self.asks_password = uninstaller::needs_password(&self.scan);
+            self.asks_password = self.scan.id == uninstaller::PLAN_ID
+                && uninstaller::needs_password(&self.scan, &self.routes);
             self.overlay = ModalOverlay::Confirm(ConfirmButton::Cancel);
         }
     }
@@ -1026,10 +1016,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     .get(row.group_index)
                     .and_then(|g| g.items.get(i_idx))
             {
-                let dest = match state.removal_mode(item) {
-                    RemovalMode::Trash => "(Trash)",
-                    RemovalMode::Permanent => "(Permanent)",
-                };
+                let dest = state.removal_mode(item).label();
                 list_row = list_row.meta(Span::styled(dest, theme.footnote()));
             }
 
@@ -1570,12 +1557,19 @@ mod tests {
     }
 
     #[test]
-    fn modes_are_worked_out_once() {
+    fn routes_are_worked_out_once() {
         let (_temp, layout) = sandbox();
         let apps = layout.system("Applications");
         let app = apps.join("Foo.app");
         fake_app(&app, "com.acme.foo", "Foo");
-        let state = SelectState::with_preserved_selection(plan_with_app(&app));
+        let scan = plan_with_app(&app);
+        let routes = scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .map(|item| (item.path.clone(), uninstaller::route(item, false)))
+            .collect();
+        let state = SelectState::with_preserved_selection(scan).with_routes(routes);
         assert!(screen(&state).contains("(Trash)"));
 
         fs::set_permissions(&apps, fs::Permissions::from_mode(0o555)).unwrap();

@@ -3,6 +3,7 @@ pub mod core;
 pub mod plain;
 pub mod ui;
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,7 +18,7 @@ use crate::cli::{
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
-use crate::core::cleaner::{RemovalMode, RemovalReport};
+use crate::core::cleaner::{RemovalMode, RemovalReport, item_removal_mode};
 use crate::core::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
@@ -29,13 +30,15 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::{expand_tilde, prettify_path};
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
-use crate::core::scanner::{CategoryScan, CategoryScanner, ScanContext, scan_all_categories};
+use crate::core::scanner::{
+    CategoryScan, CategoryScanner, ScanContext, ScanItem, scan_all_categories,
+};
 use crate::core::schedule;
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
 use crate::core::status;
 use crate::core::stores::{Config, IgnoreStore};
-use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
+use crate::core::uninstaller::{self, PlanRequest, Route, UninstallPlan, Uninstaller};
 use crate::plain::{Console, PlainRunner};
 
 fn main() -> ExitCode {
@@ -490,7 +493,7 @@ fn process_scan_result(
         let _ = write!(
             console.out,
             "{}",
-            PlainRunner::scan_text_with_options(scan, cli.permanent)
+            PlainRunner::scan_text_with_options(scan, mode_of(scan, cli.permanent))
         );
         let _ = writeln!(console.out, "\nDry run completed. No files were deleted.");
         return ExitCode::SUCCESS;
@@ -513,14 +516,14 @@ fn process_scan_result(
         let _ = write!(
             console.out,
             "{}",
-            PlainRunner::scan_text_with_options(scan, cli.permanent)
+            PlainRunner::scan_text_with_options(scan, mode_of(scan, cli.permanent))
         );
         if let Err(e) = PlainRunner::prompt_selection(scan, console) {
             let _ = writeln!(console.err, "Selection error: {e}");
             return ExitCode::FAILURE;
         }
 
-        match PlainRunner::prompt_confirm(scan, console) {
+        match PlainRunner::prompt_confirm(scan, console, mode_of(scan, cli.permanent)) {
             Ok(true) => {
                 let report = clean_and_log(scan, cli, ignore, command, "interactive", context);
                 let _ = PlainRunner::write_report("Clean", &report, console);
@@ -636,7 +639,7 @@ fn pick_apps_to_uninstall(
     let _ = write!(
         console.out,
         "{}",
-        PlainRunner::scan_text_with_options(&list, cli.permanent)
+        PlainRunner::scan_text_with_options(&list, mode_of(&list, cli.permanent))
     );
     if cli.dry_run {
         let _ = writeln!(console.out, "\nDry run completed. No files were deleted.");
@@ -716,6 +719,20 @@ fn run_uninstall(
     }
 }
 
+/// Where each row of a scan goes.
+fn mode_of(scan: &CategoryScan, permanent: bool) -> impl Fn(&ScanItem) -> RemovalMode + '_ {
+    move |item| item_removal_mode(item, &scan.id, permanent)
+}
+
+/// Where each row of an uninstall plan goes, by the route worked out for it.
+/// Where each row of a plan goes, read from routes worked out once for the whole run.
+fn plan_mode(
+    routes: &HashMap<PathBuf, Route>,
+    permanent: bool,
+) -> impl Fn(&ScanItem) -> RemovalMode + '_ {
+    move |item| uninstaller::route_of(routes, item).mode(permanent)
+}
+
 fn finish_uninstall(
     mut plan: UninstallPlan,
     cli: &Cli,
@@ -745,10 +762,11 @@ fn finish_uninstall(
     }
 
     if cli.dry_run {
+        let routes = uninstaller::routes(&plan);
         let _ = write!(
             console.out,
             "{}",
-            PlainRunner::scan_text_with_options(&plan.scan, cli.permanent)
+            PlainRunner::scan_text_with_options(&plan.scan, plan_mode(&routes, cli.permanent))
         );
         let _ = write!(console.out, "{}", PlainRunner::notes_text(&plan.notes));
         let _ = writeln!(console.out, "\nDry run completed. No files were deleted.");
@@ -765,17 +783,19 @@ fn finish_uninstall(
         return run_tui(&mut app, cli, console);
     }
 
+    // The list and the confirmation read the same routes, so they cannot disagree.
+    let routes = uninstaller::routes(&plan);
     let _ = write!(
         console.out,
         "{}",
-        PlainRunner::scan_text_with_options(&plan.scan, cli.permanent)
+        PlainRunner::scan_text_with_options(&plan.scan, plan_mode(&routes, cli.permanent))
     );
     let _ = write!(console.out, "{}", PlainRunner::notes_text(&plan.notes));
     if let Err(error) = PlainRunner::prompt_selection(&mut plan.scan, console) {
         let _ = writeln!(console.err, "Selection error: {error}");
         return ExitCode::FAILURE;
     }
-    match PlainRunner::prompt_confirm(&plan.scan, console) {
+    match PlainRunner::prompt_confirm(&plan.scan, console, plan_mode(&routes, cli.permanent)) {
         Ok(true) => run_uninstall(&plan, cli, ignore, context, console),
         Ok(false) => {
             let _ = writeln!(console.out, "Operation cancelled.");
@@ -1701,11 +1721,7 @@ fn pick_apps_to_slim(
 
     let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
 
-    let _ = write!(
-        console.out,
-        "{}",
-        PlainRunner::scan_text_with_options(&scan, false)
-    );
+    let _ = write!(console.out, "{}", PlainRunner::scan_text(&scan));
     if cli.dry_run {
         let _ = writeln!(console.out, "\nDry run completed. No apps were modified.");
         return ExitCode::SUCCESS;
@@ -3396,6 +3412,19 @@ mod tests {
         );
 
         assert!(ran.ok);
+        let bundle_rows: Vec<_> = ran
+            .out
+            .lines()
+            .filter(|line| line.contains("Taert Fixture.app"))
+            .collect();
+        assert!(!bundle_rows.is_empty(), "{}", ran.out);
+        assert!(
+            bundle_rows.iter().all(|line| line.ends_with("(Trash)")),
+            "{}",
+            ran.out
+        );
+        assert!(ran.out.contains("to the Trash."), "{}", ran.out);
+        assert!(!ran.out.contains("Permanent deletion"), "{}", ran.out);
         assert!(ran.out.contains("Type 'yes' to confirm"));
         assert!(ran.out.ends_with("Operation cancelled.\n"));
         assert!(fixture_is_untouched(&layout));

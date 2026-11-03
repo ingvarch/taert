@@ -27,7 +27,7 @@ use taert::core::telemetry::{
     CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
     PowerStatus, ProcessStatus, VolumeStatus,
 };
-use taert::core::uninstaller;
+use taert::core::uninstaller::{self, Route};
 use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::doctor::{DoctorScreenState, render_doctor};
 use taert::ui::env::UiEnv;
@@ -1150,9 +1150,27 @@ fn snapshot_select_large_files() {
     }
 }
 
+/// The plan opened as the review does, with the route each row would take.
+fn reviewed(scan: CategoryScan) -> SelectState {
+    let routes = scan
+        .groups
+        .iter()
+        .flat_map(|group| &group.items)
+        .map(|item| {
+            let root = item.path.starts_with("/Library")
+                || matches!(item.role, Some(UninstallRole::Receipt { .. }));
+            (
+                item.path.clone(),
+                if root { Route::Root } else { Route::User },
+            )
+        })
+        .collect();
+    SelectState::with_preserved_selection(scan).with_routes(routes)
+}
+
 #[test]
 fn snapshot_select_uninstall_plan() {
-    let state = SelectState::with_preserved_selection(uninstall_plan());
+    let state = reviewed(uninstall_plan());
     let theme = snapshot_theme();
 
     assert_snapshot!("select_uninstall_plan_120x32", select_screen(&state));
@@ -1162,7 +1180,7 @@ fn snapshot_select_uninstall_plan() {
 
 #[test]
 fn snapshot_uninstall_confirmation() {
-    let mut state = SelectState::with_preserved_selection(uninstall_plan());
+    let mut state = reviewed(uninstall_plan());
     state.open_confirmation();
 
     assert_snapshot!("select_uninstall_confirm_120x32", select_screen(&state));
@@ -1170,7 +1188,7 @@ fn snapshot_uninstall_confirmation() {
 
 #[test]
 fn snapshot_uninstall_outcome() {
-    let mut state = SelectState::with_preserved_selection(uninstall_plan());
+    let mut state = reviewed(uninstall_plan());
     state.overlay = ModalOverlay::Outcome(RemovalReport {
         removed_count: 5,
         freed_bytes: 0,

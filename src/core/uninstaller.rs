@@ -1,6 +1,6 @@
 //! Plans an uninstall as a reviewable list and carries it out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::io::Cursor;
@@ -521,24 +521,56 @@ pub fn user_can_remove(path: &Path) -> bool {
             .is_some_and(|parent| can_access(parent, libc::W_OK))
 }
 
-/// Determines if removing an item requires root privileges.
-pub fn needs_root(item: &ScanItem) -> bool {
-    if matches!(item.role, Some(UninstallRole::Receipt { .. })) {
-        return true;
+/// Who removes a row of an uninstall plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Homebrew,
+    User,
+    Root,
+}
+
+impl Route {
+    pub fn mode(self, permanent: bool) -> RemovalMode {
+        match self {
+            Self::User if !permanent => RemovalMode::Trash,
+            _ => RemovalMode::Permanent,
+        }
     }
-    if item.path.symlink_metadata().is_ok() {
-        return !user_can_remove(&item.path)
-            || (matches!(item.role, Some(UninstallRole::Bundle))
-                && !tree_is_removable(&item.path));
+}
+
+/// Decides who removes a row. Reads the disk and writes nothing.
+pub fn route(item: &ScanItem, cask: bool) -> Route {
+    match item.role {
+        Some(UninstallRole::Receipt { .. }) => Route::Root,
+        Some(UninstallRole::Bundle) if cask => Route::Homebrew,
+        Some(UninstallRole::Bundle)
+            if !user_can_remove(&item.path) || !tree_is_removable(&item.path) =>
+        {
+            Route::Root
+        }
+        _ if !user_can_remove(&item.path) => Route::Root,
+        _ => Route::User,
     }
-    if item.path.starts_with("/Library")
-        || item.path.starts_with("/System")
-        || item.path.starts_with("/usr")
-        || item.path.starts_with("/opt")
-    {
-        return true;
-    }
-    false
+}
+
+/// The route of every row of a plan.
+pub fn routes(plan: &UninstallPlan) -> HashMap<PathBuf, Route> {
+    plan.apps
+        .iter()
+        .zip(&plan.scan.groups)
+        .flat_map(|(app, group)| {
+            let cask = app.cask.is_some();
+            group
+                .items
+                .iter()
+                .map(move |item| (item.path.clone(), route(item, cask)))
+        })
+        .collect()
+}
+
+/// The route of a row, or `Root` when the plan has none for it.
+pub fn route_of(routes: &HashMap<PathBuf, Route>, item: &ScanItem) -> Route {
+    routes.get(&item.path).copied().unwrap_or(Route::Root)
 }
 
 fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
@@ -663,13 +695,11 @@ pub fn config_mentions(layout: &Layout, removed: &[PathBuf]) -> Vec<String> {
     found
 }
 
-/// True when the selection holds something only root can remove.
-pub fn needs_password(scan: &CategoryScan) -> bool {
-    scan.selected_items().iter().any(|item| match item.role {
-        Some(UninstallRole::Receipt { .. }) => true,
-        Some(_) => !user_can_remove(&item.path),
-        None => false,
-    })
+/// True when the selection holds a row only root can remove.
+pub fn needs_password(scan: &CategoryScan, routes: &HashMap<PathBuf, Route>) -> bool {
+    scan.selected_items()
+        .iter()
+        .any(|item| route_of(routes, item) == Route::Root)
 }
 
 /// One app's selected rows, sorted by who can remove them.
@@ -684,7 +714,7 @@ struct Job<'a> {
     system_agents: Vec<PathBuf>,
     /// Another copy of the app stays, so only this bundle goes.
     shared: bool,
-    bundle_needs_root: bool,
+    bundle_by_root: bool,
     bundle_done: bool,
     bundle_in_trash: bool,
     bundle_counted: bool,
@@ -706,7 +736,7 @@ impl<'a> Job<'a> {
             receipts: Vec::new(),
             system_agents: Vec::new(),
             shared: plan.shared,
-            bundle_needs_root: false,
+            bundle_by_root: false,
             bundle_done: false,
             bundle_in_trash: false,
             bundle_counted: false,
@@ -915,7 +945,7 @@ impl Uninstaller<'_> {
                         Some(UninstallRole::Receipt { package }) => {
                             job.receipts.push((item, package.as_str()));
                         }
-                        _ if user_can_remove(&item.path) => job.own_files.push(item),
+                        _ if route(item, false) == Route::User => job.own_files.push(item),
                         _ => {
                             if in_folder_named(&item.path, "LaunchAgents") {
                                 job.system_agents.push(item.path.clone());
@@ -1281,16 +1311,14 @@ impl Uninstaller<'_> {
         let Some(bundle) = job.pending_bundle() else {
             return;
         };
-        let must = job.bundle_needs_root
-            || !user_can_remove(&bundle.path)
-            || !tree_is_removable(&bundle.path);
+        let must = job.bundle_by_root || route(bundle, false) == Route::Root;
         if must && !self.root_may_remove(bundle) {
             self.count_bundle(job, bundle, tally);
             tally.failed(&bundle.path, NOT_SAFE_AS_ROOT);
             job.blocked = true;
             return;
         }
-        job.bundle_needs_root = must;
+        job.bundle_by_root = must;
     }
 
     fn root_may_remove(&self, bundle: &ScanItem) -> bool {
@@ -1306,7 +1334,7 @@ impl Uninstaller<'_> {
             job.hold_root_files = waits;
             let files_ready = job.has_root_files() && !waits;
             match job.pending_bundle() {
-                Some(_) => job.in_root_script = job.bundle_needs_root,
+                Some(_) => job.in_root_script = job.bundle_by_root,
                 None => job.in_root_script = !job.blocked && files_ready,
             }
         }
@@ -1329,7 +1357,7 @@ impl Uninstaller<'_> {
         }
 
         for job in jobs.iter_mut().filter(|job| job.in_root_script) {
-            if let Some(bundle) = job.bundle.filter(|_| job.bundle_needs_root) {
+            if let Some(bundle) = job.bundle.filter(|_| job.bundle_by_root) {
                 self.count_bundle(job, bundle, tally);
             }
             for (item, _) in job.receipts.iter().filter(|_| !job.hold_root_files) {
@@ -1345,8 +1373,8 @@ impl Uninstaller<'_> {
 
         for job in jobs.iter_mut().filter(|job| job.in_root_script) {
             job.in_root_script = false;
-            if let Some(bundle) = job.bundle.filter(|_| job.bundle_needs_root) {
-                job.bundle_needs_root = false;
+            if let Some(bundle) = job.bundle.filter(|_| job.bundle_by_root) {
+                job.bundle_by_root = false;
                 if is_gone(&bundle.path) {
                     tally.removed_permanent(bundle);
                     job.bundle_done = true;
@@ -1591,7 +1619,7 @@ fn root_script(jobs: &[Job]) -> String {
             ));
         }
 
-        let bundle = job.bundle.filter(|_| job.bundle_needs_root);
+        let bundle = job.bundle.filter(|_| job.bundle_by_root);
         match bundle.and_then(guarded_removal) {
             Some(removal) => {
                 lines.push(format!("if {removal}; then"));
@@ -3632,8 +3660,8 @@ mod run_tests {
         );
         let with_receipt = plan_of(&foo, vec![receipt]);
 
-        assert!(!needs_password(&plain.scan));
-        assert!(needs_password(&with_receipt.scan));
+        assert!(!needs_password(&plain.scan, &routes(&plain)));
+        assert!(needs_password(&with_receipt.scan, &routes(&with_receipt)));
     }
 
     #[test]
@@ -3902,18 +3930,69 @@ mod run_tests {
     }
 
     #[test]
-    fn needs_root_does_not_write_inside_a_bundle() {
+    fn route_does_not_write_inside_a_bundle() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let contents = foo.path.join("Contents");
         let mtime = || fs::metadata(&contents).unwrap().modified().unwrap();
         let (before_time, before_names) = (mtime(), entries(&contents));
 
-        let needed = needs_root(&row(&foo.path, UninstallRole::Bundle));
+        let went = route(&row(&foo.path, UninstallRole::Bundle), false);
 
-        assert!(!needed);
+        assert_eq!(went, Route::User);
         assert_eq!(mtime(), before_time);
         assert_eq!(entries(&contents), before_names);
+    }
+
+    #[test]
+    fn a_cask_bundle_goes_through_homebrew() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mut plan = plan_of(&foo, Vec::new());
+        assert_eq!(routes(&plan)[&foo.path], Route::User);
+
+        with_cask(&layout, &mut plan, "foo-app");
+
+        assert_eq!(routes(&plan)[&foo.path], Route::Homebrew);
+        assert_eq!(Route::Homebrew.mode(false), RemovalMode::Permanent);
+    }
+
+    #[test]
+    fn a_locked_entry_inside_a_bundle_asks_for_a_password() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let inside = foo.path.join("Contents/locked");
+        fs::write(&inside, b"data").unwrap();
+        let locked = CString::new(inside.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chflags(locked.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+        let plan = plan_of(&foo, Vec::new());
+
+        let went = routes(&plan);
+        let asks = needs_password(&plan.scan, &went);
+
+        assert_eq!(unsafe { libc::chflags(locked.as_ptr(), 0) }, 0);
+        assert_eq!(went[&foo.path], Route::Root);
+        assert!(asks);
+    }
+
+    #[test]
+    fn a_user_route_goes_to_the_trash_unless_permanent() {
+        assert_eq!(Route::User.mode(false), RemovalMode::Trash);
+        assert_eq!(Route::User.mode(true), RemovalMode::Permanent);
+        assert_eq!(Route::Root.mode(false), RemovalMode::Permanent);
+    }
+
+    #[test]
+    fn a_row_with_no_route_goes_through_root() {
+        let known = ScanItem::new(PathBuf::from("/known"), 0, true, false);
+        let unknown = ScanItem::new(PathBuf::from("/unknown"), 0, true, false);
+        let went = HashMap::from([(known.path.clone(), Route::User)]);
+
+        assert_eq!(route_of(&went, &known), Route::User);
+        assert_eq!(route_of(&went, &unknown), Route::Root);
     }
 
     #[test]
