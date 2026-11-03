@@ -1448,7 +1448,6 @@ impl App {
             if scan_id == slim::SCAN_ID {
                 thread::spawn(move || {
                     let mut total_saved = 0u64;
-                    let mut total_trashed = 0u64;
                     let mut apps_slimmed = 0usize;
                     let total_candidates = selected_items.len();
                     let mut failures = Vec::new();
@@ -1468,7 +1467,6 @@ impl App {
                             .file_stem()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_else(|| "App".to_string());
-                        let app_size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
                         let installed_app = InstalledApp {
                             name: app_name,
                             path: item.path.clone(),
@@ -1487,7 +1485,6 @@ impl App {
                         ) {
                             Ok(done) => {
                                 total_saved += done.saved;
-                                total_trashed += app_size;
                                 apps_slimmed += 1;
                                 any_trashed |= done.old_app.is_none();
                                 if done.old_app.is_some() || done.holding_left.is_some() {
@@ -1509,7 +1506,7 @@ impl App {
 
                     let report = RemovalReport {
                         freed_bytes: total_saved,
-                        trashed_bytes: total_trashed,
+                        trashed_bytes: 0,
                         removed_count: apps_slimmed,
                         failures,
                         notes,
@@ -3610,21 +3607,28 @@ mod tests {
         use super::*;
         use crate::core::apps::testing::sandbox;
         use crate::core::bytes::format_bytes;
+        use crate::core::history::{OutcomeKind, RunRecord};
         use crate::core::host::fake::FakeHost;
-        use crate::core::slim::testing::{fake_ditto, holding_of, write_test_app};
+        use crate::core::slim::testing::{
+            fake_ditto, holding_of, make_slim_save_space, write_test_app,
+        };
 
         const TRASH_NOTE: &str =
             "Clones share blocks, so the space comes back when the Trash is emptied.";
 
-        /// Slims the app at `bundle` from the slim list and returns the outcome report.
-        fn slim_in_list(layout: Layout, bundle: &Path, host: FakeHost) -> RemovalReport {
+        /// Slims the apps at `bundles` from the slim list and returns the finished app.
+        fn run_slim(layout: Layout, bundles: &[&Path], host: FakeHost) -> App {
+            let items = bundles
+                .iter()
+                .map(|bundle| ScanItem::new(bundle.to_path_buf(), 11, true, false))
+                .collect();
             let scan = CategoryScan {
                 id: slim::SCAN_ID.to_string(),
                 title: "Slim Universal Apps".to_string(),
                 notes: Vec::new(),
                 groups: vec![ToolGroup {
                     tool: "Applications".to_string(),
-                    items: vec![ScanItem::new(bundle.to_path_buf(), 11, false, false)],
+                    items,
                 }],
             };
             let mut app = select_app(scan);
@@ -3636,14 +3640,28 @@ mod tests {
                 app.poll_removal();
                 thread::sleep(Duration::from_millis(5));
             }
+            app
+        }
 
-            let ModalOverlay::Outcome(report) = &select(&app).overlay else {
+        fn report_of(app: &App) -> RemovalReport {
+            let ModalOverlay::Outcome(report) = &select(app).overlay else {
                 panic!("expected the outcome dialog");
             };
-            assert_eq!(report.removed_count, 1, "{:?}", report.failures);
             report.clone()
         }
 
+        /// Slims the app at `bundle` from the slim list and returns the outcome report.
+        fn slim_in_list(layout: Layout, bundle: &Path, host: FakeHost) -> RemovalReport {
+            let report = report_of(&run_slim(layout, &[bundle], host));
+            assert_eq!(report.removed_count, 1, "{:?}", report.failures);
+            report
+        }
+
+        fn slim_runs(layout: &Layout) -> Vec<RunRecord> {
+            HistoryLog::new(layout.history_path()).load_runs().unwrap()
+        }
+
+        /// Gives the app at `bundle` an Intel slice large enough to free blocks.
         fn ready_host(bundle: &Path) -> FakeHost {
             let host = FakeHost::idle();
             host.reply("ditto", "");
@@ -3715,6 +3733,139 @@ mod tests {
             let report = slim_in_list(layout, &bundle, host);
 
             assert_eq!(report.notes, vec![TRASH_NOTE.to_string()]);
+        }
+
+        #[test]
+        fn a_slim_reports_the_saved_bytes_and_nothing_trashed() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            make_slim_save_space(&bundle);
+            let host = ready_host(&bundle);
+            host.simulate_trash();
+
+            let app = run_slim(layout.clone(), &[&bundle], host);
+
+            let report = report_of(&app);
+            let runs = slim_runs(&layout);
+            let changed: Vec<_> = runs[0]
+                .items
+                .iter()
+                .filter(|item| item.outcome == OutcomeKind::Changed)
+                .collect();
+            assert_eq!(report.trashed_bytes, 0);
+            assert_eq!(changed.len(), 1);
+            assert!(report.freed_bytes > 0);
+            assert_eq!(report.freed_bytes, changed[0].bytes);
+            let screen = screen_text(&app);
+            assert!(screen.contains("Slim Complete"), "{screen}");
+            assert!(
+                screen.contains(&format!(
+                    "Saved {} of Intel code.",
+                    format_bytes(report.freed_bytes)
+                )),
+                "{screen}"
+            );
+            assert!(!screen.contains("Moved"), "{screen}");
+            assert!(!screen.contains("permanently."), "{screen}");
+        }
+
+        #[test]
+        fn a_refused_trash_still_says_slim_complete() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            let host = ready_host(&bundle);
+            host.fail_trash("denied");
+
+            let app = run_slim(layout, &[&bundle], host);
+
+            let report = report_of(&app);
+            let screen = screen_text(&app);
+            assert_eq!(report.trashed_bytes, 0);
+            assert!(screen.contains("Slim Complete"), "{screen}");
+            assert!(
+                screen.contains(&format!(
+                    "Saved {} of Intel code.",
+                    format_bytes(report.freed_bytes)
+                )),
+                "{screen}"
+            );
+            assert!(!screen.contains("Moved"), "{screen}");
+        }
+
+        #[test]
+        fn only_the_slimmed_app_counts() {
+            let (_temp, layout) = sandbox();
+            let x = layout.user("Applications/X.app");
+            write_test_app(&x, "com.vendor.x");
+            make_slim_save_space(&x);
+            let y = layout.user("Applications/Y.app");
+            write_test_app(&y, "com.vendor.y");
+            std::fs::create_dir(holding_of(&y)).unwrap();
+            let host = ready_host(&x);
+            host.simulate_trash();
+
+            let app = run_slim(layout.clone(), &[&x, &y], host);
+
+            let report = report_of(&app);
+            let runs = slim_runs(&layout);
+            assert_eq!(report.removed_count, 1);
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].path, y);
+            assert_eq!(report.trashed_bytes, 0);
+            assert_eq!(runs[0].items.len(), 1);
+            assert_eq!(runs[0].items[0].outcome, OutcomeKind::Changed);
+            assert_eq!(runs[0].items[0].path, x.display().to_string());
+            assert!(report.freed_bytes > 0);
+            assert_eq!(runs[0].items[0].bytes, report.freed_bytes);
+            let screen = screen_text(&app);
+            assert!(
+                screen.contains(&format!(
+                    "Saved {} of Intel code.",
+                    format_bytes(report.freed_bytes)
+                )),
+                "{screen}"
+            );
+        }
+
+        #[test]
+        fn nothing_slimmed_says_so() {
+            let (_temp, layout) = sandbox();
+            let y = layout.user("Applications/Y.app");
+            write_test_app(&y, "com.vendor.y");
+            std::fs::create_dir(holding_of(&y)).unwrap();
+
+            let app = run_slim(layout, &[&y], ready_host(&y));
+
+            let screen = screen_text(&app);
+            assert_eq!(report_of(&app).removed_count, 0);
+            assert!(screen.contains("Nothing was slimmed"), "{screen}");
+            assert!(!screen.contains("Saved"), "{screen}");
+            assert!(!screen.contains("0 B freed"), "{screen}");
+        }
+
+        #[test]
+        fn a_slim_in_the_list_writes_the_saved_bytes_to_the_history() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            make_slim_save_space(&bundle);
+            let host = ready_host(&bundle);
+            host.simulate_trash();
+
+            let report = slim_in_list(layout.clone(), &bundle, host);
+
+            let runs = slim_runs(&layout);
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "slim");
+            assert_eq!(runs[0].mode, "interactive");
+            assert_eq!(runs[0].items.len(), 1);
+            let item = &runs[0].items[0];
+            assert_eq!(item.outcome, OutcomeKind::Changed);
+            assert_eq!(item.path, bundle.display().to_string());
+            assert!(report.freed_bytes > 0);
+            assert_eq!(item.bytes, report.freed_bytes);
         }
     }
 

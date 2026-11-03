@@ -2227,6 +2227,11 @@ pub(crate) mod testing {
         make_fat_binary_32(&slices, &[&payload, b"arm!"])
     }
 
+    /// Gives the app from `write_test_app` an Intel slice big enough that slimming saves bytes.
+    pub fn make_slim_save_space(app: &Path) {
+        fs::write(app.join("Contents/MacOS/testapp"), big_fat_binary()).unwrap();
+    }
+
     pub fn write_test_app(bundle: &Path, id: &str) {
         let macos = bundle.join("Contents/MacOS");
         fs::create_dir_all(&macos).unwrap();

@@ -1,0 +1,35 @@
+---
+source: tests/ui_snapshots.rs
+expression: screen
+---
+ taert › Optimize › Slim apps                                                                   0 of 4 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ /Applications ──────────────────────────────────────────────────────────────────────────── 3 items · 810.7 MB ─╮
+   │ ▌ ○ Viscosity                                                               ━────────────────   4.8%    40.7 MB │
+   │   ○ Brave Browser                                                           ━━━━━━━━━━━━─────  69.8%   590.0 MB │
+   │   ○ Slack                                                                   ━━━━─────────────  21.3%   180.0 MB │
+   ╰─────────────────────────╭────────────────────────────────────────────────────────────╮──────────────────────────╯
+                             │ Slim Complete                                              │
+   ╭─ ~/Applications ────────│                                                            │─────── 1 item · 35.0 MB ─╮
+   │   ○ Sublime Text        │ Saved 220.7 MB of Intel code.                              │───────   4.1%    35.0 MB │
+   ╰─────────────────────────│                                                            │──────────────────────────╯
+                             │ 1 item failed to remove:                                   │
+                             │   ✕ /Applications/Brave Browser.app                        │
+                             │                                                            │
+                             │ Slimmed Viscosity, saved 40.7 MB. The old app is still     │
+                             │ at                                                         │
+                             │ /Applications/Viscosity.app.taert-slim-tmp/Viscosity.app   │
+                             │ (could not move it to the Trash: denied)                   │
+                             │ Clones share blocks, so the space comes back when the      │
+                             │ Trash is emptied.                                          │
+                             │                                                            │
+                             │                                                            │
+                             │                                                      Done  │
+                             │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+                             ╰────────────────────────────────────────────────────────────╯
+
+
+
+   Safari stays: Apple apps are part of macOS.
+   Pages stays: App Store apps are managed by the App Store.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

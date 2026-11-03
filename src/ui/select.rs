@@ -1086,7 +1086,8 @@ fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         }
         ModalOverlay::Outcome(report) => {
             let uninstall = is_plan(state) || state.scan.id == homebrew::SCAN_ID;
-            render_outcome_dialog(frame, report, uninstall, theme);
+            let slim = state.scan.id == slim::SCAN_ID;
+            render_outcome_dialog(frame, report, uninstall, slim, theme);
         }
     }
 }
@@ -1429,27 +1430,7 @@ fn render_removing_dialog(
         .render(frame, frame.area(), theme);
 }
 
-fn render_outcome_dialog(
-    frame: &mut Frame,
-    report: &RemovalReport,
-    uninstall: bool,
-    theme: &Theme,
-) {
-    let title = if report.notes.iter().any(|n| n.contains("Trash is emptied")) {
-        if report.removed_count > 0 {
-            "Slim Complete"
-        } else {
-            "Nothing was slimmed"
-        }
-    } else {
-        match (report.removed_count > 0, uninstall) {
-            (true, true) => "Uninstall Complete",
-            (true, false) => "Clean Complete",
-            (false, _) => "Nothing was removed",
-        }
-    };
-
-    let mut message = Vec::new();
+fn push_totals(message: &mut Vec<Line<'static>>, report: &RemovalReport, theme: &Theme) {
     if report.trashed_bytes > 0 {
         message.push(Line::from(vec![
             Span::styled("Moved ", theme.body()),
@@ -1475,6 +1456,41 @@ fn render_outcome_dialog(
             ),
             theme.body(),
         )]));
+    }
+}
+
+fn render_outcome_dialog(
+    frame: &mut Frame,
+    report: &RemovalReport,
+    uninstall: bool,
+    slim: bool,
+    theme: &Theme,
+) {
+    let title = if slim {
+        if report.removed_count > 0 {
+            "Slim Complete"
+        } else {
+            "Nothing was slimmed"
+        }
+    } else {
+        match (report.removed_count > 0, uninstall) {
+            (true, true) => "Uninstall Complete",
+            (true, false) => "Clean Complete",
+            (false, _) => "Nothing was removed",
+        }
+    };
+
+    let mut message = Vec::new();
+    if slim {
+        if report.removed_count > 0 {
+            message.push(Line::from(vec![
+                Span::styled("Saved ", theme.body()),
+                Span::styled(format_bytes(report.freed_bytes), theme.success()),
+                Span::styled(" of Intel code.", theme.body()),
+            ]));
+        }
+    } else {
+        push_totals(&mut message, report, theme);
     }
 
     if !report.failures.is_empty() {
@@ -1546,6 +1562,25 @@ mod tests {
             .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
             .map(|position| buffer[position].symbol())
             .collect()
+    }
+
+    #[test]
+    fn a_slim_that_saved_nothing_says_saved_0_b() {
+        let mut state = SelectState::new(CategoryScan {
+            notes: Vec::new(),
+            id: slim::SCAN_ID.to_string(),
+            title: "Slim".to_string(),
+            groups: Vec::new(),
+        });
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            removed_count: 1,
+            ..Default::default()
+        });
+
+        let text = screen(&state);
+
+        assert!(text.contains("Saved 0 B of Intel code."), "{text}");
+        assert!(!text.contains("0 B freed across"), "{text}");
     }
 
     #[test]

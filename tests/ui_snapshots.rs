@@ -1201,6 +1201,39 @@ fn snapshot_uninstall_confirmation() {
 }
 
 #[test]
+fn snapshot_slim_outcome() {
+    let mut state = SelectState::new(slim_apps_list());
+    let done = slim::SlimDone {
+        saved: 40_700_000,
+        old_app: Some((
+            PathBuf::from("/Applications/Viscosity.app.taert-slim-tmp/Viscosity.app"),
+            "denied".to_string(),
+        )),
+        holding_left: None,
+    };
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        removed_count: 2,
+        freed_bytes: 220_700_000,
+        trashed_bytes: 0,
+        failures: vec![RemovalFailure {
+            path: PathBuf::from("/Applications/Brave Browser.app"),
+            error: "Step 4 failed: Signature verification failed on copy".to_string(),
+        }],
+        notes: vec![done.summary("Viscosity"), slim::TRASH_NOTE.to_string()],
+    });
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Slim Complete"), "{screen}");
+    assert!(screen.contains("Saved 220.7 MB of Intel code."), "{screen}");
+    assert!(!screen.contains("permanently."), "{screen}");
+    assert!(
+        !screen.contains("Empty it to get the space back"),
+        "{screen}"
+    );
+    assert_snapshot!("select_slim_outcome_120x32", screen);
+}
+
+#[test]
 fn snapshot_uninstall_outcome() {
     let mut state = reviewed(uninstall_plan());
     state.overlay = ModalOverlay::Outcome(RemovalReport {
