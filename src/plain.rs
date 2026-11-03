@@ -452,4 +452,41 @@ mod tests {
             "{text}"
         );
     }
+
+    #[test]
+    fn permanent_reaches_the_rows_of_an_uninstall() {
+        for (permanent, trashed) in [(false, 1), (true, 0)] {
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("file"), b"x").unwrap();
+            let mut row = ScanItem::new(data.clone(), 1, true, false);
+            row.role = Some(crate::core::leftovers::UninstallRole::Leftover {
+                evidence: crate::core::leftovers::Evidence::BundleId,
+            });
+            let scan = CategoryScan {
+                id: crate::core::uninstaller::PLAN_ID.to_string(),
+                title: "Review".to_string(),
+                groups: vec![ToolGroup {
+                    tool: "Foo".to_string(),
+                    items: vec![row],
+                }],
+                notes: Vec::new(),
+            };
+            let host = crate::core::host::fake::FakeHost::default();
+            host.simulate_trash();
+
+            let report = PlainRunner::execute_clean(
+                &scan,
+                &IgnoreStore::default(),
+                permanent,
+                &host,
+                |_| {},
+            );
+
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(host.trashed().len(), trashed, "permanent={permanent}");
+            assert!(!data.exists());
+        }
+    }
 }

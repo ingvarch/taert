@@ -323,13 +323,15 @@ impl AnalyzeState {
         Vec::new()
     }
 
-    pub fn open_delete_confirmation(&mut self) {
+    pub fn open_delete_confirmation(&mut self, permanent: bool) {
         let items = self.items_to_delete();
         if !items.is_empty() {
-            self.overlay = AnalyzeOverlay::ConfirmDelete {
-                items,
-                button: AnalyzeConfirmButton::MoveToTrash,
+            let button = if permanent {
+                AnalyzeConfirmButton::DeletePermanently
+            } else {
+                AnalyzeConfirmButton::MoveToTrash
             };
+            self.overlay = AnalyzeOverlay::ConfirmDelete { items, button };
         }
     }
 
@@ -1492,7 +1494,7 @@ mod tests {
         assert_eq!(state.items_to_delete().len(), 1); // falls back to focused
 
         // Open delete confirmation
-        state.open_delete_confirmation();
+        state.open_delete_confirmation(false);
         assert!(matches!(
             state.overlay,
             AnalyzeOverlay::ConfirmDelete { .. }
@@ -1609,10 +1611,37 @@ mod tests {
     }
 
     #[test]
+    fn permanent_run_focuses_delete_permanently() {
+        let (_temp, mut state) = explore_fixture();
+
+        state.open_delete_confirmation(true);
+
+        assert!(matches!(
+            state.overlay,
+            AnalyzeOverlay::ConfirmDelete {
+                button: AnalyzeConfirmButton::DeletePermanently,
+                ..
+            }
+        ));
+        let rendered = screen(&state, 120, 40);
+        assert!(rendered.contains("Delete Permanently (↵)"), "{rendered}");
+        assert!(rendered.contains("Move to Trash"), "{rendered}");
+
+        state.open_delete_confirmation(false);
+        assert!(matches!(
+            state.overlay,
+            AnalyzeOverlay::ConfirmDelete {
+                button: AnalyzeConfirmButton::MoveToTrash,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_dialog_pauses_the_measurement() {
         let (_temp, mut state) = explore_fixture();
         screen(&state, 205, 40);
-        state.open_delete_confirmation();
+        state.open_delete_confirmation(false);
 
         assert_eq!(state.preview_target(), None);
     }

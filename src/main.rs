@@ -2932,6 +2932,38 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_with_permanent_never_uses_the_trash() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+        host.simulate_trash();
+
+        let ran = uninstall(
+            &["uninstall", "Taert Fixture", "--force", "--permanent"],
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(host.trashed().is_empty());
+        assert!(!layout.user("Applications/Taert Fixture.app").exists());
+    }
+
+    #[test]
+    fn uninstall_without_permanent_uses_the_trash() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = FakeHost::idle();
+        host.simulate_trash();
+
+        let ran = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(
+            host.trashed()
+                .contains(&layout.user("Applications/Taert Fixture.app"))
+        );
+    }
+
+    #[test]
     fn plain_uninstall_asks_before_it_removes() {
         let (_temp, layout) = layout_with_the_fixture_app();
         let host = FakeHost::idle();

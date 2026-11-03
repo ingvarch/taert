@@ -20,7 +20,9 @@ use super::apps::{
     InstalledApp, bundle_id_of, embedded_bundle_ids, find_apps, find_copies, is_common_name,
     official_uninstaller,
 };
-use super::cleaner::{Cleaner, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport};
+use super::cleaner::{
+    Cleaner, ItemRemovalError, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport,
+};
 use super::history::{ItemOutcome, OutcomeKind};
 use super::homebrew;
 use super::host::{Host, Output, shell_quote};
@@ -520,27 +522,15 @@ pub fn user_can_remove(path: &Path) -> bool {
             .is_some_and(|parent| can_access(parent, libc::W_OK))
 }
 
-/// App Management can keep a terminal out of an app it owns. Finding that out
-/// now, with one empty file, saves stopping the app and asking for a password twice.
-pub fn can_write_inside(bundle: &Path) -> bool {
-    Safety::can_write_inside(bundle)
-}
-
 /// Determines if removing an item requires root privileges.
 pub fn needs_root(item: &ScanItem) -> bool {
     if matches!(item.role, Some(UninstallRole::Receipt { .. })) {
         return true;
     }
     if item.path.symlink_metadata().is_ok() {
-        if !user_can_remove(&item.path) {
-            return true;
-        }
-        if matches!(item.role, Some(UninstallRole::Bundle))
-            && (!can_write_inside(&item.path) || !tree_is_removable(&item.path))
-        {
-            return true;
-        }
-        return false;
+        return !user_can_remove(&item.path)
+            || (matches!(item.role, Some(UninstallRole::Bundle))
+                && !tree_is_removable(&item.path));
     }
     if item.path.starts_with("/Library")
         || item.path.starts_with("/System")
@@ -726,6 +716,7 @@ struct Job<'a> {
     shared: bool,
     bundle_needs_root: bool,
     bundle_done: bool,
+    bundle_in_trash: bool,
     bundle_counted: bool,
     root_files_vetted: bool,
     in_root_script: bool,
@@ -747,6 +738,7 @@ impl<'a> Job<'a> {
             shared: plan.shared,
             bundle_needs_root: false,
             bundle_done: false,
+            bundle_in_trash: false,
             bundle_counted: false,
             root_files_vetted: false,
             in_root_script: false,
@@ -839,6 +831,14 @@ impl<F: FnMut(RemovalProgress), O: FnMut(&ItemOutcome)> Tally<F, O> {
     }
 }
 
+/// A refused Trash call gives only localized text, so the hint comes with it.
+fn failure_text(error: &ItemRemovalError, hint: &str) -> String {
+    match error {
+        ItemRemovalError::Trash(_) => format!("{error}. {hint}"),
+        _ => error.to_string(),
+    }
+}
+
 /// What runs from an app right now. When taert itself runs from it, in a terminal
 /// of the app, quitting or signalling the app would end taert halfway.
 struct Running {
@@ -862,12 +862,13 @@ pub struct Uninstaller<'a> {
 impl Uninstaller<'_> {
     /// Removes what is selected in `plan`.
     ///
-    /// Before the password an app is only asked to quit, and Homebrew removes its
-    /// casks. Whatever else hurts an app that stays comes after it, so a refused
-    /// prompt leaves an app with root files installed and working. If macOS only
-    /// refuses during the removal itself, that app is stopped by then, and the
-    /// second root step can ask again. An app's files go only after the app is
-    /// gone, so a failed removal never leaves an app without its data.
+    /// Before the first password step an app is only asked to quit, and Homebrew
+    /// removes its casks. The bundle goes as the user, to the Trash unless --permanent, before
+    /// root files. Only a
+    /// bundle the user cannot remove goes as root, before the app is stopped, so
+    /// a refused prompt keeps that app installed and working. An app's files go
+    /// only after the app is gone, so a failed removal never leaves an app
+    /// without its data.
     pub fn run(
         &self,
         plan: &UninstallPlan,
@@ -917,9 +918,7 @@ impl Uninstaller<'_> {
             self.stop_app(job, &mut tally);
             self.remove_bundle(job, &mut tally);
         }
-        // For bundles macOS kept from the user, and files that waited for a bundle.
-        self.remove_as_root(&mut jobs, &mut tally);
-        // For files that waited for a copy that went in the step before.
+        // For files that waited for their bundle.
         self.remove_as_root(&mut jobs, &mut tally);
         self.keep_files_of_failed_copies(&mut jobs, &mut tally);
         for job in &jobs {
@@ -1096,8 +1095,13 @@ impl Uninstaller<'_> {
         };
         let path = bundle.path.display().to_string();
         self.host.run(LSREGISTER, &["-u", &path], TEARDOWN_TIMEOUT);
-        if !job.shared {
-            self.remove_login_items(job.plan);
+        if !job.shared
+            && let Some(reason) = self.remove_login_items(job.plan)
+        {
+            let name = &job.plan.app.name;
+            tally.note(format!(
+                "{name}: could not remove its login item ({reason}). Remove it in System Settings > General > Login Items & Extensions."
+            ));
         }
         self.force_stop(job.plan, tally);
     }
@@ -1113,10 +1117,12 @@ impl Uninstaller<'_> {
         }
     }
 
-    fn remove_login_items(&self, plan: &AppPlan) {
+    /// Returns why the login item stayed, when it did.
+    fn remove_login_items(&self, plan: &AppPlan) -> Option<String> {
         let path = plan.app.path.to_string_lossy();
         let args = remove_login_item_args(&plan.app.name, &path);
-        self.host.run(OSASCRIPT, &args, TEARDOWN_TIMEOUT);
+        let output = self.host.run(OSASCRIPT, &args, TEARDOWN_TIMEOUT);
+        let failure = (!output.ok).then(|| output.stderr.lines().next().unwrap_or("").to_string());
 
         let uid = unsafe { libc::getuid() };
         for helper in &plan.login_helpers {
@@ -1126,6 +1132,7 @@ impl Uninstaller<'_> {
                     .run(LAUNCHCTL, &["bootout", &target], TEARDOWN_TIMEOUT);
             }
         }
+        failure
     }
 
     /// Finds processes by where their program lives, which a name cannot spoof.
@@ -1257,10 +1264,10 @@ impl Uninstaller<'_> {
             Ok(()) => {
                 tally.removed(bundle, self.mode);
                 job.bundle_done = true;
+                job.bundle_in_trash = self.mode == RemovalMode::Trash;
             }
-            Err(error) if error.is_permission_denied() => job.bundle_needs_root = true,
             Err(error) => {
-                tally.failed(&bundle.path, error.to_string());
+                tally.failed(&bundle.path, failure_text(&error, APP_MANAGEMENT_HINT));
                 job.blocked = true;
             }
         }
@@ -1306,7 +1313,6 @@ impl Uninstaller<'_> {
         };
         let must = job.bundle_needs_root
             || !user_can_remove(&bundle.path)
-            || !can_write_inside(&bundle.path)
             || !tree_is_removable(&bundle.path);
         if must && !self.root_may_remove(bundle) {
             self.count_bundle(job, bundle, tally);
@@ -1321,19 +1327,16 @@ impl Uninstaller<'_> {
         bundle.identity.is_some() && Safety::is_safe_as_root(&bundle.path, self.layout)
     }
 
-    /// Decides what goes in the root script. An app with files only root can
-    /// remove goes with them, so a refused password keeps all of it. Files wait
-    /// while their app or a copy of it is still there.
+    /// Decides what goes in the root script. Only a bundle the user cannot
+    /// remove goes in the script; files wait while their app or a copy of it is
+    /// still there.
     fn choose_root_work(&self, jobs: &mut [Job]) {
         let waiting: Vec<bool> = jobs.iter().map(|job| waits_for_copy(job, jobs)).collect();
         for (job, waits) in jobs.iter_mut().zip(waiting) {
             job.hold_root_files = waits;
             let files_ready = job.has_root_files() && !waits;
             match job.pending_bundle() {
-                Some(bundle) => {
-                    job.bundle_needs_root |= files_ready && self.root_may_remove(bundle);
-                    job.in_root_script = job.bundle_needs_root;
-                }
+                Some(_) => job.in_root_script = job.bundle_needs_root,
                 None => job.in_root_script = !job.blocked && files_ready,
             }
         }
@@ -1391,12 +1394,23 @@ impl Uninstaller<'_> {
             if job.blocked {
                 continue;
             }
+            let refusal = refusal.as_ref().filter(|_| job.bundle_done);
+            let place = if job.bundle_in_trash {
+                "in the Trash"
+            } else {
+                "removed"
+            };
             for item in files
                 .into_iter()
                 .chain(receipts.into_iter().map(|(item, _)| item))
             {
                 if is_gone(&item.path) {
                     tally.removed_permanent(item);
+                } else if let Some(reason) = refusal {
+                    tally.failed(
+                        &item.path,
+                        format!("{reason}. The app is already {place}, so only these files stay."),
+                    );
                 } else {
                     tally.failed(&item.path, because(NOT_REMOVED));
                 }
@@ -1431,7 +1445,7 @@ impl Uninstaller<'_> {
                 Err(error) if error.is_permission_denied() => {
                     tally.failed(&item.path, FULL_DISK_HINT);
                 }
-                Err(error) => tally.failed(&item.path, error.to_string()),
+                Err(error) => tally.failed(&item.path, failure_text(&error, FULL_DISK_HINT)),
             }
         }
     }
@@ -1584,8 +1598,8 @@ fn guarded_removal(item: &ScanItem) -> Option<String> {
     ))
 }
 
-/// The root part of a run as one script, so macOS asks for the password once.
-/// It removes an app's files only once the app is gone.
+/// One root step of a run as one script, so macOS asks for the password once
+/// for it. It removes an app's files only once the app is gone.
 fn root_script(jobs: &[Job]) -> String {
     let mut lines = Vec::new();
 
@@ -2495,6 +2509,7 @@ mod run_tests {
         let host = FakeHost::default();
         host.reply(PS, &running(&foo.path, 4242));
         host.reply(PS, "");
+        host.reply(OSASCRIPT, "");
 
         let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
 
@@ -2511,6 +2526,7 @@ mod run_tests {
         let me = std::process::id();
         host.reply(PS, &running(&foo.path, me));
         host.reply(PS, "");
+        host.reply(OSASCRIPT, "");
 
         let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
 
@@ -2701,7 +2717,10 @@ mod run_tests {
         fake_app(&foo.path, "com.other.app", "Foo");
         plan.notes.push("From the plan".to_string());
 
-        let report = run(&plan, &FakeHost::default(), &layout);
+        let host = FakeHost::default();
+        host.reply(OSASCRIPT, "");
+
+        let report = run(&plan, &host, &layout);
 
         assert!(foo.path.exists());
         assert!(!bar.path.exists());
@@ -2945,40 +2964,30 @@ mod run_tests {
     }
 
     #[test]
-    fn a_refused_password_leaves_a_user_owned_app_running_and_whole() {
+    fn a_refused_password_leaves_only_the_root_files() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let cache = folder(layout.user("Library/Caches/com.acme.foo"));
-        let agent = file(layout.user("Library/LaunchAgents/com.acme.foo.plist"));
         let support = layout.system("Library/Application Support");
         let data = folder(support.join("com.acme.foo"));
-        let mut plan = plan_of(
-            &foo,
-            vec![leftover(&cache), leftover(&agent), leftover(&data)],
-        );
-        plan.apps[0].login_helpers = vec!["com.acme.foo.login".to_string()];
+        let plan = plan_of(&foo, vec![leftover(&cache), leftover(&data)]);
         let host = FakeHost::default();
-        host.reply(PS, &running(&foo.path, 4242));
         *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
         lock_folder(&support);
 
         let report = run(&plan, &host, &layout);
 
         unlock_folder(&support);
-        assert!(foo.path.exists());
-        assert!(cache.exists());
-        assert!(agent.exists());
-        assert_eq!(report.removed_count, 0);
-        assert!(host.signals.lock().unwrap().is_empty());
-        let calls = host.calls.lock().unwrap().join("\n");
-        assert!(calls.contains("to quit"), "{calls}");
-        for side_effect in [LSREGISTER, "System Events", "bootout", "launchctl unload"] {
-            assert!(!calls.contains(side_effect), "{side_effect} in {calls}");
-        }
+        assert!(host.trashed().contains(&foo.path));
+        assert!(!foo.path.exists());
+        assert!(!cache.exists());
+        assert!(data.exists());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, data);
     }
 
     #[test]
-    fn after_the_password_the_app_is_stopped_and_unregistered() {
+    fn the_app_is_unregistered_and_its_agent_booted_out_once_gone() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let helpers = layout.system("Library/PrivilegedHelperTools");
@@ -3348,12 +3357,17 @@ mod run_tests {
         let host = FakeHost::default();
         *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
         lock_folder(&helpers);
+        let contents = foo.path.join("Contents");
+        lock_folder(&contents);
 
         let report = run(&plan, &host, &layout);
 
         unlock_folder(&helpers);
+        unlock_folder(&contents);
         assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
         assert!(foo.path.exists());
+        assert!(foo_helper.exists());
+        assert!(host.trashed().contains(&mine));
         assert!(mine_helper.exists());
         assert!(
             report
@@ -3815,6 +3829,183 @@ mod run_tests {
             report.notes.iter().any(|note| note.contains("~/.zshrc:1")),
             "{:?}",
             report.notes
+        );
+    }
+
+    fn receipt_row(layout: &Layout) -> ScanItem {
+        let mut receipt = row(
+            &layout.system("private/var/db/receipts/com.acme.foo.plist"),
+            UninstallRole::Receipt {
+                package: "com.acme.foo".to_string(),
+            },
+        );
+        receipt.size_bytes = 1;
+        receipt
+    }
+
+    #[test]
+    fn a_pkg_app_goes_to_the_trash_as_the_user() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let plan = plan_of(&foo, vec![receipt_row(&layout)]);
+        let host = FakeHost::default();
+
+        run(&plan, &host, &layout);
+
+        assert!(host.trashed().contains(&foo.path));
+        let scripts = host.admin_scripts.lock().unwrap();
+        let script = scripts.join("\n");
+        assert!(script.contains("pkgutil --forget"), "{script}");
+        let bundle = shell_quote(&foo.path.display().to_string());
+        assert!(!script.contains(&format!("rm -rf -- {bundle}")), "{script}");
+    }
+
+    #[test]
+    fn a_localized_trash_refusal_never_reaches_root() {
+        for message in ["Der Vorgang ist nicht erlaubt", "operation not permitted"] {
+            let (_temp, layout) = sandbox();
+            let foo = installed(&layout, "Foo", "com.acme.foo");
+            let plan = plan_of(&foo, vec![receipt_row(&layout)]);
+            let host = FakeHost::default();
+            host.fail_trash(message);
+
+            let report = run(&plan, &host, &layout);
+
+            assert!(foo.path.exists(), "{message}");
+            assert!(host.admin_scripts.lock().unwrap().is_empty(), "{message}");
+            let failure = report
+                .failures
+                .iter()
+                .find(|failure| failure.path == foo.path)
+                .unwrap();
+            assert!(failure.error.ends_with(APP_MANAGEMENT_HINT), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_refused_trash_leaves_a_file_row_and_shows_the_hint() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let data = folder(layout.user("Library/Containers/com.acme.foo"));
+        let mut plan = plan_of(&foo, vec![leftover(&data)]);
+        let host = FakeHost::default();
+        host.fail_trash("operation not permitted");
+        plan.scan.groups[0].items[0].selected = false;
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(data.exists());
+        let failure = report
+            .failures
+            .iter()
+            .find(|failure| failure.path == data)
+            .unwrap();
+        assert_eq!(
+            failure.error,
+            format!("operation not permitted. {FULL_DISK_HINT}")
+        );
+    }
+
+    fn entries(folder: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(folder)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn needs_root_does_not_write_inside_a_bundle() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let contents = foo.path.join("Contents");
+        let mtime = || fs::metadata(&contents).unwrap().modified().unwrap();
+        let (before_time, before_names) = (mtime(), entries(&contents));
+
+        let needed = needs_root(&row(&foo.path, UninstallRole::Bundle));
+
+        assert!(!needed);
+        assert_eq!(mtime(), before_time);
+        assert_eq!(entries(&contents), before_names);
+    }
+
+    #[test]
+    fn a_failed_login_item_removal_is_reported() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        host.fail(
+            OSASCRIPT,
+            "execution error: Not authorized to send Apple events to System Events (-1743)\nmore",
+        );
+
+        let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        let note = "Foo: could not remove its login item (execution error: Not authorized to send Apple events to System Events (-1743)). Remove it in System Settings > General > Login Items & Extensions.";
+        assert!(report.notes.iter().any(|n| n == note), "{:?}", report.notes);
+        assert!(!foo.path.exists());
+    }
+
+    #[test]
+    fn a_removed_login_item_adds_no_note() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+
+        let host = FakeHost::default();
+        host.reply(OSASCRIPT, "");
+
+        let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        assert!(
+            !report.notes.iter().any(|n| n.contains("login item")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn a_refused_password_after_the_trash_says_the_app_is_gone() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let receipt = receipt_row(&layout);
+        file(receipt.path.clone());
+        let plan = plan_of(&foo, vec![receipt]);
+        let host = FakeHost::default();
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(host.trashed().contains(&foo.path));
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].error,
+            "The password was not given. The app is already in the Trash, so only these files stay."
+        );
+    }
+
+    #[test]
+    fn a_refused_password_after_homebrew_says_the_app_is_removed() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let receipt = receipt_row(&layout);
+        file(receipt.path.clone());
+        let mut plan = plan_of(&foo, vec![receipt]);
+        let room = with_cask(&layout, &mut plan, "foo-app");
+        let host = FakeHost::default();
+        host.reply("/usr/bin/env", "");
+        host.when("/usr/bin/env", removing(&foo.path));
+        host.when("/usr/bin/env", removing(&room));
+        *host.admin_result.lock().unwrap() = Some("The password was not given".to_string());
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(host.trashed().is_empty());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].error,
+            "The password was not given. The app is already removed, so only these files stay."
         );
     }
 }

@@ -161,8 +161,8 @@ impl App {
 
     pub fn with_permanent(mut self, permanent: bool) -> Self {
         self.permanent = permanent;
-        if let Screen::Select(ref mut select) = self.screen {
-            select.permanent = permanent;
+        if let Screen::Select(select) = self.screen {
+            self.screen = Screen::Select(select.with_permanent(permanent));
         }
         self
     }
@@ -970,7 +970,7 @@ impl App {
                     KeyCode::Char('N') => state.set_sort(SortOrder::Name),
                     KeyCode::Char('D') => state.set_sort(SortOrder::Date),
                     KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
-                        state.open_delete_confirmation();
+                        state.open_delete_confirmation(self.permanent);
                     }
                     KeyCode::Enter | KeyCode::Right => {
                         state.enter_selected();
@@ -2287,6 +2287,25 @@ mod tests {
     }
 
     #[test]
+    fn the_delete_dialog_of_a_permanent_run_focuses_delete_permanently() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+        let mut app = analyze_app(dir.path());
+        app.permanent = true;
+
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('d'));
+
+        assert!(matches!(
+            analyze(&app).overlay,
+            AnalyzeOverlay::ConfirmDelete {
+                button: AnalyzeConfirmButton::DeletePermanently,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn shift_n_keeps_the_selection_and_plain_n_clears_it() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("file.txt"), "x").unwrap();
@@ -3320,6 +3339,24 @@ mod tests {
             wait_for_removal(&mut app);
 
             assert!(!bundle.exists());
+        }
+
+        #[test]
+        fn a_permanent_review_marks_its_rows_permanent() {
+            let (_temp, app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let review = |permanent| {
+                let plan = plan_for(&foo, &app);
+                screen_text(&offline(
+                    App::with_plan(plan, IgnoreStore::default(), Config::default())
+                        .with_permanent(permanent),
+                ))
+            };
+
+            assert!(review(false).contains("(Trash)"));
+            let permanent = review(true);
+            assert!(!permanent.contains("(Trash)"), "{permanent}");
+            assert!(permanent.contains("(Permanent)"), "{permanent}");
         }
 
         #[test]

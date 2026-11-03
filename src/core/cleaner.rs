@@ -148,12 +148,8 @@ pub enum ItemRemovalError {
 impl ItemRemovalError {
     pub fn is_permission_denied(&self) -> bool {
         match self {
-            Self::Refused(_) => false,
+            Self::Refused(_) | Self::Trash(_) => false,
             Self::Io(error) => matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)),
-            Self::Trash(error) => {
-                let lower = error.to_lowercase();
-                lower.contains("permission denied") || lower.contains("operation not permitted")
-            }
         }
     }
 }
