@@ -71,7 +71,9 @@ pub struct SelectState {
     /// Told before the removal starts.
     pub notes: Vec<String>,
     pub asks_password: bool,
-    pub permanent: bool,
+    permanent: bool,
+    /// Worked out once per plan, because a bundle check reads the disk.
+    modes: HashMap<PathBuf, RemovalMode>,
     /// Why the Homebrew list leaves a row alone, by the label of the row.
     pub refusals: HashMap<PathBuf, String>,
     /// What the Homebrew list was built from, so a removal can update it without reading brew.
@@ -154,12 +156,38 @@ impl SelectState {
             notes,
             asks_password: false,
             permanent: false,
+            modes: HashMap::new(),
             refusals: HashMap::new(),
             homebrew: None,
             toast: None,
         };
+        state.work_out_modes();
         state.move_to_start();
         state
+    }
+
+    fn work_out_modes(&mut self) {
+        self.modes = if self.scan.id == uninstaller::PLAN_ID {
+            self.scan
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .map(|item| {
+                    let mode = item_removal_mode(item, &self.scan.id, self.permanent);
+                    (item.path.clone(), mode)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+    }
+
+    /// Where an item goes. An uninstall plan reads the answer worked out when it was built.
+    fn removal_mode(&self, item: &ScanItem) -> RemovalMode {
+        self.modes
+            .get(&item.path)
+            .copied()
+            .unwrap_or_else(|| item_removal_mode(item, &self.scan.id, self.permanent))
     }
 
     /// The Homebrew list, with the reason each row cannot be uninstalled.
@@ -232,6 +260,7 @@ impl SelectState {
 
     pub fn with_permanent(mut self, permanent: bool) -> Self {
         self.permanent = permanent;
+        self.work_out_modes();
         self
     }
 
@@ -851,7 +880,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     .get(row.group_index)
                     .and_then(|g| g.items.get(i_idx))
             {
-                let dest = match item_removal_mode(item, &state.scan.id, state.permanent) {
+                let dest = match state.removal_mode(item) {
                     RemovalMode::Trash => "(Trash)",
                     RemovalMode::Permanent => "(Permanent)",
                 };
@@ -1105,9 +1134,7 @@ fn render_confirmation_dialog(
     let selected = state.scan.selected_items();
     let trashed_count = selected
         .iter()
-        .filter(|item| {
-            item_removal_mode(item, &state.scan.id, state.permanent) == RemovalMode::Trash
-        })
+        .filter(|item| state.removal_mode(item) == RemovalMode::Trash)
         .count();
     let perm_count = selected.len().saturating_sub(trashed_count);
 
@@ -1332,4 +1359,79 @@ fn render_outcome_dialog(
         .message(message)
         .buttons(vec![Button::primary("Done").focused(true)])
         .render(frame, frame.area(), theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::apps::testing::{fake_app, sandbox};
+    use crate::ui::env::UiEnv;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn plan_with_app(app: &Path) -> CategoryScan {
+        let mut item = ScanItem::new(app.to_path_buf(), 100, true, false);
+        item.role = Some(UninstallRole::Bundle);
+        CategoryScan {
+            notes: Vec::new(),
+            id: uninstaller::PLAN_ID.to_string(),
+            title: "Review".to_string(),
+            groups: vec![ToolGroup {
+                tool: "Foo".to_string(),
+                items: vec![item],
+            }],
+        }
+    }
+
+    fn screen(state: &SelectState) -> String {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal
+            .draw(|frame| render_select(frame, state, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn rendering_the_uninstall_screen_does_not_touch_the_bundle() {
+        let (_temp, layout) = sandbox();
+        let app = layout.system("Applications/Foo.app");
+        fake_app(&app, "com.acme.foo", "Foo");
+        let state = SelectState::with_preserved_selection(plan_with_app(&app));
+        let mtime = || {
+            fs::metadata(app.join("Contents"))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        let before = mtime();
+
+        for _ in 0..100 {
+            screen(&state);
+        }
+
+        assert_eq!(mtime(), before);
+    }
+
+    #[test]
+    fn modes_are_worked_out_once() {
+        let (_temp, layout) = sandbox();
+        let apps = layout.system("Applications");
+        let app = apps.join("Foo.app");
+        fake_app(&app, "com.acme.foo", "Foo");
+        let state = SelectState::with_preserved_selection(plan_with_app(&app));
+        assert!(screen(&state).contains("(Trash)"));
+
+        fs::set_permissions(&apps, fs::Permissions::from_mode(0o555)).unwrap();
+        let after = screen(&state);
+        fs::set_permissions(&apps, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(after.contains("(Trash)"), "{after}");
+    }
 }

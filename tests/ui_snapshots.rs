@@ -578,7 +578,7 @@ fn snapshot_analyze() {
 fn snapshot_analyze_confirmation() {
     let theme = snapshot_theme();
     let mut state = sample_analyze();
-    state.open_delete_confirmation();
+    state.open_delete_confirmation(false);
     let output = render_to_string(100, 30, |f| render_analyze(f, &state, &theme));
     assert_snapshot!("analyze_confirm_delete_100x30", output);
 }

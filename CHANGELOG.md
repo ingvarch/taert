@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `taert optimize` is gone; `taert doctor` replaces it (removed in 5a80563, never recorded).
 
 ### Fixed
+- **Uninstall**: an app with package receipts or root files goes to the Trash as you, as the review says, and no longer gets deleted as root. Root files follow once the app is gone, and a refused password keeps only them.
+- **Uninstall**: a refused Trash call never reaches root, in any language of macOS. The report keeps the app and its files and shows the App Management or Full Disk Access hint.
+- **Uninstall**: the review no longer writes into the app on every redraw, and works out where each row goes once.
+- **Uninstall**: the report notes a login item taert could not remove.
+- **Explore Storage**: with `--permanent`, the delete dialog focuses "Delete Permanently".
 - **Scheduled cleanup**: a Homebrew upgrade no longer removes the launch agent, because the cask has no `uninstall` stanza; `taert schedule show` says when the agent file is missing and how to load it again. Category names are stored in lower case, each name once. A failed `launchctl bootstrap` fails `taert schedule set` and saves nothing, and the Preferences row applies with `Enter` and shows the error. `show` reports the newer of the last run and the last skip. An unreadable lock file fails the run instead of ending it silently. The unreleased `config.json` fallback is gone: settings are TOML only.
 - **Doctor**: wake times use the zone in `pmset -g log`.
 - **Doctor**: the largest apps are sorted by memory.
