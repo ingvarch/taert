@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-03
+
 ### Added
 - **Homebrew packages**: `taert brew` lists installed formulae and casks with their size, whether you installed them, what is outdated or pinned, and what uses them, in the terminal list, plain text, or JSON (`--json`). The list itself only reads.
 - **Homebrew cleanup**: `taert brew cleanup` lists the unused dependencies and old versions Homebrew would remove, and removes the ones you select through `brew uninstall` and `brew cleanup`, never by deleting files itself. It skips a dependency that something uses again, never starts a pinned formula selected, and writes each package to the history.
