@@ -28,7 +28,13 @@ pub trait Host: Send + Sync {
         prompt: &str,
         timeout: Duration,
     ) -> Result<String, String>;
-    fn signal(&self, pid: u32, signal: i32) -> Result<(), String>;
+    /// Sends the signal as asked. Only `signal` calls it.
+    fn raw_signal(&self, pid: u32, signal: i32) -> Result<(), String>;
+    /// Sends only to a pid `signal_pid` accepts.
+    fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
+        signal_pid(pid)?;
+        self.raw_signal(pid, signal)
+    }
     fn pause(&self, duration: Duration);
     /// Moves a file or folder to the system Trash.
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
@@ -133,8 +139,9 @@ impl Host for MacHost {
         })
     }
 
-    fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
-        if unsafe { libc::kill(pid as libc::pid_t, signal) } == -1 {
+    fn raw_signal(&self, pid: u32, signal: i32) -> Result<(), String> {
+        let pid = signal_pid(pid)?;
+        if unsafe { libc::kill(pid, signal) } == -1 {
             return Err(std::io::Error::last_os_error().to_string());
         }
         Ok(())
@@ -157,6 +164,15 @@ impl Host for MacHost {
 
     fn pid(&self) -> u32 {
         std::process::id()
+    }
+}
+
+/// The pid as `kill` takes it, or an error for pid 0 (a whole process group), pid 1 (launchd),
+/// and a pid too large for `pid_t`, which would turn negative and reach a group or every process.
+pub fn signal_pid(pid: u32) -> Result<libc::pid_t, String> {
+    match libc::pid_t::try_from(pid) {
+        Ok(target) if target > 1 => Ok(target),
+        _ => Err(format!("Refusing to signal pid {pid}")),
     }
 }
 
@@ -335,7 +351,7 @@ pub mod fake {
             Ok(self.admin_stdout.lock().unwrap().clone())
         }
 
-        fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
+        fn raw_signal(&self, pid: u32, signal: i32) -> Result<(), String> {
             self.signals.lock().unwrap().push((pid, signal));
             match self.signal_error.lock().unwrap().clone() {
                 Some(error) => Err(error),
@@ -448,5 +464,24 @@ mod tests {
         let result = MacHost.signal(2_000_000_000, 0);
 
         assert!(result.unwrap_err().contains("No such process"));
+    }
+
+    #[test]
+    fn only_a_pid_of_one_process_other_than_launchd_can_be_signalled() {
+        assert_eq!(signal_pid(4242), Ok(4242));
+        for pid in [0, 1, 1 << 31, u32::MAX] {
+            assert!(signal_pid(pid).is_err(), "{pid}");
+        }
+    }
+
+    #[test]
+    fn pid_0_and_pid_1_are_never_signalled() {
+        let host = fake::FakeHost::default();
+
+        for pid in [0, 1] {
+            assert!(host.signal(pid, libc::SIGTERM).is_err());
+        }
+
+        assert!(host.signals.lock().unwrap().is_empty());
     }
 }

@@ -3643,6 +3643,29 @@ mod tests {
     }
 
     #[test]
+    fn confirming_pid_0_or_1_sends_nothing_and_shows_an_error() {
+        for pid in [0, 1] {
+            let (mut app, host) = doctor_app(None);
+            kill_dialog(&mut app);
+            let Screen::Doctor(state) = &mut app.screen else {
+                panic!("expected the doctor screen");
+            };
+            state.confirm = Some(DoctorActionConfirm::KillProcess {
+                pid,
+                name: "x".into(),
+            });
+
+            app.handle_key(KeyCode::Enter);
+
+            let Screen::Doctor(state) = &app.screen else {
+                panic!("expected the doctor screen");
+            };
+            assert!(host.signals.lock().unwrap().is_empty());
+            assert!(matches!(&state.message, Some((_, true))));
+        }
+    }
+
+    #[test]
     fn a_failed_signal_keeps_the_finding_and_shows_the_error() {
         let (mut app, host) = doctor_app(None);
         *host.signal_error.lock().unwrap() = Some("Operation not permitted".into());
