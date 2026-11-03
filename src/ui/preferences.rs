@@ -16,7 +16,7 @@ use crate::core::host::Host;
 use crate::core::layout::Layout;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::schedule::{ScheduleFrequency, remove_schedule, set_schedule};
-use crate::core::stores::{Config, IgnoreStore, ScheduleConfig};
+use crate::core::stores::{Config, IgnoreStore};
 
 pub const AGE_PRESETS: &[u64] = &[1, 3, 7, 14, 30, 60, 90, 180, 365];
 
@@ -32,9 +32,11 @@ pub struct PreferencesState {
     pub focus: PreferencesFocus,
     pub older_than_days: u64,
     pub schedule: Option<ScheduleFrequency>,
+    pub applied_schedule: Option<ScheduleFrequency>,
     pub folder_count: usize,
     pub path_count: usize,
     pub save_notice: Option<&'static str>,
+    pub error_notice: Option<String>,
 }
 
 impl PreferencesState {
@@ -43,11 +45,13 @@ impl PreferencesState {
             focus: PreferencesFocus::AgeThreshold,
             older_than_days: config.older_than_days,
             schedule: config.schedule.as_ref().map(|s| s.every),
+            applied_schedule: config.schedule.as_ref().map(|s| s.every),
             folder_count: ProjectFoldersStore::load_or_default_at(&layout.projects_path())
                 .roots
                 .len(),
             path_count: ignore.roots.len(),
             save_notice: None,
+            error_notice: None,
         }
     }
 
@@ -79,6 +83,7 @@ impl PreferencesState {
             self.older_than_days = prev;
             config.older_than_days = prev;
             let _ = config.save_to(&layout.config_path());
+            self.error_notice = None;
             self.save_notice = Some("Saved age threshold");
         }
     }
@@ -90,48 +95,47 @@ impl PreferencesState {
             self.older_than_days = next;
             config.older_than_days = next;
             let _ = config.save_to(&layout.config_path());
+            self.error_notice = None;
             self.save_notice = Some("Saved age threshold");
         }
     }
 
-    pub fn step_schedule_left(&mut self, config: &mut Config, host: &dyn Host, layout: &Layout) {
+    pub fn step_schedule_left(&mut self) {
         if self.focus != PreferencesFocus::ScheduledCleanup {
             return;
         }
-        let next_sched = match self.schedule {
-            None => None,
-            Some(ScheduleFrequency::Day) => None,
+        self.schedule = match self.schedule {
+            None | Some(ScheduleFrequency::Day) => None,
             Some(ScheduleFrequency::Week) => Some(ScheduleFrequency::Day),
             Some(ScheduleFrequency::Month) => Some(ScheduleFrequency::Week),
         };
-        self.apply_schedule(next_sched, config, host, layout);
+        self.error_notice = None;
     }
 
-    pub fn step_schedule_right(&mut self, config: &mut Config, host: &dyn Host, layout: &Layout) {
+    pub fn step_schedule_right(&mut self) {
         if self.focus != PreferencesFocus::ScheduledCleanup {
             return;
         }
-        let next_sched = match self.schedule {
+        self.schedule = match self.schedule {
             None => Some(ScheduleFrequency::Day),
             Some(ScheduleFrequency::Day) => Some(ScheduleFrequency::Week),
-            Some(ScheduleFrequency::Week) => Some(ScheduleFrequency::Month),
-            Some(ScheduleFrequency::Month) => Some(ScheduleFrequency::Month),
+            Some(ScheduleFrequency::Week | ScheduleFrequency::Month) => {
+                Some(ScheduleFrequency::Month)
+            }
         };
-        self.apply_schedule(next_sched, config, host, layout);
+        self.error_notice = None;
     }
 
-    fn apply_schedule(
-        &mut self,
-        new_freq: Option<ScheduleFrequency>,
-        config: &mut Config,
-        host: &dyn Host,
-        layout: &Layout,
-    ) {
-        if self.schedule == new_freq {
+    pub fn schedule_changed(&self) -> bool {
+        self.schedule != self.applied_schedule
+    }
+
+    /// Sends the shown schedule to launchd and the config. On failure the shown value goes back.
+    pub fn apply_schedule(&mut self, config: &mut Config, host: &dyn Host, layout: &Layout) {
+        if !self.schedule_changed() {
             return;
         }
-        self.schedule = new_freq;
-        match new_freq {
+        let result = match self.schedule {
             Some(freq) => {
                 let categories = config
                     .schedule
@@ -143,19 +147,24 @@ impl PreferencesState {
                     .as_ref()
                     .map(|s| s.min_reclaim)
                     .unwrap_or(1_000_000_000);
-                config.schedule = Some(ScheduleConfig {
-                    every: freq,
-                    categories: categories.clone(),
-                    min_reclaim,
-                    last_skip: None,
-                });
-                let _ = set_schedule(host, layout, config, freq, categories, min_reclaim, None);
-                self.save_notice = Some("Enabled scheduled cleanup");
+                set_schedule(host, layout, config, freq, categories, min_reclaim, None)
             }
-            None => {
-                config.schedule = None;
-                let _ = remove_schedule(host, layout, config);
-                self.save_notice = Some("Disabled scheduled cleanup");
+            None => remove_schedule(host, layout, config),
+        };
+        match result {
+            Ok(()) => {
+                self.applied_schedule = self.schedule;
+                self.error_notice = None;
+                self.save_notice = Some(if self.schedule.is_some() {
+                    "Enabled scheduled cleanup"
+                } else {
+                    "Disabled scheduled cleanup"
+                });
+            }
+            Err(message) => {
+                self.schedule = self.applied_schedule;
+                self.save_notice = None;
+                self.error_notice = Some(message);
             }
         }
     }
@@ -167,13 +176,19 @@ pub fn render_preferences(frame: &mut Frame, state: &PreferencesState, theme: &T
         PreferencesFocus::ProjectFolders | PreferencesFocus::ProtectedPaths
     );
 
-    let primary_action = if is_link {
+    let applies = state.focus == PreferencesFocus::ScheduledCleanup && state.schedule_changed();
+    let primary_action = if applies {
+        PrimaryAction::new("Apply", theme.g.key_enter)
+    } else if is_link {
         PrimaryAction::new("Open", theme.g.key_enter)
     } else {
         PrimaryAction::disabled("Open", theme.g.key_enter)
     };
 
-    let toast = state.save_notice.map(Toast::success);
+    let toast = match &state.error_notice {
+        Some(message) => Some(Toast::error(message.clone())),
+        None => state.save_notice.map(Toast::success),
+    };
 
     let mut hints = Vec::new();
     if !is_link {

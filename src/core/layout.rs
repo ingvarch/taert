@@ -168,14 +168,16 @@ mod tests {
     }
 
     #[test]
-    fn an_old_json_config_is_kept_until_a_toml_one_exists() {
+    fn a_config_json_is_ignored() {
         let temp = tempfile::tempdir().unwrap();
         let layout = layout_at(temp.path().to_str().unwrap());
         let dir = layout.config_path().parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.json"), "{}").unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"older_than_days": 3}"#).unwrap();
 
-        assert_eq!(layout.config_path(), dir.join("config.json"));
+        assert!(layout.config_path().ends_with("config.toml"));
+        let config = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(config.older_than_days, 7);
     }
 
     #[test]

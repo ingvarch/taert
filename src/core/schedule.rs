@@ -151,6 +151,18 @@ pub fn is_agent_loaded(host: &dyn Host, uid: u32) -> bool {
     output.ok
 }
 
+/// Trims and lower-cases names, drops empty ones and repeats (first place wins).
+pub fn normalize_categories(categories: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for cat in categories {
+        let name = cat.trim().to_lowercase();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Validates categories specified for scheduled cleanup.
 pub fn validate_categories(categories: &[String]) -> Result<(), String> {
     if categories.is_empty() {
@@ -194,8 +206,14 @@ pub struct ScheduleLock {
     file: File,
 }
 
+#[derive(Debug)]
+pub enum LockError {
+    Held,
+    Failed(String),
+}
+
 impl ScheduleLock {
-    pub fn try_acquire(path: &Path) -> Result<Self, String> {
+    pub fn try_acquire(path: &Path) -> Result<Self, LockError> {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -205,13 +223,17 @@ impl ScheduleLock {
             .create(true)
             .truncate(false)
             .open(path)
-            .map_err(|e| format!("Failed to open lock file: {e}"))?;
+            .map_err(|e| LockError::Failed(format!("Failed to open lock file: {e}")))?;
 
         let fd = file.as_raw_fd();
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
-            return Err(format!("Schedule lock held by another process: {err}"));
+            return Err(if err.kind() == std::io::ErrorKind::WouldBlock {
+                LockError::Held
+            } else {
+                LockError::Failed(format!("Failed to lock {}: {err}", path.display()))
+            });
         }
 
         Ok(Self { file })
@@ -238,12 +260,19 @@ pub fn set_schedule(
     current_exe: Option<&Path>,
 ) -> Result<(), String> {
     validate_categories(&categories)?;
+    let categories = normalize_categories(&categories);
 
     let plist_path = agent_plist_path(layout);
     let uid = host.uid();
+    // An existing plist that cannot be read could not be put back after a failed load.
+    let old_plist = if plist_path.exists() {
+        Some(fs::read(&plist_path).map_err(|e| format!("Failed to read LaunchAgent plist: {e}"))?)
+    } else {
+        None
+    };
 
     // If agent already exists on disk, bootout first
-    if plist_path.exists() {
+    if old_plist.is_some() {
         let _ = host.run(
             "/bin/launchctl",
             &["bootout", &format!("gui/{uid}/{SCHEDULE_LABEL}")],
@@ -276,10 +305,20 @@ pub fn set_schedule(
         LAUNCHCTL_TIMEOUT,
     );
     if !boot_out.ok {
-        eprintln!(
-            "Warning: launchctl bootstrap returned: {}",
-            boot_out.stderr.trim()
-        );
+        match &old_plist {
+            Some(bytes) => {
+                let _ = fs::write(&plist_path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(&plist_path);
+            }
+        }
+        let detail = boot_out.stderr.trim();
+        return Err(if detail.is_empty() {
+            "launchctl bootstrap failed".to_string()
+        } else {
+            format!("launchctl bootstrap failed: {detail}")
+        });
     }
 
     // Update config
@@ -374,7 +413,27 @@ pub fn show_schedule(
         .collect();
 
     let last_run = scheduled_runs.first();
-    if let Some(run) = last_run {
+    let newer_skip = sched.last_skip.as_ref().filter(|skip| {
+        let Some(run) = last_run else { return true };
+        match (parse_rfc3339(&run.at), parse_rfc3339(&skip.at)) {
+            (Some(run_at), Some(skip_at)) => skip_at > run_at,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    });
+    if let Some(skip) = newer_skip {
+        let date_str = if let Some(t) = parse_rfc3339(&skip.at) {
+            format_system_time(t)
+        } else {
+            skip.at.clone()
+        };
+        out.push_str(&format!(
+            "Last run: skipped on {} ({} found, below {} threshold).\n",
+            date_str,
+            format_bytes(skip.bytes),
+            threshold_str
+        ));
+    } else if let Some(run) = last_run {
         let date_str = if let Some(t) = parse_rfc3339(&run.at) {
             format_system_time(t)
         } else {
@@ -391,24 +450,13 @@ pub fn show_schedule(
             date_str,
             format_bytes(freed_bytes)
         ));
-    } else if let Some(skip) = &sched.last_skip {
-        let date_str = if let Some(t) = parse_rfc3339(&skip.at) {
-            format_system_time(t)
-        } else {
-            skip.at.clone()
-        };
-        out.push_str(&format!(
-            "Last run: skipped on {} ({} found, below {} threshold).\n",
-            date_str,
-            format_bytes(skip.bytes),
-            threshold_str
-        ));
     } else {
         out.push_str("Last run: never.\n");
     }
 
     // 3. Inspect plist binary path
-    let plist_binary = if plist_path.exists() {
+    let plist_exists = plist_path.exists();
+    let plist_binary = if plist_exists {
         plist::Value::from_file(&plist_path)
             .ok()
             .and_then(|val| val.into_dictionary())
@@ -422,20 +470,29 @@ pub fn show_schedule(
         None
     };
 
-    if let Some(ref bin) = plist_binary
-        && !bin.exists()
-    {
+    if !plist_exists {
         out.push_str(&format!(
-            "\nWarning: Binary '{}' configured in LaunchAgent does not exist.\n",
-            bin.display()
+            "\nWarning: The launch agent file is missing. A Homebrew upgrade can remove it. Load it again with:\n  taert schedule set --every {} --categories {} --min-reclaim {}\n",
+            sched.every,
+            sched.categories.join(","),
+            sched.min_reclaim
         ));
-    }
+    } else {
+        if let Some(ref bin) = plist_binary
+            && !bin.exists()
+        {
+            out.push_str(&format!(
+                "\nWarning: Binary '{}' configured in LaunchAgent does not exist.\n",
+                bin.display()
+            ));
+        }
 
-    // 4. Check if agent is loaded
-    if !is_agent_loaded(host, uid) {
-        out.push_str(
-            "\nWarning: Launch agent is not loaded in launchd. It may have been disabled in System Settings > General > Login Items & Extensions.\n"
-        );
+        // 4. Check if agent is loaded
+        if !is_agent_loaded(host, uid) {
+            out.push_str(
+                "\nWarning: Launch agent is not loaded in launchd. It may have been disabled in System Settings > General > Login Items & Extensions.\n"
+            );
+        }
     }
 
     // 5. Check if Full Disk Access is needed
@@ -476,7 +533,8 @@ pub fn run_scheduled(
     let lock_target = lock_path.unwrap_or(&default_lock);
     let _lock = match ScheduleLock::try_acquire(lock_target) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // Held lock exits with no work done
+        Err(LockError::Held) => return Ok(()),
+        Err(LockError::Failed(message)) => return Err(message),
     };
 
     // 2. Scan configured categories
@@ -484,7 +542,7 @@ pub fn run_scheduled(
     let context = ScanContext { layout, host };
     let mut all_items: Vec<ScanItem> = Vec::new();
 
-    for cat in &sched.categories {
+    for cat in &normalize_categories(&sched.categories) {
         let scan = CategoryScanner::scan_with(
             &context,
             cat,
@@ -566,25 +624,33 @@ mod tests {
     }
 
     #[test]
-    fn generated_plist_matches_stored_example_for_each_frequency() {
+    fn the_plist_matches_the_stored_example() {
         let bin = Path::new("/opt/homebrew/bin/taert");
+        let examples = [
+            (
+                ScheduleFrequency::Day,
+                include_str!("../../tests/fixtures/schedule_day.plist"),
+            ),
+            (
+                ScheduleFrequency::Week,
+                include_str!("../../tests/fixtures/schedule_week.plist"),
+            ),
+            (
+                ScheduleFrequency::Month,
+                include_str!("../../tests/fixtures/schedule_month.plist"),
+            ),
+        ];
+        for (freq, example) in examples {
+            assert_eq!(generate_plist(bin, freq).unwrap(), example, "{freq}");
+        }
+    }
 
-        let day_plist = generate_plist(bin, ScheduleFrequency::Day).unwrap();
-        assert!(
-            day_plist
-                .contains("<key>Label</key>\n\t<string>io.github.ingvarch.taert.schedule</string>")
-        );
-        assert!(day_plist.contains("<key>LowPriorityIO</key>\n\t<true/>"));
-        assert!(day_plist.contains("<key>Nice</key>\n\t<integer>10</integer>"));
-        assert!(day_plist.contains("<key>ProcessType</key>\n\t<string>Background</string>"));
-        assert!(day_plist.contains("<string>/opt/homebrew/bin/taert</string>\n\t\t<string>schedule</string>\n\t\t<string>run</string>"));
-        assert!(day_plist.contains("<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Hour</key>\n\t\t<integer>9</integer>\n\t\t<key>Minute</key>\n\t\t<integer>0</integer>\n\t</dict>"));
-
-        let week_plist = generate_plist(bin, ScheduleFrequency::Week).unwrap();
-        assert!(week_plist.contains("<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Hour</key>\n\t\t<integer>9</integer>\n\t\t<key>Minute</key>\n\t\t<integer>0</integer>\n\t\t<key>Weekday</key>\n\t\t<integer>1</integer>\n\t</dict>"));
-
-        let month_plist = generate_plist(bin, ScheduleFrequency::Month).unwrap();
-        assert!(month_plist.contains("<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Day</key>\n\t\t<integer>1</integer>\n\t\t<key>Hour</key>\n\t\t<integer>9</integer>\n\t\t<key>Minute</key>\n\t\t<integer>0</integer>\n\t</dict>"));
+    #[test]
+    fn uninstall_and_orphans_cannot_be_scheduled() {
+        for name in ["uninstall", "orphans", "clean orphans", "Orphans"] {
+            let err = validate_categories(&[name.to_string()]).unwrap_err();
+            assert!(err.contains("cannot be scheduled"), "{name}: {err}");
+        }
     }
 
     #[test]
@@ -604,6 +670,7 @@ mod tests {
             user_cache: None,
         };
         let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
         let mut config = Config::default();
 
         // Create existing plist file
@@ -641,6 +708,7 @@ mod tests {
             user_cache: None,
         };
         let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
         host.set_uid(777);
         let bin = temp.path().join("taert");
         fs::write(&bin, b"bin").unwrap();
@@ -680,8 +748,10 @@ mod tests {
         fs::write(&bin, b"bin").unwrap();
         let mut config = Config::default();
 
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
         set_schedule(
-            &FakeHost::default(),
+            &host,
             &layout,
             &mut config,
             ScheduleFrequency::Week,
@@ -734,35 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn held_lock_exits_with_no_work_done() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp.path().join("schedule.lock");
-
-        let _guard = ScheduleLock::try_acquire(&lock_path).unwrap();
-
-        let host = FakeHost::default();
-        let layout = Layout {
-            home: temp.path().to_path_buf(),
-            root: temp.path().to_path_buf(),
-            user_cache: None,
-        };
-        let mut config = Config {
-            schedule: Some(ScheduleConfig {
-                every: ScheduleFrequency::Week,
-                categories: vec!["dev".to_string()],
-                min_reclaim: 100,
-                last_skip: None,
-            }),
-            ..Default::default()
-        };
-
-        let result = run_scheduled(&host, &layout, &mut config, Some(&lock_path));
-        assert!(result.is_ok());
-        assert!(!layout.history_path().exists());
-        assert!(!layout.config_path().exists());
-    }
-
-    #[test]
     fn show_reports_a_missing_binary_and_an_unloaded_agent() {
         let temp = tempdir().unwrap();
         let layout = Layout {
@@ -771,8 +812,7 @@ mod tests {
             user_cache: None,
         };
         let host = FakeHost::default();
-        // launchctl print fails by default on FakeHost without reply
-        host.fail("/bin/launchctl", "Could not find service");
+        host.fail("/bin/launchctl print", "Could not find service");
 
         let missing_bin = temp.path().join("does_not_exist_binary");
         let plist_file = agent_plist_path(&layout);
@@ -850,32 +890,25 @@ mod tests {
     }
 
     #[test]
-    fn run_removes_only_selected_rows_and_writes_history_with_mode_schedule() {
+    fn only_selected_rows_are_removed() {
         let (_temp, layout) = sandbox();
-        let homebrew = layout.user("Library/Caches/Homebrew");
-        fs::create_dir_all(&homebrew).unwrap();
-        fs::write(homebrew.join("cache.tar.gz"), vec![0u8; 8192]).unwrap();
+        let homebrew = homebrew_cache(&layout);
+        let maven = layout.user(".m2/repository/artifact.jar");
+        fs::create_dir_all(maven.parent().unwrap()).unwrap();
+        fs::write(&maven, vec![0u8; 8192]).unwrap();
+        let mut config = scheduled(&["dev"], 1024);
 
-        let host = FakeHost::idle();
-        let lock_path = layout.user("schedule.lock");
+        run_scheduled(
+            &FakeHost::idle(),
+            &layout,
+            &mut config,
+            Some(&layout.user("schedule.lock")),
+        )
+        .unwrap();
 
-        let mut config = Config {
-            schedule: Some(ScheduleConfig {
-                every: ScheduleFrequency::Week,
-                categories: vec!["dev".to_string()],
-                min_reclaim: 1024, // 1 KB limit, we have 8 KB
-                last_skip: None,
-            }),
-            ..Default::default()
-        };
-
-        run_scheduled(&host, &layout, &mut config, Some(&lock_path)).unwrap();
-
-        // Files WERE removed
-        assert!(!homebrew.join("cache.tar.gz").exists());
-        // History was written with mode "schedule"
-        let history = HistoryLog::new(layout.history_path());
-        let runs = history.load_runs().unwrap();
+        assert!(!homebrew.exists());
+        assert!(maven.exists());
+        let runs = HistoryLog::new(layout.history_path()).load_runs().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].mode, "schedule");
         assert!(runs[0].completed);
@@ -909,5 +942,366 @@ mod tests {
         .unwrap();
 
         assert!(homebrew.join("cache.tar.gz").exists());
+    }
+
+    fn homebrew_cache(layout: &Layout) -> PathBuf {
+        let dir = layout.user("Library/Caches/Homebrew");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("cache.tar.gz");
+        fs::write(&file, vec![0u8; 8192]).unwrap();
+        file
+    }
+
+    fn scheduled(categories: &[&str], min_reclaim: u64) -> Config {
+        Config {
+            schedule: Some(ScheduleConfig {
+                every: ScheduleFrequency::Week,
+                categories: categories.iter().map(|c| c.to_string()).collect(),
+                min_reclaim,
+                last_skip: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn week_config() -> Config {
+        scheduled(&["dev", "junk"], 1_000_000_000)
+    }
+
+    #[test]
+    fn show_says_the_agent_file_is_missing() {
+        let (_temp, layout) = sandbox();
+        let history = HistoryLog::new(layout.history_path());
+
+        let output = show_schedule(&FakeHost::default(), &layout, &week_config(), &history);
+
+        assert!(
+            output.contains("The launch agent file is missing"),
+            "{output}"
+        );
+        assert!(output.contains(
+            "taert schedule set --every week --categories dev,junk --min-reclaim 1000000000"
+        ));
+        assert!(!output.contains("System Settings"));
+        assert!(!output.contains("not loaded"));
+    }
+
+    #[test]
+    fn show_with_a_loaded_agent_has_no_warning() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let plist_file = agent_plist_path(&layout);
+        fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
+        fs::write(
+            &plist_file,
+            generate_plist(&bin, ScheduleFrequency::Week).unwrap(),
+        )
+        .unwrap();
+        let host = FakeHost::default();
+        let uid = unsafe { libc::getuid() };
+        host.set_uid(uid);
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/{SCHEDULE_LABEL}"),
+            "state = waiting",
+        );
+        let history = HistoryLog::new(layout.history_path());
+
+        let output = show_schedule(&host, &layout, &week_config(), &history);
+
+        assert!(!output.contains("not loaded"), "{output}");
+        assert!(!output.contains("missing"), "{output}");
+        assert!(!output.contains("Warning"), "{output}");
+    }
+
+    #[test]
+    fn set_stores_lower_case_names_once() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        let mut config = Config::default();
+
+        set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["DEV".into(), " dev ".into(), "junk".into()],
+            1024,
+            Some(&layout.user("taert")),
+        )
+        .unwrap();
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.schedule.unwrap().categories, ["dev", "junk"]);
+        assert_eq!(config.schedule.unwrap().categories, ["dev", "junk"]);
+    }
+
+    #[test]
+    fn names_are_trimmed_lower_cased_and_listed_once() {
+        let names: Vec<String> = [" Dev", "", "JUNK", "dev", "  "]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        assert_eq!(normalize_categories(&names), ["dev", "junk"]);
+    }
+
+    #[test]
+    fn a_run_with_upper_case_names_removes_the_target() {
+        let (_temp, layout) = sandbox();
+        let homebrew = homebrew_cache(&layout);
+        let mut config = scheduled(&["DEV"], 1024);
+
+        run_scheduled(
+            &FakeHost::idle(),
+            &layout,
+            &mut config,
+            Some(&layout.user("schedule.lock")),
+        )
+        .unwrap();
+
+        assert!(!homebrew.exists());
+    }
+
+    #[test]
+    fn a_run_with_repeated_names_scans_once() {
+        let (_temp, layout) = sandbox();
+        let homebrew = homebrew_cache(&layout);
+        let mut config = scheduled(&["dev", "dev"], 1024);
+
+        run_scheduled(
+            &FakeHost::idle(),
+            &layout,
+            &mut config,
+            Some(&layout.user("schedule.lock")),
+        )
+        .unwrap();
+
+        let runs = HistoryLog::new(layout.history_path()).load_runs().unwrap();
+        let path = homebrew.parent().unwrap().display().to_string();
+        let items: Vec<_> = runs[0]
+            .items
+            .iter()
+            .filter(|i| i.path.contains(&path))
+            .collect();
+        assert_eq!(items.len(), 1, "{:?}", runs[0].items);
+        assert!(
+            runs[0]
+                .items
+                .iter()
+                .all(|i| i.outcome != OutcomeKind::Failed)
+        );
+    }
+
+    #[test]
+    fn a_failed_bootstrap_fails_set_and_saves_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.fail(
+            "/bin/launchctl bootstrap",
+            "Bootstrap failed: 5: Input/output error\n",
+        );
+        let mut config = Config::default();
+        let bin = layout.user("taert");
+
+        let err = set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["dev".into()],
+            1024,
+            Some(&bin),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Bootstrap failed: 5"), "{err}");
+        assert!(err.starts_with("launchctl bootstrap failed: "));
+        assert!(config.schedule.is_none());
+        assert!(!layout.config_path().exists());
+        assert!(!agent_plist_path(&layout).exists());
+        assert_eq!(
+            host.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("/bin/launchctl bootstrap"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_failed_bootstrap_puts_the_old_plist_back() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.fail("/bin/launchctl bootstrap", "");
+        let plist_file = agent_plist_path(&layout);
+        fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
+        fs::write(&plist_file, b"old").unwrap();
+        let mut config = Config::default();
+
+        let err = set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["dev".into()],
+            1024,
+            Some(&layout.user("taert")),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "launchctl bootstrap failed");
+        assert_eq!(fs::read(&plist_file).unwrap(), b"old");
+        assert_eq!(
+            host.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("/bin/launchctl bootstrap"))
+                .count(),
+            1
+        );
+        assert!(config.schedule.is_none());
+        assert!(!layout.config_path().exists());
+    }
+
+    fn history_with_a_run_at(layout: &Layout, at: &str) {
+        let start = format!(
+            r#"{{"event":"start","run":"r1","at":"{at}","command":"schedule run","mode":"schedule","version":"0"}}"#
+        );
+        let end = format!(r#"{{"event":"end","run":"r1","at":"{at}"}}"#);
+        fs::create_dir_all(layout.history_path().parent().unwrap()).unwrap();
+        fs::write(layout.history_path(), format!("{start}\n{end}\n")).unwrap();
+    }
+
+    fn last_run_line(output: &str) -> &str {
+        output
+            .lines()
+            .find(|l| l.starts_with("Last run:"))
+            .unwrap_or_default()
+    }
+
+    fn show_with_skip(layout: &Layout, skip_at: &str) -> String {
+        let mut config = week_config();
+        config.schedule.as_mut().unwrap().last_skip = Some(ScheduleSkip {
+            at: skip_at.to_string(),
+            bytes: 2048,
+        });
+        let history = HistoryLog::new(layout.history_path());
+        show_schedule(&FakeHost::default(), layout, &config, &history)
+    }
+
+    #[test]
+    fn show_reports_the_newer_skip() {
+        let (_temp, layout) = sandbox();
+        history_with_a_run_at(&layout, "2026-01-01T00:00:00Z");
+
+        let output = show_with_skip(&layout, "2026-02-01T00:00:00Z");
+
+        let line = last_run_line(&output);
+        assert!(line.starts_with("Last run: skipped on"), "{output}");
+        assert!(!line.contains("freed"), "{output}");
+    }
+
+    #[test]
+    fn show_reports_the_newer_run() {
+        let (_temp, layout) = sandbox();
+        history_with_a_run_at(&layout, "2026-02-01T00:00:00Z");
+
+        let output = show_with_skip(&layout, "2026-01-01T00:00:00Z");
+
+        let line = last_run_line(&output);
+        assert!(line.contains("freed"), "{output}");
+        assert!(!line.contains("skipped"), "{output}");
+    }
+
+    #[test]
+    fn a_skip_with_a_broken_date_loses_to_the_run() {
+        let (_temp, layout) = sandbox();
+        history_with_a_run_at(&layout, "2026-01-01T00:00:00Z");
+
+        let output = show_with_skip(&layout, "not a date");
+
+        assert!(last_run_line(&output).contains("freed"), "{output}");
+    }
+
+    #[test]
+    fn a_run_with_a_broken_date_loses_to_the_skip() {
+        let (_temp, layout) = sandbox();
+        history_with_a_run_at(&layout, "not a date");
+
+        let output = show_with_skip(&layout, "2026-02-01T00:00:00Z");
+
+        assert!(
+            last_run_line(&output).starts_with("Last run: skipped on"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_old_plist_stops_set_before_anything_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        let plist_file = agent_plist_path(&layout);
+        fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
+        fs::write(&plist_file, b"old").unwrap();
+        fs::set_permissions(&plist_file, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut config = Config::default();
+
+        let err = set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            ScheduleFrequency::Week,
+            vec!["dev".into()],
+            1024,
+            Some(&layout.user("taert")),
+        )
+        .unwrap_err();
+
+        fs::set_permissions(&plist_file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(err.starts_with("Failed to read LaunchAgent plist"), "{err}");
+        assert!(host.calls.lock().unwrap().is_empty());
+        assert_eq!(fs::read(&plist_file).unwrap(), b"old");
+        assert!(config.schedule.is_none());
+    }
+
+    #[test]
+    fn an_unreadable_lock_file_fails_the_run() {
+        let (temp, layout) = sandbox();
+        let file = temp.path().join("file.txt");
+        fs::write(&file, b"x").unwrap();
+        let mut config = scheduled(&["dev"], 1024);
+
+        let result = run_scheduled(
+            &FakeHost::idle(),
+            &layout,
+            &mut config,
+            Some(&file.join("schedule.lock")),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_held_lock_decides_the_outcome() {
+        let (_temp, layout) = sandbox();
+        let homebrew = homebrew_cache(&layout);
+        let lock_path = layout.user("schedule.lock");
+        let _held = ScheduleLock::try_acquire(&lock_path).unwrap();
+        let mut config = scheduled(&["dev"], 1024);
+
+        let result = run_scheduled(&FakeHost::idle(), &layout, &mut config, Some(&lock_path));
+
+        assert!(result.is_ok());
+        assert!(homebrew.exists());
+        assert!(!layout.history_path().exists());
+        assert!(config.schedule.unwrap().last_skip.is_none());
+        assert!(!layout.config_path().exists());
     }
 }

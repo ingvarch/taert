@@ -62,11 +62,6 @@ homebrew_casks:
         - bash
         - zsh
         - fish
-    uninstall:
-      launchctl:
-        - io.github.ingvarch.taert.schedule
-      delete:
-        - ~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist
     zap:
       launchctl:
         - io.github.ingvarch.taert.schedule
