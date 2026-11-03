@@ -3,20 +3,20 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use rayon::prelude::*;
 
 use super::apps::{InstalledApp, find_apps};
 use super::host::Host;
 use super::layout::Layout;
+use super::path_utils::{STALE_AFTER, changed_since};
 use super::processes;
 
 pub const APP_CACHES: &str = "App caches";
 pub const BROWSER_CACHES: &str = "Browser caches";
 
 const CACHES: &str = "Library/Caches";
-const STALE_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheRow {
@@ -129,25 +129,6 @@ impl Running<'_> {
 /// A cache starts selected when nothing changed in it for a while and its app is not running.
 pub fn starts_selected(stale: bool, running: bool) -> bool {
     stale && !running
-}
-
-/// Did anything in the tree change after `cutoff`? What cannot be read counts as changed.
-fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return true;
-    };
-    if meta.modified().is_ok_and(|time| time > cutoff) {
-        return true;
-    }
-    if !meta.is_dir() {
-        return false;
-    }
-    match fs::read_dir(path) {
-        Ok(entries) => entries
-            .flatten()
-            .any(|entry| changed_since(&entry.path(), cutoff)),
-        Err(_) => true,
-    }
 }
 
 fn runs_inside(table: &[(u32, u32, String)], bundle: &Path) -> bool {
@@ -289,6 +270,7 @@ mod tests {
     use crate::core::host::fake::FakeHost;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 

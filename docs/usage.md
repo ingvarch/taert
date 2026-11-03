@@ -97,16 +97,16 @@ Safari keeps its cache in `~/Library/Caches/com.apple.Safari` and in a container
 
 `taert clean orphans` inspects the top level (one level deep) of 11 user Library folders: `~/Library/Application Scripts`, `Application Support`, `Caches`, `Containers`, `Cookies`, `Group Containers`, `HTTPStorages`, `Logs`, `Preferences`, `Saved Application State`, and `WebKit`. Symlinks are skipped, and `~/Library/LaunchAgents` is left to Startup Items.
 
-Only names that carry a reverse-DNS bundle id are found (free-form names such as `Foo Editor` are never listed). In `Containers`, the id is read from the container metadata plist (`MCMMetadataIdentifier`). In `Group Containers`, a leading `group.` or 10-character team id prefix is removed. An id is dropped if it starts with `com.apple.`, matches an installed app bundle id or embedded helper/extension id, or for shared group containers shares a vendor token with an installed app.
+Only names that carry a reverse-DNS bundle id are found (free-form names such as `Foo Editor` are never listed). In `Containers`, the id is read from the container metadata plist (`MCMMetadataIdentifier`), in either of its two file names. In `Group Containers`, a leading `group.` or 10-character team id prefix is removed. An id is dropped if it starts with `com.apple.`, matches an installed app bundle id or embedded helper/extension id, or for shared group containers shares a vendor token with an installed app.
 
 Before listing an orphan candidate, taert checks Spotlight with `mdfind` for the bundle id. If Spotlight finds the app on any connected drive (including the Trash), the candidate is dropped. If the Spotlight check fails, the candidate stays listed but starts unselected.
 
-Apps on a drive that is not connected look removed. To protect them, rows changed in the last 30 days start unselected.
+Apps on a drive that is not connected look removed. To protect them, rows with a file changed in the last 30 days anywhere inside start unselected. So does a row with a part taert cannot read.
 
 | Condition | Starts Selected (`taert clean orphans`) |
 |---|---|
-| Exact id, age ≥ 30 days, Spotlight confirmed missing | Yes |
-| Exact id, age < 30 days (or recent child < 30 days) | No |
+| Exact id, nothing inside changed for 30 days, Spotlight confirmed missing | Yes |
+| Exact id, a file changed < 30 days ago anywhere inside (or a part that cannot be read) | No |
 | Exact id, Spotlight check failed | No |
 | Shared id (`Group Containers`) | No |
 | Any orphan row in `taert clean` (no category) or TUI All row | No |

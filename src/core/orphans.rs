@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -13,13 +13,11 @@ use crate::core::catalog::Category;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
 use crate::core::leftovers::{self, Evidence, UninstallRole};
-use crate::core::path_utils::prettify_path;
+use crate::core::path_utils::{STALE_AFTER, changed_since, prettify_path};
 use crate::core::scanner::{self, CategoryScan, ScanProgressEvent, ToolGroup};
 use crate::core::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "orphans";
-
-const THIRTY_DAYS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CandidateKind {
@@ -64,48 +62,6 @@ fn cut_group_container_name(name: &str) -> &str {
         }
     }
     name
-}
-
-fn read_container_identifier(container: &Path) -> Option<String> {
-    let p1 = container.join(".com.apple.containermanagerd.metadata.plist");
-    let p2 = container.join(".com.apple.containermanager.metadata.plist");
-    let path = if p1.exists() {
-        p1
-    } else if p2.exists() {
-        p2
-    } else {
-        return None;
-    };
-    let val = plist::Value::from_file(path).ok()?;
-    val.as_dictionary()?
-        .get("MCMMetadataIdentifier")?
-        .as_string()
-        .map(str::to_string)
-}
-
-fn newest_modified(path: &Path, now: SystemTime) -> Option<SystemTime> {
-    let mut newest = fs::symlink_metadata(path).ok()?.modified().ok()?;
-    if newest > now {
-        newest = now;
-    }
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
-                let effective = if mtime > now { now } else { mtime };
-                if effective > newest {
-                    newest = effective;
-                }
-            }
-        }
-    }
-    Some(newest)
-}
-
-fn is_old(path: &Path, now: SystemTime) -> bool {
-    newest_modified(path, now).is_some_and(|mtime| {
-        now.duration_since(mtime)
-            .is_ok_and(|age| age >= THIRTY_DAYS)
-    })
 }
 
 pub fn scan(
@@ -180,7 +136,7 @@ pub fn scan(
             let name_str = file_name.to_string_lossy();
 
             let (id, kind) = if is_containers {
-                let Some(id) = read_container_identifier(&entry_path) else {
+                let Some(id) = leftovers::container_owner(&entry_path) else {
                     continue;
                 };
                 (id, CandidateKind::Exact)
@@ -292,6 +248,7 @@ pub fn scan(
 
     // Step 5 & 6: Build rows
     let mut groups_by_id: HashMap<String, Vec<scanner::ScanItem>> = HashMap::new();
+    let cutoff = now - STALE_AFTER;
 
     for candidate in surviving_candidates {
         if cancelled() {
@@ -302,8 +259,9 @@ pub fn scan(
             .get(&candidate.id)
             .copied()
             .unwrap_or(false);
-        let selected =
-            candidate.kind == CandidateKind::Exact && !failed && is_old(&candidate.path, now);
+        let selected = candidate.kind == CandidateKind::Exact
+            && !failed
+            && !changed_since(&candidate.path, cutoff);
 
         if let Some(mut item) = scanner::scan_folder(candidate.path, selected, ignore, &progress) {
             let evidence = match candidate.kind {
@@ -366,6 +324,7 @@ mod tests {
     use crate::core::host::fake::FakeHost;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::path::Path;
     use std::time::Duration;
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -648,6 +607,34 @@ mod tests {
             .unwrap()
             .set_modified(now - 40 * DAY)
             .unwrap();
+
+        let res = scan(&layout, &host, &IgnoreStore::default(), now, None, None);
+        assert_eq!(res.groups.len(), 1);
+        assert!(!res.groups[0].items[0].selected);
+    }
+
+    #[test]
+    fn a_folder_with_a_recent_file_deep_inside_starts_unselected() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+
+        let now = SystemTime::now();
+        let folder = layout.user("Library/Caches/com.gone.app");
+        let data = folder.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        let file = data.join("recent.data");
+        fs::write(&file, vec![0_u8; 4096]).unwrap();
+        fs::File::open(&file)
+            .unwrap()
+            .set_modified(now - 5 * DAY)
+            .unwrap();
+        for old in [&data, &folder] {
+            fs::File::open(old)
+                .unwrap()
+                .set_modified(now - 40 * DAY)
+                .unwrap();
+        }
 
         let res = scan(&layout, &host, &IgnoreStore::default(), now, None, None);
         assert_eq!(res.groups.len(), 1);

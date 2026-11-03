@@ -1,8 +1,31 @@
-//! Path prettification and Home directory tilde contraction.
+//! Path prettification, Home directory tilde contraction, and the 30-day change check.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::core::safety::Safety;
+
+pub(crate) const STALE_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Did anything in the tree change after `cutoff`? What cannot be read counts as changed.
+pub(crate) fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return true;
+    };
+    if meta.modified().is_ok_and(|time| time > cutoff) {
+        return true;
+    }
+    if !meta.is_dir() {
+        return false;
+    }
+    match fs::read_dir(path) {
+        Ok(entries) => entries
+            .flatten()
+            .any(|entry| changed_since(&entry.path(), cutoff)),
+        Err(_) => true,
+    }
+}
 
 /// Contract absolute paths starting with user's home directory to "~/..."
 pub fn prettify_path(path: &Path) -> String {

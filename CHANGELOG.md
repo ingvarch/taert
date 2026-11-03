@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `taert optimize` is gone; `taert doctor` replaces it (removed in 5a80563, never recorded).
 
 ### Fixed
+- **Orphaned app files**: a row starts selected only when nothing inside it changed for 30 days, as for app caches. Before, only the folder and its direct children counted, so a recent file deeper inside did not protect it. A row with a part taert cannot read starts unselected.
+- **Uninstall**: a container named by a UUID that has only the older `.com.apple.containermanager.metadata.plist` is now listed, and an emptied container holding only that file is removed instead of reported as a failure.
 - **Flags that do nothing**: `taert schedule`, `taert ignore` and `taert config` now stop with an error when given `--dry-run` or `--json`. Before, `--dry-run` still ran the scheduled cleanup, wrote the schedule agent, and saved the ignore list and settings.
 - **Safety**: `~/Library/Keychains` and everything in it is refused by Explore Storage, the clean scans, large files, and uninstall, as it already was for compress. Purge rows follow the same safety rule as the clean scans: no row is listed inside an ignored folder, or holding one, the walk does not enter an ignored folder, rows under 1 KiB no longer show, and a project below a symlinked folder gives no rows.
 - **Slim**: an app counts as running when `ps` prints its program in other letter case, under the app's real path, or with two spaces in a row in the name. Slim and compress now share one running check.
