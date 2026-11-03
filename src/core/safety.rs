@@ -689,17 +689,9 @@ impl Safety {
     }
 
     fn check_bundle_not_running(bundle: &Path, host: &dyn Host) -> Result<(), SafetyError> {
-        let processes = crate::core::uninstaller::checked_process_table(host)
-            .ok_or(SafetyError::ProcessListUnavailable)?;
-        let lower = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
-        let mut names = vec![lower(bundle)];
-        if let Ok(canonical) = bundle.canonicalize() {
-            names.push(lower(&canonical));
-        }
-        let running = processes.iter().any(|(_, _, comm)| {
-            let program = lower(Path::new(comm));
-            names.iter().any(|name| program.starts_with(name))
-        });
+        let processes =
+            crate::core::processes::read(host).ok_or(SafetyError::ProcessListUnavailable)?;
+        let running = crate::core::processes::bundle_is_running(&processes, bundle);
         if running {
             return Err(SafetyError::AppIsRunning);
         }

@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use super::apps::{InstalledApp, find_apps};
 use super::host::Host;
 use super::layout::Layout;
-use super::uninstaller::{checked_process_table, is_inside_any};
+use super::processes;
 
 pub const APP_CACHES: &str = "App caches";
 pub const BROWSER_CACHES: &str = "Browser caches";
@@ -101,10 +101,8 @@ const BROWSERS: &[Browser] = &[
 /// These hold sync state, and macOS refuses to remove some of them.
 const SYNC_STATE: &[&str] = &["CloudKit", "FamilyCircle"];
 
-type Processes = [(u32, u32, String)];
-
 /// What is running, or nothing known when `ps` failed. Unknown counts as running.
-struct Running<'a>(Option<&'a Processes>);
+struct Running<'a>(Option<&'a [(u32, u32, String)]>);
 
 impl Running<'_> {
     fn app_with_id(&self, apps: &[InstalledApp], ids: &[&str]) -> bool {
@@ -152,17 +150,17 @@ fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
     }
 }
 
-fn runs_inside(processes: &Processes, bundle: &Path) -> bool {
+fn runs_inside(table: &[(u32, u32, String)], bundle: &Path) -> bool {
     let mut folders = vec![bundle.to_path_buf()];
     folders.extend(fs::canonicalize(bundle));
-    processes
+    table
         .iter()
-        .any(|(_, _, program)| is_inside_any(program, &folders))
+        .any(|(_, _, program)| processes::is_inside_any(program, &folders))
 }
 
 /// Looks in `Contents/MacOS` only: extensions in a bundle can run while the app is closed.
-fn runs_bundle_named(processes: &Processes, bundles: &[&str]) -> bool {
-    processes.iter().any(|(_, _, program)| {
+fn runs_bundle_named(table: &[(u32, u32, String)], bundles: &[&str]) -> bool {
+    table.iter().any(|(_, _, program)| {
         bundles
             .iter()
             .any(|bundle| program.contains(&format!("/{bundle}/Contents/MacOS/")))
@@ -255,10 +253,10 @@ fn browser_group(
 
 /// `named` lists the paths other targets already cover.
 pub fn plan(layout: &Layout, host: &dyn Host, named: &[PathBuf], now: SystemTime) -> CachePlan {
-    let processes = checked_process_table(host);
-    let running = Running(processes.as_deref());
+    let table = processes::read(host);
+    let running = Running(table.as_deref());
     let mut notes = Vec::new();
-    if processes.is_none() {
+    if table.is_none() {
         notes.push(
             "taert could not list the running programs, \
              so no app or browser cache starts selected."

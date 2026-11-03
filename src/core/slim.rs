@@ -27,6 +27,7 @@ use super::bytes::format_bytes;
 use super::history::{HistorySession, ItemOutcome};
 use super::host::Host;
 use super::layout::Layout;
+use super::processes;
 use super::safety::Safety;
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
 use super::sizer::DirSizer;
@@ -471,32 +472,6 @@ pub fn is_apple_silicon(host: &dyn Host) -> bool {
         && (out_full.stdout.contains("hw.optional.arm64: 1") || out_full.stdout.trim() == "1")
 }
 
-/// Running processes table representation: `(pid, ppid, comm)`.
-pub type Processes = [(u32, u32, String)];
-
-/// Retrieves running processes from `ps`.
-pub fn running_processes(host: &dyn Host) -> Result<Vec<(u32, u32, String)>, String> {
-    let out = host.run(
-        "/bin/ps",
-        &["-axo", "pid=,ppid=,comm="],
-        Duration::from_secs(5),
-    );
-    if !out.ok {
-        return Err(PS_FAILED.to_string());
-    }
-    Ok(out
-        .stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse().ok()?;
-            let ppid = parts.next()?.parse().ok()?;
-            let comm = parts.collect::<Vec<_>>().join(" ");
-            Some((pid, ppid, comm))
-        })
-        .collect())
-}
-
 /// Verifies whether an app qualifies for slimming according to safety and integrity rules.
 /// Returns the qualifying universal binaries or an error describing why it stays.
 pub fn check_eligibility(
@@ -505,7 +480,7 @@ pub fn check_eligibility(
     layout: &Layout,
     ignore: &IgnoreStore,
     rosetta_apps: &HashSet<String>,
-    running: Option<&Processes>,
+    running: Option<&[(u32, u32, String)]>,
     skip_developer_id: bool,
 ) -> Result<Vec<PathBuf>, String> {
     // 1. Apple apps: bundle id starting with com.apple.
@@ -532,15 +507,10 @@ pub fn check_eligibility(
     }
 
     // 4. Running apps
-    if let Some(processes) = running {
-        let is_running = processes.iter().any(|(_, _, comm)| {
-            let comm_path = Path::new(comm);
-            comm_path.starts_with(&app.path)
-                || comm.contains(&format!("{}/Contents/MacOS/", app.path.display()))
-        });
-        if is_running {
-            return Err("App is currently running".to_string());
-        }
+    if let Some(table) = running
+        && processes::bundle_is_running(table, &app.path)
+    {
+        return Err("App is currently running".to_string());
     }
 
     // 5. Owned by another user, or holding a setuid or setgid file
@@ -895,13 +865,8 @@ fn stage_clone(
     if fingerprint(&app.path).ok() != Some(before) {
         return Err((6, "Original app changed".to_string()));
     }
-    let running = running_processes(host).map_err(|e| (6, e))?;
-    let is_running = running.iter().any(|(_, _, comm)| {
-        let comm_path = Path::new(comm);
-        comm_path.starts_with(&app.path)
-            || comm.contains(&format!("{}/Contents/MacOS/", app.path.display()))
-    });
-    if is_running {
+    let table = processes::read(host).ok_or_else(|| (6, PS_FAILED.to_string()))?;
+    if processes::bundle_is_running(&table, &app.path) {
         return Err((6, "App started running during slimming".to_string()));
     }
 
@@ -958,7 +923,7 @@ pub fn slim_scan(
 
     let installed = candidate_apps(layout);
     let rosetta = rosetta_bundle_ids(layout);
-    let running = running_processes(host);
+    let running = processes::read(host);
 
     for root in layout.app_roots() {
         let mut items = Vec::new();
@@ -975,7 +940,7 @@ pub fn slim_scan(
                 let _ = tx.send(ScanProgressEvent::ScanningPath(app.name.clone()));
             }
 
-            let Ok(running) = &running else {
+            let Some(running) = &running else {
                 scan.notes.push(format!("{} stays: {PS_FAILED}.", app.name));
                 continue;
             };
@@ -1260,6 +1225,85 @@ mod tests {
             true,
         );
         assert_eq!(res.unwrap_err(), "App is currently running");
+    }
+
+    fn eligibility_with_table(
+        app: &InstalledApp,
+        layout: &Layout,
+        table: &[(u32, u32, String)],
+    ) -> Result<Vec<PathBuf>, String> {
+        check_eligibility(
+            app,
+            &FakeHost::idle(),
+            layout,
+            &IgnoreStore::default(),
+            &HashSet::new(),
+            Some(table),
+            true,
+        )
+    }
+
+    #[test]
+    fn a_running_app_in_other_letter_case_is_refused() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("RunningApp.app");
+        write_test_app(&app_path, "com.vendor.running");
+        let app = app_for(&app_path, "com.vendor.running");
+        let program = format!("{}/Contents/MacOS/testapp", app_path.display()).to_lowercase();
+
+        let res = eligibility_with_table(&app, &layout, &[(123, 1, program)]);
+
+        assert_eq!(res.unwrap_err(), "App is currently running");
+    }
+
+    #[test]
+    fn a_running_app_under_its_real_path_is_refused() {
+        let (_dir, layout) = test_env();
+        let real = layout.system("Elsewhere").join("Real.app");
+        write_test_app(&real, "com.vendor.real");
+        let link = layout.system("Applications").join("Real.app");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let app = app_for(&link, "com.vendor.real");
+        let program = format!(
+            "{}/Contents/MacOS/testapp",
+            real.canonicalize().unwrap().display()
+        );
+
+        let res = eligibility_with_table(&app, &layout, &[(123, 1, program)]);
+
+        assert_eq!(res.unwrap_err(), "App is currently running");
+    }
+
+    #[test]
+    fn an_app_with_two_spaces_in_its_name_is_seen_running() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Two  Spaces.app");
+        write_test_app(&app_path, "com.vendor.twospaces");
+        let host = FakeHost::default();
+        host.reply(
+            "codesign -dv",
+            "Authority=Developer ID Application: Acme Corp (123)\n",
+        );
+        host.reply("codesign --verify", "");
+        host.reply("spctl", "");
+        host.reply(
+            "/bin/ps",
+            &format!(
+                "  123     1 {}/Contents/MacOS/testapp\n",
+                app_path.display()
+            ),
+        );
+
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+
+        assert!(scan.groups.is_empty(), "{:?}", scan.groups);
+        assert!(
+            scan.notes
+                .iter()
+                .any(|note| note.ends_with("stays: App is currently running.")),
+            "{:?}",
+            scan.notes
+        );
     }
 
     #[test]
@@ -2045,10 +2089,7 @@ mod tests {
         host.reply("ditto", "");
         fake_ditto(&host, &app_path);
 
-        assert_eq!(
-            running_processes(&host).unwrap_err(),
-            "Could not list running programs"
-        );
+        assert!(crate::core::processes::read(&host).is_none());
 
         let result = slim_app(
             &app_for(&app_path, "com.vendor.psy"),
