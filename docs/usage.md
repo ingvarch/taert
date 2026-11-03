@@ -20,7 +20,7 @@ taert
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
 - **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Personal files and apps move to the Trash by default (recoverable), while root files are permanently deleted. Use `--permanent` to skip Trash. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
-- **Homebrew**: Lists the installed formulae and casks with their size, whether you installed them or they came as dependencies, what is outdated or pinned, and how many packages use each one. Formulae and casks sit in separate frames, largest first. You can search and scroll, and nothing in this list can be selected or removed. Casks are removed with Uninstall Apps. See [Homebrew Packages](#homebrew-packages-taert-brew).
+- **Homebrew**: Lists the installed formulae and casks with their size, whether you installed them or they came as dependencies, what is outdated or pinned, and how many packages use each one. Formulae and casks sit in separate frames, largest first. You can search and scroll, but you cannot select several rows. `Enter` removes the focused formula, as described under [Remove a formula](#remove-a-formula-taert-brew-uninstall). Casks are removed with Uninstall Apps. See [Homebrew Packages](#homebrew-packages-taert-brew).
 - **Startup Items**: Review launch agents, launch daemons, and classic login items. Shows the owning app, service kind, live CPU% and memory if active, and whether the service is enabled, disabled, or broken (missing executable on disk). On wide terminals (≥100 columns), details appear in a side card. `Space` toggles an item (opens a confirmation modal naming the owning app before anything is switched off) or removes a broken user agent plist. Apple system services are hidden by default and read-only. See [Startup Items](#startup-items-taert-startup) for what counts as Apple's.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and deletion via `D` or `Backspace` (offering "Move to Trash" by default or "Delete Permanently").
 - **Large Files**: Flat list of the largest and oldest files and packages across your home folder (or any given path) to answer "what big things did I forget about?". Shows item name, enclosing top-level folder, size, and last used date (queried via Spotlight, fallback to modified date). `⇧S`, `⇧N`, and `⇧D` sort by size, name, or last used date. Filter interactively with `/`, reveal in Finder with `O`, and select with `Space`. Selected items move to the Trash upon confirmation.
@@ -228,7 +228,43 @@ Casks (remove with taert uninstall)
 
 If Homebrew is not installed, the list is empty and the note `Homebrew is not installed.` explains why. If Homebrew cannot list its packages, taert prints `Error: ...` and exits with a failure, never an empty list.
 
-`taert brew` only reads. It makes one `brew info --json=v2 --installed` call and removes nothing. Casks are removed with `taert uninstall`.
+Listing makes one `brew info --json=v2 --installed` call and removes nothing. `--plain` and `--json` only read. In the terminal list, `Enter` can remove a formula (described below). Casks are removed with `taert uninstall`.
+
+In a terminal, the list has no check marks, and `Space`, `A`, and `N` do nothing. `Enter` acts on the focused row:
+
+- On a formula that nothing uses, it asks to remove that formula. The question says that Homebrew removes it, and the footer shows `Uninstall <name>` with `↵`. After you confirm, taert removes it as `taert brew uninstall` does, shows the result, and reads the list again, so the formula is gone from it.
+- On a cask, a pinned formula, or a formula that other formulae use, it shows the reason at the bottom of the screen and changes nothing. The footer shows `Uninstall` dimmed.
+
+#### Remove a formula (`taert brew uninstall`)
+
+```bash
+# Ask first
+taert brew uninstall fd
+
+# Only show what would be removed
+taert brew uninstall fd --dry-run
+
+# Remove without asking
+taert brew uninstall fd --force
+
+# The plan as JSON, nothing is removed
+taert brew uninstall fd --json
+```
+
+taert refuses, prints `Error: ...`, exits with a failure, and runs no removing call when:
+
+- the name is a cask: `<name> is a cask. Remove it with taert uninstall.` Casks go through `taert uninstall`, which also quits the app and removes its files.
+- the formula is pinned: `<name> is pinned. Run brew unpin <name> first.` A pin means you asked Homebrew to keep it as it is.
+- other installed formulae use it: `<name> stays: <a>, <b> use it.` Removing it would break them.
+- the name is not installed, or Homebrew is not installed.
+
+`--force` does not skip a refusal. It only skips the question.
+
+Without `--force`, taert prints `Remove <name> <version> (<size>) with brew uninstall? [y/N] ` and reads one line. `y` or `yes`, in any case, goes on. Anything else prints `Operation cancelled.` and removes nothing. The question is a plain prompt, also in a terminal; this command opens no screen. `--dry-run` prints `Would remove <name> <version> (<size>) with brew uninstall.` and removes nothing. `--json` prints the plan, with the `brew` task on the row, and removes nothing.
+
+Removal goes through the same path as `taert brew cleanup`. Before it removes anything, taert reads the installed packages again. If another formula uses the formula by then, taert reports it and the command fails. `brew uninstall <name>` removes one version at a time without `--force`, so taert repeats it until no version folder is left, with `HOMEBREW_NO_AUTOREMOVE=1`, so Homebrew does not also remove other unused formulae. taert never passes `--force`, `--zap`, or `--ignore-dependencies`.
+
+The history gets one `removed` item under the command `brew uninstall`, with the bytes freed, measured on the Cellar folder before and after.
 
 #### Cleanup (`taert brew cleanup`)
 
@@ -250,7 +286,7 @@ The list has two groups, with one row per formula and the allocated size of its 
 
 Both groups start selected, except pinned formulae. A pinned formula stays out of every default. On the command line, `--force` removes the selected rows. `--plain`, or a run outside a terminal, asks first, as `taert clean` does, and you can change the selection before you confirm. In a terminal, the list opens in the select screen. It starts with nothing selected, so you choose the rows. The rows stay in an order that is safe to remove: a formula is listed before the formulae it needs, so when taert reaches a dependency, the formula that used it is already gone.
 
-Removal goes through Homebrew and never deletes a file in the Cellar itself, so Homebrew's records stay right. An unused dependency is removed with `brew uninstall <name>` and an old version with `brew cleanup <name>`. Both run with `HOMEBREW_NO_AUTOREMOVE=1`, because Homebrew would otherwise also remove every other unused formula after the one you picked. Before it uninstalls each dependency, taert reads the installed packages again. If another formula uses the dependency by then, or it is gone, taert skips it and reports why, and the rest goes on. If a version is still there when brew stops removing, taert reports which versions are still installed. taert never passes `--force`, `--zap`, or `--ignore-dependencies`.
+Removal goes through Homebrew and never deletes a file in the Cellar itself, so Homebrew's records stay right. An unused dependency is removed with `brew uninstall <name>` and an old version with `brew cleanup <name>`. Both run with `HOMEBREW_NO_AUTOREMOVE=1`, because Homebrew would otherwise also remove every other unused formula after the one you picked. Before it uninstalls each dependency, taert reads the installed packages again. If another formula uses the dependency by then, it is pinned, or it is gone, taert skips it and reports why, and the rest goes on. This also skips a pinned formula you select by hand. If a version is still there when brew stops removing, taert reports which versions are still installed. taert never passes `--force`, `--zap`, or `--ignore-dependencies`.
 
 Each package goes into the removal history under the command `brew cleanup`, with the bytes it freed, measured on its Cellar folder before and after. If Homebrew is not installed, the list is empty with the note `Homebrew is not installed.` If Homebrew fails to answer one of the three read commands, taert prints `Error: ...` and exits with a failure.
 
@@ -613,7 +649,7 @@ By default, taert moves personal files and user apps to macOS Trash instead of d
 - **Large Files (`taert large`)**: Selected files and packages move to Trash (default).
 - **Uninstall Apps (`taert uninstall`)**: User-level app bundles and leftovers in home folders move to Trash. Files requiring root (`/Library/...`) and package receipts are deleted permanently because root has no Trash.
 - **Orphaned App Files (`taert clean orphans`)**: Orphan rows move to the Trash because they hold personal data in Application Support and Containers.
-- **Caches, Build Artifacts & Docker**: Caches (`taert clean`), project artifacts (`taert purge`), Docker items (`taert docker`), Homebrew cleanup (`taert brew cleanup`, removed by Homebrew), and emptying the Trash are always permanently removed.
+- **Caches, Build Artifacts & Docker**: Caches (`taert clean`), project artifacts (`taert purge`), Docker items (`taert docker`), Homebrew cleanup and uninstall (`taert brew cleanup`, `taert brew uninstall`, and Enter on the Homebrew list, removed by Homebrew), and emptying the Trash are always permanently removed.
 - **`--permanent` flag**: Global CLI flag (`taert --permanent ...`) that skips Trash and deletes files and apps permanently.
 
 For configuration and preferences, see [configuration.md](configuration.md).

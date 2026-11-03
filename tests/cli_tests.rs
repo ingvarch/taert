@@ -46,6 +46,19 @@ fn the_help_lists_the_brew_command() {
 }
 
 #[test]
+fn brew_help_lists_uninstall() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .args(["brew", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("uninstall"))
+        .stdout(predicate::str::contains(
+            "Remove one formula through Homebrew",
+        ));
+}
+
+#[test]
 fn clean_help_mentions_orphans() {
     let home = tempfile::tempdir().unwrap();
     taert(&home)

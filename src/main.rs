@@ -96,6 +96,9 @@ fn main() -> ExitCode {
             Some(BrewAction::Cleanup) => {
                 handle_brew_cleanup(&cli, use_plain, &ignore, &context, console)
             }
+            Some(BrewAction::Uninstall { ref name }) => {
+                handle_brew_uninstall(name, &cli, &ignore, &context, console)
+            }
             None => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
         },
 
@@ -275,6 +278,74 @@ fn handle_brew_cleanup(
     }
 }
 
+fn handle_brew_uninstall(
+    name: &str,
+    cli: &Cli,
+    ignore: &IgnoreStore,
+    context: &ScanContext,
+    console: &mut Console,
+) -> ExitCode {
+    let scan = match homebrew::uninstall_plan(context.layout, context.host, name) {
+        Ok(scan) => scan,
+        Err(error) => {
+            let _ = writeln!(console.err, "Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if cli.json {
+        return match serde_json::to_string_pretty(&scan) {
+            Ok(json) => {
+                let _ = writeln!(console.out, "{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                let _ = writeln!(console.err, "Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let Some(row) = scan.selected_items().first().copied() else {
+        let _ = writeln!(
+            console.err,
+            "Error: taert has nothing to remove for {name}."
+        );
+        return ExitCode::FAILURE;
+    };
+    let what = format!(
+        "{} ({}) with brew uninstall",
+        row.path.display(),
+        format_bytes(row.size_bytes)
+    );
+    if cli.dry_run {
+        let _ = writeln!(console.out, "Would remove {what}.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mode = if cli.force {
+        "force"
+    } else {
+        let _ = write!(console.out, "Remove {what}? [y/N] ");
+        let _ = console.out.flush();
+        let mut answer = String::new();
+        let _ = console.input.read_line(&mut answer);
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            let _ = writeln!(console.out, "Operation cancelled.");
+            return ExitCode::SUCCESS;
+        }
+        "interactive"
+    };
+
+    let report = clean_and_log(&scan, cli, ignore, "brew uninstall", mode, context);
+    let _ = PlainRunner::write_report("Uninstall", &report, console);
+    if report.failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn handle_brew(
     cli: &Cli,
     use_plain: bool,
@@ -316,11 +387,7 @@ fn handle_brew(
         return ExitCode::SUCCESS;
     }
 
-    let mut app = ui::app::App::with_select(
-        homebrew::list_scan(&inventory),
-        ignore.clone(),
-        config.clone(),
-    );
+    let mut app = ui::app::App::with_brew_list(&inventory, ignore.clone(), config.clone());
     run_tui(&mut app, cli, console)
 }
 
@@ -2022,6 +2089,248 @@ mod tests {
             "Error: Homebrew did not list its packages: Error: broken tap\n"
         );
         assert!(ran.out.is_empty());
+    }
+
+    fn brew_uninstall(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
+        let cli = parse(args);
+        let Some(Command::Brew(crate::cli::BrewArgs {
+            action: Some(BrewAction::Uninstall { ref name }),
+        })) = cli.command
+        else {
+            panic!("not a brew uninstall command");
+        };
+        let context = ScanContext { layout, host };
+        run(typed, |console| {
+            handle_brew_uninstall(name, &cli, &IgnoreStore::default(), &context, console)
+        })
+    }
+
+    fn brotli_size(layout: &Layout) -> u64 {
+        DirSizer::size_of(&layout.system("opt/homebrew/Cellar/brotli"))
+    }
+
+    fn brotli_question(layout: &Layout) -> String {
+        format!(
+            "Remove brotli 1.2.1 ({}) with brew uninstall? [y/N] ",
+            crate::core::bytes::format_bytes(brotli_size(layout))
+        )
+    }
+
+    fn mentions_uninstall(host: &FakeHost) -> bool {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("uninstall"))
+    }
+
+    #[test]
+    fn brew_uninstall_refuses_a_cask_a_used_formula_and_a_pinned_one_even_with_force() {
+        let refusals = [
+            (
+                "ghostty",
+                "Error: ghostty is a cask. Remove it with taert uninstall.\n",
+            ),
+            ("go", "Error: go stays: golangci-lint, gosec use it.\n"),
+            ("fd", "Error: fd is pinned. Run brew unpin fd first.\n"),
+        ];
+
+        for (name, text) in refusals {
+            let (_temp, layout, host) = brew_cleanup_mac();
+
+            let ran = brew_uninstall(&["brew", "uninstall", name, "--force"], "", &host, &layout);
+
+            assert!(!ran.ok, "{name}");
+            assert_eq!(ran.err, text);
+            assert!(ran.out.is_empty(), "{}", ran.out);
+            assert!(!mentions_uninstall(&host), "{name}");
+            assert!(!layout.history_path().exists());
+        }
+    }
+
+    #[test]
+    fn brew_uninstall_reports_a_missing_name_and_a_missing_homebrew_as_errors() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "nope", "--force"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok);
+        assert_eq!(ran.err, "Error: nope is not installed.\n");
+        assert!(!mentions_uninstall(&host));
+
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "nope", "--force"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok);
+        assert_eq!(ran.err, "Error: Homebrew is not installed.\n");
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn brew_uninstall_force_removes_one_formula_and_logs_it() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+        brew_removes(&host, &layout, "uninstall brotli", "brotli");
+        let before = brotli_size(&layout);
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "brotli", "--force"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}{}", ran.out, ran.err);
+        let brew = layout.system("opt/homebrew/bin/brew");
+        assert_eq!(
+            removal_calls(&host),
+            [format!(
+                "{ENV_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall brotli",
+                brew.display()
+            )]
+        );
+        assert!(!ran.out.contains("[y/N]"));
+        let runs = runs_in(&layout);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "brew uninstall");
+        assert_eq!(runs[0].mode, "force");
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(
+            runs[0].items[0].outcome,
+            crate::core::history::OutcomeKind::Removed
+        );
+        assert_eq!(runs[0].items[0].path, "brotli 1.2.1");
+        assert_eq!(runs[0].items[0].bytes, before);
+    }
+
+    #[test]
+    fn brew_uninstall_fails_when_the_run_is_refused_because_a_formula_uses_it_by_then() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+        let brew = layout.system("opt/homebrew/bin/brew");
+        host.reply(
+            &format!("{ENV_START} {} info --json=v2 --installed", brew.display()),
+            &BREW_INFO.replacen(
+                "\"dependencies\": [\n        \"shellcheck\"",
+                "\"dependencies\": [\n        \"brotli\",\n        \"shellcheck\"",
+                1,
+            ),
+        );
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "brotli", "--force"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok, "{}", ran.out);
+        assert!(
+            ran.err.contains("brotli stays: actionlint use it."),
+            "{}",
+            ran.err
+        );
+        assert!(removal_calls(&host).is_empty());
+        let runs = runs_in(&layout);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "brew uninstall");
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(
+            runs[0].items[0].outcome,
+            crate::core::history::OutcomeKind::Failed
+        );
+    }
+
+    #[test]
+    fn brew_uninstall_asks_first_and_only_a_yes_removes() {
+        for (typed, removes) in [
+            ("y\n", true),
+            (" Yes \n", true),
+            ("YES\n", true),
+            ("n\n", false),
+            ("\n", false),
+            ("yep\n", false),
+            ("", false),
+        ] {
+            let (_temp, layout, host) = brew_cleanup_mac();
+            brew_removes(&host, &layout, "uninstall brotli", "brotli");
+            let question = brotli_question(&layout);
+
+            let ran = brew_uninstall(&["brew", "uninstall", "brotli"], typed, &host, &layout);
+
+            assert!(ran.ok, "{typed:?}: {}{}", ran.out, ran.err);
+            assert!(ran.out.starts_with(&question), "{typed:?}: {}", ran.out);
+            assert_eq!(
+                removal_calls(&host).len(),
+                usize::from(removes),
+                "{typed:?}"
+            );
+            if removes {
+                assert_eq!(runs_in(&layout)[0].mode, "interactive");
+                assert_eq!(runs_in(&layout)[0].items[0].path, "brotli 1.2.1");
+            } else {
+                assert!(ran.out.ends_with("Operation cancelled.\n"), "{typed:?}");
+                assert!(!mentions_uninstall(&host));
+                assert!(!layout.history_path().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn brew_uninstall_dry_run_only_says_what_it_would_do() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "brotli", "--dry-run"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        let size = crate::core::bytes::format_bytes(brotli_size(&layout));
+        assert_eq!(
+            ran.out,
+            format!("Would remove brotli 1.2.1 ({size}) with brew uninstall.\n")
+        );
+        assert!(!mentions_uninstall(&host));
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn brew_uninstall_json_prints_the_plan_and_removes_nothing() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "brotli", "--json"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(json["id"], "brew-uninstall");
+        let row = &json["groups"][0]["items"][0];
+        assert_eq!(row["selected"], true);
+        assert_eq!(row["brew"]["action"], "uninstall");
+        assert_eq!(row["brew"]["name"], "brotli");
+        assert_eq!(
+            row["brew"]["cellar"],
+            serde_json::json!(layout.system("opt/homebrew/Cellar/brotli"))
+        );
+        assert!(!mentions_uninstall(&host));
+        assert!(!layout.history_path().exists());
     }
 
     #[test]

@@ -152,6 +152,11 @@ pub struct BrewArgs {
 pub enum BrewAction {
     /// Remove unused dependencies and old versions through Homebrew
     Cleanup,
+    /// Remove one formula through Homebrew
+    Uninstall {
+        /// Name of the formula
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]

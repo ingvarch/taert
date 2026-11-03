@@ -18,9 +18,11 @@ use super::sizer::DirSizer;
 
 pub const SCAN_ID: &str = "brew";
 pub const CLEANUP_ID: &str = "brew-cleanup";
+pub const UNINSTALL_ID: &str = "brew-uninstall";
 const INFO_TIMEOUT: Duration = Duration::from_secs(60);
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const GROUP_FORMULA: &str = "Formula";
 const GROUP_FORMULAE: &str = "Formulae";
 const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
 const GROUP_UNUSED: &str = "Unused dependencies";
@@ -77,6 +79,9 @@ pub enum BrewTask {
 pub struct Inventory {
     pub packages: Vec<Package>,
     pub notes: Vec<String>,
+    /// The brew that listed the packages, so a row can carry a task.
+    #[serde(skip)]
+    pub brew: Option<PathBuf>,
 }
 
 pub struct Brew {
@@ -289,8 +294,8 @@ fn installed(host: &dyn Host, brew: &Path, prefix: &Path) -> Result<Vec<Package>
 pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     let Some(brew) = find(layout) else {
         return Ok(Inventory {
-            packages: Vec::new(),
             notes: vec![NOT_INSTALLED.to_string()],
+            ..Inventory::default()
         });
     };
 
@@ -304,11 +309,21 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     Ok(Inventory {
         packages,
         notes: Vec::new(),
+        brew: Some(brew.path),
     })
 }
 
+fn name_version(package: &Package) -> String {
+    format!("{} {}", package.name, package.version)
+}
+
+/// The name and version a list label starts with, without its details.
+pub fn label_name(label: &str) -> &str {
+    label.split_once(" · ").map_or(label, |(name, _)| name)
+}
+
 fn label(package: &Package) -> String {
-    let mut label = format!("{} {}", package.name, package.version);
+    let mut label = name_version(package);
     match package.kind {
         PackageKind::Formula => {
             let origin = if package.on_request {
@@ -350,12 +365,24 @@ fn item(label: String, size_bytes: u64, selected: bool, brew: Option<BrewTask>) 
     }
 }
 
-fn row(package: &Package) -> ScanItem {
-    item(label(package), package.size_bytes, false, None)
+fn uninstall_task(package: &Package, brew: &Path) -> BrewTask {
+    BrewTask::Uninstall {
+        name: package.name.clone(),
+        brew: brew.to_path_buf(),
+        cellar: package.path.clone(),
+    }
 }
 
-/// The packages as a list to browse. Nothing in it can be removed.
+/// The packages as a list to browse. A formula row carries the task that removes it, and no row
+/// starts selected.
 pub fn list_scan(inventory: &Inventory) -> CategoryScan {
+    let row = |package: &Package| {
+        let task = match (package.kind, &inventory.brew) {
+            (PackageKind::Formula, Some(brew)) => Some(uninstall_task(package, brew)),
+            _ => None,
+        };
+        item(label(package), package.size_bytes, false, task)
+    };
     let group = |tool: &str, kind: PackageKind| ToolGroup {
         tool: tool.to_string(),
         items: inventory
@@ -379,6 +406,67 @@ pub fn list_scan(inventory: &Inventory) -> CategoryScan {
         groups,
         notes: inventory.notes.clone(),
     }
+}
+
+fn in_use(name: &str, used_by: &[String]) -> String {
+    format!("{name} stays: {} use it.", used_by.join(", "))
+}
+
+/// Why taert will not uninstall this package, if it will not.
+pub fn refusal(package: &Package) -> Option<String> {
+    let name = &package.name;
+    if package.kind == PackageKind::Cask {
+        Some(format!("{name} is a cask. Remove it with taert uninstall."))
+    } else if package.pinned {
+        Some(format!("{name} is pinned. Run brew unpin {name} first."))
+    } else if !package.used_by.is_empty() {
+        Some(in_use(name, &package.used_by))
+    } else {
+        None
+    }
+}
+
+/// The refusal of each row of the list that has one, by the label of the row.
+pub fn list_refusals(inventory: &Inventory) -> HashMap<PathBuf, String> {
+    inventory
+        .packages
+        .iter()
+        .filter_map(|package| Some((PathBuf::from(label(package)), refusal(package)?)))
+        .collect()
+}
+
+/// One formula to remove, read with one `brew info` call and checked against `refusal`.
+pub fn uninstall_plan(
+    layout: &Layout,
+    host: &dyn Host,
+    name: &str,
+) -> Result<CategoryScan, String> {
+    let brew = find(layout).ok_or(NOT_INSTALLED)?;
+    let packages = installed(host, &brew.path, &brew.prefix)?;
+    let package = [PackageKind::Formula, PackageKind::Cask]
+        .into_iter()
+        .find_map(|kind| {
+            packages
+                .iter()
+                .find(|package| package.kind == kind && is_named(package, name))
+        })
+        .ok_or_else(|| format!("{name} is not installed."))?;
+    if let Some(text) = refusal(package) {
+        return Err(text);
+    }
+
+    let size = DirSizer::size_of(&package.path);
+    let task = uninstall_task(package, &brew.path);
+    let row = item(name_version(package), size, true, Some(task));
+    Ok(CategoryScan {
+        id: UNINSTALL_ID.to_string(),
+        title: "Homebrew Uninstall".to_string(),
+        groups: vec![ToolGroup {
+            tool: GROUP_FORMULA.to_string(),
+            items: vec![row],
+        }],
+        notes: Vec::new(),
+    })
 }
 
 /// The names `brew autoremove --dry-run` lists after its header.
@@ -464,16 +552,11 @@ fn unused_group(unused: &[&Package], brew: &Brew) -> ToolGroup {
     let items = dependents_first(sized)
         .into_iter()
         .map(|(package, size)| {
-            let task = BrewTask::Uninstall {
-                name: package.name.clone(),
-                brew: brew.path.clone(),
-                cellar: package.path.clone(),
-            };
             item(
-                format!("{} {}", package.name, package.version),
+                name_version(package),
                 size,
                 !package.pinned,
-                Some(task),
+                Some(uninstall_task(package, &brew.path)),
             )
         })
         .collect();
@@ -601,11 +684,8 @@ fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<
     else {
         return Err(format!("{name} is no longer installed."));
     };
-    if !package.used_by.is_empty() {
-        return Err(format!(
-            "{name} stays: {} use it.",
-            package.used_by.join(", ")
-        ));
+    if let Some(reason) = refusal(package) {
+        return Err(reason);
     }
     let mut left = versions(cellar);
     if left.is_empty() {
@@ -1050,6 +1130,7 @@ mod tests {
         let inventory = Inventory {
             packages,
             notes: vec!["a note".to_string()],
+            ..Inventory::default()
         };
 
         let scan = list_scan(&inventory);
@@ -1082,6 +1163,7 @@ mod tests {
         let scan = list_scan(&Inventory {
             packages,
             notes: Vec::new(),
+            ..Inventory::default()
         });
 
         let rows = rows(&scan);
@@ -1130,6 +1212,7 @@ mod tests {
         let inventory = Inventory {
             packages: vec![go, ada, fd, bun, ghostty],
             notes: Vec::new(),
+            ..Inventory::default()
         };
 
         let text = plain_text(&inventory);
@@ -1570,7 +1653,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         (temp, layout, host, cellar)
     }
 
-    fn uninstall_task(layout: &Layout, cellar: &Path) -> BrewTask {
+    fn lib_uninstall_task(layout: &Layout, cellar: &Path) -> BrewTask {
         BrewTask::Uninstall {
             name: "lib".to_string(),
             brew: brew_of(layout),
@@ -1590,9 +1673,25 @@ Would remove: /opt/homebrew/Cellar/go/1.0
     fn an_uninstall_stops_when_another_formula_uses_the_package_again() {
         let (_temp, layout, host, cellar) = task_setup(&["tool", "app"]);
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(error, "lib stays: app, tool use it.");
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+        assert!(cellar.exists());
+    }
+
+    #[test]
+    fn an_uninstall_stops_when_the_package_is_pinned_by_then() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let cellar = prefix_of(&layout).join("Cellar/lib");
+        fill(&cellar.join("1"), 70_000);
+        let host = FakeHost::default();
+        let formulae: &[(&str, &[&str], bool)] = &[("lib", &[], true)];
+        host.reply(&line(&layout, READS[0]), &info(formulae));
+
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(error, "lib is pinned. Run brew unpin lib first.");
         assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
         assert!(cellar.exists());
     }
@@ -1607,7 +1706,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
             fs::remove_dir_all(&doomed).unwrap();
         });
 
-        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+        let freed = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap();
 
         assert_eq!(
             *host.calls.lock().unwrap(),
@@ -1641,7 +1740,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         let (_temp, layout, host, cellar) = task_setup(&[]);
         host.fail(&removing_line(&layout, "uninstall lib"), "Error: boom\n");
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(error, "Homebrew could not remove lib: Error: boom");
     }
@@ -1682,7 +1781,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         let before = DirSizer::size_of(&cellar);
         uninstall_removes_one_version_per_call(&host, &layout, &cellar);
 
-        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+        let freed = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap();
 
         assert_eq!(
             uninstall_calls(&host),
@@ -1702,7 +1801,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         fill(&cellar.join("2"), 30_000);
         host.reply(&removing_line(&layout, "uninstall lib"), "");
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(uninstall_calls(&host).len(), 1);
         assert_eq!(
@@ -1716,7 +1815,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         let (_temp, layout, host, cellar) = task_setup(&[]);
         host.reply(&removing_line(&layout, "uninstall lib"), "");
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(uninstall_calls(&host).len(), 1);
         assert_eq!(error, "Homebrew removed part of lib; 1 is still installed.");
@@ -1727,7 +1826,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         let (_temp, layout, host, cellar) = task_setup(&[]);
         fs::remove_dir_all(&cellar).unwrap();
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(
             error,
@@ -1745,7 +1844,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         fs::remove_dir_all(cellar.join("1")).unwrap();
         fs::write(cellar.join("stray"), "kept").unwrap();
 
-        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+        let error = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
 
         assert_eq!(
             error,
@@ -1777,7 +1876,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
             fs::remove_dir_all(&left[0]).unwrap();
         });
 
-        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+        let freed = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap();
 
         assert_eq!(uninstall_calls(&host), [uninstall.clone(), uninstall]);
         assert!(cellar.join("stray").exists());
@@ -1866,6 +1965,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         let inventory = Inventory {
             packages: vec![package(PackageKind::Cask, "ghostty", "1.3.1", 0)],
             notes: Vec::new(),
+            ..Inventory::default()
         };
 
         let text = plain_text(&inventory);
@@ -1873,5 +1973,268 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         assert!(text.starts_with("Casks (remove with taert uninstall)\n"));
         assert!(!text.contains("Formulae"));
         assert_eq!(plain_text(&Inventory::default()), "");
+    }
+
+    fn refusal_packages() -> Vec<Package> {
+        let json = r#"{"formulae":[
+            {"name":"plain","dependencies":[],
+             "installed":[{"version":"1","installed_on_request":true}]},
+            {"name":"fd","dependencies":[],"pinned":true,
+             "installed":[{"version":"1","installed_on_request":true}]},
+            {"name":"lib","dependencies":[],
+             "installed":[{"version":"1","installed_on_request":false}]},
+            {"name":"tool","dependencies":["lib"],
+             "installed":[{"version":"1","installed_on_request":true}]},
+            {"name":"app","dependencies":["lib"],
+             "installed":[{"version":"1","installed_on_request":true}]}
+        ],"casks":[{"token":"ghostty","installed":"1"}]}"#;
+        parse_packages(json, Path::new("/opt/homebrew")).unwrap()
+    }
+
+    #[test]
+    fn a_cask_is_refused_with_the_texts_of_the_issue() {
+        let packages = refusal_packages();
+
+        assert_eq!(
+            refusal(named(&packages, "ghostty")).unwrap(),
+            "ghostty is a cask. Remove it with taert uninstall."
+        );
+    }
+
+    #[test]
+    fn a_pinned_formula_is_refused() {
+        let packages = refusal_packages();
+
+        assert_eq!(
+            refusal(named(&packages, "fd")).unwrap(),
+            "fd is pinned. Run brew unpin fd first."
+        );
+    }
+
+    #[test]
+    fn a_formula_that_others_use_is_refused_with_the_text_of_run_task() {
+        let packages = refusal_packages();
+        let (_temp, layout, host, cellar) = task_setup(&["tool", "app"]);
+
+        let from_run_task = run_task(&host, &lib_uninstall_task(&layout, &cellar)).unwrap_err();
+
+        let text = refusal(named(&packages, "lib")).unwrap();
+        assert_eq!(text, "lib stays: app, tool use it.");
+        assert_eq!(text, from_run_task);
+    }
+
+    #[test]
+    fn a_plain_formula_is_not_refused() {
+        let packages = refusal_packages();
+
+        assert_eq!(refusal(named(&packages, "plain")), None);
+        assert_eq!(refusal(named(&packages, "tool")), None);
+    }
+
+    #[test]
+    fn a_pinned_formula_that_is_also_used_is_refused_as_pinned() {
+        let mut package = package(PackageKind::Formula, "lib", "1", 0);
+        package.pinned = true;
+        package.used_by = vec!["app".to_string()];
+
+        assert_eq!(
+            refusal(&package).unwrap(),
+            "lib is pinned. Run brew unpin lib first."
+        );
+    }
+
+    fn plan_host(layout: &Layout, json: &str) -> FakeHost {
+        let host = FakeHost::default();
+        host.reply(&line(layout, READS[0]), json);
+        host
+    }
+
+    #[test]
+    fn without_brew_the_uninstall_plan_is_an_error_and_runs_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let error = uninstall_plan(&layout, &host, "lib").unwrap_err();
+
+        assert_eq!(error, "Homebrew is not installed.");
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_name_that_is_not_installed_is_an_error_after_one_info_call() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = plan_host(&layout, &info(&[("lib", &[], false)]));
+
+        let error = uninstall_plan(&layout, &host, "other").unwrap_err();
+
+        assert_eq!(error, "other is not installed.");
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+    }
+
+    #[test]
+    fn a_refused_package_gives_its_refusal_after_one_info_call() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let json = r#"{"formulae":[
+            {"name":"fd","dependencies":[],"pinned":true,
+             "installed":[{"version":"1","installed_on_request":true}]},
+            {"name":"lib","dependencies":[],
+             "installed":[{"version":"1","installed_on_request":false}]},
+            {"name":"app","dependencies":["lib"],
+             "installed":[{"version":"1","installed_on_request":true}]}
+        ],"casks":[{"token":"ghostty","installed":"1"}]}"#;
+        let expected = [
+            (
+                "ghostty",
+                "ghostty is a cask. Remove it with taert uninstall.",
+            ),
+            ("fd", "fd is pinned. Run brew unpin fd first."),
+            ("lib", "lib stays: app use it."),
+        ];
+
+        for (name, text) in expected {
+            let host = plan_host(&layout, json);
+
+            let error = uninstall_plan(&layout, &host, name).unwrap_err();
+
+            assert_eq!(error, text);
+            assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+        }
+    }
+
+    #[test]
+    fn a_plain_formula_gives_a_one_row_scan_with_the_uninstall_task() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+
+        let scan = uninstall_plan(&layout, &host, "lib").unwrap();
+
+        assert_eq!(scan.id, UNINSTALL_ID);
+        assert_eq!(scan.title, "Homebrew Uninstall");
+        assert!(scan.notes.is_empty());
+        assert_eq!(scan.groups.len(), 1);
+        assert_eq!(scan.groups[0].tool, "Formula");
+        let rows = &scan.groups[0].items;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, Path::new("lib 1"));
+        assert_eq!(rows[0].size_bytes, DirSizer::size_of(&cellar));
+        assert!(rows[0].size_bytes >= 70_000);
+        assert!(rows[0].selected);
+        assert_eq!(rows[0].brew, Some(lib_uninstall_task(&layout, &cellar)));
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+    }
+
+    #[test]
+    fn a_formula_is_found_by_its_full_name_and_removed_by_its_short_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let cellar = prefix_of(&layout).join("Cellar/lib");
+        fill(&cellar.join("1"), 1_000);
+        let json = r#"{"formulae":[
+            {"name":"lib","full_name":"someone/tap/lib","dependencies":[],
+             "installed":[{"version":"1","installed_on_request":true}]}
+        ],"casks":[]}"#;
+        let host = plan_host(&layout, json);
+
+        let scan = uninstall_plan(&layout, &host, "someone/tap/lib").unwrap();
+
+        let row = &scan.groups[0].items[0];
+        assert_eq!(row.path, Path::new("lib 1"));
+        assert_eq!(row.brew, Some(lib_uninstall_task(&layout, &cellar)));
+    }
+
+    #[test]
+    fn the_list_carries_an_uninstall_task_on_formula_rows_when_it_knows_brew() {
+        let brew = PathBuf::from("/opt/homebrew/bin/brew");
+        let inventory = Inventory {
+            packages: packages(),
+            brew: Some(brew.clone()),
+            ..Inventory::default()
+        };
+
+        let scan = list_scan(&inventory);
+
+        let formulae: Vec<&Package> = inventory
+            .packages
+            .iter()
+            .filter(|package| package.kind == PackageKind::Formula)
+            .collect();
+        let tasks: Vec<_> = scan.groups[0]
+            .items
+            .iter()
+            .map(|i| i.brew.clone())
+            .collect();
+        let expected: Vec<_> = formulae
+            .iter()
+            .map(|package| {
+                Some(BrewTask::Uninstall {
+                    name: package.name.clone(),
+                    brew: brew.clone(),
+                    cellar: package.path.clone(),
+                })
+            })
+            .collect();
+        assert_eq!(tasks, expected);
+        assert!(scan.groups[1].items.iter().all(|item| item.brew.is_none()));
+        assert!(
+            scan.groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .all(|item| !item.selected)
+        );
+    }
+
+    #[test]
+    fn the_list_has_no_task_without_a_brew() {
+        let scan = list_scan(&Inventory {
+            packages: packages(),
+            ..Inventory::default()
+        });
+
+        assert!(
+            scan.groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .all(|item| item.brew.is_none())
+        );
+    }
+
+    #[test]
+    fn the_scan_remembers_the_brew_it_used_but_the_json_does_not_show_it() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(INFO_LINE_START, BREW_INFO);
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(inventory.brew, Some(brew_of(&layout)));
+        let json = serde_json::to_value(&inventory).unwrap();
+        assert!(json.get("brew").is_none(), "{json}");
+        let without = scan(&sandbox().1, &FakeHost::default()).unwrap();
+        assert_eq!(without.brew, None);
+    }
+
+    #[test]
+    fn the_list_refuses_what_uninstall_plan_refuses() {
+        let packages = refusal_packages();
+        let inventory = Inventory {
+            packages,
+            ..Inventory::default()
+        };
+
+        let refusals = list_refusals(&inventory);
+
+        let text = |label: &str| refusals.get(Path::new(label)).map(String::as_str);
+        assert_eq!(
+            text("ghostty 1"),
+            Some("ghostty is a cask. Remove it with taert uninstall.")
+        );
+        assert_eq!(
+            text("fd 1 · on request · pinned"),
+            Some("fd is pinned. Run brew unpin fd first.")
+        );
+        assert_eq!(
+            text("lib 1 · dependency · used by 2"),
+            Some("lib stays: app, tool use it.")
+        );
+        assert_eq!(text("plain 1 · on request"), None);
+        assert_eq!(refusals.len(), 3);
     }
 }

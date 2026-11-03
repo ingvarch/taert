@@ -73,6 +73,7 @@ pub enum ScanMessage {
     Progress(ScanProgressEvent),
     PurgeProgress(PurgeScanEvent),
     Finished(CategoryScan),
+    Homebrew(homebrew::Inventory),
     Failed(String),
     AppsFound(Vec<InstalledApp>),
     Planned(UninstallPlan),
@@ -214,9 +215,22 @@ impl App {
     }
 
     pub fn with_select(scan: CategoryScan, ignore: IgnoreStore, config: Config) -> Self {
+        Self::with_select_state(SelectState::new(scan), ignore, config)
+    }
+
+    /// Opens on the Homebrew list.
+    pub fn with_brew_list(
+        inventory: &homebrew::Inventory,
+        ignore: IgnoreStore,
+        config: Config,
+    ) -> Self {
+        Self::with_select_state(SelectState::homebrew_list(inventory), ignore, config)
+    }
+
+    fn with_select_state(state: SelectState, ignore: IgnoreStore, config: Config) -> Self {
         Self {
             theme: Theme::new(),
-            screen: Screen::Select(SelectState::new(scan)),
+            screen: Screen::Select(state),
             back_stack: Vec::new(),
             ignore,
             config,
@@ -558,6 +572,12 @@ impl App {
                         self.plan = Some(plan);
                         break;
                     }
+                    ScanMessage::Homebrew(inventory) => {
+                        self.screen = Screen::Select(
+                            SelectState::homebrew_list(&inventory).with_permanent(self.permanent),
+                        );
+                        break;
+                    }
                     ScanMessage::Finished(scan) => {
                         let state = if scan.id == purger::SCAN_ID || scan.id == docker::SCAN_ID {
                             SelectState::with_preserved_selection(scan)
@@ -707,6 +727,8 @@ impl App {
                             state.close_overlay();
                             if state.scan.id == uninstaller::PLAN_ID {
                                 self.show_fresh_app_list();
+                            } else if state.scan.id == homebrew::SCAN_ID {
+                                self.launch_brew_scan();
                             }
                         }
                         return;
@@ -770,6 +792,9 @@ impl App {
                         state.search_query.clear();
                     }
                     KeyCode::Enter if state.scan.id == apps::LIST_ID => self.start_review(),
+                    KeyCode::Enter if state.scan.id == homebrew::SCAN_ID => {
+                        state.uninstall_focused();
+                    }
                     KeyCode::Enter => {
                         if state.scan.id == slim::SCAN_ID && state.scan.selected_items().is_empty()
                         {
@@ -1278,10 +1303,21 @@ impl App {
                 HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
                 general(Vec::new()),
             ],
-            Screen::Select(state) if state.is_read_only() => vec![
-                HelpSection::new("Homebrew", vec![Hint::new("/", "Search")]),
-                general(vec![navigate, back]),
-            ],
+            Screen::Select(state) if state.is_single_row_list() => {
+                let mut hints = vec![Hint::new("/", "Search")];
+                if state
+                    .scan
+                    .groups
+                    .iter()
+                    .any(|group| !group.items.is_empty())
+                {
+                    hints.push(Hint::new("↵", "Uninstall"));
+                }
+                vec![
+                    HelpSection::new("Homebrew", hints),
+                    general(vec![navigate, back]),
+                ]
+            }
             Screen::Select(state) => {
                 let enter = match state.scan.id.as_str() {
                     apps::LIST_ID => "Review",
@@ -1371,8 +1407,15 @@ impl App {
 
     fn start_removal(&mut self) {
         if let Screen::Select(ref mut select) = self.screen {
-            let selected_items: Vec<_> =
+            let mut selected_items: Vec<_> =
                 select.scan.selected_items().into_iter().cloned().collect();
+            if select.scan.id == homebrew::SCAN_ID {
+                // The history names the formula as `taert brew uninstall` does, without details.
+                for item in &mut selected_items {
+                    let name = homebrew::label_name(&item.path.to_string_lossy()).to_string();
+                    item.path = name.into();
+                }
+            }
             if selected_items.is_empty() {
                 select.close_overlay();
                 return;
@@ -1551,6 +1594,7 @@ impl App {
                         let command = match scan_id.as_str() {
                             "docker" => "docker".to_string(),
                             homebrew::CLEANUP_ID => "brew cleanup".to_string(),
+                            homebrew::SCAN_ID => "brew uninstall".to_string(),
                             "purge" => "purge".to_string(),
                             "large" => "large".to_string(),
                             "dev" => "clean dev".to_string(),
@@ -1747,14 +1791,12 @@ impl App {
         let host = self.host.clone();
 
         thread::spawn(move || {
-            let scan = match homebrew::scan(&layout, &*host) {
-                Ok(inventory) => homebrew::list_scan(&inventory),
-                Err(message) => homebrew::list_scan(&homebrew::Inventory {
-                    packages: Vec::new(),
+            let inventory =
+                homebrew::scan(&layout, &*host).unwrap_or_else(|message| homebrew::Inventory {
                     notes: vec![message],
-                }),
-            };
-            let _ = tx.send(ScanMessage::Finished(scan));
+                    ..homebrew::Inventory::default()
+                });
+            let _ = tx.send(ScanMessage::Homebrew(inventory));
         });
 
         self.open(Screen::Scanning(
@@ -3351,28 +3393,82 @@ mod tests {
         use crate::core::apps::testing::sandbox;
         use crate::core::homebrew::{self, Inventory, Package, PackageKind};
         use crate::core::host::fake::FakeHost;
+        use crate::core::sizer::DirSizer;
+        use crate::ui::components::toast::ToastKind;
+
+        const BREW_START: &str =
+            "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1";
 
         fn package(kind: PackageKind, name: &str, bytes: u64) -> Package {
             homebrew::testing::package(kind, name, "1.0", bytes)
         }
 
-        fn brew_scan() -> CategoryScan {
-            homebrew::list_scan(&Inventory {
+        fn brew_list_app(inventory: &Inventory) -> App {
+            let mut app = new_app();
+            app.screen = Screen::Select(SelectState::homebrew_list(inventory));
+            app
+        }
+
+        fn brew_app() -> App {
+            brew_list_app(&Inventory {
                 packages: vec![
                     package(PackageKind::Formula, "fd", 3_000),
                     package(PackageKind::Formula, "go", 5_000),
                     package(PackageKind::Cask, "ghostty", 9_000),
                 ],
-                notes: Vec::new(),
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
             })
         }
 
-        fn brew_app() -> App {
-            select_app(brew_scan())
+        /// A plain formula, a pinned one, one that others use, and a cask.
+        fn refusal_app() -> App {
+            let mut pinned = package(PackageKind::Formula, "pin", 3_000);
+            pinned.pinned = true;
+            let mut used = package(PackageKind::Formula, "lib", 2_000);
+            used.used_by = vec!["app".to_string(), "tool".to_string()];
+            brew_list_app(&Inventory {
+                packages: vec![
+                    package(PackageKind::Formula, "fd", 5_000),
+                    pinned,
+                    used,
+                    package(PackageKind::Cask, "ghostty", 9_000),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            })
+        }
+
+        fn focus_on(app: &mut App, name: &str) {
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            let prefix = format!("{name} ");
+            state.focused_index = state
+                .flattened_rows()
+                .iter()
+                .position(|row| row.is_item() && row.display_path.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("no row {name}"));
         }
 
         fn selected(app: &App) -> usize {
             select(app).scan.selected_items().len()
+        }
+
+        #[test]
+        fn the_menu_detail_says_a_formula_nothing_uses_can_be_removed() {
+            let mut app = new_app();
+
+            press(&mut app, &[KeyCode::Down; 4]);
+
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+            terminal.draw(|frame| app.render_screen(frame)).unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+            assert!(
+                text.contains("Remove a formula that nothing uses."),
+                "{text}"
+            );
+            assert!(!text.contains("Nothing is removed."), "{text}");
         }
 
         #[test]
@@ -3433,7 +3529,7 @@ mod tests {
         }
 
         #[test]
-        fn selecting_and_removing_do_nothing() {
+        fn selecting_does_nothing() {
             let mut app = brew_app();
 
             press(
@@ -3444,7 +3540,6 @@ mod tests {
                     KeyCode::Char(' '),
                     KeyCode::Char('a'),
                     KeyCode::Char('A'),
-                    KeyCode::Enter,
                 ],
             );
 
@@ -3509,10 +3604,10 @@ mod tests {
             python.on_request = false;
             python.outdated = true;
             python.used_by = vec!["azure-cli".to_string()];
-            let app = select_app(homebrew::list_scan(&Inventory {
+            let app = brew_list_app(&Inventory {
                 packages: vec![python],
-                notes: Vec::new(),
-            }));
+                ..Inventory::default()
+            });
 
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();
@@ -3526,7 +3621,7 @@ mod tests {
 
         #[test]
         fn an_empty_list_says_there_is_nothing_to_show() {
-            let app = select_app(homebrew::list_scan(&Inventory::default()));
+            let app = brew_list_app(&Inventory::default());
 
             let text = screen_text(&app);
 
@@ -3536,16 +3631,36 @@ mod tests {
 
         #[test]
         fn an_empty_list_with_a_note_shows_the_note_once_as_the_reason() {
-            let app = select_app(homebrew::list_scan(&Inventory {
-                packages: Vec::new(),
+            let app = brew_list_app(&Inventory {
                 notes: vec!["Homebrew is not installed.".to_string()],
-            }));
+                ..Inventory::default()
+            });
 
             let text = screen_text(&app);
 
             assert!(text.contains("Homebrew isn't available"));
             assert_eq!(text.matches("Homebrew is not installed.").count(), 1);
             assert!(!text.contains("No Homebrew packages"));
+        }
+
+        #[test]
+        fn an_empty_list_has_no_primary_action() {
+            for (notes, title) in [
+                (Vec::new(), "No Homebrew packages"),
+                (
+                    vec!["Homebrew is not installed.".to_string()],
+                    "Homebrew isn't available",
+                ),
+            ] {
+                let app = brew_list_app(&Inventory {
+                    notes,
+                    ..Inventory::default()
+                });
+
+                assert!(screen_text(&app).contains(title), "{title}");
+                assert_footer(&app, &["⎋  Back"], &["Uninstall", "↵"]);
+                assert_eq!(help_row(&app, "Uninstall"), None, "{title}");
+            }
         }
 
         const CLEANUP_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1 /fake/bin/brew cleanup lib";
@@ -3678,13 +3793,284 @@ mod tests {
         }
 
         #[test]
-        fn searching_keeps_the_apply_action_and_browsing_has_none() {
+        fn searching_keeps_the_apply_action_and_browsing_has_uninstall() {
             let mut app = brew_app();
             assert!(!screen_text(&app).contains("Apply"));
+            assert!(footer(&app).contains("Uninstall"), "{}", footer(&app));
 
             press(&mut app, &[KeyCode::Char('/')]);
 
             assert!(screen_text(&app).contains("Apply"));
+            assert!(!footer(&app).contains("Uninstall"));
+        }
+
+        #[test]
+        fn enter_on_a_refused_row_shows_why_and_changes_nothing() {
+            let refusals = [
+                (
+                    "ghostty",
+                    "ghostty is a cask. Remove it with taert uninstall.",
+                ),
+                ("pin", "pin is pinned. Run brew unpin pin first."),
+                ("lib", "lib stays: app, tool use it."),
+            ];
+
+            for (name, text) in refusals {
+                let mut app = refusal_app();
+                let host = Arc::new(FakeHost::default());
+                app.host = host.clone();
+                focus_on(&mut app, name);
+
+                app.handle_key(KeyCode::Enter);
+
+                let state = select(&app);
+                let toast = state.toast.as_ref().expect(name);
+                assert_eq!(toast.text, text);
+                assert_eq!(toast.kind, ToastKind::Error);
+                assert!(matches!(state.overlay, ModalOverlay::None), "{name}");
+                assert_eq!(selected(&app), 0, "{name}");
+                assert!(screen_text(&app).contains(text), "{name}");
+                assert!(host.calls.lock().unwrap().is_empty(), "{name}");
+            }
+        }
+
+        #[test]
+        fn enter_on_a_plain_formula_asks_to_remove_only_that_row_and_says_homebrew_does_it() {
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+
+            app.handle_key(KeyCode::Enter);
+
+            let state = select(&app);
+            assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
+            assert!(state.toast.is_none());
+            let chosen = state.scan.selected_items();
+            assert_eq!(chosen.len(), 1);
+            assert!(chosen[0].path.to_string_lossy().starts_with("fd "));
+            let text = screen_text(&app);
+            assert!(text.contains("Uninstall fd?"), "{text}");
+            assert!(text.contains("Homebrew will remove fd"), "{text}");
+            assert!(!text.contains("Trash"), "{text}");
+            assert!(!text.contains("permanently deleted"), "{text}");
+        }
+
+        #[test]
+        fn a_cancelled_question_does_not_carry_its_row_into_the_next_enter() {
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Esc);
+
+            focus_on(&mut app, "lib");
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(selected(&app), 0);
+            assert!(select(&app).toast.is_some());
+        }
+
+        #[test]
+        fn the_primary_action_names_a_removable_formula_and_is_off_for_the_rest() {
+            let mut app = refusal_app();
+
+            focus_on(&mut app, "fd");
+            let action = crate::ui::select::homebrew_primary(select(&app), "↵");
+            assert!(action.enabled);
+            assert_eq!(action.label, "Uninstall fd");
+            assert!(footer(&app).contains("Uninstall fd"), "{}", footer(&app));
+
+            for name in ["ghostty", "pin", "lib"] {
+                focus_on(&mut app, name);
+                let action = crate::ui::select::homebrew_primary(select(&app), "↵");
+                assert!(!action.enabled, "{name}");
+                assert_eq!(action.label, "Uninstall", "{name}");
+                assert!(footer(&app).contains("Uninstall"), "{name}");
+                let named = format!("Uninstall {name}");
+                assert!(!footer(&app).contains(&named), "{name}: {}", footer(&app));
+            }
+        }
+
+        #[test]
+        fn the_list_opened_from_the_command_line_has_the_refusals_too() {
+            let inventory = Inventory {
+                packages: vec![package(PackageKind::Cask, "ghostty", 9_000)],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            };
+            let mut app = offline(App::with_brew_list(
+                &inventory,
+                IgnoreStore::default(),
+                Config::default(),
+            ));
+
+            app.handle_key(KeyCode::Enter);
+
+            assert_eq!(
+                select(&app).toast.as_ref().unwrap().text,
+                "ghostty is a cask. Remove it with taert uninstall."
+            );
+        }
+
+        #[test]
+        fn the_list_opened_from_the_menu_has_the_refusals_too() {
+            let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let brew = layout.system("opt/homebrew/bin/brew");
+            let info = serde_json::json!({
+                "formulae": [
+                    {"name": "pin", "pinned": true, "installed": [{"version": "1"}]},
+                    {"name": "lib", "installed": [{"version": "1"}]},
+                    {"name": "app", "dependencies": ["lib"], "installed": [{"version": "1"}]},
+                    {"name": "tool", "dependencies": ["lib"], "installed": [{"version": "1"}]},
+                ],
+                "casks": [{"token": "ghostty", "installed": "1.0"}],
+            });
+            let host = Arc::new(FakeHost::default());
+            host.reply(
+                &format!("{BREW_START} {} info --json=v2 --installed", brew.display()),
+                &info.to_string(),
+            );
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = host.clone();
+
+            app.handle_key(KeyCode::Char('5'));
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+            let calls_after_scan = host.calls.lock().unwrap().len();
+
+            let refusals = [
+                (
+                    "ghostty",
+                    "ghostty is a cask. Remove it with taert uninstall.",
+                ),
+                ("pin", "pin is pinned. Run brew unpin pin first."),
+                ("lib", "lib stays: app, tool use it."),
+            ];
+            for (name, text) in refusals {
+                focus_on(&mut app, name);
+
+                app.handle_key(KeyCode::Enter);
+
+                let state = select(&app);
+                let toast = state.toast.as_ref().expect(name);
+                assert_eq!(toast.text, text);
+                assert_eq!(toast.kind, ToastKind::Error);
+                assert!(matches!(state.overlay, ModalOverlay::None), "{name}");
+                assert_eq!(selected(&app), 0, "{name}");
+            }
+            assert_eq!(host.calls.lock().unwrap().len(), calls_after_scan);
+            assert!(!host.ran(&format!("{BREW_START} HOMEBREW_NO_AUTOREMOVE=1")));
+        }
+
+        #[test]
+        fn the_help_sheet_lists_enter_as_uninstall() {
+            let app = brew_app();
+
+            assert_eq!(help_row(&app, "Uninstall"), Some("↵"));
+        }
+
+        #[test]
+        fn a_row_with_no_task_and_no_refusal_cannot_be_uninstalled() {
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![package(PackageKind::Formula, "fd", 3_000)],
+                ..Inventory::default()
+            });
+
+            app.handle_key(KeyCode::Enter);
+
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+            assert!(select(&app).toast.is_none());
+            assert!(!crate::ui::select::homebrew_primary(select(&app), "↵").enabled);
+        }
+
+        fn info_with(names: &[&str]) -> String {
+            let formulae: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "name": name,
+                        "installed": [{"version": "1", "installed_on_request": true}],
+                    })
+                })
+                .collect();
+            serde_json::json!({"formulae": formulae, "casks": []}).to_string()
+        }
+
+        #[test]
+        fn a_removal_from_the_list_goes_through_brew_is_logged_and_the_list_is_read_again() {
+            let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let brew = layout.system("opt/homebrew/bin/brew");
+            let info_line = format!("{BREW_START} {} info --json=v2 --installed", brew.display());
+            let uninstall_line = format!(
+                "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall lib",
+                brew.display()
+            );
+            let cellar = layout.system("opt/homebrew/Cellar/lib");
+            std::fs::create_dir_all(cellar.join("1")).unwrap();
+            std::fs::write(cellar.join("1/data"), vec![1_u8; 50_000]).unwrap();
+            let host = FakeHost::default();
+            // The list, the check before the removal, then the list after it.
+            host.reply(&info_line, &info_with(&["lib", "keep"]));
+            host.reply(&info_line, &info_with(&["lib", "keep"]));
+            host.reply(&info_line, &info_with(&["keep"]));
+            host.reply(&uninstall_line, "");
+            let gone = cellar.clone();
+            host.when(&uninstall_line, move || {
+                std::fs::remove_dir_all(&gone).unwrap();
+            });
+            let before = DirSizer::size_of(&cellar);
+            let inventory = homebrew::scan(&layout, &host).unwrap();
+            let mut app = brew_list_app(&inventory);
+            app.layout = layout;
+            let host = Arc::new(host);
+            app.host = host.clone();
+            focus_on(&mut app, "lib");
+
+            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('y'));
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let outcome = screen_text(&app);
+            assert!(outcome.contains("Uninstall Complete"), "{outcome}");
+            assert!(!outcome.contains("Trash"), "{outcome}");
+            let runs = HistoryLog::new(app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "brew uninstall");
+            assert_eq!(runs[0].items.len(), 1);
+            assert_eq!(runs[0].items[0].path, "lib 1");
+            assert!(before >= 50_000);
+            assert_eq!(runs[0].items[0].bytes, before);
+            let removals: Vec<String> = host
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.contains("HOMEBREW_NO_AUTOREMOVE=1"))
+                .cloned()
+                .collect();
+            assert_eq!(removals, [uninstall_line]);
+
+            app.handle_key(KeyCode::Enter);
+            assert!(screen_text(&app).contains("Reading Homebrew"));
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+            let labels: Vec<_> = select(&app)
+                .scan
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .map(|item| item.path.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(labels.len(), 1);
+            assert!(labels[0].starts_with("keep "), "{labels:?}");
         }
     }
 }

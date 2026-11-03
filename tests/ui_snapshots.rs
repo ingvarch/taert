@@ -1213,7 +1213,7 @@ fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Pac
     }
 }
 
-fn brew_scan() -> CategoryScan {
+fn brew_list() -> SelectState {
     let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);
     let mut go = formula("go", "1.27.3", 250_100_000);
     go.used_by = vec!["golangci-lint".to_string(), "gosec".to_string()];
@@ -1225,20 +1225,36 @@ fn brew_scan() -> CategoryScan {
     ada.on_request = false;
     let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
     ghostty.apps = vec!["Ghostty.app".to_string()];
-    homebrew::list_scan(&Inventory {
+    SelectState::homebrew_list(&Inventory {
         packages: vec![go, bun, ada, fd, ghostty],
-        notes: Vec::new(),
+        brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+        ..Inventory::default()
     })
 }
 
 #[test]
 fn snapshot_select_brew() {
-    let state = SelectState::new(brew_scan());
+    let state = brew_list();
     let theme = snapshot_theme();
 
     assert_snapshot!("select_brew_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_brew_80x24", narrow);
+}
+
+#[test]
+fn snapshot_select_brew_removable_formula() {
+    let mut state = brew_list();
+    state.focused_index = state
+        .flattened_rows()
+        .iter()
+        .position(|row| row.is_item() && row.display_path.starts_with("bun "))
+        .unwrap();
+    let theme = snapshot_theme();
+
+    assert_snapshot!("select_brew_removable_120x32", select_screen(&state));
+    let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_brew_removable_80x24", narrow);
 }
 
 fn brew_cleanup_row(label: &str, size: u64, uninstall: bool) -> ScanItem {
