@@ -7,6 +7,7 @@
 //! - Accurate folder `/` and package ` [package]` suffixes.
 //! - Live measuring background progress dialog with cancellation.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,10 +31,10 @@ use super::components::list::{ColumnTitles, ListRow};
 use super::components::modal::Modal;
 use super::components::progress::ProgressView;
 use super::components::toast::Toast;
-use super::folder_preview::{FolderPreview, preview_lines};
+use super::folder_preview::{FolderPreview, Job, preview_lines};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
-pub use crate::core::cache::{ChildItem, FolderSnapshot, StorageCache};
+pub use crate::core::cache::{CachedSnapshot, ChildItem, FolderSnapshot, StorageCache};
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
 use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
@@ -74,6 +75,7 @@ pub struct BrowserLevel {
     pub snapshot: FolderSnapshot,
     pub selected: usize,
     pub offset: usize,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +206,7 @@ pub struct AnalyzeState {
     pub cache: Arc<RwLock<StorageCache>>,
     pub sort_order: SortOrder,
     pub preview: FolderPreview,
+    pub update: Option<Job>,
 }
 
 impl AnalyzeState {
@@ -230,6 +233,7 @@ impl AnalyzeState {
             cache,
             sort_order: SortOrder::default(),
             preview: FolderPreview::default(),
+            update: None,
         };
         state.start_measuring(root);
         state
@@ -246,6 +250,7 @@ impl AnalyzeState {
             snapshot,
             selected: 0,
             offset: 0,
+            stale: false,
         };
 
         Self {
@@ -262,6 +267,7 @@ impl AnalyzeState {
             cache,
             sort_order,
             preview: FolderPreview::default(),
+            update: None,
         }
     }
 
@@ -342,24 +348,23 @@ impl AnalyzeState {
         if report.removed_count == 0 {
             return;
         }
-        let updated_snapshot = if let Some(level) = self.current_level_mut() {
-            level.snapshot.children.retain(|child| child.path.exists());
-            level.snapshot.total_bytes = level.snapshot.children.iter().map(|c| c.size_bytes).sum();
-            if level.selected >= level.snapshot.children.len()
-                && !level.snapshot.children.is_empty()
-            {
-                level.selected = level.snapshot.children.len() - 1;
-            }
-            Some(level.snapshot.clone())
-        } else {
-            None
+        let Some(level) = self.current_level_mut() else {
+            return;
         };
-        if let Some(snapshot) = updated_snapshot {
-            let mut cache = self.cache.write().unwrap();
-            cache.invalidate_prefix(&snapshot.path);
-            cache.put_snapshot(snapshot.path.clone(), snapshot);
-            self.preview = FolderPreview::default();
+        level.snapshot.children.retain(|child| child.path.exists());
+        level.snapshot.total_bytes = level.snapshot.children.iter().map(|c| c.size_bytes).sum();
+        if level.selected >= level.snapshot.children.len() && !level.snapshot.children.is_empty() {
+            level.selected = level.snapshot.children.len() - 1;
         }
+        let stale = level.stale;
+        let snapshot = level.snapshot.clone();
+        let mut cache = self.cache.write().unwrap();
+        cache.invalidate_prefix(&snapshot.path);
+        if !stale {
+            cache.put_snapshot(snapshot.path.clone(), snapshot);
+        }
+        drop(cache);
+        self.preview = FolderPreview::default();
     }
 
     pub fn current_level(&self) -> Option<&BrowserLevel> {
@@ -599,17 +604,6 @@ impl AnalyzeState {
         };
 
         if child.is_dir && !child.is_package {
-            // Check if snapshot is cached for instant zero-latency transition
-            if let Some(mut snapshot) = self.cache.read().unwrap().get_snapshot(&child.path) {
-                self.sort_order.sort_children(&mut snapshot.children);
-                self.levels.push(BrowserLevel {
-                    snapshot,
-                    selected: 0,
-                    offset: 0,
-                });
-                return;
-            }
-
             self.start_measuring(child.path);
         }
     }
@@ -627,6 +621,7 @@ impl AnalyzeState {
     pub fn go_up(&mut self) -> bool {
         if self.levels.len() > 1 {
             self.levels.pop();
+            self.cancel_update();
             true
         } else {
             false
@@ -643,16 +638,25 @@ impl AnalyzeState {
     }
 
     pub fn start_measuring(&mut self, path: PathBuf) {
-        // If snapshot is already cached, push directly without spawning a thread!
-        if let Some(mut snapshot) = self.cache.read().unwrap().get_snapshot(&path) {
+        self.cancel_update();
+        let cached = self.cache.read().unwrap().lookup_snapshot(&path);
+        if let Some(cached) = cached {
+            let (mut snapshot, stale) = match cached {
+                CachedSnapshot::Fresh(snapshot) => (snapshot, false),
+                CachedSnapshot::Stale(snapshot) => (snapshot, true),
+            };
             self.sort_order.sort_children(&mut snapshot.children);
             self.levels.push(BrowserLevel {
                 snapshot,
                 selected: 0,
                 offset: 0,
+                stale,
             });
-            self.measuring_rx = None;
-            self.current_progress = None;
+            if !stale {
+                self.measuring_rx = None;
+                self.current_progress = None;
+            }
+            self.start_update_if_stale();
             return;
         }
 
@@ -679,6 +683,55 @@ impl AnalyzeState {
             scanned_files: 0,
             scanned_bytes: 0,
         });
+    }
+
+    pub fn cancel_update(&mut self) {
+        self.update = None;
+    }
+
+    fn start_update_if_stale(&mut self) {
+        let Some(level) = self.levels.last().filter(|level| level.stale) else {
+            return;
+        };
+        if self.update.is_none()
+            && self.measuring_rx.is_none()
+            && !matches!(self.overlay, AnalyzeOverlay::Deleting { .. })
+        {
+            self.update = Some(Job::start(&level.snapshot.path, &self.ignore, &self.cache));
+        }
+    }
+
+    fn swap_in_update(&mut self) {
+        if !matches!(self.overlay, AnalyzeOverlay::None) {
+            return;
+        }
+        let Some(mut snapshot) = self.update.as_ref().and_then(|job| job.rx.try_recv().ok()) else {
+            return;
+        };
+        self.sort_order.sort_children(&mut snapshot.children);
+        if let Some(level) = self.levels.last_mut() {
+            let focused = level.snapshot.children.get(level.selected).map(|c| &c.path);
+            let marked: HashSet<&PathBuf> = level
+                .snapshot
+                .children
+                .iter()
+                .filter(|c| c.selected)
+                .map(|c| &c.path)
+                .collect();
+            for child in &mut snapshot.children {
+                child.selected = marked.contains(&child.path);
+            }
+            level.selected = focused
+                .and_then(|path| snapshot.children.iter().position(|c| &c.path == path))
+                .unwrap_or_else(|| {
+                    level
+                        .selected
+                        .min(snapshot.children.len().saturating_sub(1))
+                });
+            level.snapshot = snapshot;
+            level.stale = false;
+        }
+        self.update = None;
     }
 
     pub fn cancel_measuring(&mut self) {
@@ -716,6 +769,7 @@ impl AnalyzeState {
                             snapshot,
                             selected: 0,
                             offset: 0,
+                            stale: false,
                         });
                         self.measuring_rx = None;
                         self.current_progress = None;
@@ -724,6 +778,9 @@ impl AnalyzeState {
                 }
             }
         }
+
+        self.swap_in_update();
+        self.start_update_if_stale();
 
         let target = self.preview_target();
         self.preview
@@ -991,9 +1048,14 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         || level.snapshot.path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
+    let updating = if level.stale {
+        vec![Span::styled("Updating…", theme.footnote())]
+    } else {
+        Vec::new()
+    };
     let list_frame = card(
         &folder,
-        Vec::new(),
+        updating,
         list_lines,
         list_rect.width as usize,
         frame_rows,
@@ -1357,6 +1419,7 @@ mod tests {
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
             preview: FolderPreview::default(),
+            update: None,
         };
 
         terminal
@@ -1399,6 +1462,7 @@ mod tests {
                 },
                 selected: 0,
                 offset: 0,
+                stale: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -1419,6 +1483,7 @@ mod tests {
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
             preview: FolderPreview::default(),
+            update: None,
         };
 
         terminal
@@ -1468,6 +1533,7 @@ mod tests {
                 },
                 selected: 0,
                 offset: 0,
+                stale: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -1480,6 +1546,7 @@ mod tests {
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
             preview: FolderPreview::default(),
+            update: None,
         };
 
         // Initially nothing selected
@@ -1694,6 +1761,8 @@ mod tests {
         state.enter_selected();
         assert_eq!(state.levels.len(), 2);
         assert!(state.measuring_rx.is_none()); // Instant transition, no background thread needed!
+        assert!(state.update.is_none());
+        assert!(!state.current_level().unwrap().stale);
     }
 
     #[test]
@@ -1763,6 +1832,7 @@ mod tests {
                 },
                 selected: 0,
                 offset: 0,
+                stale: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -1775,6 +1845,7 @@ mod tests {
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::Size,
             preview: FolderPreview::default(),
+            update: None,
         };
 
         assert_eq!(state.sort_order, SortOrder::Size);
@@ -1864,5 +1935,376 @@ mod tests {
         assert_eq!(state.levels.len(), 2);
         assert!(drawn.iter().all(|s| !s.contains("Measuring")));
         assert!(!screen(&state, 100, 30).contains("Measuring"));
+    }
+
+    // Stores `rows` as the cached view of `dir`, then makes it old by moving the folder's mtime back.
+    fn make_stale(state: &AnalyzeState, dir: &Path, rows: &[(&str, u64, bool)]) {
+        let children: Vec<ChildItem> = rows
+            .iter()
+            .map(|(name, size, is_dir)| ChildItem {
+                name: (*name).to_string(),
+                path: dir.join(name),
+                size_bytes: *size,
+                is_dir: *is_dir,
+                is_package: false,
+                selected: false,
+                created: None,
+            })
+            .collect();
+        let snapshot = FolderSnapshot {
+            path: dir.to_path_buf(),
+            total_bytes: children.iter().map(|c| c.size_bytes).sum(),
+            children,
+            inaccessible_count: 0,
+            skipped_count: 0,
+        };
+        state
+            .cache
+            .write()
+            .unwrap()
+            .put_snapshot(dir.to_path_buf(), snapshot);
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        fs::File::open(dir).unwrap().set_modified(old).unwrap();
+    }
+
+    fn names(state: &AnalyzeState) -> Vec<String> {
+        let level = state.current_level().unwrap();
+        level
+            .snapshot
+            .children
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    fn finish_update(state: &mut AnalyzeState) {
+        for _ in 0..1000 {
+            if state.update.is_none() {
+                return;
+            }
+            state.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the update never ended");
+    }
+
+    // A root with `sub` holding the given files; `sub` is shown stale with `rows`, and opened.
+    fn stale_sub(
+        files: &[(&str, usize)],
+        rows: &[(&str, u64, bool)],
+    ) -> (tempfile::TempDir, AnalyzeState, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let sub = temp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        if rows.iter().any(|(name, ..)| *name == "inner") {
+            fs::create_dir(sub.join("inner")).unwrap();
+        }
+        for (name, len) in files {
+            fs::write(sub.join(name), vec![0_u8; *len]).unwrap();
+        }
+        let mut state = AnalyzeState::new_sync(temp.path().to_path_buf(), IgnoreStore::default());
+        make_stale(&state, &sub, rows);
+        state.enter_selected();
+        (temp, state, sub)
+    }
+
+    #[test]
+    fn a_stale_folder_opens_at_once_and_updates() {
+        let (temp, mut state) = explore_fixture();
+        let sub = temp.path().join("sub");
+        make_stale(&state, &sub, &[("old.bin", 1, false)]);
+
+        state.enter_selected();
+
+        assert_eq!(state.levels.len(), 2);
+        assert!(state.measuring_rx.is_none());
+        assert_eq!(names(&state), ["old.bin"]);
+        assert!(state.current_level().unwrap().stale);
+        assert!(state.update.is_some());
+        let rendered = screen(&state, 100, 30);
+        assert!(rendered.contains("Updating…"), "{rendered}");
+        assert!(!rendered.contains("Measuring"), "{rendered}");
+
+        finish_update(&mut state);
+
+        assert_eq!(names(&state), ["nested.bin"]);
+        assert!(!state.current_level().unwrap().stale);
+        assert!(!screen(&state, 100, 30).contains("Updating…"));
+        let expected = AnalyzeState::scan_folder(
+            &sub,
+            &IgnoreStore::default(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(RwLock::new(StorageCache::new())),
+        );
+        let rows = |s: &FolderSnapshot| -> Vec<(String, u64)> {
+            s.children
+                .iter()
+                .map(|c| (c.name.clone(), c.size_bytes))
+                .collect()
+        };
+        assert_eq!(
+            rows(&state.current_level().unwrap().snapshot),
+            rows(&expected)
+        );
+        assert!(matches!(
+            state.cache.read().unwrap().lookup_snapshot(&sub),
+            Some(CachedSnapshot::Fresh(_))
+        ));
+    }
+
+    const MB: u64 = 1024 * 1024;
+
+    #[test]
+    fn the_update_keeps_the_focus_and_the_marks_by_path() {
+        let files = [("a.bin", 4096), ("b.bin", 16384), ("c.bin", 65536)];
+        let rows = [
+            ("a.bin", 3 * MB, false),
+            ("b.bin", 2 * MB, false),
+            ("c.bin", MB, false),
+        ];
+        let (_temp, mut state, _sub) = stale_sub(&files, &rows);
+        assert_eq!(names(&state), ["a.bin", "b.bin", "c.bin"]);
+        state.next();
+        state.next();
+        state.toggle_current();
+        state.previous();
+        state.previous();
+
+        finish_update(&mut state);
+
+        assert_eq!(names(&state), ["c.bin", "b.bin", "a.bin"]);
+        let level = state.current_level().unwrap();
+        assert_eq!(level.selected, 2);
+        let marked: Vec<bool> = level.snapshot.children.iter().map(|c| c.selected).collect();
+        assert_eq!(marked, [true, false, false]);
+
+        let rows = [
+            ("a.bin", 3 * MB, false),
+            ("b.bin", 2 * MB, false),
+            ("c.bin", MB, false),
+            ("gone.bin", 1, false),
+        ];
+        let (_temp, mut state, _sub) = stale_sub(&files, &rows);
+        state.move_to_end();
+        assert_eq!(state.current_level().unwrap().selected, 3);
+
+        finish_update(&mut state);
+
+        assert_eq!(state.current_level().unwrap().selected, 2);
+    }
+
+    #[test]
+    fn opening_explore_at_a_stale_folder_shows_it_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        fs::write(root.join("a.bin"), b"12345").unwrap();
+        let holder = AnalyzeState::new_sync(root.clone(), IgnoreStore::default());
+        make_stale(&holder, &root, &[("old.bin", 1, false)]);
+
+        let mut state =
+            AnalyzeState::with_cache(root, IgnoreStore::default(), holder.cache.clone());
+
+        assert_eq!(state.levels.len(), 1);
+        assert!(state.measuring_rx.is_none());
+        assert!(state.levels[0].stale);
+        assert!(state.update.is_some());
+        finish_update(&mut state);
+        assert_eq!(names(&state), ["a.bin"]);
+    }
+
+    fn updating_sub() -> (tempfile::TempDir, AnalyzeState, PathBuf) {
+        let rows = [("inner", 500, true), ("old.bin", 1, false)];
+        stale_sub(&[("old.bin", 1)], &rows)
+    }
+
+    #[test]
+    fn leaving_the_folder_stops_the_update() {
+        let cancel = |state: &AnalyzeState| state.update.as_ref().unwrap().cancel.clone();
+
+        let (_t, mut state, _) = updating_sub();
+        let flag = cancel(&state);
+        assert!(state.go_up());
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(state.update.is_none());
+
+        let (_t, mut state, _) = updating_sub();
+        let flag = cancel(&state);
+        state.enter_selected();
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(state.update.is_none());
+
+        let (_t, mut state, _) = updating_sub();
+        let flag = cancel(&state);
+        state.refresh_current();
+        assert!(state.measuring_rx.is_some());
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(state.update.is_none());
+
+        let (_t, mut state, _) = updating_sub();
+        let flag = cancel(&state);
+        state.next();
+        state.toggle_current();
+        state.set_sort(SortOrder::Name);
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(state.update.is_some());
+    }
+
+    #[test]
+    fn going_back_to_a_stale_folder_updates_it_again() {
+        let (_t, mut state, sub) = updating_sub();
+        state.enter_selected();
+        assert!(state.measuring_rx.is_some());
+        for _ in 0..1000 {
+            if state.measuring_rx.is_none() {
+                break;
+            }
+            state.tick();
+            assert!(state.update.is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state.measuring_rx.is_none());
+        assert_eq!(state.levels.len(), 3);
+        assert_eq!(
+            state.current_level().unwrap().snapshot.path,
+            sub.join("inner")
+        );
+
+        assert!(state.go_up());
+
+        let level = state.current_level().unwrap();
+        assert_eq!(level.snapshot.path, sub);
+        assert!(level.stale);
+        state.tick();
+        assert_eq!(state.update.as_ref().unwrap().path, sub);
+    }
+
+    #[test]
+    fn the_update_waits_for_a_measuring_or_a_removal_to_end() {
+        let (_t, mut state, sub) = updating_sub();
+        state.cancel_update();
+
+        let (_tx, rx) = mpsc::channel();
+        state.measuring_rx = Some(rx);
+        state.tick();
+        assert!(state.update.is_none());
+
+        state.measuring_rx = None;
+        state.overlay = AnalyzeOverlay::Deleting {
+            progress: RemovalProgress {
+                current_index: 0,
+                total_count: 1,
+                path: sub.join("old.bin"),
+            },
+            spinner_idx: 0,
+        };
+        state.tick();
+        assert!(state.update.is_none());
+
+        state.overlay = AnalyzeOverlay::Outcome(RemovalReport::default());
+        state.tick();
+        assert_eq!(state.update.as_ref().unwrap().path, sub);
+    }
+
+    #[test]
+    fn the_update_waits_while_a_dialog_is_open() {
+        let rows = [("gone.bin", 9 * MB, false), ("a.bin", MB, false)];
+        let (_t, mut state, sub) = stale_sub(&[("a.bin", 10)], &rows);
+        state.open_delete_confirmation(false);
+        let only_gone = |state: &AnalyzeState| -> Vec<String> {
+            state
+                .items_to_delete()
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        };
+        assert_eq!(only_gone(&state), ["gone.bin"]);
+
+        for _ in 0..1000 {
+            if matches!(
+                state.cache.read().unwrap().lookup_snapshot(&sub),
+                Some(CachedSnapshot::Fresh(_))
+            ) {
+                break;
+            }
+            state.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            state.cache.read().unwrap().lookup_snapshot(&sub),
+            Some(CachedSnapshot::Fresh(_))
+        ));
+        for _ in 0..5 {
+            state.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(names(&state), ["gone.bin", "a.bin"]);
+        assert!(state.current_level().unwrap().stale);
+        assert_eq!(only_gone(&state), ["gone.bin"]);
+
+        state.overlay = AnalyzeOverlay::None;
+        finish_update(&mut state);
+
+        assert_eq!(names(&state), ["a.bin"]);
+    }
+
+    #[test]
+    fn a_removal_in_a_stale_folder_measures_it_again() {
+        let rows = [("a.bin", 2 * MB, false), ("b.bin", MB, false)];
+        let files = [("a.bin", 10), ("b.bin", 10)];
+        let (_t, mut state, sub) = stale_sub(&files, &rows);
+        state.cancel_update();
+        fs::remove_file(sub.join("b.bin")).unwrap();
+
+        state.handle_removal_finished(&RemovalReport {
+            removed_count: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(names(&state), ["a.bin"]);
+        assert!(state.current_level().unwrap().stale);
+        assert!(state.cache.read().unwrap().lookup_snapshot(&sub).is_none());
+        for _ in 0..1000 {
+            state.tick();
+            if state.update.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!state.current_level().unwrap().stale);
+        assert_eq!(names(&state), ["a.bin"]);
+    }
+
+    #[test]
+    fn a_removal_in_a_fresh_folder_keeps_it_cached() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("a.bin"), b"1").unwrap();
+        fs::write(temp.path().join("b.bin"), b"1").unwrap();
+        let mut state = AnalyzeState::new_sync(temp.path().to_path_buf(), IgnoreStore::default());
+        fs::remove_file(temp.path().join("b.bin")).unwrap();
+
+        state.handle_removal_finished(&RemovalReport {
+            removed_count: 1,
+            ..Default::default()
+        });
+
+        let cached = state.cache.read().unwrap().get_snapshot(temp.path());
+        assert_eq!(cached.unwrap().children.len(), 1);
+    }
+
+    #[test]
+    fn the_updating_mark_shows_only_while_stale() {
+        let (_temp, mut state) = explore_fixture();
+        state.levels[0].stale = true;
+
+        let rendered = screen(&state, 100, 30);
+
+        let marked = rendered.lines().find(|l| l.contains("Updating…")).unwrap();
+        assert!(marked.contains("╭─"), "{rendered}");
+        assert!(!rendered.contains("Measuring"), "{rendered}");
+
+        state.levels[0].stale = false;
+        assert!(!screen(&state, 100, 30).contains("Updating…"));
     }
 }

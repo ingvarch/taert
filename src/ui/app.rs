@@ -1602,6 +1602,7 @@ impl App {
                 analyze.overlay = AnalyzeOverlay::None;
                 return;
             }
+            analyze.cancel_update();
 
             let scan_items: Vec<ScanItem> = items_to_remove
                 .into_iter()
@@ -2501,6 +2502,97 @@ mod tests {
         app.handle_key(KeyCode::Char('q'));
 
         assert_main_menu(&app, 0);
+    }
+
+    // `dir` holds `sub`; the cached view of `sub` is old and lists `rows`.
+    fn make_sub_stale(app: &App, dir: &Path, rows: &[&str]) {
+        use crate::core::cache::{ChildItem, FolderSnapshot};
+        let sub = dir.join("sub");
+        let children = rows
+            .iter()
+            .map(|name| ChildItem {
+                name: (*name).to_string(),
+                path: sub.join(name),
+                size_bytes: 10,
+                is_dir: false,
+                is_package: false,
+                selected: false,
+                created: None,
+            })
+            .collect();
+        let snapshot = FolderSnapshot {
+            path: sub.clone(),
+            children,
+            total_bytes: 10 * rows.len() as u64,
+            inaccessible_count: 0,
+            skipped_count: 0,
+        };
+        analyze(app)
+            .cache
+            .write()
+            .unwrap()
+            .put_snapshot(sub.clone(), snapshot);
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::open(&sub)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+
+    fn updating_app(dir: &Path) -> App {
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let mut app = analyze_app(dir);
+        make_sub_stale(&app, dir, &["one.bin", "two.bin"]);
+        app.handle_key(KeyCode::Enter);
+        app
+    }
+
+    fn update_flag(app: &App) -> Arc<AtomicBool> {
+        analyze(app).update.as_ref().unwrap().cancel.clone()
+    }
+
+    #[test]
+    fn keys_work_while_a_folder_updates() {
+        let dir = tempdir().unwrap();
+        let mut app = updating_app(dir.path());
+
+        assert_eq!(analyze(&app).levels.len(), 2);
+        app.handle_key(KeyCode::Down);
+
+        assert_eq!(analyze(&app).current_level().unwrap().selected, 1);
+        let text = screen_text(&app);
+        assert!(text.contains("Updating…"), "{text}");
+        assert!(!text.contains("Measuring"), "{text}");
+    }
+
+    #[test]
+    fn leaving_explore_stops_the_update() {
+        let dir = tempdir().unwrap();
+        let mut app = updating_app(dir.path());
+        let flag = update_flag(&app);
+
+        app.handle_key(KeyCode::Char('q'));
+
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn deleting_in_an_updating_folder_stops_the_update() {
+        let dir = tempdir().unwrap();
+        let mut app = updating_app(dir.path());
+        let (_sandbox, layout) = crate::core::apps::testing::sandbox();
+        app.layout = layout;
+        let flag = update_flag(&app);
+
+        press(&mut app, &[KeyCode::Char('d'), KeyCode::Enter]);
+
+        assert!(flag.load(Ordering::Relaxed));
+        let started = std::time::Instant::now();
+        while app.removal_rx.is_some() {
+            assert!(started.elapsed() < Duration::from_secs(5), "removal hangs");
+            app.poll_removal();
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn screen_text(app: &App) -> String {

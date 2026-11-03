@@ -263,11 +263,12 @@ Explore Storage uses a two-tier in-memory cache ([`StorageCache`](file:///Users/
 2. **Instant Drill-Down**:
    When navigating into a subfolder, its children's sizes are already present in the cache, packages (`.app`, `.framework`, `.bundle`) included. Directory listings load in $< 1\text{ ms}$ without additional disk traversal. The measuring dialog shows only after 150 ms, so a folder that loads faster opens with no dialog.
 3. **Snapshot Caching**:
-   Constructed `FolderSnapshot` structures are cached in memory. Re-visiting a previously viewed folder restores the view instantly in the same frame without spawning a background thread.
+   Constructed `FolderSnapshot` structures are cached in memory. Re-visiting a previously viewed folder with a fresh snapshot restores the view instantly in the same frame without spawning a background thread.
+   `StorageCache::lookup_snapshot` says whether a snapshot is `Fresh` or `Stale` (the folder's mtime changed or the 15-minute TTL passed). A stale snapshot shows at once with `Updating…` on the list frame. `scan_folder` measures the folder again in a background `Job`, and the new rows replace the old ones when it ends. The focus and the Space marks stay on their paths, and the swap waits while a dialog is open. The update stops when the open folder changes (`go_up`, opening another folder, `R`), when a removal starts, and when the user leaves Explore Storage. `tick` starts it again for a level that is still stale.
 4. **Cache Invalidation**:
-   - Deleting items in Explore Storage invokes `invalidate_prefix` on affected paths and updates parent snapshots.
+   - Deleting items in Explore Storage invokes `invalidate_prefix` on affected paths and updates parent snapshots. In a stale folder the rows are not cached again, and the level stays stale until the update ends.
    - Performing cleanup operations from the main menu clears the cache to prevent stale data.
-   - Directory modified times (`mtime`) and a 15-minute TTL ensure stale entries on disk are automatically refreshed.
+   - Directory modified times (`mtime`) and a 15-minute TTL mark a snapshot stale. A stale snapshot shows at once with `Updating…` and is measured again in the background.
    - Pressing `R` in Explore Storage forces an immediate cache bypass and fresh rescan.
 
 For developer instructions and checks, see [development.md](development.md).

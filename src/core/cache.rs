@@ -45,6 +45,13 @@ pub struct FolderSnapshot {
     pub skipped_count: usize,
 }
 
+/// A cached snapshot and whether it is still valid.
+#[derive(Debug, Clone)]
+pub enum CachedSnapshot {
+    Fresh(FolderSnapshot),
+    Stale(FolderSnapshot),
+}
+
 /// Cached directory size entry with metadata timestamp.
 #[derive(Debug, Clone)]
 pub struct CachedDirSize {
@@ -107,24 +114,24 @@ impl StorageCache {
         Some(entry.bytes)
     }
 
+    /// Look up a folder snapshot and say whether it is still valid.
+    pub fn lookup_snapshot(&self, path: &Path) -> Option<CachedSnapshot> {
+        let (snapshot, mtime, cached_at) = self.snapshots.get(path)?;
+        let current_mtime = fs::metadata(path).ok()?.modified().ok();
+        let changed = mtime.is_some() && current_mtime.is_some() && mtime != &current_mtime;
+        if cached_at.elapsed() > self.ttl || changed {
+            Some(CachedSnapshot::Stale(snapshot.clone()))
+        } else {
+            Some(CachedSnapshot::Fresh(snapshot.clone()))
+        }
+    }
+
     /// Retrieve a cached folder snapshot if still valid.
     pub fn get_snapshot(&self, path: &Path) -> Option<FolderSnapshot> {
-        let (snapshot, mtime, cached_at) = self.snapshots.get(path)?;
-        if cached_at.elapsed() > self.ttl {
-            return None;
+        match self.lookup_snapshot(path)? {
+            CachedSnapshot::Fresh(snapshot) => Some(snapshot),
+            CachedSnapshot::Stale(_) => None,
         }
-
-        // Validate mtime
-        if let Ok(meta) = fs::metadata(path) {
-            let current_mtime = meta.modified().ok();
-            if mtime.is_some() && current_mtime.is_some() && mtime != &current_mtime {
-                return None;
-            }
-        } else {
-            return None;
-        }
-
-        Some(snapshot.clone())
     }
 
     /// Cache a directory size entry.
@@ -349,5 +356,82 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
         assert_eq!(cache.get_size(&dir), None);
+    }
+
+    fn snap(dir: &Path, bytes: u64) -> FolderSnapshot {
+        FolderSnapshot {
+            path: dir.to_path_buf(),
+            children: Vec::new(),
+            total_bytes: bytes,
+            inaccessible_count: 0,
+            skipped_count: 0,
+        }
+    }
+
+    fn set_mtime_back(dir: &Path) {
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        fs::File::open(dir).unwrap().set_modified(old).unwrap();
+    }
+
+    #[test]
+    fn a_changed_folder_gives_its_old_snapshot_as_stale() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut cache = StorageCache::new();
+        cache.put_snapshot(dir.clone(), snap(&dir, 77));
+        set_mtime_back(&dir);
+        assert!(cache.get_snapshot(&dir).is_none());
+        match cache.lookup_snapshot(&dir) {
+            Some(CachedSnapshot::Stale(s)) => assert_eq!(s.total_bytes, 77),
+            other => panic!("expected stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_old_snapshot_is_stale_after_the_ttl() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut cache = StorageCache::with_ttl(Duration::from_millis(1));
+        cache.put_snapshot(dir.clone(), snap(&dir, 5));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(matches!(
+            cache.lookup_snapshot(&dir),
+            Some(CachedSnapshot::Stale(_))
+        ));
+        assert!(cache.get_snapshot(&dir).is_none());
+    }
+
+    #[test]
+    fn a_new_snapshot_is_fresh() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut cache = StorageCache::new();
+        cache.put_snapshot(dir.clone(), snap(&dir, 5));
+        assert!(matches!(
+            cache.lookup_snapshot(&dir),
+            Some(CachedSnapshot::Fresh(_))
+        ));
+    }
+
+    #[test]
+    fn no_snapshot_without_an_entry_or_a_folder() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut cache = StorageCache::new();
+        assert!(cache.lookup_snapshot(&dir).is_none());
+
+        cache.put_snapshot(dir.clone(), snap(&dir, 1));
+        cache.invalidate_prefix(&dir);
+        assert!(cache.lookup_snapshot(&dir).is_none());
+
+        cache.put_snapshot(dir.clone(), snap(&dir, 1));
+        cache.clear();
+        assert!(cache.lookup_snapshot(&dir).is_none());
+
+        let gone = dir.join("gone");
+        fs::create_dir(&gone).unwrap();
+        cache.put_snapshot(gone.clone(), snap(&gone, 1));
+        fs::remove_dir(&gone).unwrap();
+        assert!(cache.lookup_snapshot(&gone).is_none());
     }
 }

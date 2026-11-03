@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Explore Storage**: a folder that changed since your last visit, or that was cached more than 15 minutes ago, opens at once with `Updating…` and is measured again in the background. Its rows change when the new sizes are in.
+
 ### Fixed
 - **Slim apps**: on a Mac that is not Apple Silicon, the interface leaves the scanning screen and shows why under the name `Slim Universal Apps`.
 - **Uninstall**: an uninstall plan with no apps shows the crumbs `taert › Uninstall apps › Review`, the `Uninstall` button, and the right help for Enter.

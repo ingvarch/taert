@@ -26,14 +26,15 @@ const SETTLE: Duration = Duration::from_millis(150);
 const MIN_BAR_W: usize = 8;
 const MAX_BAR_W: usize = 30;
 
-struct Job {
-    path: PathBuf,
-    cancel: Arc<AtomicBool>,
-    rx: Receiver<FolderSnapshot>,
+/// Measures one folder on a thread; sends the snapshot unless cancelled, and cancels on drop.
+pub struct Job {
+    pub path: PathBuf,
+    pub cancel: Arc<AtomicBool>,
+    pub rx: Receiver<FolderSnapshot>,
 }
 
 impl Job {
-    fn start(path: &Path, ignore: &IgnoreStore, cache: &Arc<RwLock<StorageCache>>) -> Self {
+    pub fn start(path: &Path, ignore: &IgnoreStore, cache: &Arc<RwLock<StorageCache>>) -> Self {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
