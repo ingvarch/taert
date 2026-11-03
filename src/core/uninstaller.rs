@@ -25,13 +25,14 @@ use super::cleaner::{
 };
 use super::history::{ItemOutcome, OutcomeKind};
 use super::homebrew;
-use super::host::{Host, Output, shell_quote};
+use super::host::{Host, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
     Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary, vendor_token,
     without_channel,
 };
 use super::path_utils::prettify_path;
+use super::processes;
 use super::safety::{Safety, SafetyError};
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
 use super::sizer::DirSizer;
@@ -48,7 +49,6 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an app may keep a save dialog open before the quit request counts as ignored.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-const PS: &str = "/bin/ps";
 const OSASCRIPT: &str = "/usr/bin/osascript";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const DEFAULTS: &str = "/usr/bin/defaults";
@@ -553,12 +553,6 @@ fn program_folders(plan: &AppPlan) -> Vec<PathBuf> {
     folders
 }
 
-pub(crate) fn is_inside_any(program: &str, folders: &[PathBuf]) -> bool {
-    folders
-        .iter()
-        .any(|folder| Path::new(program).starts_with(folder))
-}
-
 fn is_gone(path: &Path) -> bool {
     fs::symlink_metadata(path).is_err()
 }
@@ -567,29 +561,6 @@ fn in_folder_named(path: &Path, folder: &str) -> bool {
     path.parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name == folder)
-}
-
-fn list_processes(host: &dyn Host) -> Output {
-    host.run(PS, &["-axo", "pid=,ppid=,comm="], TEARDOWN_TIMEOUT)
-}
-
-/// The process table, or `None` when `ps` failed and the list cannot be trusted.
-pub(crate) fn checked_process_table(host: &dyn Host) -> Option<Vec<(u32, u32, String)>> {
-    let listing = list_processes(host);
-    listing.ok.then(|| parse_process_table(&listing.stdout))
-}
-
-fn parse_process_table(table: &str) -> Vec<(u32, u32, String)> {
-    table
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.trim_start().splitn(2, char::is_whitespace);
-            let pid = fields.next()?.parse().ok()?;
-            let rest = fields.next()?.trim_start();
-            let (parent, program) = rest.split_once(char::is_whitespace)?;
-            Some((pid, parent.parse().ok()?, program.trim_start().to_string()))
-        })
-        .collect()
 }
 
 /// This process and everything that started it, the terminal included.
@@ -1139,11 +1110,11 @@ impl Uninstaller<'_> {
     fn running(&self, plan: &AppPlan) -> Running {
         let folders = program_folders(plan);
         // Whatever `ps` printed before it failed still names processes to stop.
-        let table = parse_process_table(&list_processes(self.host).stdout);
+        let table = processes::parse(&processes::list(self.host).stdout);
         let lineage = own_lineage(&table, self.host.pid());
         let inside = table
             .iter()
-            .filter(|(_, _, program)| is_inside_any(program, &folders));
+            .filter(|(_, _, program)| processes::is_inside_any(program, &folders));
         let (own, others): (Vec<_>, Vec<_>) = inside.partition(|(pid, _, _)| lineage.contains(pid));
         Running {
             pids: others.iter().map(|(pid, _, _)| *pid).collect(),
@@ -2240,6 +2211,7 @@ mod run_tests {
     use super::*;
     use crate::core::apps::testing::{app, fake_app, sandbox};
     use crate::core::host::fake::FakeHost;
+    use crate::core::processes::PS;
     use crate::core::safety::FileIdentity;
     use crate::core::scanner::ToolGroup;
     use std::os::unix::fs::PermissionsExt;

@@ -1449,12 +1449,9 @@ fn handle_slim(
     };
 
     let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
-    let running = match crate::core::slim::running_processes(host) {
-        Ok(running) => running,
-        Err(error) => {
-            let _ = writeln!(console.err, "Error: {error}");
-            return ExitCode::FAILURE;
-        }
+    let Some(running) = crate::core::processes::read(host) else {
+        let _ = writeln!(console.err, "Error: {}", crate::core::slim::PS_FAILED);
+        return ExitCode::FAILURE;
     };
 
     let history_session = (!cli.dry_run).then(|| {
@@ -1655,22 +1652,25 @@ fn pick_apps_to_slim(
     if cli.json {
         let installed = crate::core::slim::candidate_apps(layout);
         let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
-        let running = crate::core::slim::running_processes(host);
+        let running = crate::core::processes::read(host);
 
         let infos: Vec<crate::core::slim::SlimAppInfo> = installed
             .into_iter()
             .map(|app| {
-                let eligible = running.as_ref().map_err(Clone::clone).and_then(|running| {
-                    crate::core::slim::check_eligibility(
-                        &app,
-                        host,
-                        layout,
-                        ignore,
-                        &rosetta,
-                        Some(running),
-                        false,
-                    )
-                });
+                let eligible = running
+                    .as_ref()
+                    .ok_or_else(|| crate::core::slim::PS_FAILED.to_string())
+                    .and_then(|running| {
+                        crate::core::slim::check_eligibility(
+                            &app,
+                            host,
+                            layout,
+                            ignore,
+                            &rosetta,
+                            Some(running),
+                            false,
+                        )
+                    });
                 match eligible {
                     Ok(binaries) => {
                         let intel_bytes: u64 = binaries

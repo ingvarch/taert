@@ -536,7 +536,7 @@ The saved size is the allocated size of each rewritten binary before, minus the 
 `taert slim` verifies that each application is safe to slim, in the list, in `--json`, and for a named app:
 - **System Applications**: Apple bundles (`com.apple.*`) and system roots are strictly refused.
 - **Mac App Store Apps**: Apps with an App Store receipt (`_MASReceipt`) are skipped because macOS App Store verification requires the original unmodified bundle.
-- **Running Applications**: Running applications are detected via `/bin/ps` and skipped to prevent file locks and memory corruptions. If `ps` fails, every app is refused with "Could not list running programs".
+- **Running Applications**: Running applications are detected via `/bin/ps` and skipped to prevent file locks and memory corruptions. Letter case does not matter, and a program under the app's real path counts when the app's path goes through a link. If `ps` fails, every app is refused with "Could not list running programs".
 - **Rosetta Preference**: Apps configured to run under Rosetta (`LSArchitecturesForX86_64` in `com.apple.LaunchServices.plist`) are excluded so Rosetta compatibility is not broken.
 - **Links**: A bundle path that is a symbolic link is refused ("The app is a link. Slim the app it points to"), because the clone would copy the app it points to. Slim that app by its own path.
 - **Ownership**: The bundle and every file and folder in it must belong to you. A bundle owned by root is refused ("Belongs to another user"), because the copy would make a root-owned helper yours. A bundle with a setuid or setgid file is refused ("Contains a setuid or setgid file"). If permissions fail, `taert` reports a hint to grant App Management in System Settings.
