@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Slim apps**: on a Mac that is not Apple Silicon, the interface leaves the scanning screen and shows why under the name `Slim Universal Apps`.
+- **Uninstall**: an uninstall plan with no apps shows the crumbs `taert › Uninstall apps › Review`, the `Uninstall` button, and the right help for Enter.
+- **Search**: the count in the search line reads `1 result` instead of `1 results`.
 - **Uninstall**: a Homebrew cask is removed with the brew of the Homebrew install that holds it, so a cask in `/usr/local` no longer fails on a Mac that also has `/opt/homebrew`.
 - **Main menu**: in a short window the menu scrolls with the highlighted row, so every row can be reached, and the first or last line says how many rows are out of view.
 

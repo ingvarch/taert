@@ -154,10 +154,10 @@ impl SelectState {
     }
 
     /// A scan that could not run, with the reason to show instead of a list.
-    pub fn unavailable(title: &str, problem: String) -> Self {
+    pub fn unavailable(id: &str, title: &str, problem: String) -> Self {
         let mut state = Self::new(CategoryScan {
             notes: Vec::new(),
-            id: SCAN_ID.to_string(),
+            id: id.to_string(),
             title: title.to_string(),
             groups: Vec::new(),
         });
@@ -863,7 +863,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             Span::styled(&state.search_query, theme.headline()),
             Span::styled("▏", theme.accent_text().add_modifier(Modifier::BOLD)),
             Span::raw("   "),
-            Span::styled(format!("{results_count} results"), theme.footnote()),
+            Span::styled(plural(results_count, "result", "results"), theme.footnote()),
         ]);
         let search_rect = Rect {
             x: content_rect.x,

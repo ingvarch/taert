@@ -10,7 +10,7 @@ use ratatui::style::Color;
 use taert::core::apps;
 use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
-use taert::core::docker::DockerObject;
+use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind};
 use taert::core::large_files;
@@ -1359,6 +1359,17 @@ fn snapshot_select_docker() {
 }
 
 #[test]
+fn snapshot_select_slim_unavailable() {
+    let state = SelectState::unavailable(
+        slim::SCAN_ID,
+        slim::TITLE,
+        "Slimming universal apps requires an Apple Silicon Mac.".to_string(),
+    );
+
+    assert_snapshot!("select_slim_unavailable_120x32", select_screen(&state));
+}
+
+#[test]
 fn docker_has_its_own_breadcrumb() {
     let output = select_screen(&SelectState::with_preserved_selection(docker_scan()));
 
@@ -1391,10 +1402,12 @@ fn removing_images_alone_does_not_mention_volumes() {
 
 #[test]
 fn an_unreachable_docker_explains_itself() {
-    let state = SelectState::unavailable("Docker", "Can't reach Docker.".to_string());
+    let state =
+        SelectState::unavailable(docker::SCAN_ID, "Docker", "Can't reach Docker.".to_string());
 
     let output = select_screen(&state);
 
+    assert!(output.contains("taert › Docker"), "{output}");
     assert!(output.contains("Docker isn't available"), "{output}");
     assert!(output.contains("Can't reach Docker."), "{output}");
     assert!(!output.contains("Nothing to clean"), "{output}");
@@ -1819,6 +1832,24 @@ fn every_list_of_items_sits_in_frames() {
     assert!(output.contains("╭─ Cargo"), "{output}");
     assert!(output.contains('╰'), "{output}");
     assert!(!output.contains("CREATED"), "{output}");
+}
+
+#[test]
+fn the_search_line_counts_in_the_right_form() {
+    let search = |query: &str| {
+        let mut state = docker_table();
+        state.search_query = query.to_string();
+        state.move_to_start();
+        select_screen(&state)
+    };
+
+    let one = search("pgdata");
+    assert!(one.contains("1 result"), "{one}");
+    assert!(!one.contains("1 results"), "{one}");
+    let two = search(":1");
+    assert!(two.contains("2 results"), "{two}");
+    let none = search("zzz");
+    assert!(none.contains("0 results"), "{none}");
 }
 
 #[test]

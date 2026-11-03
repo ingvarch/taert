@@ -34,6 +34,7 @@ use super::sizer::DirSizer;
 use super::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "slim";
+pub const TITLE: &str = "Slim Universal Apps";
 
 pub const FAT_MAGIC: u32 = 0xCAFEBABE;
 pub const FAT_MAGIC_64: u32 = 0xCAFEBABF;
@@ -911,7 +912,7 @@ pub fn slim_scan(
 ) -> CategoryScan {
     let mut scan = CategoryScan {
         id: SCAN_ID.to_string(),
-        title: "Slim Universal Apps".to_string(),
+        title: TITLE.to_string(),
         groups: Vec::new(),
         notes: Vec::new(),
     };
