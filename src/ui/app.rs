@@ -1191,14 +1191,17 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => state.next(),
                 KeyCode::Left => {
                     state.step_age_left(&mut self.config, &self.layout);
-                    state.step_schedule_left(&mut self.config, &*self.host, &self.layout);
+                    state.step_schedule_left();
                 }
                 KeyCode::Right => {
                     state.step_age_right(&mut self.config, &self.layout);
-                    state.step_schedule_right(&mut self.config, &*self.host, &self.layout);
+                    state.step_schedule_right();
                 }
                 KeyCode::Enter => match state.focus {
-                    PreferencesFocus::AgeThreshold | PreferencesFocus::ScheduledCleanup => {}
+                    PreferencesFocus::AgeThreshold => {}
+                    PreferencesFocus::ScheduledCleanup => {
+                        state.apply_schedule(&mut self.config, &*self.host, &self.layout);
+                    }
                     PreferencesFocus::ProjectFolders => {
                         self.open(Screen::PathListEditor(PathListEditorState::new(
                             PathListKind::ProjectFolders,
@@ -2538,6 +2541,143 @@ mod tests {
         let saved = Config::load_from(&layout.config_path()).unwrap();
         assert_eq!(saved.older_than_days, app.config.older_than_days);
         assert_ne!(saved.older_than_days, Config::default().older_than_days);
+    }
+
+    fn schedule_app(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+    ) -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        app.host = host.clone();
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Down],
+        );
+        (temp, layout, app)
+    }
+
+    fn bootstraps(host: &crate::core::host::fake::FakeHost) -> usize {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("/bin/launchctl bootstrap"))
+            .count()
+    }
+
+    #[test]
+    fn arrows_on_the_schedule_row_do_not_run_launchctl() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, layout, mut app) = schedule_app(&host);
+
+        press(&mut app, &[KeyCode::Right]);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Every day"));
+        assert!(text.contains("Apply"));
+        assert!(!host.ran("/bin/launchctl"));
+        assert!(app.config.schedule.is_none());
+        assert!(!crate::core::schedule::agent_plist_path(&layout).exists());
+    }
+
+    #[test]
+    fn enter_applies_the_schedule_once() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, mut app) = schedule_app(&host);
+
+        press(&mut app, &[KeyCode::Right]);
+
+        assert_eq!(bootstraps(&host), 0);
+
+        press(&mut app, &[KeyCode::Enter]);
+
+        assert_eq!(bootstraps(&host), 1);
+        let schedule = app.config.schedule.clone().unwrap();
+        assert_eq!(
+            schedule.every,
+            crate::core::schedule::ScheduleFrequency::Day
+        );
+        assert!(screen_text(&app).contains("Enabled scheduled cleanup"));
+        let calls = host.calls.lock().unwrap().len();
+
+        press(&mut app, &[KeyCode::Enter]);
+
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+    }
+
+    #[test]
+    fn a_failed_load_shows_the_error_and_keeps_the_old_value() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+        let (_temp, layout, mut app) = schedule_app(&host);
+
+        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Bootstrap failed: 5"), "{text}");
+        assert!(!text.contains("Enabled"));
+        let Screen::Preferences(prefs) = &app.screen else {
+            panic!("expected the preferences screen");
+        };
+        assert_eq!(prefs.schedule, None);
+        assert_eq!(prefs.applied_schedule, None);
+        assert!(app.config.schedule.is_none());
+        assert!(!layout.config_path().exists());
+        let calls = host.calls.lock().unwrap().len();
+
+        press(&mut app, &[KeyCode::Right]);
+
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+    }
+
+    #[test]
+    fn stepping_the_age_after_a_failed_apply_shows_the_new_save() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+        let (_temp, _layout, mut app) = schedule_app(&host);
+
+        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+        assert!(screen_text(&app).contains("Bootstrap failed: 5"));
+
+        press(&mut app, &[KeyCode::Up, KeyCode::Right]);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Saved age threshold"), "{text}");
+        assert!(!text.contains("Bootstrap failed: 5"), "{text}");
+    }
+
+    #[test]
+    fn enter_on_off_removes_the_schedule() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout, mut app) = schedule_app(&host);
+        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+        assert!(app.config.schedule.is_some());
+        let plist = crate::core::schedule::agent_plist_path(&layout);
+        assert!(plist.exists());
+        let bootouts = |h: &crate::core::host::fake::FakeHost| {
+            h.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("/bin/launchctl bootout"))
+                .count()
+        };
+        let before = bootouts(&host);
+
+        press(&mut app, &[KeyCode::Left]);
+
+        assert!(screen_text(&app).contains("Off"));
+        assert_eq!(bootouts(&host), before);
+
+        press(&mut app, &[KeyCode::Enter]);
+
+        assert_eq!(bootouts(&host), before + 1);
+        assert!(screen_text(&app).contains("Disabled scheduled cleanup"));
+        assert!(app.config.schedule.is_none());
+        assert!(!plist.exists());
     }
 
     #[test]

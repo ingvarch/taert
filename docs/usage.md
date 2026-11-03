@@ -604,9 +604,11 @@ taert schedule off
 ```
 
 - **`--every`**: Frequency interval: `day` (daily at 09:00), `week` (Mondays at 09:00, default), or `month` (1st of each month at 09:00).
-- **`--categories`**: Comma-separated list of any of `dev`, `junk`, `ai`, and `trash` (default `dev,junk`).
+- **`--categories`**: Comma-separated list of any of `dev`, `junk`, `ai`, and `trash` (default `dev,junk`). Names are stored in lower case and each is kept once, so `DEV,dev` becomes `dev`.
   - `purge`, `docker`, `uninstall`, and `clean orphans` cannot be scheduled; their results require interactive review.
 - **`--min-reclaim`**: Minimum reclaimable space threshold (default `1G`). If scanning finds less than this amount, the run is skipped and the skip is recorded.
+
+If `launchctl` cannot load the agent, `taert schedule set` prints the error, exits with failure, and saves nothing. The old plist and settings stay, but the old agent stays unloaded until `taert schedule set` succeeds.
 
 #### Launch Agent & Full Disk Access
 
@@ -615,9 +617,13 @@ Scheduled cleanup installs a user launch agent into `~/Library/LaunchAgents/io.g
 - `taert schedule run` executes silently in the background, acquiring a lock file at `~/.config/taert/schedule.lock` to prevent overlapping runs.
 - Because `launchd` launches `taert` directly in the background, permissions granted to your terminal app do not apply. Any rows that fail with `EPERM` are logged as failures, and `taert schedule show` will warn and provide instructions on how to grant Full Disk Access to the stable binary (e.g. `/opt/homebrew/bin/taert`).
 
+#### Homebrew
+
+A `brew upgrade` does not touch the launch agent. Run `taert schedule off` before `brew uninstall taert`, or use `brew uninstall --zap taert`, which also removes the agent. If the agent file is missing, `taert schedule show` prints the `taert schedule set` command that loads it again.
+
 #### Interactive Preferences
 
-You can also switch on and adjust scheduled cleanup in the TUI workspace under **Preferences** → **Scheduled cleanup** using `←` and `→` to cycle between `Off`, `Every day`, `Every week`, and `Every month`.
+You can also switch on and adjust scheduled cleanup in the TUI workspace under **Preferences** → **Scheduled cleanup**. Use `←` and `→` to cycle between `Off`, `Every day`, `Every week`, and `Every month`, then press `Enter` to apply the choice. If the agent cannot be loaded, the error shows and the row goes back to its old value.
 
 ### Shell Completion (`taert completion`)
 

@@ -142,15 +142,8 @@ impl Config {
         Some(Self::path_in(&dirs::config_dir()?.join("taert")))
     }
 
-    /// The config file inside `dir`. An old `config.json` stays in use until a TOML file exists.
     pub fn path_in(dir: &Path) -> PathBuf {
-        let toml_path = dir.join("config.toml");
-        let json_path = dir.join("config.json");
-        if json_path.exists() && !toml_path.exists() {
-            json_path
-        } else {
-            toml_path
-        }
+        dir.join("config.toml")
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
@@ -159,29 +152,35 @@ impl Config {
         }
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let config: Config = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-            Ok(config)
-        } else {
-            let config: Config = toml::from_str(&content)
-                .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-            Ok(config)
-        }
+        let config: Config = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config from {}", path.display()))?;
+        Ok(config)
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = if path.extension().is_some_and(|ext| ext == "json") {
-            serde_json::to_string_pretty(self)?
-        } else {
-            toml::to_string_pretty(self)?
-        };
+        let content = toml::to_string_pretty(self)?;
         let temp_path = path.with_extension("tmp");
         fs::write(&temp_path, content)?;
         fs::rename(&temp_path, path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_the_config_writes_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Config::path_in(temp.path());
+
+        Config::default().save_to(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("older_than_days ="), "{text}");
     }
 }

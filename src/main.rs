@@ -2550,6 +2550,7 @@ mod tests {
     fn schedule_set_and_off_use_the_given_host_and_layout() {
         let (_temp, layout) = sandbox();
         let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
 
         let set = schedule(
             &[
@@ -2605,6 +2606,41 @@ mod tests {
 
         assert!(host.calls.lock().unwrap().is_empty());
         assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn schedule_set_exits_with_failure_when_the_load_fails() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+
+        let ran = schedule(&["schedule", "set"], &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(
+            ran.err.contains("Error: launchctl bootstrap failed"),
+            "{}",
+            ran.err
+        );
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn schedule_set_refuses_uninstall() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = schedule(
+            &["schedule", "set", "--categories", "uninstall"],
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok);
+        assert!(ran.err.contains("cannot be scheduled"), "{}", ran.err);
+        assert!(!schedule::agent_plist_path(&layout).exists());
+        assert!(!layout.config_path().exists());
+        assert!(!host.ran("/bin/launchctl"));
     }
 
     #[test]
