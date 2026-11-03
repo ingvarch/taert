@@ -15,7 +15,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
-| Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes through one read-only `brew info` call, and removes unused dependencies and old versions through brew |
+| Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes through one read-only `brew info` call, and removes unused dependencies, old versions, and one formula that nothing uses through brew |
 | Orphan Detector | `crate::core::orphans` | Finds files left behind by apps that are gone with Spotlight and bundle ID checks |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
 | TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
@@ -83,7 +83,7 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 
 ## Homebrew
 
-[`homebrew.rs`](../src/core/homebrew.rs) lists installed formulae and casks, finds what is unused, and removes it through brew. The list only reads.
+[`homebrew.rs`](../src/core/homebrew.rs) lists installed formulae and casks, finds what is unused, and removes it through brew. The list itself only reads.
 
 - **Finding brew**: the first prefix from `Layout::homebrew_prefixes` (`/opt/homebrew`, then `/usr/local`) that has `bin/brew`. The uninstaller uses the same finder for casks. Without a `brew`, the scan is empty with the note `Homebrew is not installed.` and no command runs.
 - **Running brew**: only through `Host`, as `/usr/bin/env` with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ENV_HINTS=1`, and `NONINTERACTIVE=1`, so brew neither updates itself nor asks questions.
@@ -97,11 +97,20 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 
 - **Through brew only**: a removal is `brew uninstall <name>` or `brew cleanup <name>`, never `rm` on the Cellar, so Homebrew's records of what is installed stay right. taert never passes `--force`, `--zap`, or `--ignore-dependencies`.
 - **`HOMEBREW_NO_AUTOREMOVE=1`**: Homebrew runs `autoremove` at the end of `brew uninstall` unless this is set. Without it, removing one selected formula would also remove every other unused formula. Every call that removes something sets it. The dry runs and `brew info` keep the usual environment. One helper builds both environments, so the common part is written once.
-- **Read again before each uninstall**: `run_task` runs `brew info` again right before the first `brew uninstall` of that formula. If the formula is gone, or another formula lists it as a dependency by now, it returns an error and runs no `uninstall`. The run goes on with the next row.
+- **Read again before each uninstall**: `run_task` runs `brew info` again right before the first `brew uninstall` of that formula. If the formula is gone, or `refusal` refuses it by now (pinned, or another formula lists it as a dependency), it returns an error and runs no `uninstall`. So a formula pinned while the list was open, or while the question waited, stays. The run goes on with the next row.
 - **Every version**: `brew uninstall` without `--force` removes one version at a time, so taert repeats it until no version folder is left, and stops when a call removes nothing. Brew keeps the formula's folder when it holds another file, so taert checks the version folders, not the folder itself. With no version folder before the first call, taert runs no `uninstall` and returns an error.
 - **Order**: a formula comes before every formula it depends on, so a dependency is reached after the formula that used it is gone. Otherwise the biggest row comes first.
 - **Freed bytes**: `DirSizer` measures `<prefix>/Cellar/<name>` before and after the call, and the difference is what the history and the report show. The sizes brew prints are not used.
 - **Old versions and unused dependencies do not overlap**: an uninstall removes every version, so a formula in the first group is left out of the second, and its size is counted once.
+
+### Remove one formula
+
+`taert brew uninstall <name>` and the Enter key on the Homebrew list remove one formula through the same `homebrew::run_task` path as the cleanup. There is no second removal path. `uninstall_plan`, `refusal`, and the list run no removing call.
+
+- **Plan**: `uninstall_plan` makes one `brew info` call, finds a formula by name or full name first and a cask by token second, and returns a scan with one selected row that carries a `BrewTask::Uninstall`.
+- **Refusals**: `refusal` is the one place that decides. In this order: a cask, a pinned formula, a formula that other formulae use. The CLI prints its text as an error. The TUI shows it on the screen and opens no question. The text for a formula in use comes from one function that `run_task` shares, so the two never differ.
+- **The list carries tasks**: `Inventory` remembers the brew that listed the packages, so `list_scan` puts a `BrewTask::Uninstall` on every formula row. A cask row has none. The list keeps one row per package with no check marks, and Enter selects the focused row alone before it opens the existing confirm dialog. `list_refusals` gives the TUI the refusal of each row by its label.
+- **After the removal**: when the outcome dialog closes, the TUI reads the list again with the same scan as the menu, so the removed formula is gone.
 
 ## Orphaned App Files
 

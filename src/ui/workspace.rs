@@ -154,7 +154,7 @@ impl WorkspaceState {
                     MainMenuChoice::Homebrew,
                     "Homebrew",
                     "Review installed formulae and casks",
-                    "List Homebrew formulae and casks by the space they take.\nSee which ones you installed, which are only dependencies,\nand what uses them. Nothing is removed.",
+                    "List Homebrew formulae and casks by the space they take.\nSee which ones you installed, which are only dependencies,\nand what uses them. Remove a formula that nothing uses.",
                 ),
                 (
                     MainMenuChoice::Doctor,

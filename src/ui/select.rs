@@ -2,6 +2,7 @@
 //! Includes modal confirmation dialog, live removal progress dialog with spinner,
 //! and completion outcome dialog.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -23,6 +24,7 @@ use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ColumnTitles, ListRow, SIZE_W, row_path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
+use super::components::toast::Toast;
 use super::theme::Theme;
 use crate::core::apps;
 use crate::core::bytes::format_bytes;
@@ -70,6 +72,9 @@ pub struct SelectState {
     pub notes: Vec<String>,
     pub asks_password: bool,
     pub permanent: bool,
+    /// Why the Homebrew list leaves a row alone, by the label of the row.
+    pub refusals: HashMap<PathBuf, String>,
+    pub toast: Option<Toast>,
 }
 
 const BAR_MIN_WIDTH: usize = 100;
@@ -147,8 +152,17 @@ impl SelectState {
             notes,
             asks_password: false,
             permanent: false,
+            refusals: HashMap::new(),
+            toast: None,
         };
         state.move_to_start();
+        state
+    }
+
+    /// The Homebrew list, with the reason each row cannot be uninstalled.
+    pub fn homebrew_list(inventory: &homebrew::Inventory) -> Self {
+        let mut state = Self::new(homebrew::list_scan(inventory));
+        state.refusals = homebrew::list_refusals(inventory);
         state
     }
 
@@ -278,13 +292,55 @@ impl SelectState {
         rows
     }
 
-    /// A list to look at: nothing in it can be selected or removed.
-    pub fn is_read_only(&self) -> bool {
+    /// A list that acts on its focused row: no check marks, no selecting several, no Reveal.
+    pub fn is_single_row_list(&self) -> bool {
         self.scan.id == homebrew::SCAN_ID
     }
 
+    fn focused_position(&self) -> Option<(usize, usize)> {
+        let rows = self.flattened_rows();
+        let row = rows.get(self.focused_index)?;
+        Some((row.group_index, row.item_index?))
+    }
+
+    fn focused_item(&self) -> Option<&ScanItem> {
+        let (group, item) = self.focused_position()?;
+        self.scan.groups.get(group)?.items.get(item)
+    }
+
+    /// The formula Enter uninstalls on the Homebrew list, if the focused row allows it.
+    fn removable(&self) -> Option<&str> {
+        let item = self.focused_item()?;
+        if self.refusals.contains_key(&item.path) {
+            return None;
+        }
+        uninstall_name(item)
+    }
+
+    /// Enter on the Homebrew list: says why the focused row stays, or asks to remove only it.
+    pub fn uninstall_focused(&mut self) {
+        for item in self
+            .scan
+            .groups
+            .iter_mut()
+            .flat_map(|group| &mut group.items)
+        {
+            item.selected = false;
+        }
+        self.toast = None;
+        let Some((group, item)) = self.focused_position() else {
+            return;
+        };
+        if let Some(text) = self.refusals.get(&self.scan.groups[group].items[item].path) {
+            self.toast = Some(Toast::error(text.clone()));
+        } else if self.removable().is_some() {
+            self.scan.groups[group].items[item].selected = true;
+            self.open_confirmation();
+        }
+    }
+
     pub fn toggle_current(&mut self) {
-        if self.is_read_only() {
+        if self.is_single_row_list() {
             return;
         }
         let rows = self.flattened_rows();
@@ -307,7 +363,7 @@ impl SelectState {
     }
 
     fn set_shown_items(&mut self, selected: bool) {
-        if self.is_read_only() {
+        if self.is_single_row_list() {
             return;
         }
         for row in self.flattened_rows() {
@@ -432,7 +488,7 @@ impl SelectState {
     }
 
     pub fn current_focused_path(&self) -> Option<PathBuf> {
-        if self.is_read_only() {
+        if self.is_single_row_list() {
             return None;
         }
         let rows = self.flattened_rows();
@@ -466,14 +522,22 @@ impl SelectState {
     }
 }
 
+/// The primary action of the Homebrew list for the focused row.
+pub fn homebrew_primary<'a>(state: &SelectState, enter: &'a str) -> PrimaryAction<'a> {
+    match state.removable() {
+        Some(name) => PrimaryAction::new(format!("Uninstall {name}"), enter),
+        None => PrimaryAction::disabled("Uninstall", enter),
+    }
+}
+
 pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let total_shown_bytes: u64 = state.scan.total_all_bytes();
     let total_selected_bytes: u64 = state.scan.total_selected_bytes();
     let selected_count = state.scan.selected_items().len();
     let total_count: usize = state.scan.groups.iter().map(|g| g.items.len()).sum();
 
-    let read_only = state.is_read_only();
-    let right_status = if read_only {
+    let single_row = state.is_single_row_list();
+    let right_status = if single_row {
         Line::from(vec![
             Span::styled(plural(total_count, "package", "packages"), theme.headline()),
             Span::styled("  ·  ", theme.callout()),
@@ -497,6 +561,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let id = state.scan.id.as_str();
     let primary_action = if state.is_searching {
         PrimaryAction::new("Apply", enter)
+    } else if id == homebrew::SCAN_ID {
+        homebrew_primary(state, enter)
     } else if id == uninstaller::PLAN_ID && selected_count > 0 {
         let items = plural(selected_count, "item", "items");
         PrimaryAction::new(format!("Uninstall {items}"), enter)
@@ -541,8 +607,9 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .full_width()
         .status(right_status)
         .hints(toolbar_hints(state, total_count > 0))
+        .toast(state.toast.as_ref())
         .behind_dialog(!matches!(state.overlay, ModalOverlay::None));
-    let chrome = if read_only && !state.is_searching {
+    let chrome = if single_row && total_count == 0 && !state.is_searching {
         chrome
     } else {
         chrome.primary(primary_action)
@@ -667,7 +734,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     name.to_string_lossy().into_owned(),
                     theme.body(),
                 )]
-            } else if read_only {
+            } else if single_row {
                 label_spans(&row.display_path, theme)
             } else if let Some(path) = &row.full_path {
                 let max_len = row_width.saturating_sub(20);
@@ -699,7 +766,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             };
 
             let mut list_row = ListRow::new(title_spans)
-                .leading(if read_only {
+                .leading(if single_row {
                     Span::raw(" ")
                 } else {
                     Span::styled(bullet, bullet_style)
@@ -782,7 +849,8 @@ fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             render_removing_dialog(frame, progress, *spinner_idx, cancel.is_some(), theme);
         }
         ModalOverlay::Outcome(report) => {
-            render_outcome_dialog(frame, report, is_plan(state), theme);
+            let uninstall = is_plan(state) || state.scan.id == homebrew::SCAN_ID;
+            render_outcome_dialog(frame, report, uninstall, theme);
         }
     }
 }
@@ -843,7 +911,7 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
     }
 
     let mut hints = Vec::new();
-    if has_items && state.is_read_only() {
+    if has_items && state.is_single_row_list() {
         hints.extend([Hint::new("/", "Search"), Hint::new("↑↓", "Move")]);
     } else if has_items {
         hints.extend([
@@ -929,6 +997,21 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
     }
 }
 
+/// The formula the confirm dialog of the Homebrew list is about.
+fn homebrew_formula(state: &SelectState) -> Option<&str> {
+    if state.scan.id != homebrew::SCAN_ID {
+        return None;
+    }
+    uninstall_name(state.scan.selected_items().first()?)
+}
+
+fn uninstall_name(item: &ScanItem) -> Option<&str> {
+    match item.brew.as_ref()? {
+        homebrew::BrewTask::Uninstall { name, .. } => Some(name),
+        homebrew::BrewTask::Cleanup { .. } => None,
+    }
+}
+
 fn render_confirmation_dialog(
     frame: &mut Frame,
     state: &SelectState,
@@ -943,7 +1026,10 @@ fn render_confirmation_dialog(
         .iter()
         .filter(|item| item.role == Some(UninstallRole::Bundle))
         .count();
-    let title = if state.scan.id == slim::SCAN_ID {
+    let formula = homebrew_formula(state);
+    let title = if let Some(name) = formula {
+        format!("Uninstall {name}?")
+    } else if state.scan.id == slim::SCAN_ID {
         format!("Slim {}?", plural(count, "app", "apps"))
     } else if bundles > 0 {
         format!("Uninstall {}?", plural(bundles, "app", "apps"))
@@ -961,7 +1047,12 @@ fn render_confirmation_dialog(
         .count();
     let perm_count = selected.len().saturating_sub(trashed_count);
 
-    let msg = if trashed_count > 0 && perm_count == 0 {
+    let msg = if let Some(name) = formula {
+        format!(
+            "Homebrew will remove {name} ({}). This cannot be undone.",
+            format_bytes(total_bytes)
+        )
+    } else if trashed_count > 0 && perm_count == 0 {
         format!(
             "{} will be moved to the Trash. Empty it to get the space back.",
             format_bytes(total_bytes)
@@ -1029,7 +1120,7 @@ fn render_confirmation_dialog(
             Button::new("Cancel").focused(cancel_focused),
             Button::destructive(if state.scan.id == slim::SCAN_ID {
                 "Slim"
-            } else if bundles > 0 {
+            } else if bundles > 0 || formula.is_some() {
                 "Uninstall"
             } else {
                 "Remove"
@@ -1097,7 +1188,12 @@ fn render_removing_dialog(
         .render(frame, frame.area(), theme);
 }
 
-fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, theme: &Theme) {
+fn render_outcome_dialog(
+    frame: &mut Frame,
+    report: &RemovalReport,
+    uninstall: bool,
+    theme: &Theme,
+) {
     let title = if report.notes.iter().any(|n| n.contains("Trash is emptied")) {
         if report.removed_count > 0 {
             "Slim Complete"
@@ -1105,7 +1201,7 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, 
             "Nothing was slimmed"
         }
     } else {
-        match (report.removed_count > 0, plan) {
+        match (report.removed_count > 0, uninstall) {
             (true, true) => "Uninstall Complete",
             (true, false) => "Clean Complete",
             (false, _) => "Nothing was removed",
@@ -1155,7 +1251,7 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, plan: bool, 
                 theme.callout(),
             )));
         }
-        if plan {
+        if uninstall {
             let reason = report.failures[0].error.clone();
             message.push(Line::from(Span::styled(reason, theme.callout())));
         }
