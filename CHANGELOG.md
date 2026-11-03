@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Uninstall**: the report notes a login item taert could not remove.
 - **Explore Storage**: with `--permanent`, the delete dialog focuses "Delete Permanently".
 - **Scheduled cleanup**: a Homebrew upgrade no longer removes the launch agent, because the cask has no `uninstall` stanza; `taert schedule show` says when the agent file is missing and how to load it again. Category names are stored in lower case, each name once. A failed `launchctl bootstrap` fails `taert schedule set` and saves nothing, and the Preferences row applies with `Enter` and shows the error. `show` reports the newer of the last run and the last skip. An unreadable lock file fails the run instead of ending it silently. The unreleased `config.json` fallback is gone: settings are TOML only.
+- **Doctor**: a finding never offers to stop pid 0 or pid 1 and says the process is part of macOS, `nettop` lines without a readable pid are left out, and the code that sends a signal refuses pid 0, pid 1, and a pid too large to be one process.
 - **Doctor**: wake times use the zone in `pmset -g log`.
 - **Doctor**: the largest apps are sorted by memory.
 - **Doctor**: heat counts only `CPU_Speed_Limit` below 100 and the two warning levels.

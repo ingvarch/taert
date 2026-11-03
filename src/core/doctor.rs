@@ -612,15 +612,16 @@ pub fn parse_nettop_output(
             let bytes_in = parts[1].parse::<u64>().unwrap_or(0);
             let bytes_out = parts[2].parse::<u64>().unwrap_or(0);
 
-            let (command, pid) = if let Some(last_dot) = proc_part.rfind('.') {
-                let cmd = proc_part[..last_dot].to_string();
-                let p = proc_part[last_dot + 1..].parse::<u32>().unwrap_or(0);
-                (cmd, p)
-            } else {
-                (proc_part.to_string(), 0)
+            let Some((cmd, pid_text)) = proc_part.rsplit_once('.') else {
+                continue;
             };
-
-            current_sample.insert(proc_part.to_string(), (pid, command, bytes_in, bytes_out));
+            let Ok(pid) = pid_text.parse::<u32>() else {
+                continue;
+            };
+            current_sample.insert(
+                proc_part.to_string(),
+                (pid, cmd.to_string(), bytes_in, bytes_out),
+            );
         }
     }
 
@@ -888,16 +889,15 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                                     action_target: None,
                                 });
                             } else {
+                                let (action, action_target) =
+                                    quit_offer(pid, cmd, "Quit it if you don't need it.");
                                 findings.push(Finding {
                                     id: "sustained_cpu".to_string(),
                                     severity: FindingSeverity::Warning,
                                     title: format!("{cmd} is using {avg_cpu:.0}% CPU"),
                                     evidence: format!("pid {pid}, for the whole check"),
-                                    action: "Quit it if you don't need it.".to_string(),
-                                    action_target: Some(FindingAction::KillProcess {
-                                        pid,
-                                        name: cmd.clone(),
-                                    }),
+                                    action,
+                                    action_target,
                                 });
                             }
                             continue;
@@ -919,6 +919,8 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                         if all_low_cpu && wakeups_per_second > ENERGY_HIGH_WAKEUPS_THRESHOLD as f64
                         {
                             let cmd = &procs[0].command;
+                            let (action, action_target) =
+                                quit_offer(pid, cmd, "Quit it to save battery.");
                             findings.push(Finding {
                                 id: "energy".to_string(),
                                 severity: FindingSeverity::Notice,
@@ -928,11 +930,8 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                                 evidence: format!(
                                     "pid {pid}, {wakeups_per_second:.0} wakeups/s while CPU is low"
                                 ),
-                                action: "Quit it to save battery.".to_string(),
-                                action_target: Some(FindingAction::KillProcess {
-                                    pid,
-                                    name: cmd.clone(),
-                                }),
+                                action,
+                                action_target,
                             });
                         }
                     }
@@ -1054,6 +1053,11 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
         Ok(blockers) => {
             checks.push(CheckResult::ok("sleep_blockers"));
             for blocker in blockers {
+                let (action, action_target) = quit_offer(
+                    blocker.pid,
+                    &blocker.command,
+                    "Quit it to let the Mac sleep.",
+                );
                 findings.push(Finding {
                     id: "sleep_blocker".to_string(),
                     severity: FindingSeverity::Warning,
@@ -1062,11 +1066,8 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                         "{} has held {} for {}",
                         blocker.command, blocker.assertion_type, blocker.duration_display
                     ),
-                    action: "Quit it to let the Mac sleep.".to_string(),
-                    action_target: Some(FindingAction::KillProcess {
-                        pid: blocker.pid,
-                        name: blocker.command.clone(),
-                    }),
+                    action,
+                    action_target,
                 });
             }
         }
@@ -1172,10 +1173,7 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
                         format_bytes(delta.delta_out)
                     ),
                     action: "Check what it is downloading or uploading.".to_string(),
-                    action_target: Some(FindingAction::KillProcess {
-                        pid: delta.pid,
-                        name: delta.command.clone(),
-                    }),
+                    action_target: kill_action(delta.pid, &delta.command),
                 });
             }
         }
@@ -1222,6 +1220,24 @@ pub fn diagnose(snapshot: &DoctorSnapshot) -> DoctorReport {
         seconds: snapshot.seconds,
         findings,
         checks,
+    }
+}
+
+/// Stopping pid 0 or pid 1 is never offered.
+const SYSTEM_PROCESS: &str = "It is part of macOS, so taert does not offer to stop it.";
+
+fn kill_action(pid: u32, name: &str) -> Option<FindingAction> {
+    (pid > 1).then(|| FindingAction::KillProcess {
+        pid,
+        name: name.to_string(),
+    })
+}
+
+/// The advice to quit a process and the action that does it, or neither for pid 0 and 1.
+fn quit_offer(pid: u32, name: &str, advice: &str) -> (String, Option<FindingAction>) {
+    match kill_action(pid, name) {
+        Some(action) => (advice.to_string(), Some(action)),
+        None => (SYSTEM_PROCESS.to_string(), None),
     }
 }
 
@@ -2248,5 +2264,76 @@ test.100,1999998,0,
         assert!(text.contains("  Command: kill 4123\n"));
         assert!(text.contains("  Command: taert analyze\n"));
         assert_eq!(text.matches("Command:").count(), 2);
+    }
+
+    #[test]
+    fn energy_finding_for_kernel_task_has_no_action() {
+        let sample = |idlew| TopSample {
+            processes: vec![TopProcess {
+                pid: 0,
+                command: "kernel_task".to_string(),
+                cpu: 10.0,
+                power: 5.0,
+                idlew,
+            }],
+            swapins: 0,
+            swapouts: 0,
+        };
+        let report = diagnose(&DoctorSnapshot {
+            top: Ok(TopDiagnostics {
+                samples: vec![sample(0), sample(100_000), sample(200_000), sample(300_000)],
+            }),
+            ..Default::default()
+        });
+
+        let found: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.id == "energy")
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].action_target.is_none());
+        assert!(found[0].evidence.contains("pid 0"), "{}", found[0].evidence);
+        assert_eq!(found[0].action, SYSTEM_PROCESS);
+        assert!(!plain_report(&report).contains("Command:"));
+    }
+
+    #[test]
+    fn nettop_line_without_a_readable_pid_gives_no_process() {
+        let nettop = ",bytes_in,bytes_out,\nnoisy,1000,0,\nother.x,1000,0,\n\
+                      ,bytes_in,bytes_out,\nnoisy,9000000,0,\nother.x,9000000,0,\n";
+
+        let deltas = parse_nettop_output(nettop, 2).unwrap();
+        assert!(deltas.is_empty());
+
+        let report = diagnose(&DoctorSnapshot {
+            network: Ok(deltas),
+            ..Default::default()
+        });
+        assert!(report.findings.iter().all(|f| f.id != "network"));
+    }
+
+    #[test]
+    fn finding_for_pid_1_has_no_action() {
+        let blocker = SleepBlocker {
+            pid: 1,
+            command: "launchd".to_string(),
+            duration_secs: 3600,
+            duration_display: "1h".to_string(),
+            assertion_type: "PreventUserIdleSystemSleep".to_string(),
+            name: "x".to_string(),
+        };
+        let report = diagnose(&DoctorSnapshot {
+            assertions: Ok(vec![blocker]),
+            ..Default::default()
+        });
+
+        let found = report
+            .findings
+            .iter()
+            .find(|f| f.id == "sleep_blocker")
+            .unwrap();
+        assert!(found.action_target.is_none());
+        assert_eq!(found.action, SYSTEM_PROCESS);
     }
 }
