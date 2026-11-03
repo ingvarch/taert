@@ -222,11 +222,7 @@ pub(crate) fn scan_folder(
         let _ = tx.send(ScanProgressEvent::ScanningPath(prettify_path(&path)));
     }
 
-    if Safety::has_symlink_component(&path)
-        || Safety::is_cloud_or_dataless(&path)
-        || Safety::is_ignored_or_protected(&path, ignore)
-        || Safety::can_remove(&path, ignore).is_err()
-    {
+    if Safety::can_remove(&path, ignore).is_err() {
         return None;
     }
 

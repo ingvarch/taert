@@ -100,14 +100,6 @@ pub fn top_level_folder(path: &Path, root: &Path) -> String {
     }
 }
 
-/// Checks if a path is inside an ignored root.
-fn is_ignored_path(path: &Path, ignore: &IgnoreStore) -> bool {
-    ignore.roots.iter().any(|r| {
-        let ip = Path::new(r);
-        path == ip || path.starts_with(ip)
-    })
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct Candidate {
     size_bytes: u64,
@@ -195,7 +187,7 @@ pub fn scan(
     // If root itself is a regular file or package, check it directly
     if root.is_file() || is_package(&root) {
         if Safety::is_cloud_or_dataless_in(&root, &home)
-            || is_ignored_path(&root, ignore)
+            || Safety::is_ignored(&root, ignore)
             || Safety::is_credential_root_in(&root, &home)
         {
             // skipped
@@ -263,7 +255,7 @@ pub fn scan(
                         if Safety::is_cloud_or_dataless_in(&path, &home_clone) {
                             return false;
                         }
-                        if is_ignored_path(&path, &ignore_clone) {
+                        if Safety::is_ignored(&path, &ignore_clone) {
                             return false;
                         }
                         if Safety::is_credential_root_in(&path, &home_clone) {
@@ -328,7 +320,7 @@ pub fn scan(
             // Exclude cloud, ignored, or symlink files if encountered at top-level
             if entry.file_type.is_symlink()
                 || Safety::is_cloud_or_dataless_in(&path, &home)
-                || is_ignored_path(&path, ignore)
+                || Safety::is_ignored(&path, ignore)
                 || Safety::is_credential_root_in(&path, &home)
             {
                 continue;

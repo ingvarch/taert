@@ -135,11 +135,6 @@ impl Safety {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
     }
 
-    /// Denied roots for cloud/sync storage providers
-    pub fn denied_cloud_roots() -> Vec<PathBuf> {
-        Self::cloud_roots_in(&Self::home_dir())
-    }
-
     fn cloud_roots_in(home: &Path) -> Vec<PathBuf> {
         vec![
             home.join("Library/Mobile Documents"),
@@ -203,38 +198,28 @@ impl Safety {
         roots
     }
 
-    /// Denied user-level credential and sensitive config directories
-    pub fn denied_user_roots() -> Vec<PathBuf> {
-        Self::user_roots_in(&Self::home_dir())
-    }
-
-    fn user_roots_in(home: &Path) -> Vec<PathBuf> {
-        let dirs = [
-            ".ssh",
-            ".aws",
-            ".gnupg",
-            ".gpg",
-            ".kube",
-            ".docker",
-            ".claude",
-            ".config",
-            ".cargo",
-            ".rustup",
-            ".gem",
-            ".nvm",
-            ".pyenv",
-            ".rbenv",
-            ".ollama",
-            ".lmstudio",
-        ];
-        dirs.iter().map(|d| home.join(d)).collect()
-    }
+    /// Credential folders below home, and whether compress may go inside.
+    const CREDENTIAL_ROOTS: &[(&str, bool)] = &[
+        (".ssh", false),
+        (".aws", false),
+        (".gnupg", false),
+        (".gpg", false),
+        (".kube", false),
+        (".claude", false),
+        ("Library/Keychains", false),
+        (".docker", true),
+        (".config", true),
+        (".cargo", true),
+        (".rustup", true),
+        (".gem", true),
+        (".nvm", true),
+        (".pyenv", true),
+        (".rbenv", true),
+        (".ollama", true),
+        (".lmstudio", true),
+    ];
 
     /// Whitelisted cache paths under credential roots (e.g. ~/.cargo/registry/cache is ok, ~/.cargo itself is not)
-    pub fn allowed_credential_subpaths() -> Vec<PathBuf> {
-        Self::credential_subpaths_in(&Self::home_dir())
-    }
-
     fn credential_subpaths_in(home: &Path) -> Vec<PathBuf> {
         vec![
             home.join(".docker/cli-plugins/.cache"),
@@ -311,13 +296,9 @@ impl Safety {
             }
         }
 
-        for denied in Self::user_roots_in(home) {
-            if path == denied || path.starts_with(&denied) {
-                return true;
-            }
-        }
-
-        false
+        Self::CREDENTIAL_ROOTS
+            .iter()
+            .any(|(dir, _)| path.starts_with(home.join(dir)))
     }
 
     /// Check if an ignore store protects the candidate path (ancestor or descendant)
@@ -333,6 +314,11 @@ impl Safety {
             }
         }
         false
+    }
+
+    /// True when the path is an ignored path or inside one.
+    pub fn is_ignored(path: &Path, ignore: &IgnoreStore) -> bool {
+        ignore.roots.iter().any(|r| path.starts_with(r))
     }
 
     /// Primary safety validator: can this path be safely cleaned/removed?
@@ -529,11 +515,6 @@ impl Safety {
         writable
     }
 
-    /// Checks if a path is inside Homebrew prefix.
-    pub fn is_homebrew_path(path: &Path) -> bool {
-        Self::is_homebrew_path_in(path, &Layout::current())
-    }
-
     pub fn is_homebrew_path_in(path: &Path, layout: &Layout) -> bool {
         let brew_roots = [
             layout.system("opt/homebrew"),
@@ -552,24 +533,12 @@ impl Safety {
             .any(|root| path == root || path.starts_with(root))
     }
 
-    /// Credential roots refused by compress (.ssh, .aws, .gnupg, .kube, .claude, Keychains).
+    /// Credential roots that compress refuses.
     pub fn is_compress_credential_root(path: &Path, home: &Path) -> bool {
-        let sensitive = [
-            ".ssh",
-            ".aws",
-            ".gnupg",
-            ".gpg",
-            ".kube",
-            ".claude",
-            "Library/Keychains",
-        ];
-        for dir in sensitive {
-            let target = home.join(dir);
-            if path == target || path.starts_with(&target) {
-                return true;
-            }
-        }
-        false
+        Self::CREDENTIAL_ROOTS
+            .iter()
+            .filter(|(_, enter)| !enter)
+            .any(|(dir, _)| path.starts_with(home.join(dir)))
     }
 
     /// Finds enclosing `.app` bundle if `path` is an app bundle or inside one.
@@ -690,29 +659,6 @@ impl Safety {
             || Self::is_homebrew_path_in(path, layout);
 
         if !in_home && !is_app && !is_homebrew {
-            let denied_trees = [
-                layout.system("System"),
-                layout.system("Library"),
-                layout.system("usr"),
-                layout.system("bin"),
-                layout.system("sbin"),
-                layout.system("etc"),
-                layout.system("private/etc"),
-                layout.system("cores"),
-                PathBuf::from("/System"),
-                PathBuf::from("/Library"),
-                PathBuf::from("/usr"),
-                PathBuf::from("/bin"),
-                PathBuf::from("/sbin"),
-                PathBuf::from("/etc"),
-                PathBuf::from("/private/etc"),
-                PathBuf::from("/cores"),
-            ];
-            for tree_path in &denied_trees {
-                if canonical == *tree_path || canonical.starts_with(tree_path) {
-                    return Err(SafetyError::ProtectedSystemPath);
-                }
-            }
             return Err(SafetyError::ProtectedSystemPath);
         }
 
@@ -1165,6 +1111,43 @@ mod tests {
                 Safety::can_remove(&ssh_dir, &ignore),
                 Err(SafetyError::CredentialRoot) | Err(SafetyError::ProtectedRoot)
             ));
+        }
+    }
+
+    #[test]
+    fn both_credential_rules_stay_as_they_were() {
+        let home = tempdir().unwrap();
+        let home = home.path();
+        for kept in [".ssh/id_ed25519", ".cargo/bin/cargo", ".config/app/x"] {
+            assert!(
+                Safety::is_credential_root_in(&home.join(kept), home),
+                "{kept}"
+            );
+        }
+        assert!(!Safety::is_credential_root_in(
+            &home.join(".cargo/registry/cache/x"),
+            home
+        ));
+        assert!(Safety::is_compress_credential_root(
+            &home.join(".ssh/id_ed25519"),
+            home
+        ));
+        for open in [".cargo/bin/cargo", ".rustup/x", ".config/app/x"] {
+            assert!(
+                !Safety::is_compress_credential_root(&home.join(open), home),
+                "{open}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keychain_folder_is_a_credential_root() {
+        let home = tempdir().unwrap();
+        let home = home.path();
+        for path in ["Library/Keychains", "Library/Keychains/login.keychain-db"] {
+            let path = home.join(path);
+            assert!(Safety::is_credential_root_in(&path, home), "{path:?}");
+            assert!(Safety::is_compress_credential_root(&path, home), "{path:?}");
         }
     }
 
