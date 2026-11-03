@@ -535,6 +535,7 @@ fn sample_analyze() -> AnalyzeState {
             },
             selected: 0,
             offset: 0,
+            stale: false,
         }],
         ignore: IgnoreStore::default(),
         measuring_rx: None,
@@ -549,6 +550,7 @@ fn sample_analyze() -> AnalyzeState {
         )),
         sort_order: taert::ui::analyze::SortOrder::default(),
         preview: Default::default(),
+        update: None,
     }
 }
 
@@ -560,6 +562,18 @@ fn snapshot_analyze() {
     for &(w, h, label) in SIZES {
         let output = render_to_string(w, h, |f| render_analyze(f, &state, &theme));
         assert_snapshot!(format!("analyze_{label}"), output);
+    }
+}
+
+#[test]
+fn snapshot_analyze_updating() {
+    let theme = snapshot_theme();
+    let mut state = sample_analyze();
+    state.levels[0].stale = true;
+
+    for (w, h) in [(120, 32), (50, 16)] {
+        let output = render_to_string(w, h, |f| render_analyze(f, &state, &theme));
+        assert_snapshot!(format!("analyze_updating_{w}x{h}"), output);
     }
 }
 
