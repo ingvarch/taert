@@ -12,7 +12,7 @@ use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
-use taert::core::homebrew::{self, Inventory, Package, PackageKind};
+use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind};
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
@@ -1200,6 +1200,7 @@ fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Pac
     Package {
         kind,
         name: name.to_string(),
+        full_name: name.to_string(),
         version: version.to_string(),
         size_bytes: bytes,
         on_request: true,
@@ -1238,6 +1239,53 @@ fn snapshot_select_brew() {
     assert_snapshot!("select_brew_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_brew_80x24", narrow);
+}
+
+fn brew_cleanup_row(label: &str, size: u64, uninstall: bool) -> ScanItem {
+    let mut item = ScanItem::new(PathBuf::from(label), size, true, false);
+    let name = label.split(' ').next().unwrap().to_string();
+    let (brew, cellar) = (
+        PathBuf::from("/opt/homebrew/bin/brew"),
+        PathBuf::from("/opt/homebrew/Cellar").join(&name),
+    );
+    item.brew = Some(if uninstall {
+        BrewTask::Uninstall { name, brew, cellar }
+    } else {
+        BrewTask::Cleanup { name, brew, cellar }
+    });
+    item
+}
+
+fn brew_cleanup_scan() -> CategoryScan {
+    CategoryScan {
+        notes: Vec::new(),
+        id: homebrew::CLEANUP_ID.to_string(),
+        title: "Homebrew Cleanup".to_string(),
+        groups: vec![
+            ToolGroup {
+                tool: "Unused dependencies".to_string(),
+                items: vec![
+                    brew_cleanup_row("simdutf 8.2.0", 12_400_000, true),
+                    brew_cleanup_row("ada-url 4.0.0_1", 3_100_000, true),
+                    brew_cleanup_row("gmp 6.3.0", 1_500_000, true),
+                ],
+            },
+            ToolGroup {
+                tool: "Old versions".to_string(),
+                items: vec![
+                    brew_cleanup_row("go 1.26.4, 1.25.9", 480_000_000, false),
+                    brew_cleanup_row("bun 1.4.0", 60_000_000, false),
+                ],
+            },
+        ],
+    }
+}
+
+#[test]
+fn snapshot_select_brew_cleanup() {
+    let state = SelectState::new(brew_cleanup_scan());
+
+    assert_snapshot!("select_brew_cleanup_120x32", select_screen(&state));
 }
 
 #[test]

@@ -436,8 +436,13 @@ impl SelectState {
             return None;
         }
         let rows = self.flattened_rows();
-        rows.get(self.focused_index)
-            .and_then(|r| r.full_path.clone())
+        let row = rows.get(self.focused_index)?;
+        let item = &self.scan.groups[row.group_index].items[row.item_index?];
+        // The label of a brew row is no path.
+        if item.brew.is_some() {
+            return None;
+        }
+        row.full_path.clone()
     }
 
     pub fn open_confirmation(&mut self) {
@@ -520,6 +525,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Optimize", "Slim apps"]
     } else if id == large_files::SCAN_ID {
         vec!["taert", "Inspect", "Large files"]
+    } else if id == homebrew::CLEANUP_ID {
+        vec!["taert", "Homebrew", "Cleanup"]
     } else if id == SCAN_ID
         || id == purger::SCAN_ID
         || id == apps::LIST_ID
@@ -542,7 +549,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     };
 
     let content_rect = chrome.render(frame, theme);
-    let note_is_the_reason = read_only && total_count == 0;
+    let note_is_the_reason = total_count == 0 && is_homebrew(id);
     let content_rect = if note_is_the_reason {
         content_rect
     } else {
@@ -848,12 +855,24 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             hints.push(Hint::new("⇧S/N/D", order.hint_label()));
         }
         hints.push(Hint::new("/", "Search"));
-        hints.push(Hint::new("O", "Reveal"));
+        let all_brew = state
+            .scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .all(|item| item.brew.is_some());
+        if !all_brew {
+            hints.push(Hint::new("O", "Reveal"));
+        }
         hints.push(Hint::new("↑↓", "Move"));
     }
     hints.push(Hint::new("⎋", "Back"));
     hints.push(Hint::new("?", "More"));
     hints
+}
+
+fn is_homebrew(id: &str) -> bool {
+    id == homebrew::SCAN_ID || id == homebrew::CLEANUP_ID
 }
 
 fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, theme: &Theme) {
@@ -862,7 +881,7 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
         EmptyState::new(theme.g.warning, &title, problem)
             .glyph_color(theme.p.yellow)
             .render(frame, area, theme);
-    } else if state.scan.id == homebrew::SCAN_ID
+    } else if is_homebrew(&state.scan.id)
         && let Some(note) = state.scan.notes.first()
     {
         EmptyState::new(theme.g.warning, "Homebrew isn't available", note)
@@ -874,6 +893,14 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
             "No Homebrew packages",
             "Packages you install with Homebrew show up here.",
         )
+        .render(frame, area, theme);
+    } else if state.scan.id == homebrew::CLEANUP_ID {
+        EmptyState::new(
+            "✓",
+            "Homebrew has nothing to clean",
+            "No unused dependencies or old versions.",
+        )
+        .glyph_color(theme.p.green)
         .render(frame, area, theme);
     } else if state.scan.id == SCAN_ID {
         EmptyState::new("✓", "Docker has nothing unused", "Every object is in use.")

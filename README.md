@@ -21,7 +21,7 @@ A fast, keyboard-driven macOS disk cleanup and storage explorer CLI built with R
 - Orphaned file detector (`taert clean orphans`) that finds files left behind in `~/Library` by apps that are gone and moves them safely to the Trash
 - Docker cleanup for images, volumes, networks, and build cache that no container uses
 - App uninstaller that removes an app with its settings, caches, login items, background helpers, and installer receipts
-- Homebrew package list (`taert brew`) with the size of each formula and cask, which ones you installed, which are dependencies, and what uses them
+- Homebrew package list (`taert brew`) with the size of each formula and cask, which ones you installed, which are dependencies, and what uses them. `taert brew cleanup` removes unused dependencies and old versions through Homebrew.
 - Startup manager to review and switch off launchd agents, daemons, and login items with live CPU/RAM metrics
 - Universal app slimming (`taert slim`) to strip Intel (x86_64) code from universal apps on Apple Silicon Macs, preserving ARM slices and code signatures and moving originals to the Trash
 - Doctor diagnostic command (`taert doctor`) to explain what is slowing the Mac down, heating it up, or draining battery with named causes and single actions

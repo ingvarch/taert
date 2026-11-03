@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::app_caches;
 use super::catalog::{Catalog, Target};
 use super::docker::DockerObject;
+use super::homebrew::BrewTask;
 use super::host::Host;
 use super::layout::Layout;
 use super::leftovers::UninstallRole;
@@ -35,6 +36,8 @@ pub struct ScanItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker: Option<DockerObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brew: Option<BrewTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<UninstallRole>,
     /// More folders of this row. `size_bytes` covers them, and they go with it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -53,6 +56,7 @@ impl ScanItem {
             contents_only,
             identity,
             docker: None,
+            brew: None,
             role: None,
             also: Vec::new(),
         }

@@ -1,9 +1,10 @@
-//! Lists the Homebrew packages and the space they take. Reads only.
+//! Lists the Homebrew packages and the space they take, and removes unused ones through brew.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -16,9 +17,14 @@ use super::scanner::{CategoryScan, ScanItem, ToolGroup};
 use super::sizer::DirSizer;
 
 pub const SCAN_ID: &str = "brew";
+pub const CLEANUP_ID: &str = "brew-cleanup";
 const INFO_TIMEOUT: Duration = Duration::from_secs(60);
+const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const GROUP_FORMULAE: &str = "Formulae";
 const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
+const GROUP_UNUSED: &str = "Unused dependencies";
+const GROUP_OLD: &str = "Old versions";
 const NOT_INSTALLED: &str = "Homebrew is not installed.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -32,6 +38,9 @@ pub enum PackageKind {
 pub struct Package {
     pub kind: PackageKind,
     pub name: String,
+    /// The name with its tap (`user/tap/name`), the same as `name` when there is none.
+    #[serde(skip)]
+    pub full_name: String,
     pub version: String,
     pub size_bytes: u64,
     pub on_request: bool,
@@ -44,6 +53,24 @@ pub struct Package {
     pub dependencies: Vec<String>,
     #[serde(skip)]
     pub path: PathBuf,
+}
+
+/// What a row of the cleanup list asks Homebrew to do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BrewTask {
+    /// `brew uninstall <name>`, after checking again that nothing uses it.
+    Uninstall {
+        name: String,
+        brew: PathBuf,
+        cellar: PathBuf,
+    },
+    /// `brew cleanup <name>`: removes the old versions of one formula.
+    Cleanup {
+        name: String,
+        brew: PathBuf,
+        cellar: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -106,13 +133,60 @@ pub fn find(layout: &Layout) -> Option<Brew> {
 
 /// Runs `brew` without auto-update, hints or questions.
 pub fn run_brew(host: &dyn Host, brew: &Path, args: &[&str], timeout: Duration) -> Output {
+    run_brew_with(host, brew, &[], args, timeout)
+}
+
+/// Runs a read-only brew command that must succeed, and returns what it printed.
+fn read(
+    host: &dyn Host,
+    brew: &Path,
+    args: &[&str],
+    timeout: Duration,
+    what: &str,
+) -> Result<String, String> {
+    let output = run_brew(host, brew, args, timeout);
+    if output.ok {
+        Ok(output.stdout)
+    } else {
+        Err(format!(
+            "Homebrew did not list {what}: {}",
+            output.stderr.trim()
+        ))
+    }
+}
+
+/// Runs a brew command that removes something. brew removes only what was named, not every unused
+/// formula too.
+fn remove(host: &dyn Host, brew: &Path, args: &[&str], failure: &str) -> Result<(), String> {
+    let output = run_brew_with(
+        host,
+        brew,
+        &["HOMEBREW_NO_AUTOREMOVE=1"],
+        args,
+        BREW_TIMEOUT,
+    );
+    if output.ok {
+        Ok(())
+    } else {
+        Err(format!("{failure}: {}", output.stderr.trim()))
+    }
+}
+
+fn run_brew_with(
+    host: &dyn Host,
+    brew: &Path,
+    environment: &[&str],
+    args: &[&str],
+    timeout: Duration,
+) -> Output {
     let brew = brew.display().to_string();
     let mut command = vec![
         "HOMEBREW_NO_AUTO_UPDATE=1",
         "HOMEBREW_NO_ENV_HINTS=1",
         "NONINTERACTIVE=1",
-        brew.as_str(),
     ];
+    command.extend_from_slice(environment);
+    command.push(brew.as_str());
     command.extend_from_slice(args);
     host.run("/usr/bin/env", &command, timeout)
 }
@@ -130,6 +204,7 @@ fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
     Package {
         kind: PackageKind::Formula,
         name: raw.name.clone(),
+        full_name: raw.full_name.clone().unwrap_or_else(|| raw.name.clone()),
         version: raw
             .installed
             .last()
@@ -145,7 +220,7 @@ fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
         used_by: Vec::new(),
         apps: Vec::new(),
         dependencies: raw.dependencies.clone(),
-        path: prefix.join("Cellar").join(&raw.name),
+        path: cellar_of(prefix, &raw.name),
     }
 }
 
@@ -153,6 +228,7 @@ fn cask_package(raw: &RawCask, prefix: &Path) -> Package {
     Package {
         kind: PackageKind::Cask,
         name: raw.token.clone(),
+        full_name: raw.token.clone(),
         version: raw.installed.clone().unwrap_or_default(),
         size_bytes: 0,
         on_request: true,
@@ -197,6 +273,18 @@ pub fn parse_packages(json: &str, prefix: &Path) -> Result<Vec<Package>, String>
     Ok(formulae.chain(casks).collect())
 }
 
+/// Asks brew for the installed packages, without sizes.
+fn installed(host: &dyn Host, brew: &Path, prefix: &Path) -> Result<Vec<Package>, String> {
+    let json = read(
+        host,
+        brew,
+        &["info", "--json=v2", "--installed"],
+        INFO_TIMEOUT,
+        "its packages",
+    )?;
+    parse_packages(&json, prefix)
+}
+
 /// Lists what Homebrew has installed, with the size of each folder.
 pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     let Some(brew) = find(layout) else {
@@ -206,20 +294,7 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
         });
     };
 
-    let output = run_brew(
-        host,
-        &brew.path,
-        &["info", "--json=v2", "--installed"],
-        INFO_TIMEOUT,
-    );
-    if !output.ok {
-        return Err(format!(
-            "Homebrew did not list its packages: {}",
-            output.stderr.trim()
-        ));
-    }
-
-    let mut packages = parse_packages(&output.stdout, &brew.prefix)?;
+    let mut packages = installed(host, &brew.path, &brew.prefix)?;
     for package in &mut packages {
         package.size_bytes = DirSizer::size_of(&package.path);
     }
@@ -260,18 +335,23 @@ fn label(package: &Package) -> String {
     label
 }
 
-fn row(package: &Package) -> ScanItem {
+fn item(label: String, size_bytes: u64, selected: bool, brew: Option<BrewTask>) -> ScanItem {
     ScanItem {
-        path: PathBuf::from(label(package)),
-        size_bytes: package.size_bytes,
+        path: PathBuf::from(label),
+        size_bytes,
         modified: None,
-        selected: false,
+        selected,
         contents_only: false,
         identity: None,
         docker: None,
+        brew,
         role: None,
         also: Vec::new(),
     }
+}
+
+fn row(package: &Package) -> ScanItem {
+    item(label(package), package.size_bytes, false, None)
 }
 
 /// The packages as a list to browse. Nothing in it can be removed.
@@ -299,6 +379,282 @@ pub fn list_scan(inventory: &Inventory) -> CategoryScan {
         groups,
         notes: inventory.notes.clone(),
     }
+}
+
+/// The names `brew autoremove --dry-run` lists after its header.
+pub fn parse_autoremove(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|line| !line.starts_with("==> Would autoremove"))
+        .skip(1)
+        .map(str::trim)
+        .take_while(|line| !line.is_empty() && !line.starts_with("==>"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The old versions in the Cellar that `brew cleanup --dry-run` lists, by formula.
+pub fn parse_old_versions(text: &str, prefix: &Path) -> Vec<(String, Vec<PathBuf>)> {
+    let cellar = prefix.join("Cellar");
+    let mut found: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("Would remove: ") else {
+            continue;
+        };
+        let Some((path, _)) = rest.strip_suffix(')').and_then(|s| s.rsplit_once(" (")) else {
+            continue;
+        };
+        let path = Path::new(path);
+        let Ok(inside) = path.strip_prefix(&cellar) else {
+            continue;
+        };
+        let parts: Vec<_> = inside.components().collect();
+        if parts.len() < 2 || parts.iter().any(|c| !matches!(c, Component::Normal(_))) {
+            continue;
+        }
+        let name = parts[0].as_os_str().to_string_lossy().into_owned();
+        match found.iter_mut().find(|(known, _)| *known == name) {
+            Some((_, paths)) => paths.push(path.to_path_buf()),
+            None => found.push((name, vec![path.to_path_buf()])),
+        }
+    }
+    found
+}
+
+fn empty_cleanup(notes: Vec<String>) -> CategoryScan {
+    CategoryScan {
+        id: CLEANUP_ID.to_string(),
+        title: "Homebrew Cleanup".to_string(),
+        groups: Vec::new(),
+        notes,
+    }
+}
+
+fn is_named(package: &Package, name: &str) -> bool {
+    package.name == name || package.full_name == name
+}
+
+fn cellar_of(prefix: &Path, name: &str) -> PathBuf {
+    prefix.join("Cellar").join(name)
+}
+
+/// A formula comes before the formulae it needs, so each one is already gone when the run reaches
+/// what it used. Otherwise the biggest comes first.
+fn dependents_first(mut rest: Vec<(&Package, u64)>) -> Vec<(&Package, u64)> {
+    rest.sort_by(|a, b| (Reverse(a.1), &a.0.name).cmp(&(Reverse(b.1), &b.0.name)));
+    let mut ordered = Vec::with_capacity(rest.len());
+    while !rest.is_empty() {
+        let next = rest
+            .iter()
+            .position(|(wanted, _)| {
+                !rest
+                    .iter()
+                    .any(|(user, _)| user.dependencies.iter().any(|d| is_named(wanted, d)))
+            })
+            .unwrap_or(0);
+        ordered.push(rest.remove(next));
+    }
+    ordered
+}
+
+fn unused_group(unused: &[&Package], brew: &Brew) -> ToolGroup {
+    let sized = unused
+        .iter()
+        .map(|package| (*package, DirSizer::size_of(&package.path)))
+        .collect();
+    let items = dependents_first(sized)
+        .into_iter()
+        .map(|(package, size)| {
+            let task = BrewTask::Uninstall {
+                name: package.name.clone(),
+                brew: brew.path.clone(),
+                cellar: package.path.clone(),
+            };
+            item(
+                format!("{} {}", package.name, package.version),
+                size,
+                !package.pinned,
+                Some(task),
+            )
+        })
+        .collect();
+    ToolGroup {
+        tool: GROUP_UNUSED.to_string(),
+        items,
+    }
+}
+
+fn old_versions_group(
+    old: &[(String, Vec<PathBuf>)],
+    formulae: &[&Package],
+    brew: &Brew,
+) -> ToolGroup {
+    let mut rows: Vec<ScanItem> = old
+        .iter()
+        .map(|(name, paths)| {
+            let versions: Vec<_> = paths
+                .iter()
+                .filter_map(|path| path.file_name()?.to_str())
+                .collect();
+            let size = paths.iter().map(|path| DirSizer::size_of(path)).sum();
+            let pinned = formulae
+                .iter()
+                .any(|package| package.name == *name && package.pinned);
+            let task = BrewTask::Cleanup {
+                name: name.clone(),
+                brew: brew.path.clone(),
+                cellar: cellar_of(&brew.prefix, name),
+            };
+            item(
+                format!("{name} {}", versions.join(", ")),
+                size,
+                !pinned,
+                Some(task),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| (Reverse(a.size_bytes), &a.path).cmp(&(Reverse(b.size_bytes), &b.path)));
+    ToolGroup {
+        tool: GROUP_OLD.to_string(),
+        items: rows,
+    }
+}
+
+/// Unused dependencies and old versions, read with dry runs only.
+pub fn cleanup_scan(layout: &Layout, host: &dyn Host) -> Result<CategoryScan, String> {
+    let Some(brew) = find(layout) else {
+        return Ok(empty_cleanup(vec![NOT_INSTALLED.to_string()]));
+    };
+
+    let packages = installed(host, &brew.path, &brew.prefix)?;
+    let formulae: Vec<&Package> = packages
+        .iter()
+        .filter(|package| package.kind == PackageKind::Formula)
+        .collect();
+    let autoremove = read(
+        host,
+        &brew.path,
+        &["autoremove", "--dry-run"],
+        DRY_RUN_TIMEOUT,
+        "the unused dependencies",
+    )?;
+    let cleanup = read(
+        host,
+        &brew.path,
+        &["cleanup", "--dry-run"],
+        DRY_RUN_TIMEOUT,
+        "the old versions",
+    )?;
+
+    let mut unused: Vec<&Package> = Vec::new();
+    for name in parse_autoremove(&autoremove) {
+        let found = formulae.iter().find(|package| is_named(package, &name));
+        if let Some(package) = found
+            && !unused.iter().any(|known| known.name == package.name)
+        {
+            unused.push(package);
+        }
+    }
+    // Only installed formulae, so a name from brew's text never reaches brew as a flag.
+    let old: Vec<_> = parse_old_versions(&cleanup, &brew.prefix)
+        .into_iter()
+        .filter(|(name, _)| formulae.iter().any(|package| package.name == *name))
+        .filter(|(name, _)| !unused.iter().any(|package| package.name == *name))
+        .collect();
+
+    let mut scan = empty_cleanup(Vec::new());
+    scan.groups = [
+        unused_group(&unused, &brew),
+        old_versions_group(&old, &formulae, &brew),
+    ]
+    .into_iter()
+    .filter(|group| !group.items.is_empty())
+    .collect();
+    Ok(scan)
+}
+
+/// The version folders right below the Cellar folder of a formula, by name; none if it is gone.
+fn versions(cellar: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(cellar)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Uninstalls every version of the formula, only if the packages brew lists now still show
+/// nothing using it.
+fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<(), String> {
+    let prefix = cellar.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "taert cannot find the Homebrew prefix of {}.",
+            cellar.display()
+        )
+    })?;
+    let packages = installed(host, brew, prefix)?;
+    let Some(package) = packages
+        .iter()
+        .find(|package| package.kind == PackageKind::Formula && package.name == name)
+    else {
+        return Err(format!("{name} is no longer installed."));
+    };
+    if !package.used_by.is_empty() {
+        return Err(format!(
+            "{name} stays: {} use it.",
+            package.used_by.join(", ")
+        ));
+    }
+    let mut left = versions(cellar);
+    if left.is_empty() {
+        return Err(format!(
+            "taert finds no installed version of {name} in {}.",
+            cellar.display()
+        ));
+    }
+    // Without --force, each call removes one version. Brew keeps the folder when it holds
+    // another file, so no version left means done.
+    for _ in 0..left.len() {
+        remove(
+            host,
+            brew,
+            &["uninstall", name],
+            &format!("Homebrew could not remove {name}"),
+        )?;
+        let now = versions(cellar);
+        if now.is_empty() {
+            return Ok(());
+        }
+        let removed_nothing = now.len() >= left.len();
+        left = now;
+        if removed_nothing {
+            break;
+        }
+    }
+    let verb = if left.len() == 1 { "is" } else { "are" };
+    Err(format!(
+        "Homebrew removed part of {name}; {} {verb} still installed.",
+        left.join(", ")
+    ))
+}
+
+/// Runs one task through brew and returns the bytes it freed.
+pub fn run_task(host: &dyn Host, task: &BrewTask) -> Result<u64, String> {
+    let (BrewTask::Uninstall { name, brew, cellar } | BrewTask::Cleanup { name, brew, cellar }) =
+        task;
+    let before = DirSizer::size_of(cellar);
+    match task {
+        BrewTask::Uninstall { .. } => uninstall(host, name, brew, cellar)?,
+        BrewTask::Cleanup { .. } => remove(
+            host,
+            brew,
+            &["cleanup", name],
+            &format!("Homebrew could not clean up {name}"),
+        )?,
+    }
+    Ok(before.saturating_sub(DirSizer::size_of(cellar)))
 }
 
 struct Widths {
@@ -381,11 +737,20 @@ pub mod testing {
     use crate::core::apps::testing::sandbox;
     use crate::core::layout::Layout;
 
+    // From brew info --json=v2 --installed on a Mac with Homebrew 7.0.12, cut down to 10 formulae and 2 casks. "pinned" was set to true on fd by hand, because no formula there was pinned.
+    pub const BREW_INFO: &str = include_str!("../../tests/fixtures/brew_info.json");
+    // From brew cleanup --dry-run on a Mac with Homebrew 7.0.12, a few lines. brew prints the Warning line on stderr; it is kept here to check that the parser skips it.
+    pub const CLEANUP_DRY_RUN: &str = include_str!("../../tests/fixtures/brew_cleanup_dry_run.txt");
+    // Written in the format of Cleanup.autoremove in Library/Homebrew/cleanup.rb (Homebrew 7.0.12), because brew autoremove --dry-run printed nothing on that Mac.
+    pub const AUTOREMOVE_DRY_RUN: &str =
+        include_str!("../../tests/fixtures/brew_autoremove_dry_run.txt");
+
     /// A package on request that nothing uses.
     pub fn package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Package {
         Package {
             kind,
             name: name.to_string(),
+            full_name: name.to_string(),
             version: version.to_string(),
             size_bytes: bytes,
             on_request: true,
@@ -410,15 +775,12 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{package, with_brew};
+    use super::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO, CLEANUP_DRY_RUN, package, with_brew};
     use super::*;
     use crate::core::apps::testing::sandbox;
     use crate::core::host::fake::FakeHost;
     use crate::core::sizer::DirSizer;
     use std::fs;
-
-    // From brew info --json=v2 --installed on a Mac with Homebrew 7.0.12, cut down to 10 formulae and 2 casks. "pinned" was set to true on fd by hand, because no formula there was pinned.
-    const BREW_INFO: &str = include_str!("../../tests/fixtures/brew_info.json");
 
     const INFO_LINE_START: &str =
         "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1";
@@ -783,6 +1145,720 @@ Casks (remove with taert uninstall)
   ghostty  1.3.1     50.0 MB  on request  -         -       0
 ";
         assert_eq!(text, expected);
+    }
+
+    const REMOVING_LINE_START: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1";
+
+    #[test]
+    fn autoremove_names_follow_the_header() {
+        assert_eq!(parse_autoremove(AUTOREMOVE_DRY_RUN), ["ada-url", "brotli"]);
+    }
+
+    #[test]
+    fn autoremove_text_without_the_header_gives_no_names() {
+        assert!(parse_autoremove("ada-url\nbrotli\n").is_empty());
+        assert!(parse_autoremove("").is_empty());
+    }
+
+    #[test]
+    fn autoremove_ignores_what_comes_before_the_header() {
+        let text = "stray\n==> Would autoremove 1 unneeded formula:\nada-url\n";
+
+        assert_eq!(parse_autoremove(text), ["ada-url"]);
+    }
+
+    #[test]
+    fn autoremove_names_stop_at_a_blank_line_or_the_next_header() {
+        let text = "==> Would autoremove 2 unneeded formulae:\n  ada-url \nbrotli\n\nlater\n";
+        assert_eq!(parse_autoremove(text), ["ada-url", "brotli"]);
+
+        let text = "==> Would autoremove 1 unneeded formula:\nada-url\n==> Other\nbrotli\n";
+        assert_eq!(parse_autoremove(text), ["ada-url"]);
+    }
+
+    #[test]
+    fn old_versions_come_only_from_the_cellar_lines_of_the_fixture() {
+        let found = parse_old_versions(CLEANUP_DRY_RUN, Path::new("/opt/homebrew"));
+
+        assert_eq!(
+            found,
+            [
+                (
+                    "ada-url".to_string(),
+                    vec![PathBuf::from("/opt/homebrew/Cellar/ada-url/4.0.0")]
+                ),
+                (
+                    "brotli".to_string(),
+                    vec![PathBuf::from("/opt/homebrew/Cellar/brotli/1.2.0")]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn old_versions_group_by_formula_in_order_of_first_appearance() {
+        let text = "\
+Would remove: /opt/homebrew/Cellar/go/1.26.0 (10 files, 1MB)
+Would remove: /opt/homebrew/Cellar/bun/1.4.0 (10 files, 1MB)
+Would remove: /opt/homebrew/Cellar/go/1.25.0 (10 files, 1MB)
+";
+
+        let found = parse_old_versions(text, Path::new("/opt/homebrew"));
+
+        assert_eq!(
+            found,
+            [
+                (
+                    "go".to_string(),
+                    vec![
+                        PathBuf::from("/opt/homebrew/Cellar/go/1.26.0"),
+                        PathBuf::from("/opt/homebrew/Cellar/go/1.25.0")
+                    ]
+                ),
+                (
+                    "bun".to_string(),
+                    vec![PathBuf::from("/opt/homebrew/Cellar/bun/1.4.0")]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_bracket_in_it_keeps_its_whole_name() {
+        let text = "Would remove: /opt/homebrew/Cellar/odd (x)/1.0 (3 files, 1KB)\n";
+
+        let found = parse_old_versions(text, Path::new("/opt/homebrew"));
+
+        assert_eq!(
+            found,
+            [(
+                "odd (x)".to_string(),
+                vec![PathBuf::from("/opt/homebrew/Cellar/odd (x)/1.0")]
+            )]
+        );
+    }
+
+    #[test]
+    fn old_versions_leave_out_other_prefixes_and_paths_that_climb_out() {
+        let text = "\
+Would remove: /usr/local/Cellar/go/1.0 (1 files, 1KB)
+Would remove: /opt/homebrew/Cellar/../../etc/passwd (1 files, 1KB)
+Would remove: /opt/homebrew/Cellar/go (1 files, 1KB)
+Would remove: /opt/homebrew/Cellar/go/1.0
+";
+
+        assert!(parse_old_versions(text, Path::new("/opt/homebrew")).is_empty());
+    }
+
+    const READS: [&str; 3] = [
+        "info --json=v2 --installed",
+        "autoremove --dry-run",
+        "cleanup --dry-run",
+    ];
+
+    fn prefix_of(layout: &Layout) -> PathBuf {
+        layout.system("opt/homebrew")
+    }
+
+    fn brew_of(layout: &Layout) -> PathBuf {
+        layout.system("opt/homebrew/bin/brew")
+    }
+
+    fn line(layout: &Layout, args: &str) -> String {
+        format!("{INFO_LINE_START} {} {args}", brew_of(layout).display())
+    }
+
+    fn removing_line(layout: &Layout, args: &str) -> String {
+        format!("{REMOVING_LINE_START} {} {args}", brew_of(layout).display())
+    }
+
+    fn reading_host(layout: &Layout, info: &str, autoremove: &str, cleanup: &str) -> FakeHost {
+        let host = FakeHost::default();
+        host.reply(&line(layout, READS[0]), info);
+        host.reply(&line(layout, READS[1]), autoremove);
+        host.reply(&line(layout, READS[2]), cleanup);
+        host
+    }
+
+    fn info(formulae: &[(&str, &[&str], bool)]) -> String {
+        let formulae: Vec<Value> = formulae
+            .iter()
+            .map(|(name, dependencies, pinned)| {
+                serde_json::json!({
+                    "name": name,
+                    "full_name": name,
+                    "dependencies": dependencies,
+                    "pinned": pinned,
+                    "installed": [{"version": "1", "installed_on_request": false}],
+                })
+            })
+            .collect();
+        serde_json::json!({"formulae": formulae, "casks": []}).to_string()
+    }
+
+    fn autoremove_of(names: &[&str]) -> String {
+        format!(
+            "==> Would autoremove {} unneeded formulae:\n{}\n",
+            names.len(),
+            names.join("\n")
+        )
+    }
+
+    fn old(layout: &Layout, name: &str, version: &str) -> String {
+        format!(
+            "Would remove: {}/Cellar/{name}/{version} (3 files, 9.9MB)\n",
+            prefix_of(layout).display()
+        )
+    }
+
+    fn items<'a>(scan: &'a CategoryScan, tool: &str) -> &'a [ScanItem] {
+        &scan
+            .groups
+            .iter()
+            .find(|group| group.tool == tool)
+            .unwrap_or_else(|| panic!("no group {tool}"))
+            .items
+    }
+
+    fn labels(items: &[ScanItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| item.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn without_brew_the_cleanup_scan_is_empty_and_runs_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        assert_eq!(scan.id, CLEANUP_ID);
+        assert_eq!(scan.title, "Homebrew Cleanup");
+        assert!(scan.groups.is_empty());
+        assert_eq!(scan.notes, ["Homebrew is not installed."]);
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_cleanup_scan_runs_the_three_read_commands_and_nothing_else() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = reading_host(&layout, BREW_INFO, AUTOREMOVE_DRY_RUN, CLEANUP_DRY_RUN);
+
+        cleanup_scan(&layout, &host).unwrap();
+
+        let expected: Vec<String> = READS.iter().map(|args| line(&layout, args)).collect();
+        assert_eq!(*host.calls.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn unused_dependencies_and_old_versions_are_two_groups_with_sizes_from_disk() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let prefix = prefix_of(&layout);
+        fill(&prefix.join("Cellar/ada-url/4.0.0_1"), 100_000);
+        fill(&prefix.join("Cellar/brotli/1.2.1"), 40_000);
+        fill(&prefix.join("Cellar/bun/1.4.0"), 20_000);
+        fill(&prefix.join("Cellar/bun/1.4.1"), 30_000);
+        fill(&prefix.join("Cellar/go/1.27.2"), 500_000);
+        let cleanup = [
+            "Warning: Skipping bun: most recent version 1.4.4_1 not installed\n".to_string(),
+            old(&layout, "ada-url", "4.0.0"),
+            old(&layout, "bun", "1.4.1"),
+            old(&layout, "go", "1.27.2"),
+            old(&layout, "bun", "1.4.0"),
+            "Would remove: /Users/igor/Library/Caches/Homebrew/bun--1.4.1 (336KB)\n".to_string(),
+        ]
+        .concat();
+        let host = reading_host(&layout, BREW_INFO, AUTOREMOVE_DRY_RUN, &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        let groups: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
+        assert_eq!(groups, ["Unused dependencies", "Old versions"]);
+        let unused = items(&scan, "Unused dependencies");
+        assert_eq!(labels(unused), ["ada-url 4.0.0_1", "brotli 1.2.1"]);
+        assert_eq!(
+            unused[0].size_bytes,
+            DirSizer::size_of(&prefix.join("Cellar/ada-url"))
+        );
+        assert!(unused[0].size_bytes >= 100_000);
+        assert_eq!(
+            unused[0].brew,
+            Some(BrewTask::Uninstall {
+                name: "ada-url".to_string(),
+                brew: brew_of(&layout),
+                cellar: prefix.join("Cellar/ada-url"),
+            })
+        );
+
+        let old_versions = items(&scan, "Old versions");
+        assert_eq!(labels(old_versions), ["go 1.27.2", "bun 1.4.1, 1.4.0"]);
+        assert_eq!(
+            old_versions[1].size_bytes,
+            DirSizer::size_of(&prefix.join("Cellar/bun/1.4.1"))
+                + DirSizer::size_of(&prefix.join("Cellar/bun/1.4.0"))
+        );
+        assert!(old_versions[1].size_bytes >= 50_000);
+        assert_eq!(
+            old_versions[1].brew,
+            Some(BrewTask::Cleanup {
+                name: "bun".to_string(),
+                brew: brew_of(&layout),
+                cellar: prefix.join("Cellar/bun"),
+            })
+        );
+        assert!(scan.notes.is_empty());
+    }
+
+    #[test]
+    fn an_unused_dependency_is_not_listed_again_as_an_old_version() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let cleanup = old(&layout, "ada-url", "4.0.0") + &old(&layout, "brotli", "1.2.0");
+        let host = reading_host(&layout, BREW_INFO, AUTOREMOVE_DRY_RUN, &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        let groups: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
+        assert_eq!(groups, ["Unused dependencies"]);
+    }
+
+    #[test]
+    fn an_autoremove_name_matches_a_formula_by_its_full_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let json = r#"{"formulae":[
+            {"name":"lib","full_name":"someone/tap/lib","dependencies":[],
+             "installed":[{"version":"2","installed_on_request":false}]}
+        ],"casks":[]}"#;
+        let host = reading_host(&layout, json, &autoremove_of(&["someone/tap/lib"]), "");
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        let unused = items(&scan, "Unused dependencies");
+        assert_eq!(labels(unused), ["lib 2"]);
+        assert!(matches!(
+            &unused[0].brew,
+            Some(BrewTask::Uninstall { name, .. }) if name == "lib"
+        ));
+    }
+
+    #[test]
+    fn an_old_version_of_a_formula_that_is_not_installed_gives_no_row() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let cleanup = old(&layout, "--prune=all", "1.0") + &old(&layout, "ghost", "1.0");
+        let host = reading_host(&layout, BREW_INFO, "", &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        assert!(scan.groups.is_empty(), "{:?}", scan.groups);
+    }
+
+    #[test]
+    fn an_autoremove_name_that_is_not_installed_gives_no_row() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = reading_host(&layout, BREW_INFO, &autoremove_of(&["ghost"]), "");
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        assert!(scan.groups.is_empty());
+    }
+
+    #[test]
+    fn pinned_formulae_start_unselected_and_others_selected_in_both_groups() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let json = info(&[
+            ("held", &[], true),
+            ("free", &[], false),
+            ("keep", &[], true),
+            ("tidy", &[], false),
+        ]);
+        let cleanup = old(&layout, "keep", "0") + &old(&layout, "tidy", "0");
+        let host = reading_host(&layout, &json, &autoremove_of(&["held", "free"]), &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        let selected = |tool: &str| -> Vec<(String, bool)> {
+            let mut rows: Vec<_> = items(&scan, tool)
+                .iter()
+                .map(|i| (i.path.to_string_lossy().into_owned(), i.selected))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            selected("Unused dependencies"),
+            [("free 1".to_string(), true), ("held 1".to_string(), false)]
+        );
+        assert_eq!(
+            selected("Old versions"),
+            [("keep 0".to_string(), false), ("tidy 0".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn a_formula_comes_before_the_unused_dependency_it_needs() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let prefix = prefix_of(&layout);
+        fill(&prefix.join("Cellar/a/1"), 50_000);
+        fill(&prefix.join("Cellar/b/1"), 200_000);
+        fill(&prefix.join("Cellar/c/1"), 100_000);
+        let json = info(&[("a", &["b"], false), ("b", &[], false), ("c", &[], false)]);
+        let host = reading_host(&layout, &json, &autoremove_of(&["b", "a", "c"]), "");
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        let unused = items(&scan, "Unused dependencies");
+        assert_eq!(labels(unused), ["c 1", "a 1", "b 1"]);
+    }
+
+    #[test]
+    fn old_versions_and_equal_sizes_are_ordered_by_size_then_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let prefix = prefix_of(&layout);
+        fill(&prefix.join("Cellar/x/1"), 10_000);
+        fill(&prefix.join("Cellar/y/1"), 10_000);
+        fill(&prefix.join("Cellar/z/1"), 90_000);
+        let json = info(&[("x", &[], false), ("y", &[], false), ("z", &[], false)]);
+        let cleanup = old(&layout, "y", "1") + &old(&layout, "x", "1") + &old(&layout, "z", "1");
+        let host = reading_host(&layout, &json, "", &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+
+        assert_eq!(labels(items(&scan, "Old versions")), ["z 1", "x 1", "y 1"]);
+    }
+
+    #[test]
+    fn a_failed_read_command_is_an_error_that_names_it() {
+        let cases = [
+            (0, "Homebrew did not list its packages: Error: boom"),
+            (
+                1,
+                "Homebrew did not list the unused dependencies: Error: boom",
+            ),
+            (2, "Homebrew did not list the old versions: Error: boom"),
+        ];
+        for (failing, expected) in cases {
+            let (_temp, layout) = with_brew("opt/homebrew");
+            let host = FakeHost::default();
+            let replies = [BREW_INFO, AUTOREMOVE_DRY_RUN, CLEANUP_DRY_RUN];
+            for (index, (args, stdout)) in READS.iter().zip(replies).enumerate() {
+                if index == failing {
+                    host.fail(&line(&layout, args), "Error: boom\n");
+                } else {
+                    host.reply(&line(&layout, args), stdout);
+                }
+            }
+
+            let error = cleanup_scan(&layout, &host).unwrap_err();
+
+            assert_eq!(error, expected);
+        }
+    }
+
+    fn task_setup(users: &[&str]) -> (tempfile::TempDir, Layout, FakeHost, PathBuf) {
+        let (temp, layout) = with_brew("opt/homebrew");
+        let cellar = prefix_of(&layout).join("Cellar/lib");
+        fill(&cellar.join("1"), 70_000);
+        let mut formulae = vec![("lib", Vec::new(), false)];
+        formulae.extend(users.iter().map(|user| (*user, vec!["lib"], false)));
+        let formulae: Vec<(&str, &[&str], bool)> = formulae
+            .iter()
+            .map(|(name, deps, pinned)| (*name, deps.as_slice(), *pinned))
+            .collect();
+        let host = FakeHost::default();
+        host.reply(&line(&layout, READS[0]), &info(&formulae));
+        (temp, layout, host, cellar)
+    }
+
+    fn uninstall_task(layout: &Layout, cellar: &Path) -> BrewTask {
+        BrewTask::Uninstall {
+            name: "lib".to_string(),
+            brew: brew_of(layout),
+            cellar: cellar.to_path_buf(),
+        }
+    }
+
+    fn cleanup_task(layout: &Layout, cellar: &Path) -> BrewTask {
+        BrewTask::Cleanup {
+            name: "lib".to_string(),
+            brew: brew_of(layout),
+            cellar: cellar.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn an_uninstall_stops_when_another_formula_uses_the_package_again() {
+        let (_temp, layout, host, cellar) = task_setup(&["tool", "app"]);
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(error, "lib stays: app, tool use it.");
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+        assert!(cellar.exists());
+    }
+
+    #[test]
+    fn an_uninstall_of_a_package_nothing_uses_runs_one_brew_uninstall_and_counts_the_freed_bytes() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        let before = DirSizer::size_of(&cellar);
+        let doomed = cellar.clone();
+        host.reply(&removing_line(&layout, "uninstall"), "");
+        host.when(&removing_line(&layout, "uninstall"), move || {
+            fs::remove_dir_all(&doomed).unwrap();
+        });
+
+        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+
+        assert_eq!(
+            *host.calls.lock().unwrap(),
+            [
+                line(&layout, READS[0]),
+                removing_line(&layout, "uninstall lib")
+            ]
+        );
+        assert!(before >= 70_000);
+        assert_eq!(freed, before);
+    }
+
+    #[test]
+    fn an_uninstall_of_a_package_that_is_gone_is_an_error_and_runs_no_uninstall() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        let task = BrewTask::Uninstall {
+            name: "other".to_string(),
+            brew: brew_of(&layout),
+            cellar: prefix_of(&layout).join("Cellar/other"),
+        };
+
+        let error = run_task(&host, &task).unwrap_err();
+
+        assert_eq!(error, "other is no longer installed.");
+        assert!(!host.ran(REMOVING_LINE_START));
+        assert!(cellar.exists());
+    }
+
+    #[test]
+    fn a_failed_uninstall_is_an_error_with_the_message_of_brew() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        host.fail(&removing_line(&layout, "uninstall lib"), "Error: boom\n");
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(error, "Homebrew could not remove lib: Error: boom");
+    }
+
+    fn uninstall_calls(host: &FakeHost) -> Vec<String> {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.contains(" uninstall "))
+            .cloned()
+            .collect()
+    }
+
+    /// Like brew without `--force`: each call removes one version, and the empty folder after the
+    /// last one.
+    fn uninstall_removes_one_version_per_call(host: &FakeHost, layout: &Layout, cellar: &Path) {
+        let line = removing_line(layout, "uninstall lib");
+        host.reply(&line, "");
+        let cellar = cellar.to_path_buf();
+        host.when(&line, move || {
+            let mut left: Vec<PathBuf> = fs::read_dir(&cellar)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            left.sort();
+            fs::remove_dir_all(&left[0]).unwrap();
+            if left.len() == 1 {
+                fs::remove_dir(&cellar).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn an_uninstall_repeats_brew_uninstall_until_every_version_is_gone() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        fill(&cellar.join("2"), 30_000);
+        let before = DirSizer::size_of(&cellar);
+        uninstall_removes_one_version_per_call(&host, &layout, &cellar);
+
+        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+
+        assert_eq!(
+            uninstall_calls(&host),
+            [
+                removing_line(&layout, "uninstall lib"),
+                removing_line(&layout, "uninstall lib")
+            ]
+        );
+        assert!(!cellar.exists());
+        assert!(before >= 100_000);
+        assert_eq!(freed, before);
+    }
+
+    #[test]
+    fn an_uninstall_stops_when_a_call_removes_nothing() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        fill(&cellar.join("2"), 30_000);
+        host.reply(&removing_line(&layout, "uninstall lib"), "");
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(uninstall_calls(&host).len(), 1);
+        assert_eq!(
+            error,
+            "Homebrew removed part of lib; 1, 2 are still installed."
+        );
+    }
+
+    #[test]
+    fn an_uninstall_of_one_version_runs_brew_uninstall_once() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        host.reply(&removing_line(&layout, "uninstall lib"), "");
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(uninstall_calls(&host).len(), 1);
+        assert_eq!(error, "Homebrew removed part of lib; 1 is still installed.");
+    }
+
+    #[test]
+    fn an_uninstall_with_no_cellar_folder_is_an_error_and_runs_no_uninstall() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        fs::remove_dir_all(&cellar).unwrap();
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(
+            error,
+            format!(
+                "taert finds no installed version of lib in {}.",
+                cellar.display()
+            )
+        );
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+    }
+
+    #[test]
+    fn an_uninstall_with_no_version_folder_is_an_error_and_runs_no_uninstall() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        fs::remove_dir_all(cellar.join("1")).unwrap();
+        fs::write(cellar.join("stray"), "kept").unwrap();
+
+        let error = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(
+            error,
+            format!(
+                "taert finds no installed version of lib in {}.",
+                cellar.display()
+            )
+        );
+        assert_eq!(*host.calls.lock().unwrap(), [line(&layout, READS[0])]);
+    }
+
+    #[test]
+    fn an_uninstall_is_done_when_no_version_is_left_even_if_the_folder_stays() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        fill(&cellar.join("2"), 30_000);
+        fs::write(cellar.join("stray"), "kept").unwrap();
+        let both = DirSizer::size_of(&cellar.join("1")) + DirSizer::size_of(&cellar.join("2"));
+        let uninstall = removing_line(&layout, "uninstall lib");
+        host.reply(&uninstall, "");
+        let rack = cellar.clone();
+        // Like brew when the rack holds a file other than .DS_Store: the rack stays.
+        host.when(&uninstall, move || {
+            let mut left: Vec<PathBuf> = fs::read_dir(&rack)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_dir())
+                .collect();
+            left.sort();
+            fs::remove_dir_all(&left[0]).unwrap();
+        });
+
+        let freed = run_task(&host, &uninstall_task(&layout, &cellar)).unwrap();
+
+        assert_eq!(uninstall_calls(&host), [uninstall.clone(), uninstall]);
+        assert!(cellar.join("stray").exists());
+        assert!(both >= 100_000);
+        assert!(freed >= both);
+    }
+
+    #[test]
+    fn an_uninstall_with_a_cellar_path_too_short_for_a_prefix_is_an_error_and_runs_nothing() {
+        let (_temp, layout, host, _cellar) = task_setup(&[]);
+        let task = BrewTask::Uninstall {
+            name: "lib".to_string(),
+            brew: brew_of(&layout),
+            cellar: PathBuf::from("/lib"),
+        };
+
+        let error = run_task(&host, &task).unwrap_err();
+
+        assert_eq!(error, "taert cannot find the Homebrew prefix of /lib.");
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cleanup_task_runs_one_brew_cleanup_and_counts_the_freed_bytes() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        let old_version = cellar.join("1");
+        let before = DirSizer::size_of(&cellar);
+        host.reply(&removing_line(&layout, "cleanup"), "");
+        host.when(&removing_line(&layout, "cleanup lib"), move || {
+            fs::remove_dir_all(&old_version).unwrap();
+        });
+
+        let freed = run_task(&host, &cleanup_task(&layout, &cellar)).unwrap();
+
+        assert_eq!(
+            *host.calls.lock().unwrap(),
+            [removing_line(&layout, "cleanup lib")]
+        );
+        assert_eq!(freed, before - DirSizer::size_of(&cellar));
+        assert!(freed >= 70_000);
+    }
+
+    #[test]
+    fn a_failed_cleanup_is_an_error_with_the_message_of_brew() {
+        let (_temp, layout, host, cellar) = task_setup(&[]);
+        host.fail(&removing_line(&layout, "cleanup lib"), "Error: boom\n");
+
+        let error = run_task(&host, &cleanup_task(&layout, &cellar)).unwrap_err();
+
+        assert_eq!(error, "Homebrew could not clean up lib: Error: boom");
+    }
+
+    #[test]
+    fn no_call_has_force_zap_or_ignore_dependencies() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let prefix = prefix_of(&layout);
+        fill(&prefix.join("Cellar/ada-url/4.0.0_1"), 1_000);
+        fill(&prefix.join("Cellar/bun/1.4.0"), 1_000);
+        let cleanup = old(&layout, "bun", "1.4.0");
+        let host = reading_host(&layout, BREW_INFO, AUTOREMOVE_DRY_RUN, &cleanup);
+
+        let scan = cleanup_scan(&layout, &host).unwrap();
+        let tasks: Vec<_> = scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .filter_map(|item| item.brew.as_ref())
+            .collect();
+        assert_eq!(tasks.len(), 3);
+        for task in tasks {
+            let _ = run_task(&host, task);
+        }
+
+        let calls = host.calls.lock().unwrap();
+        assert!(calls.iter().any(|call| call.contains("uninstall ada-url")));
+        assert!(calls.iter().any(|call| call.contains("cleanup bun")));
+        for call in calls.iter() {
+            for flag in ["--force", "--zap", "--ignore-dependencies"] {
+                assert!(!call.contains(flag), "{call}");
+            }
+        }
     }
 
     #[test]

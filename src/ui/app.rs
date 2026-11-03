@@ -1550,6 +1550,7 @@ impl App {
                     None => {
                         let command = match scan_id.as_str() {
                             "docker" => "docker".to_string(),
+                            homebrew::CLEANUP_ID => "brew cleanup".to_string(),
                             "purge" => "purge".to_string(),
                             "large" => "large".to_string(),
                             "dev" => "clean dev".to_string(),
@@ -3545,6 +3546,135 @@ mod tests {
             assert!(text.contains("Homebrew isn't available"));
             assert_eq!(text.matches("Homebrew is not installed.").count(), 1);
             assert!(!text.contains("No Homebrew packages"));
+        }
+
+        const CLEANUP_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1 /fake/bin/brew cleanup lib";
+
+        fn cleanup_app(cellar: &Path) -> App {
+            let mut item = ScanItem::new("lib 0.9".into(), 50_000, true, false);
+            item.brew = Some(homebrew::BrewTask::Cleanup {
+                name: "lib".to_string(),
+                brew: "/fake/bin/brew".into(),
+                cellar: cellar.to_path_buf(),
+            });
+            select_app(CategoryScan {
+                notes: Vec::new(),
+                id: homebrew::CLEANUP_ID.to_string(),
+                title: "Homebrew Cleanup".to_string(),
+                groups: vec![ToolGroup {
+                    tool: "Old versions".to_string(),
+                    items: vec![item],
+                }],
+            })
+        }
+
+        #[test]
+        fn a_cleanup_without_homebrew_shows_the_note_once_as_the_reason() {
+            let (_temp, layout) = sandbox();
+            let scan = homebrew::cleanup_scan(&layout, &FakeHost::default()).unwrap();
+            let app = select_app(scan);
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("Homebrew isn't available"), "{text}");
+            assert_eq!(text.matches("Homebrew is not installed.").count(), 1);
+            assert!(!text.contains("Nothing to clean"), "{text}");
+        }
+
+        #[test]
+        fn an_empty_cleanup_says_homebrew_has_nothing_to_clean() {
+            let app = select_app(CategoryScan {
+                notes: Vec::new(),
+                id: homebrew::CLEANUP_ID.to_string(),
+                title: "Homebrew Cleanup".to_string(),
+                groups: Vec::new(),
+            });
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("Homebrew has nothing to clean"), "{text}");
+            assert!(!text.contains("Nothing to clean"), "{text}");
+            assert!(!text.contains("Your caches are already tidy."), "{text}");
+        }
+
+        #[test]
+        fn the_cleanup_crumbs_read_homebrew_then_cleanup() {
+            let app = cleanup_app(Path::new("/fake/Cellar/lib"));
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("taert › Homebrew › Cleanup"), "{text}");
+            assert!(!text.contains("Clean caches"));
+        }
+
+        #[test]
+        fn a_cleanup_row_has_no_path_to_reveal_and_no_reveal_hint() {
+            let app = cleanup_app(Path::new("/fake/Cellar/lib"));
+
+            assert!(select(&app).current_focused_path().is_none());
+            assert_footer(&app, &["/  Search"], &["Reveal"]);
+        }
+
+        #[test]
+        fn a_list_with_a_file_row_next_to_a_brew_row_keeps_reveal() {
+            let mut app = cleanup_app(Path::new("/fake/Cellar/lib"));
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            state.scan.groups[0]
+                .items
+                .push(ScanItem::new("/tmp/file".into(), 1, true, false));
+
+            assert_footer(&app, &["O  Reveal"], &[]);
+        }
+
+        #[test]
+        fn a_docker_row_still_has_a_path_to_reveal() {
+            let mut scan = scan_with_id(docker::SCAN_ID);
+            scan.groups[0].items[0].docker = Some(docker::DockerObject::BuildCache);
+            let app = select_app(scan);
+
+            assert!(select(&app).current_focused_path().is_some());
+            assert_footer(&app, &["O  Reveal"], &[]);
+        }
+
+        #[test]
+        fn a_cleanup_removal_goes_through_brew_and_is_logged_as_brew_cleanup() {
+            let (_temp, layout) = sandbox();
+            let cellar = layout.system("opt/homebrew/Cellar/lib");
+            std::fs::create_dir_all(cellar.join("0.9")).unwrap();
+            std::fs::write(cellar.join("0.9/data"), vec![1_u8; 50_000]).unwrap();
+            let host = FakeHost::default();
+            host.reply(CLEANUP_LINE, "");
+            let old = cellar.join("0.9");
+            host.when(CLEANUP_LINE, move || std::fs::remove_dir_all(&old).unwrap());
+            let mut app = cleanup_app(&cellar);
+            app.layout = layout;
+            app.host = Arc::new(host);
+
+            app.handle_key(KeyCode::Enter);
+            let confirm = screen_text(&app);
+            assert!(confirm.contains("permanently deleted"), "{confirm}");
+            assert!(!confirm.contains("Trash"), "{confirm}");
+
+            app.handle_key(KeyCode::Char('y'));
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let outcome = screen_text(&app);
+            assert!(outcome.contains("Clean Complete"), "{outcome}");
+            assert!(outcome.contains("permanently"), "{outcome}");
+            assert!(!outcome.contains("Trash"), "{outcome}");
+            assert!(!cellar.join("0.9").exists());
+            let runs = HistoryLog::new(app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "brew cleanup");
+            assert_eq!(runs[0].items[0].path, "lib 0.9");
+            assert!(runs[0].items[0].bytes >= 50_000);
         }
 
         #[test]
