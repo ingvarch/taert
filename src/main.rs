@@ -16,6 +16,7 @@ use crate::cli::{
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
+use crate::core::catalog::Category;
 use crate::core::cleaner::{RemovalMode, RemovalReport};
 use crate::core::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use crate::core::docker::DockerClient;
@@ -28,7 +29,7 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::{expand_tilde, prettify_path};
 use crate::core::purger::Purger;
 use crate::core::safety::Safety;
-use crate::core::scanner::{CategoryScan, CategoryScanner, ScanContext};
+use crate::core::scanner::{CategoryScan, CategoryScanner, ScanContext, scan_all_categories};
 use crate::core::schedule;
 use crate::core::sizer::DirSizer;
 use crate::core::startup;
@@ -189,44 +190,18 @@ fn handle_clean(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let categories: Vec<(&str, &str)> = match args.category {
-        Some(CleanCategory::Dev) => vec![("dev", "Developer Caches")],
-        Some(CleanCategory::Junk) => vec![("junk", "System Junk")],
-        Some(CleanCategory::Ai) => vec![("ai", "AI Tool Caches")],
-        Some(CleanCategory::Trash) => vec![("trash", "Trash")],
-        Some(CleanCategory::Orphans) => vec![("orphans", "Orphaned App Files")],
-        None => vec![
-            ("dev", "Developer Caches"),
-            ("junk", "System Junk"),
-            ("ai", "AI Tool Caches"),
-            ("trash", "Trash"),
-            ("orphans", "Orphaned App Files"),
-        ],
+    let category = args.category.map(|category| match category {
+        CleanCategory::Dev => Category::Dev,
+        CleanCategory::Junk => Category::Junk,
+        CleanCategory::Ai => Category::Ai,
+        CleanCategory::Trash => Category::Trash,
+        CleanCategory::Orphans => Category::Orphans,
+    });
+    let command = category.map_or("clean", Category::history_command);
+    let scans = match category {
+        Some(category) => vec![CategoryScanner::scan(context, category, ignore, None, None)],
+        None => scan_all_categories(context, ignore, None, None),
     };
-
-    let command = match args.category {
-        Some(CleanCategory::Dev) => "clean dev",
-        Some(CleanCategory::Junk) => "clean junk",
-        Some(CleanCategory::Ai) => "clean ai",
-        Some(CleanCategory::Trash) => "clean trash",
-        Some(CleanCategory::Orphans) => "clean orphans",
-        None => "clean",
-    };
-
-    let scans = categories
-        .into_iter()
-        .map(|(id, title)| {
-            let mut s = CategoryScanner::scan(context, id, title, ignore, None, None);
-            if args.category.is_none() && id == "orphans" {
-                for group in &mut s.groups {
-                    for item in &mut group.items {
-                        item.selected = false;
-                    }
-                }
-            }
-            s
-        })
-        .collect();
     let mut scan = CategoryScan::combined("Clean Review", scans);
 
     process_scan_result(&mut scan, cli, use_plain, ignore, command, context, console)

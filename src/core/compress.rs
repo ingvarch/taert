@@ -1660,6 +1660,8 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
     candidates
 }
 
+pub const SCAN_ID: &str = "compress";
+
 /// Creates a `CategoryScan` with compression candidates for the TUI select screen.
 pub fn compress_candidates_scan(layout: &Layout) -> CategoryScan {
     let candidates = find_compress_candidates(layout);
@@ -1698,7 +1700,7 @@ pub fn compress_candidates_scan(layout: &Layout) -> CategoryScan {
     }
 
     CategoryScan {
-        id: "compress".to_string(),
+        id: SCAN_ID.to_string(),
         title: "Transparent APFS Compression Candidates".to_string(),
         groups,
         notes: vec![

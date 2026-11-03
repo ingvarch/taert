@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::app_caches;
-use super::catalog::{Catalog, Target};
+use super::catalog::{Catalog, Category, Target};
 use super::docker::DockerObject;
 use super::homebrew::BrewTask;
 use super::host::Host;
@@ -276,13 +276,12 @@ fn scan_group(
 impl CategoryScanner {
     pub fn scan(
         context: &ScanContext,
-        category_id: &str,
-        category_title: &str,
+        category: Category,
         ignore: &IgnoreStore,
         progress_tx: Option<Sender<ScanProgressEvent>>,
         is_cancelled: Option<Arc<AtomicBool>>,
     ) -> CategoryScan {
-        if category_id == orphans::SCAN_ID {
+        if category == Category::Orphans {
             return orphans::scan(
                 context.layout,
                 context.host,
@@ -294,9 +293,9 @@ impl CategoryScanner {
         }
         Self::scan_with(
             context,
-            category_id,
-            category_title,
-            Catalog::targets_in(context.layout, category_id),
+            category.id(),
+            category.title(),
+            Catalog::targets_in(context.layout, category),
             ignore,
             progress_tx,
             is_cancelled,
@@ -332,7 +331,7 @@ impl CategoryScanner {
             .collect();
 
         let mut notes = Vec::new();
-        if category_id == "junk" && !is_cancelled(&cancel) {
+        if category_id == Category::Junk.id() && !is_cancelled(&cancel) {
             let found = app_caches::plan(
                 context.layout,
                 context.host,
@@ -366,6 +365,39 @@ impl CategoryScanner {
     }
 }
 
+/// Scans every category in order, so the TUI and `taert clean` list the same rows.
+/// Orphan rows start unselected here because the user did not pick the orphans category.
+pub fn scan_all_categories(
+    context: &ScanContext,
+    ignore: &IgnoreStore,
+    progress: Option<Sender<ScanProgressEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Vec<CategoryScan> {
+    let total = Category::ALL.len();
+    let mut scans = Vec::new();
+    for (index, category) in Category::ALL.into_iter().enumerate() {
+        if is_cancelled(&cancel) {
+            break;
+        }
+        if let Some(tx) = &progress {
+            let _ = tx.send(ScanProgressEvent::CategoryStarted {
+                title: category.title().to_string(),
+                index: index + 1,
+                total,
+            });
+        }
+        let mut scan =
+            CategoryScanner::scan(context, category, ignore, progress.clone(), cancel.clone());
+        if category == Category::Orphans {
+            for item in scan.groups.iter_mut().flat_map(|group| &mut group.items) {
+                item.selected = false;
+            }
+        }
+        scans.push(scan);
+    }
+    scans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,8 +414,7 @@ mod tests {
                 layout: &layout,
                 host: &FakeHost::idle(),
             },
-            "junk",
-            "System Junk",
+            Category::Junk,
             &IgnoreStore::default(),
             None,
             None,
@@ -423,6 +454,90 @@ mod tests {
             .filter(|group| group.tool == tool)
             .flat_map(|group| &group.items)
             .collect()
+    }
+
+    fn old_orphan(layout: &Layout) {
+        let folder = fill(layout, "Library/Caches/com.gone.app");
+        let then = SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        for path in [folder.join("data"), folder] {
+            fs::File::open(path).unwrap().set_modified(then).unwrap();
+        }
+    }
+
+    fn orphan_host() -> FakeHost {
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+        host
+    }
+
+    #[test]
+    fn scanning_all_categories_keeps_orphan_rows_unselected() {
+        let (_temp, layout) = sandbox();
+        old_orphan(&layout);
+        let host = orphan_host();
+        let context = ScanContext {
+            layout: &layout,
+            host: &host,
+        };
+        let ignore = IgnoreStore::default();
+
+        let alone = CategoryScanner::scan(&context, Category::Orphans, &ignore, None, None);
+        assert!(!alone.selected_items().is_empty());
+
+        let scans = scan_all_categories(&context, &ignore, None, None);
+        let ids: Vec<_> = scans.iter().map(|scan| scan.id.as_str()).collect();
+        assert_eq!(ids, ["dev", "junk", "ai", "trash", "orphans"]);
+        let titles: Vec<_> = scans.iter().map(|scan| scan.title.as_str()).collect();
+        assert_eq!(titles, Category::ALL.map(Category::title));
+        let orphans = &scans[4];
+        assert!(!orphans.groups.is_empty());
+        assert!(orphans.selected_items().is_empty());
+    }
+
+    #[test]
+    fn scanning_all_categories_reports_each_title_with_its_place() {
+        let (_temp, layout) = sandbox();
+        let host = orphan_host();
+        let context = ScanContext {
+            layout: &layout,
+            host: &host,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        scan_all_categories(&context, &IgnoreStore::default(), Some(tx), None);
+
+        let starts: Vec<_> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                ScanProgressEvent::CategoryStarted {
+                    title,
+                    index,
+                    total,
+                } => Some((title, index, total)),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<_> = Category::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, category)| (category.title().to_string(), i + 1, 5))
+            .collect();
+        assert_eq!(starts, expected);
+    }
+
+    #[test]
+    fn scanning_all_categories_stops_when_cancelled() {
+        let (_temp, layout) = sandbox();
+        let host = orphan_host();
+        let context = ScanContext {
+            layout: &layout,
+            host: &host,
+        };
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let scans = scan_all_categories(&context, &IgnoreStore::default(), None, Some(cancel));
+
+        assert!(scans.is_empty());
     }
 
     #[test]
@@ -474,7 +589,7 @@ mod tests {
                 layout: &layout,
                 host: &FakeHost::idle(),
             },
-            "ai",
+            Category::Ai.id(),
             "AI",
             Vec::new(),
             &IgnoreStore::default(),

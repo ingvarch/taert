@@ -118,7 +118,6 @@ taert/
 │       ├── path_list_editor.rs # Path list manager for protected paths and project folders
 │       ├── preferences.rs      # Settings and age threshold configuration screen
 │       ├── progress.rs         # Scanning progress screen with live progress bars
-│       ├── review.rs           # Pre-cleanup review screen with group statistics
 │       ├── select.rs           # Item selection screen with search filtering and modals
 │       ├── system_status.rs    # Live system overview with panels and history graphs
 │       ├── theme.rs            # Design tokens, typography styles, and symbols

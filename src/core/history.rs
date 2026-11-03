@@ -14,8 +14,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::bytes::format_bytes;
+use super::catalog::Category;
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use super::safety::Safety;
+use super::{compress, docker, homebrew, large_files, purger};
+
+/// The history command a scan is logged under when its rows are removed.
+pub fn command_for_scan(scan_id: &str) -> String {
+    match scan_id {
+        docker::SCAN_ID => "docker".to_string(),
+        homebrew::CLEANUP_ID => "brew cleanup".to_string(),
+        homebrew::SCAN_ID => "brew uninstall".to_string(),
+        purger::SCAN_ID => "purge".to_string(),
+        large_files::SCAN_ID => "large".to_string(),
+        compress::SCAN_ID => "compress".to_string(),
+        id => Category::from_id(id)
+            .map_or("clean", Category::history_command)
+            .to_string(),
+    }
+}
 
 static RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -633,6 +650,29 @@ fn create_with_mode_0600(path: &Path) -> io::Result<File> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn scans_map_to_their_history_commands() {
+        let commands = [
+            ("docker", "docker"),
+            ("brew-cleanup", "brew cleanup"),
+            ("brew", "brew uninstall"),
+            ("purge", "purge"),
+            ("large", "large"),
+            ("compress", "compress"),
+            ("dev", "clean dev"),
+            ("junk", "clean junk"),
+            ("ai", "clean ai"),
+            ("trash", "clean trash"),
+            ("orphans", "clean orphans"),
+            ("clean", "clean"),
+            ("slim", "clean"),
+            ("anything else", "clean"),
+        ];
+        for (scan_id, command) in commands {
+            assert_eq!(command_for_scan(scan_id), command, "{scan_id}");
+        }
+    }
 
     #[test]
     fn run_writes_start_items_and_end() {

@@ -12,7 +12,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use super::bytes::format_bytes;
-use super::catalog::Catalog;
+use super::catalog::{Catalog, Category};
 use super::cleaner::{Cleaner, RemovalMode};
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use super::history::{HistoryLog, ItemOutcome, OutcomeKind, RunRecord};
@@ -23,7 +23,12 @@ use super::stores::{Config, IgnoreStore, ScheduleConfig, ScheduleSkip};
 
 pub const SCHEDULE_LABEL: &str = "io.github.ingvarch.taert.schedule";
 pub const SCHEDULE_PLIST_NAME: &str = "io.github.ingvarch.taert.schedule.plist";
-pub const VALID_CATEGORIES: &[&str] = &["dev", "junk", "ai", "trash"];
+pub const VALID_CATEGORIES: &[&str] = &[
+    Category::Dev.id(),
+    Category::Junk.id(),
+    Category::Ai.id(),
+    Category::Trash.id(),
+];
 const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Recurrence frequency for background cleanup.
@@ -170,11 +175,10 @@ pub fn validate_categories(categories: &[String]) -> Result<(), String> {
     }
     for cat in categories {
         let normalized = cat.trim().to_lowercase();
-        if normalized == "purge"
-            || normalized == "docker"
-            || normalized == "uninstall"
-            || normalized == "clean orphans"
-            || normalized == "orphans"
+        if matches!(
+            normalized.as_str(),
+            "purge" | "docker" | "uninstall" | "clean orphans"
+        ) || Category::from_id(&normalized).is_some_and(|category| !category.schedulable())
         {
             return Err(format!(
                 "Category '{cat}' cannot be scheduled; its results require interactive review"
@@ -191,16 +195,6 @@ pub fn validate_categories(categories: &[String]) -> Result<(), String> {
 }
 
 /// Returns the descriptive title for a category.
-pub fn category_title(id: &str) -> &'static str {
-    match id {
-        "dev" => "Developer Caches",
-        "junk" => "System Junk",
-        "ai" => "AI Tool Caches",
-        "trash" => "Trash",
-        _ => "Caches",
-    }
-}
-
 /// File lock wrapper using `flock` to guarantee non-overlapping runs.
 pub struct ScheduleLock {
     file: File,
@@ -543,11 +537,14 @@ pub fn run_scheduled(
     let mut all_items: Vec<ScanItem> = Vec::new();
 
     for cat in &normalize_categories(&sched.categories) {
+        let Some(category) = Category::from_id(cat) else {
+            continue;
+        };
         let scan = CategoryScanner::scan_with(
             &context,
             cat,
-            category_title(cat),
-            Catalog::targets_in(layout, cat),
+            category.title(),
+            Catalog::targets_in(layout, category),
             &ignore,
             None,
             None,
@@ -651,6 +648,34 @@ mod tests {
             let err = validate_categories(&[name.to_string()]).unwrap_err();
             assert!(err.contains("cannot be scheduled"), "{name}: {err}");
         }
+    }
+
+    #[test]
+    fn every_schedule_category_parses() {
+        assert_eq!(VALID_CATEGORIES, ["dev", "junk", "ai", "trash"]);
+        for id in VALID_CATEGORIES {
+            assert!(
+                Category::from_id(id).is_some_and(Category::schedulable),
+                "{id}"
+            );
+        }
+        for category in Category::ALL {
+            assert_eq!(
+                VALID_CATEGORIES.contains(&category.id()),
+                category.schedulable(),
+                "{}",
+                category.id()
+            );
+        }
+        assert!(!Category::Orphans.schedulable());
+    }
+
+    #[test]
+    fn an_unknown_category_lists_the_allowed_ones() {
+        assert_eq!(
+            validate_categories(&["foo".to_string()]),
+            Err("Invalid category 'foo'. Allowed categories: dev, junk, ai, trash".to_string())
+        );
     }
 
     #[test]
