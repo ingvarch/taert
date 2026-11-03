@@ -9,23 +9,23 @@ expression: output
    │   ◇ Project cleanup          › │  │                                                                             │
    │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches                        │
    │   ⌦ Uninstall apps           › │  │ and the Trash. You'll review every item before                              │
-   ╰────────────────────────────────╯  │ anything is removed.                                                        │
-   ╭─ Optimize ─────────────────────╮  │                                                                             │
-   │   ✚ Doctor                   › │  │ ↵ Open                                                                      │
-   │   ▲ Startup items            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
-   │   ⌦ Slim apps           ╭────────────────────────────────────────────────────────────╮
-   │   ✧ Compress            │ Explore your home folder?                                  │───── 118.6 GB available ─╮
-   ╰─────────────────────────│                                                            │──── 375.8 GB of 494.4 GB │
-   ╭─ Inspect ───────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   │   ◆ Homebrew                 › │  │ anything is removed.                                                        │
+   ╰────────────────────────────────╯  │                                                                             │
+   ╭─ Optimize ─────────────────────╮  │ ↵ Open                                                                      │
+   │   ✚ Doctor                   › │  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ▲ Startup items       ╭────────────────────────────────────────────────────────────╮
+   │   ⌦ Slim apps           │ Explore your home folder?                                  │───── 118.6 GB available ─╮
+   │   ✧ Compress            │                                                            │──── 375.8 GB of 494.4 GB │
+   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
+   ╭─ Inspect ───────────────│                                                            │                          │
    │   ◔ Explore storage     │                                                            │                          │
-   │   ◔ Large files         │                                                            │                          │
-   │   ▤ System status       │                                           Cancel    Start  │──────────────────────────╯
-   ╰─────────────────────────│                                    Enter select   Esc back │
-   ╭─ Settings ──────────────╰────────────────────────────────────────────────────────────╯
+   │   ◔ Large files         │                                           Cancel    Start  │──────────────────────────╯
+   │   ▤ System status       │                                    Enter select   Esc back │
+   ╰─────────────────────────╰────────────────────────────────────────────────────────────╯
+   ╭─ Settings ─────────────────────╮
    │   ⌥ Preferences              › │
    │   ◈ Protected paths          › │
    ╰────────────────────────────────╯
-
 
 
 

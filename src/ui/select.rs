@@ -29,6 +29,7 @@ use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
+use crate::core::homebrew;
 use crate::core::large_files;
 use crate::core::leftovers::UninstallRole;
 use crate::core::path_utils::{middle_truncate, prettify_path};
@@ -277,7 +278,15 @@ impl SelectState {
         rows
     }
 
+    /// A list to look at: nothing in it can be selected or removed.
+    pub fn is_read_only(&self) -> bool {
+        self.scan.id == homebrew::SCAN_ID
+    }
+
     pub fn toggle_current(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
         let rows = self.flattened_rows();
         if let Some(row) = rows.get(self.focused_index) {
             if row.kind == RowKind::Section {
@@ -298,6 +307,9 @@ impl SelectState {
     }
 
     fn set_shown_items(&mut self, selected: bool) {
+        if self.is_read_only() {
+            return;
+        }
         for row in self.flattened_rows() {
             if let Some(item) = row.item_index {
                 self.scan.groups[row.group_index].items[item].selected = selected;
@@ -420,6 +432,9 @@ impl SelectState {
     }
 
     pub fn current_focused_path(&self) -> Option<PathBuf> {
+        if self.is_read_only() {
+            return None;
+        }
         let rows = self.flattened_rows();
         rows.get(self.focused_index)
             .and_then(|r| r.full_path.clone())
@@ -452,14 +467,26 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let selected_count = state.scan.selected_items().len();
     let total_count: usize = state.scan.groups.iter().map(|g| g.items.len()).sum();
 
-    let right_status = Line::from(vec![
-        Span::styled(format!("{selected_count}"), theme.headline()),
-        Span::styled(format!(" of {total_count} selected  ·  "), theme.callout()),
-        Span::styled(
-            format_bytes(total_selected_bytes),
-            theme.size(total_selected_bytes),
-        ),
-    ]);
+    let read_only = state.is_read_only();
+    let right_status = if read_only {
+        Line::from(vec![
+            Span::styled(plural(total_count, "package", "packages"), theme.headline()),
+            Span::styled("  ·  ", theme.callout()),
+            Span::styled(
+                format_bytes(total_shown_bytes),
+                theme.size(total_shown_bytes),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!("{selected_count}"), theme.headline()),
+            Span::styled(format!(" of {total_count} selected  ·  "), theme.callout()),
+            Span::styled(
+                format_bytes(total_selected_bytes),
+                theme.size(total_selected_bytes),
+            ),
+        ])
+    };
 
     let enter = theme.g.key_enter;
     let id = state.scan.id.as_str();
@@ -493,7 +520,11 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Optimize", "Slim apps"]
     } else if id == large_files::SCAN_ID {
         vec!["taert", "Inspect", "Large files"]
-    } else if id == SCAN_ID || id == purger::SCAN_ID || id == apps::LIST_ID {
+    } else if id == SCAN_ID
+        || id == purger::SCAN_ID
+        || id == apps::LIST_ID
+        || id == homebrew::SCAN_ID
+    {
         vec!["taert", title]
     } else {
         vec!["taert", "Clean caches", title]
@@ -503,11 +534,20 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         .full_width()
         .status(right_status)
         .hints(toolbar_hints(state, total_count > 0))
-        .primary(primary_action)
         .behind_dialog(!matches!(state.overlay, ModalOverlay::None));
+    let chrome = if read_only && !state.is_searching {
+        chrome
+    } else {
+        chrome.primary(primary_action)
+    };
 
     let content_rect = chrome.render(frame, theme);
-    let content_rect = render_notes(frame, content_rect, &state.scan.notes, theme);
+    let note_is_the_reason = read_only && total_count == 0;
+    let content_rect = if note_is_the_reason {
+        content_rect
+    } else {
+        render_notes(frame, content_rect, &state.scan.notes, theme)
+    };
 
     if total_count == 0 {
         render_nothing_to_show(frame, content_rect, state, theme);
@@ -620,6 +660,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     name.to_string_lossy().into_owned(),
                     theme.body(),
                 )]
+            } else if read_only {
+                label_spans(&row.display_path, theme)
             } else if let Some(path) = &row.full_path {
                 let max_len = row_width.saturating_sub(20);
                 let mut spans = row_path_spans(path, row.more_folders, max_len, theme);
@@ -650,7 +692,11 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             };
 
             let mut list_row = ListRow::new(title_spans)
-                .leading(Span::styled(bullet, bullet_style))
+                .leading(if read_only {
+                    Span::raw(" ")
+                } else {
+                    Span::styled(bullet, bullet_style)
+                })
                 .detail(detail)
                 .selected(is_focused);
 
@@ -773,13 +819,26 @@ fn section_frame_top(
     }
 }
 
+/// A label row: what it names first, then its details in a quieter style.
+fn label_spans(label: &str, theme: &Theme) -> Vec<Span<'static>> {
+    match label.split_once(" · ") {
+        Some((name, details)) => vec![
+            Span::styled(name.to_string(), theme.body()),
+            Span::styled(format!(" · {details}"), theme.footnote()),
+        ],
+        None => vec![Span::styled(label.to_string(), theme.body())],
+    }
+}
+
 fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
     if state.is_searching {
         return vec![Hint::new("⎋", "Cancel")];
     }
 
     let mut hints = Vec::new();
-    if has_items {
+    if has_items && state.is_read_only() {
+        hints.extend([Hint::new("/", "Search"), Hint::new("↑↓", "Move")]);
+    } else if has_items {
         hints.extend([
             Hint::new("␣", "Select"),
             Hint::new("A", "All"),
@@ -803,6 +862,19 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
         EmptyState::new(theme.g.warning, &title, problem)
             .glyph_color(theme.p.yellow)
             .render(frame, area, theme);
+    } else if state.scan.id == homebrew::SCAN_ID
+        && let Some(note) = state.scan.notes.first()
+    {
+        EmptyState::new(theme.g.warning, "Homebrew isn't available", note)
+            .glyph_color(theme.p.yellow)
+            .render(frame, area, theme);
+    } else if state.scan.id == homebrew::SCAN_ID {
+        EmptyState::new(
+            theme.g.package,
+            "No Homebrew packages",
+            "Packages you install with Homebrew show up here.",
+        )
+        .render(frame, area, theme);
     } else if state.scan.id == SCAN_ID {
         EmptyState::new("✓", "Docker has nothing unused", "Every object is in use.")
             .glyph_color(theme.p.green)

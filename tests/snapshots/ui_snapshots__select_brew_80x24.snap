@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: narrow
+---
+ taert › Homebrew                                       5 packages  ·  365.2 MB
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ Formulae ───────────────────────────────────────── 4 items · 315.2 MB ─╮
+   │ ▌   go 1.27.3 · on request · used by 2                         250.1 MB │
+   │     bun 1.4.2 · on request · outdated                           60.0 MB │
+   │     ada-url 4.0.0_1 · dependency                                 3.1 MB │
+   │     fd 10.5.0 · on request · pinned                              2.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Casks · Remove with taert uninstall ──────────────── 1 item · 50.0 MB ─╮
+   │     ghostty 1.3.1 · Ghostty.app                                 50.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  /  Search    ↑↓  Move    ⎋  Back    ?  More

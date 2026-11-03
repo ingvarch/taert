@@ -12,9 +12,9 @@ expression: output
    │   ◇ Project cleanup                     › │
    │   ▦ Docker cleanup                      › │
    │   ⌦ Uninstall apps                      › │
+   │   ◆ Homebrew                            › │
    ╰───────────────────────────────────────────╯
    ╭─ Optimize ────────────────────────────────╮
    │   ✚ Doctor                              › │
-   │   ▲ Startup items                       › │
 ──────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More         Open  ↵

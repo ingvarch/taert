@@ -41,6 +41,7 @@ use crate::core::compress::Compressor;
 use crate::core::docker;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
+use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
 use crate::core::layout::Layout;
@@ -1255,19 +1256,12 @@ impl App {
 
         match &self.screen {
             Screen::Workspace(state) => {
-                let quick_key = match state.items.len() {
-                    13 => "1-13",
-                    12 => "1-12",
-                    11 => "1-11",
-                    10 => "1-10",
-                    _ => "1-9",
-                };
                 vec![
                     HelpSection::new(
                         "Menu",
                         vec![
                             Hint::new("↵", "Select"),
-                            Hint::new(quick_key, "Quick select"),
+                            Hint::new("1-9, 0", "Quick select"),
                         ],
                     ),
                     general(vec![
@@ -1283,6 +1277,10 @@ impl App {
             Screen::Scanning(_, _, _) => vec![
                 HelpSection::new("Scanning", vec![Hint::new("⎋ / q", "Cancel scan")]),
                 general(Vec::new()),
+            ],
+            Screen::Select(state) if state.is_read_only() => vec![
+                HelpSection::new("Homebrew", vec![Hint::new("/", "Search")]),
+                general(vec![navigate, back]),
             ],
             Screen::Select(state) => {
                 let enter = match state.scan.id.as_str() {
@@ -1662,6 +1660,7 @@ impl App {
             }
             MainMenuChoice::DockerCleanup => self.launch_docker_scan(),
             MainMenuChoice::UninstallApps => self.launch_app_scan(),
+            MainMenuChoice::Homebrew => self.launch_brew_scan(),
             MainMenuChoice::Doctor => self.open_doctor(10),
             MainMenuChoice::StartupItems => self.open_startup(false),
             MainMenuChoice::SlimApps => self.launch_slim_scan(),
@@ -1736,6 +1735,29 @@ impl App {
 
         self.open(Screen::Scanning(
             ProgressState::new("Reading Docker").top_level(),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+        ));
+    }
+
+    fn launch_brew_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let layout = self.layout.clone();
+        let host = self.host.clone();
+
+        thread::spawn(move || {
+            let scan = match homebrew::scan(&layout, &*host) {
+                Ok(inventory) => homebrew::list_scan(&inventory),
+                Err(message) => homebrew::list_scan(&homebrew::Inventory {
+                    packages: Vec::new(),
+                    notes: vec![message],
+                }),
+            };
+            let _ = tx.send(ScanMessage::Finished(scan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Reading Homebrew").top_level(),
             rx,
             Arc::new(AtomicBool::new(false)),
         ));
@@ -2014,9 +2036,8 @@ mod tests {
     }
 
     #[test]
-    fn help_counts_every_row_of_the_main_menu() {
+    fn help_names_the_quick_keys_of_the_main_menu() {
         let app = new_app();
-        let rows = WorkspaceState::new().items.len();
 
         let sections = app.help_sections();
         let quick = sections[0]
@@ -2024,7 +2045,7 @@ mod tests {
             .iter()
             .find(|h| h.desc == "Quick select");
 
-        assert_eq!(quick.unwrap().key, format!("1-{rows}"));
+        assert_eq!(quick.unwrap().key, "1-9, 0");
     }
 
     #[test]
@@ -2038,51 +2059,55 @@ mod tests {
     }
 
     #[test]
-    fn the_fifth_quick_key_opens_doctor() {
+    fn the_fifth_quick_key_opens_homebrew() {
         let mut state = WorkspaceState::new();
 
-        assert_eq!(state.select_by_number(5), Some(MainMenuChoice::Doctor));
+        assert_eq!(state.select_by_number(5), Some(MainMenuChoice::Homebrew));
     }
 
     #[test]
-    fn the_sixth_quick_key_opens_startup_items() {
+    fn the_sixth_quick_key_opens_doctor() {
+        let mut state = WorkspaceState::new();
+
+        assert_eq!(state.select_by_number(6), Some(MainMenuChoice::Doctor));
+    }
+
+    #[test]
+    fn the_seventh_quick_key_opens_startup_items() {
         let mut state = WorkspaceState::new();
 
         assert_eq!(
-            state.select_by_number(6),
+            state.select_by_number(7),
             Some(MainMenuChoice::StartupItems)
         );
     }
 
     #[test]
-    fn the_seventh_quick_key_opens_slim_apps() {
+    fn the_eighth_quick_key_opens_slim_apps() {
         let mut state = WorkspaceState::new();
 
-        assert_eq!(state.select_by_number(7), Some(MainMenuChoice::SlimApps));
+        assert_eq!(state.select_by_number(8), Some(MainMenuChoice::SlimApps));
     }
 
     #[test]
-    fn the_eighth_quick_key_opens_compress() {
+    fn the_ninth_quick_key_opens_compress() {
         let mut state = WorkspaceState::new();
 
-        assert_eq!(state.select_by_number(8), Some(MainMenuChoice::Compress));
+        assert_eq!(state.select_by_number(9), Some(MainMenuChoice::Compress));
     }
 
     #[test]
-    fn the_ninth_quick_key_opens_explore_storage() {
-        let mut state = WorkspaceState::new();
+    fn the_zero_key_opens_explore_storage_and_large_files_has_no_number_key() {
+        let mut app = new_app();
 
-        assert_eq!(
-            state.select_by_number(9),
-            Some(MainMenuChoice::ExploreStorage)
-        );
-    }
+        app.handle_key(KeyCode::Char('0'));
 
-    #[test]
-    fn the_tenth_quick_key_opens_large_files() {
-        let mut state = WorkspaceState::new();
-
-        assert_eq!(state.select_by_number(10), Some(MainMenuChoice::LargeFiles));
+        assert!(matches!(app.screen, Screen::Workspace(_)));
+        let Screen::Workspace(state) = &app.screen else {
+            unreachable!()
+        };
+        assert_eq!(state.current_main_choice(), MainMenuChoice::ExploreStorage);
+        assert_eq!(state.items[10].0, MainMenuChoice::LargeFiles);
     }
 
     fn select_app(scan: CategoryScan) -> App {
@@ -2329,9 +2354,9 @@ mod tests {
     fn esc_returns_to_the_menu_row_a_screen_was_opened_from() {
         let mut app = new_app();
 
-        press(&mut app, &[KeyCode::Char('6'), KeyCode::Esc]);
+        press(&mut app, &[KeyCode::Char('7'), KeyCode::Esc]);
 
-        assert_main_menu(&app, 5);
+        assert_main_menu(&app, 6);
     }
 
     #[test]
@@ -2340,10 +2365,10 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Char('8'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('0'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 7);
+        assert_main_menu(&app, 9);
     }
 
     #[test]
@@ -2352,7 +2377,7 @@ mod tests {
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
 
-        assert_main_menu(&app, 12);
+        assert_main_menu(&app, 13);
     }
 
     #[test]
@@ -2381,7 +2406,7 @@ mod tests {
         assert_eq!(state.path_count, app.ignore.roots.len());
 
         app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 11);
+        assert_main_menu(&app, 12);
     }
 
     #[test]
@@ -3318,5 +3343,218 @@ mod tests {
         };
         assert_eq!(state.findings().len(), 1);
         assert!(matches!(&state.message, Some((m, true)) if m.contains("denied")));
+    }
+
+    mod brew {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::homebrew::{self, Inventory, Package, PackageKind};
+        use crate::core::host::fake::FakeHost;
+
+        fn package(kind: PackageKind, name: &str, bytes: u64) -> Package {
+            homebrew::testing::package(kind, name, "1.0", bytes)
+        }
+
+        fn brew_scan() -> CategoryScan {
+            homebrew::list_scan(&Inventory {
+                packages: vec![
+                    package(PackageKind::Formula, "fd", 3_000),
+                    package(PackageKind::Formula, "go", 5_000),
+                    package(PackageKind::Cask, "ghostty", 9_000),
+                ],
+                notes: Vec::new(),
+            })
+        }
+
+        fn brew_app() -> App {
+            select_app(brew_scan())
+        }
+
+        fn selected(app: &App) -> usize {
+            select(app).scan.selected_items().len()
+        }
+
+        #[test]
+        fn the_homebrew_row_reads_brew_and_shows_the_list() {
+            let (_temp, layout) = sandbox();
+            let mut app = new_app();
+            app.layout = layout;
+
+            app.handle_key(KeyCode::Char('5'));
+            assert!(screen_text(&app).contains("Reading Homebrew"));
+
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(select(&app).scan.id, homebrew::SCAN_ID);
+            assert_eq!(select(&app).scan.notes, ["Homebrew is not installed."]);
+        }
+
+        #[test]
+        fn a_failed_read_shows_its_message_as_a_note() {
+            let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let host = FakeHost::default();
+            host.fail("/usr/bin/env", "Error: broken tap");
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = Arc::new(host);
+
+            app.handle_key(KeyCode::Char('5'));
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let scan = &select(&app).scan;
+            assert_eq!(scan.id, homebrew::SCAN_ID);
+            assert!(scan.groups.is_empty());
+            assert_eq!(
+                scan.notes,
+                ["Homebrew did not list its packages: Error: broken tap"]
+            );
+        }
+
+        #[test]
+        fn the_list_keeps_the_order_of_the_scan_and_is_not_a_table() {
+            let app = brew_app();
+
+            assert!(select(&app).sort_order.is_none());
+            let first = &select(&app).scan.groups[0].items[0];
+            assert!(first.path.to_string_lossy().starts_with("fd "));
+        }
+
+        #[test]
+        fn no_row_has_a_path_to_open() {
+            let app = brew_app();
+
+            assert!(select(&app).current_focused_path().is_none());
+        }
+
+        #[test]
+        fn selecting_and_removing_do_nothing() {
+            let mut app = brew_app();
+
+            press(
+                &mut app,
+                &[
+                    KeyCode::Char(' '),
+                    KeyCode::Down,
+                    KeyCode::Char(' '),
+                    KeyCode::Char('a'),
+                    KeyCode::Char('A'),
+                    KeyCode::Enter,
+                ],
+            );
+
+            assert_eq!(selected(&app), 0);
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+
+            press(&mut app, &[KeyCode::Char('n'), KeyCode::Char('N')]);
+            assert_eq!(selected(&app), 0);
+            assert!(select(&app).sort_order.is_none());
+        }
+
+        #[test]
+        fn the_footer_has_no_review_or_selection_hints() {
+            let app = brew_app();
+
+            assert_footer(&app, &["↑↓  Move", "/  Search", "⎋  Back", "?  More"], &[]);
+            assert_footer(
+                &app,
+                &[],
+                &[
+                    "Select", "All", "None", "Review", "Remove", "Reveal", "Sort",
+                ],
+            );
+        }
+
+        #[test]
+        fn the_help_sheet_has_no_review_or_selection_hints() {
+            let app = brew_app();
+
+            for desc in [
+                "Toggle item",
+                "Select all",
+                "Select none",
+                "Review & clean",
+                "Reveal in Finder",
+            ] {
+                assert_eq!(help_row(&app, desc), None, "{desc}");
+            }
+            assert_eq!(help_row(&app, "Search"), Some("/"));
+        }
+
+        #[test]
+        fn the_crumbs_and_status_name_homebrew_without_a_selection_count() {
+            let app = brew_app();
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("taert › Homebrew"));
+            assert!(text.contains("3 packages"));
+            assert!(!text.contains("selected"));
+            assert!(!text.contains("Clean caches"));
+        }
+
+        #[test]
+        fn a_long_label_uses_the_whole_row_at_80_columns() {
+            let mut python = homebrew::testing::package(
+                PackageKind::Formula,
+                "python@3.14",
+                "3.14.8_1",
+                180_000_000,
+            );
+            python.on_request = false;
+            python.outdated = true;
+            python.used_by = vec!["azure-cli".to_string()];
+            let app = select_app(homebrew::list_scan(&Inventory {
+                packages: vec![python],
+                notes: Vec::new(),
+            }));
+
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| app.render_screen(frame)).unwrap();
+            let text = format!("{:?}", terminal.backend().buffer());
+
+            assert!(
+                text.contains("python@3.14 3.14.8_1 · dependency · used by 1 · outdated"),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn an_empty_list_says_there_is_nothing_to_show() {
+            let app = select_app(homebrew::list_scan(&Inventory::default()));
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("No Homebrew packages"));
+            assert!(!text.contains("Nothing to clean"));
+        }
+
+        #[test]
+        fn an_empty_list_with_a_note_shows_the_note_once_as_the_reason() {
+            let app = select_app(homebrew::list_scan(&Inventory {
+                packages: Vec::new(),
+                notes: vec!["Homebrew is not installed.".to_string()],
+            }));
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("Homebrew isn't available"));
+            assert_eq!(text.matches("Homebrew is not installed.").count(), 1);
+            assert!(!text.contains("No Homebrew packages"));
+        }
+
+        #[test]
+        fn searching_keeps_the_apply_action_and_browsing_has_none() {
+            let mut app = brew_app();
+            assert!(!screen_text(&app).contains("Apply"));
+
+            press(&mut app, &[KeyCode::Char('/')]);
+
+            assert!(screen_text(&app).contains("Apply"));
+        }
     }
 }

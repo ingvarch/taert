@@ -10,6 +10,7 @@ pub mod date_utils;
 pub mod docker;
 pub mod doctor;
 pub mod history;
+pub mod homebrew;
 pub mod host;
 pub mod iokit;
 pub mod large_files;

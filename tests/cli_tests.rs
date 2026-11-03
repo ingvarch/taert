@@ -34,6 +34,18 @@ fn the_history_help_says_what_it_does() {
 }
 
 #[test]
+fn the_help_lists_the_brew_command() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "List Homebrew packages and the space they take",
+        ));
+}
+
+#[test]
 fn clean_help_mentions_orphans() {
     let home = tempfile::tempdir().unwrap();
     taert(&home)

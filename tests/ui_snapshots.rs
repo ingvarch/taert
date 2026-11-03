@@ -12,6 +12,7 @@ use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
 use taert::core::docker::DockerObject;
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
+use taert::core::homebrew::{self, Inventory, Package, PackageKind};
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
@@ -746,14 +747,15 @@ const CLEAN_CACHES: usize = 0;
 const PROJECT_CLEANUP: usize = 1;
 const DOCKER_CLEANUP: usize = 2;
 const _UNINSTALL_APPS: usize = 3;
-const _DOCTOR: usize = 4;
-const _STARTUP_ITEMS: usize = 5;
-const _SLIM_APPS: usize = 6;
-const _COMPRESS: usize = 7;
-const EXPLORE_STORAGE: usize = 8;
-const _LARGE_FILES: usize = 9;
-const SYSTEM_STATUS: usize = 10;
-const PREFERENCES: usize = 11;
+const _HOMEBREW: usize = 4;
+const _DOCTOR: usize = 5;
+const _STARTUP_ITEMS: usize = 6;
+const _SLIM_APPS: usize = 7;
+const _COMPRESS: usize = 8;
+const EXPLORE_STORAGE: usize = 9;
+const _LARGE_FILES: usize = 10;
+const SYSTEM_STATUS: usize = 11;
+const PREFERENCES: usize = 12;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -1192,6 +1194,50 @@ fn snapshot_uninstall_outcome() {
     });
 
     assert_snapshot!("select_uninstall_outcome_120x32", select_screen(&state));
+}
+
+fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Package {
+    Package {
+        kind,
+        name: name.to_string(),
+        version: version.to_string(),
+        size_bytes: bytes,
+        on_request: true,
+        outdated: false,
+        pinned: false,
+        used_by: Vec::new(),
+        apps: Vec::new(),
+        dependencies: Vec::new(),
+        path: PathBuf::new(),
+    }
+}
+
+fn brew_scan() -> CategoryScan {
+    let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);
+    let mut go = formula("go", "1.27.3", 250_100_000);
+    go.used_by = vec!["golangci-lint".to_string(), "gosec".to_string()];
+    let mut bun = formula("bun", "1.4.2", 60_000_000);
+    bun.outdated = true;
+    let mut fd = formula("fd", "10.5.0", 2_000_000);
+    fd.pinned = true;
+    let mut ada = formula("ada-url", "4.0.0_1", 3_100_000);
+    ada.on_request = false;
+    let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
+    ghostty.apps = vec!["Ghostty.app".to_string()];
+    homebrew::list_scan(&Inventory {
+        packages: vec![go, bun, ada, fd, ghostty],
+        notes: Vec::new(),
+    })
+}
+
+#[test]
+fn snapshot_select_brew() {
+    let state = SelectState::new(brew_scan());
+    let theme = snapshot_theme();
+
+    assert_snapshot!("select_brew_120x32", select_screen(&state));
+    let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_brew_80x24", narrow);
 }
 
 #[test]

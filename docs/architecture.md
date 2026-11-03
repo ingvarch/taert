@@ -15,6 +15,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
+| Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes, through one read-only `brew info` call |
 | Orphan Detector | `crate::core::orphans` | Finds files left behind by apps that are gone with Spotlight and bundle ID checks |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
 | TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
@@ -79,6 +80,16 @@ These rules keep it from removing the wrong thing:
 - **Root**: everything that needs root runs as one script, so macOS asks for the password once. taert uses `sudo` if it has a cached session, and the macOS password dialog otherwise. Paths are quoted. `Safety::is_safe_as_root` refuses a target below a folder the user could replace, because `rm` run as root follows folder links, and the script compares device and inode again right before each `rm`, since the password prompt can stay open for minutes.
 
 Everything that touches the running system goes through the `Host` trait in [`host.rs`](../src/core/host.rs), and `Layout` in [`layout.rs`](../src/core/layout.rs) holds the system's folders. Tests use a fake host and a temporary folder, so they never quit an app or ask for a password.
+
+## Homebrew
+
+[`homebrew.rs`](../src/core/homebrew.rs) lists installed formulae and casks. It only reads.
+
+- **Finding brew**: the first prefix from `Layout::homebrew_prefixes` (`/opt/homebrew`, then `/usr/local`) that has `bin/brew`. The uninstaller uses the same finder for casks. Without a `brew`, the scan is empty with the note `Homebrew is not installed.` and no command runs.
+- **Running brew**: only through `Host`, as `/usr/bin/env` with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ENV_HINTS=1`, and `NONINTERACTIVE=1`, so brew neither updates itself nor asks questions.
+- **One call**: `brew info --json=v2 --installed` with a 60 second timeout. A failed call or output taert cannot parse is an error, never an empty list. In the list opened from the main menu, a failed read shows as this message instead of rows.
+- **Used by**: worked out from the dependencies in that same JSON. A formula is used by every installed formula that lists its name or full name. taert never calls `brew uses`, which is slow.
+- **Sizes**: `DirSizer` measures `<prefix>/Cellar/<name>` for a formula and `<prefix>/Caskroom/<token>` for a cask.
 
 ## Orphaned App Files
 

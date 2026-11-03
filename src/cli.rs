@@ -49,6 +49,9 @@ pub enum Command {
     /// Remove apps together with everything they left on disk
     Uninstall(UninstallArgs),
 
+    /// List Homebrew packages and the space they take
+    Brew,
+
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
 

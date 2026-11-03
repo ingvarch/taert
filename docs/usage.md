@@ -14,12 +14,13 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, and Preferences. Keys `1` to `9` and `0` open a row directly (rows past the 10th have no digit key).
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, Preferences, and Protected Paths. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key.
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), Orphaned App Files, or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧D` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
 - **Uninstall Apps**: Lists the apps in `/Applications`, `~/Applications`, the input method folders, and `/Volumes/*/Applications` with their size and last use. `⇧S`, `⇧N`, and `⇧D` sort the list. Pick apps with `Space`, or press `Enter` on a single app. taert then lists the bundle and everything it found for that app, so you can change the selection before anything is removed. `Enter` asks for confirmation. Apps that are open are quit first. Personal files and apps move to the Trash by default (recoverable), while root files are permanently deleted. Use `--permanent` to skip Trash. See [Uninstall Apps](#uninstall-apps-taert-uninstall) for what is found and what starts selected.
+- **Homebrew**: Lists the installed formulae and casks with their size, whether you installed them or they came as dependencies, what is outdated or pinned, and how many packages use each one. Formulae and casks sit in separate frames, largest first. You can search and scroll, and nothing in this list can be selected or removed. Casks are removed with Uninstall Apps. See [Homebrew Packages](#homebrew-packages-taert-brew).
 - **Startup Items**: Review launch agents, launch daemons, and classic login items. Shows the owning app, service kind, live CPU% and memory if active, and whether the service is enabled, disabled, or broken (missing executable on disk). On wide terminals (≥100 columns), details appear in a side card. `Space` toggles an item (opens a confirmation modal naming the owning app before anything is switched off) or removes a broken user agent plist. Apple system services are hidden by default and read-only. See [Startup Items](#startup-items-taert-startup) for what counts as Apple's.
 - **Explore Storage**: Multi-level interactive storage browser. Features breadcrumb navigation, live streaming progress during background measuring, item selection via `Space`, and deletion via `D` or `Backspace` (offering "Move to Trash" by default or "Delete Permanently").
 - **Large Files**: Flat list of the largest and oldest files and packages across your home folder (or any given path) to answer "what big things did I forget about?". Shows item name, enclosing top-level folder, size, and last used date (queried via Spotlight, fallback to modified date). `⇧S`, `⇧N`, and `⇧D` sort by size, name, or last used date. Filter interactively with `/`, reveal in Finder with `O`, and select with `Space`. Selected items move to the Trash upon confirmation.
@@ -195,6 +196,39 @@ An app in `/Applications` that is a link goes alone: the link is removed, and th
 taert never edits your configuration. If `~/.zshrc`, `~/.config/fish/config.fish`, or a similar file still mentions a removed path, taert names the file and line.
 
 If macOS refuses a removal, give your terminal **Full Disk Access** for files in `~/Library`, and **App Management** for app bundles, in System Settings > Privacy & Security.
+
+### Homebrew Packages (`taert brew`)
+
+```bash
+# Interactive list in a terminal
+taert brew
+
+# Plain text, one row per package
+taert brew --plain
+
+# Structured JSON for automation
+taert brew --json
+```
+
+taert lists every installed formula and cask with the space it takes: the allocated size of `<prefix>/Cellar/<name>` for a formula and `<prefix>/Caskroom/<token>` for a cask. A cask's app in `/Applications` is not counted. Formulae come first, then casks, each largest first.
+
+The plain output has one row per package in two sections. The columns are the name, the version, the size, `on request` or `dependency`, `outdated` or `-`, `pinned` or `-`, and the number of installed formulae that use the package:
+
+```
+Formulae
+  go       1.27.3   250.1 MB  on request  -         -       2
+  bun      1.4.2     60.0 MB  on request  outdated  -       0
+  ada-url  4.0.0_1    3.1 MB  dependency  -         -       0
+
+Casks (remove with taert uninstall)
+  ghostty  1.3.1     50.0 MB  on request  -         -       0
+```
+
+`--json` prints an object with `packages` and `notes`. Each package has `kind` (`formula` or `cask`), `name`, `version`, `size_bytes`, `on_request`, `outdated`, `pinned`, `used_by` (the names of the formulae that list it as a dependency), and `apps` (the apps of a cask).
+
+If Homebrew is not installed, the list is empty and the note `Homebrew is not installed.` explains why. If Homebrew cannot list its packages, taert prints `Error: ...` and exits with a failure, never an empty list.
+
+This command only reads. It makes one `brew info --json=v2 --installed` call and removes nothing. Casks are removed with `taert uninstall`.
 
 ### Large Files (`taert large`)
 
