@@ -9,6 +9,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
 use crate::core::apps;
+use crate::core::catalog::Category;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
 use crate::core::leftovers::{self, Evidence, UninstallRole};
@@ -117,7 +118,7 @@ pub fn scan(
 ) -> CategoryScan {
     let mut scan = CategoryScan {
         id: SCAN_ID.to_string(),
-        title: "Orphaned App Files".to_string(),
+        title: Category::Orphans.title().to_string(),
         groups: Vec::new(),
         notes: Vec::new(),
     };

@@ -42,6 +42,65 @@ impl Target {
     }
 }
 
+/// A clean category. The ids are saved in `schedule.categories`, so they never change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Dev,
+    Junk,
+    Ai,
+    Trash,
+    Orphans,
+}
+
+impl Category {
+    pub const ALL: [Category; 5] = [
+        Category::Dev,
+        Category::Junk,
+        Category::Ai,
+        Category::Trash,
+        Category::Orphans,
+    ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Category::Dev => "dev",
+            Category::Junk => "junk",
+            Category::Ai => "ai",
+            Category::Trash => "trash",
+            Category::Orphans => "orphans",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Category::Dev => "Developer Caches",
+            Category::Junk => "System Junk",
+            Category::Ai => "AI Tool Caches",
+            Category::Trash => "Trash",
+            Category::Orphans => "Orphaned App Files",
+        }
+    }
+
+    pub fn history_command(self) -> &'static str {
+        match self {
+            Category::Dev => "clean dev",
+            Category::Junk => "clean junk",
+            Category::Ai => "clean ai",
+            Category::Trash => "clean trash",
+            Category::Orphans => "clean orphans",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|category| category.id() == id)
+    }
+
+    /// Orphan rows need a look first, so a schedule cannot run them.
+    pub fn schedulable(self) -> bool {
+        self != Category::Orphans
+    }
+}
+
 pub struct Catalog;
 
 fn move_home(path: PathBuf, home: &Path) -> PathBuf {
@@ -308,13 +367,13 @@ impl Catalog {
     }
 
     /// The targets of `category` in the folders of `layout`.
-    pub fn targets_in(layout: &Layout, category: &str) -> Vec<Target> {
+    pub fn targets_in(layout: &Layout, category: Category) -> Vec<Target> {
         let targets = match category {
-            "dev" => Self::dev(),
-            "junk" => Self::junk(),
-            "ai" => Self::ai(),
-            "trash" => return Self::trash(layout),
-            _ => Vec::new(),
+            Category::Dev => Self::dev(),
+            Category::Junk => Self::junk(),
+            Category::Ai => Self::ai(),
+            Category::Trash => return Self::trash(layout),
+            Category::Orphans => Vec::new(),
         };
         targets
             .into_iter()
@@ -336,6 +395,32 @@ mod tests {
     use crate::core::apps::testing::sandbox;
 
     #[test]
+    fn category_ids_titles_and_commands() {
+        let rows = [
+            (Category::Dev, "dev", "Developer Caches", "clean dev"),
+            (Category::Junk, "junk", "System Junk", "clean junk"),
+            (Category::Ai, "ai", "AI Tool Caches", "clean ai"),
+            (Category::Trash, "trash", "Trash", "clean trash"),
+            (
+                Category::Orphans,
+                "orphans",
+                "Orphaned App Files",
+                "clean orphans",
+            ),
+        ];
+
+        assert_eq!(Category::ALL.len(), rows.len());
+        for (category, (expected, id, title, command)) in Category::ALL.into_iter().zip(rows) {
+            assert_eq!(category, expected);
+            assert_eq!(category.id(), id);
+            assert_eq!(category.title(), title);
+            assert_eq!(category.history_command(), command);
+            assert_eq!(Category::from_id(id), Some(category));
+        }
+        assert_eq!(Category::from_id("purge"), None);
+    }
+
+    #[test]
     fn test_catalog_targets_exist_or_safe() {
         let targets = Catalog::dev();
         assert!(!targets.is_empty());
@@ -352,17 +437,18 @@ mod tests {
             user_cache: None,
         };
 
-        for category in ["dev", "junk", "ai", "trash"] {
+        for category in Category::ALL {
             let real = Safety::home_dir();
             for target in Catalog::targets_in(&layout, category) {
                 assert!(
                     target.paths.iter().all(|path| !path.starts_with(&real)),
-                    "{category}: {}",
+                    "{}: {}",
+                    category.id(),
                     target.tool
                 );
             }
         }
-        let homebrew = Catalog::targets_in(&layout, "dev")
+        let homebrew = Catalog::targets_in(&layout, Category::Dev)
             .into_iter()
             .find(|target| target.tool == "Homebrew")
             .unwrap();
@@ -380,7 +466,7 @@ mod tests {
         std::fs::create_dir_all(&volume_trash).unwrap();
         std::fs::create_dir_all(layout.system("Volumes/Empty")).unwrap();
 
-        let trash = Catalog::targets_in(&layout, "trash");
+        let trash = Catalog::targets_in(&layout, Category::Trash);
 
         assert_eq!(trash[0].paths, vec![layout.user(".Trash"), volume_trash]);
     }

@@ -34,7 +34,6 @@ use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::preferences::{PreferencesState, render_preferences};
 use taert::ui::progress::{ProgressState, render_progress};
-use taert::ui::review::{ReviewState, render_review};
 use taert::ui::select::{ModalOverlay, SelectState, render_select};
 use taert::ui::startup::{StartupScreenState, render_startup};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
@@ -501,16 +500,6 @@ fn the_confirmation_keeps_the_end_of_a_long_path() {
     for &(w, h, _) in SIZES {
         let output = render_to_string(w, h, |f| render_select(f, &state, &theme));
         assert!(output.contains("Data/Library/Caches"), "{output}");
-    }
-}
-
-#[test]
-fn snapshot_review() {
-    let theme = snapshot_theme();
-    let state = ReviewState::new(sample_scan());
-    for &(w, h, label) in SIZES {
-        let output = render_to_string(w, h, |f| render_review(f, &state, &theme));
-        assert_snapshot!(format!("review_{label}"), output);
     }
 }
 

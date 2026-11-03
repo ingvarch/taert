@@ -9,7 +9,6 @@ pub mod palette;
 pub mod path_list_editor;
 pub mod preferences;
 pub mod progress;
-pub mod review;
 pub mod select;
 pub mod size_level;
 pub mod startup;

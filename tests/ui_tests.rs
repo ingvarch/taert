@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
-use taert::ui::review::{ReviewState, render_review};
 use taert::ui::select::{SelectState, render_select};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{WorkspaceState, render_workspace};
@@ -166,25 +165,6 @@ fn test_render_select_screen() {
 }
 
 #[test]
-fn test_render_review_screen() {
-    let backend = TestBackend::new(120, 30);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let scan = sample_scan();
-    let state = ReviewState::new(scan);
-    let theme = Theme::new();
-
-    terminal
-        .draw(|f| {
-            render_review(f, &state, &theme);
-        })
-        .unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let rendered_text = format!("{buffer:?}");
-    assert!(rendered_text.contains("permanently deleted"));
-}
-
-#[test]
 fn test_render_analyze_screen() {
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -275,15 +255,7 @@ fn test_select_state_page_and_home_end_navigation() {
 }
 
 #[test]
-fn test_analyze_and_review_page_navigation() {
-    let scan = sample_scan();
-    let mut review = ReviewState::new(scan);
-    assert_eq!(review.scroll_offset, 0);
-    review.page_down();
-    assert_eq!(review.scroll_offset, 10);
-    review.page_up();
-    assert_eq!(review.scroll_offset, 0);
-
+fn test_analyze_page_navigation() {
     let temp = tempfile::tempdir().unwrap();
     let dir_path = temp.path().to_path_buf();
     for i in 0..30 {
@@ -401,17 +373,6 @@ fn search_finds_a_row_by_its_second_folder() {
         .filter(|row| row.is_item())
         .collect();
     assert_eq!(found.len(), 1);
-}
-
-#[test]
-fn the_review_screen_names_every_folder_of_a_row() {
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    let state = ReviewState::new(scan_with_a_row_of_two_folders());
-    let theme = Theme::new();
-    terminal.draw(|f| render_review(f, &state, &theme)).unwrap();
-    let text = format!("{:?}", terminal.backend().buffer());
-    assert!(text.contains("/.cargo/registry/cache"), "{text}");
-    assert!(text.contains("Library/Containers/second"), "{text}");
 }
 
 #[test]

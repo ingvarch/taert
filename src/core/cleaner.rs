@@ -217,20 +217,6 @@ impl<'a> Cleaner<'a> {
         Self { host, mode }
     }
 
-    pub fn permanent(host: &'a dyn Host) -> Self {
-        Self {
-            host,
-            mode: RemovalMode::Permanent,
-        }
-    }
-
-    pub fn trash(host: &'a dyn Host) -> Self {
-        Self {
-            host,
-            mode: RemovalMode::Trash,
-        }
-    }
-
     /// Remove selected items with strict safety re-checks.
     pub fn remove_items(&self, items: &[ScanItem], ignore: &IgnoreStore) -> RemovalReport {
         self.remove_items_with_progress(items, ignore, None::<fn(RemovalProgress)>)

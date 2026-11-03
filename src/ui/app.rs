@@ -25,7 +25,6 @@ use super::path_list_editor::{
 };
 use super::preferences::{PreferencesFocus, PreferencesState, render_preferences};
 use super::progress::{ProgressState, render_progress};
-use super::review::{ReviewState, render_review};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
 use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
@@ -36,11 +35,12 @@ use super::workspace::{
 };
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
+use crate::core::catalog::Category;
 use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport, remove_selected};
-use crate::core::compress::Compressor;
+use crate::core::compress::{self, Compressor};
 use crate::core::docker;
 use crate::core::doctor;
-use crate::core::history::{HistoryLog, ItemOutcome};
+use crate::core::history::{HistoryLog, ItemOutcome, command_for_scan};
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
@@ -49,7 +49,7 @@ use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
 use crate::core::scanner::{
-    CategoryScan, CategoryScanner, ScanContext, ScanItem, ScanProgressEvent,
+    CategoryScan, CategoryScanner, ScanContext, ScanItem, ScanProgressEvent, scan_all_categories,
 };
 use crate::core::slim;
 use crate::core::startup;
@@ -60,7 +60,6 @@ pub enum Screen {
     Workspace(WorkspaceState),
     Scanning(ProgressState, Receiver<ScanMessage>, Arc<AtomicBool>),
     Select(Box<SelectState>),
-    Review(ReviewState),
     Analyze(Box<AnalyzeState>),
     SystemStatus(Box<SystemStatusState>),
     Startup(StartupScreenState),
@@ -457,7 +456,6 @@ impl App {
             Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
             Screen::Scanning(state, _, _) => render_progress(frame, state, &self.theme),
             Screen::Select(state) => render_select(frame, state, &self.theme),
-            Screen::Review(state) => render_review(frame, state, &self.theme),
             Screen::Analyze(state) => render_analyze(frame, state, &self.theme),
             Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
             Screen::Startup(state) => render_startup(frame, state, &self.theme),
@@ -822,68 +820,6 @@ impl App {
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.go_back();
-                    }
-                    _ => {}
-                }
-            }
-
-            Screen::Review(state) => {
-                if state.report.is_some() {
-                    // Result view
-                    if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
-                        self.go_back();
-                        return;
-                    }
-                    match code {
-                        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                        KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
-                        KeyCode::PageUp => state.page_up(),
-                        KeyCode::PageDown => state.page_down(),
-                        KeyCode::Home => state.move_to_start(),
-                        KeyCode::End => state.move_to_end(),
-                        _ => {}
-                    }
-                    return;
-                }
-
-                match code {
-                    KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                    KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
-                    KeyCode::PageUp => state.page_up(),
-                    KeyCode::PageDown => state.page_down(),
-                    KeyCode::Home => state.move_to_start(),
-                    KeyCode::End => state.move_to_end(),
-                    KeyCode::Enter => {
-                        // Confirm deletion!
-                        let items: Vec<_> =
-                            state.scan.selected_items().into_iter().cloned().collect();
-                        let command = match state.scan.id.as_str() {
-                            "dev" => "clean dev".to_string(),
-                            "junk" => "clean junk".to_string(),
-                            "ai" => "clean ai".to_string(),
-                            "trash" => "clean trash".to_string(),
-                            _ => "clean".to_string(),
-                        };
-                        let session = HistoryLog::new(self.layout.history_path()).start_run(
-                            &command,
-                            "interactive",
-                            Some(items.len()),
-                        );
-                        let report = Cleaner::new(&*self.host, RemovalMode::Permanent)
-                            .remove_items_with_callbacks(
-                                &items,
-                                &self.ignore,
-                                None::<fn(RemovalProgress)>,
-                                Some(|outcome: &ItemOutcome| session.record_item(outcome)),
-                            );
-                        session.finish();
-                        state.report = Some(report);
-                    }
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen = Screen::Select(Box::new(
-                            SelectState::with_preserved_selection(state.scan.clone())
-                                .with_permanent(self.permanent),
-                        ));
                     }
                     _ => {}
                 }
@@ -1367,10 +1303,6 @@ impl App {
                 sections.push(general(vec![navigate, back]));
                 sections
             }
-            Screen::Review(_) => vec![
-                HelpSection::new("Review", vec![Hint::new("↵", "Confirm clean")]),
-                general(vec![scroll, back]),
-            ],
             Screen::Analyze(_) => vec![
                 HelpSection::new(
                     "Explore",
@@ -1464,7 +1396,7 @@ impl App {
             let (layout, host, permanent) =
                 (self.layout.clone(), self.host.clone(), self.permanent);
 
-            if scan_id == "compress" {
+            if scan_id == compress::SCAN_ID {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 if let ModalOverlay::Removing { cancel, .. } = &mut select.overlay {
                     *cancel = Some(cancelled.clone());
@@ -1478,7 +1410,11 @@ impl App {
                     let paths: Vec<_> = selected_items.iter().map(|i| i.path.clone()).collect();
                     let total_count = paths.len();
                     let history = HistoryLog::new(layout.history_path());
-                    let session = history.start_run("compress", "interactive", Some(total_count));
+                    let session = history.start_run(
+                        &command_for_scan(compress::SCAN_ID),
+                        "interactive",
+                        Some(total_count),
+                    );
                     let report = compressor.compress_selected(
                         &paths,
                         &cancelled,
@@ -1623,19 +1559,7 @@ impl App {
                         rep
                     }
                     None => {
-                        let command = match scan_id.as_str() {
-                            "docker" => "docker".to_string(),
-                            homebrew::CLEANUP_ID => "brew cleanup".to_string(),
-                            homebrew::SCAN_ID => "brew uninstall".to_string(),
-                            "purge" => "purge".to_string(),
-                            "large" => "large".to_string(),
-                            "dev" => "clean dev".to_string(),
-                            "junk" => "clean junk".to_string(),
-                            "ai" => "clean ai".to_string(),
-                            "trash" => "clean trash".to_string(),
-                            "orphans" => "clean orphans".to_string(),
-                            _ => "clean".to_string(),
-                        };
+                        let command = command_for_scan(&scan_id);
                         let total = selected_items.len();
                         let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
@@ -1772,14 +1696,15 @@ impl App {
     }
 
     fn start_clean_subcategory(&mut self, subcat: CleanSubcategory) {
-        match subcat {
-            CleanSubcategory::All => self.launch_all_categories_scan(),
-            CleanSubcategory::Developer => self.launch_category_scan("dev", "Developer Caches"),
-            CleanSubcategory::UserJunk => self.launch_category_scan("junk", "System Junk"),
-            CleanSubcategory::AiTools => self.launch_category_scan("ai", "AI Tool Caches"),
-            CleanSubcategory::Orphans => self.launch_category_scan("orphans", "Orphaned App Files"),
-            CleanSubcategory::Trash => self.launch_category_scan("trash", "Trash"),
-        }
+        let category = match subcat {
+            CleanSubcategory::All => return self.launch_all_categories_scan(),
+            CleanSubcategory::Developer => Category::Dev,
+            CleanSubcategory::UserJunk => Category::Junk,
+            CleanSubcategory::AiTools => Category::Ai,
+            CleanSubcategory::Orphans => Category::Orphans,
+            CleanSubcategory::Trash => Category::Trash,
+        };
+        self.launch_category_scan(category);
     }
 
     fn execute_start_confirmed(&mut self, kind: StartConfirmKind) {
@@ -1914,7 +1839,7 @@ impl App {
         ));
     }
 
-    fn launch_category_scan(&mut self, cat_id: &'static str, cat_title: &'static str) {
+    fn launch_category_scan(&mut self, category: Category) {
         let (fwd_tx, fwd_rx) = mpsc::channel();
         let ignore = self.ignore.clone();
         let (layout, host) = (self.layout.clone(), self.host.clone());
@@ -1922,37 +1847,29 @@ impl App {
         let cancel_clone = Arc::clone(&cancel_flag);
 
         thread::spawn(move || {
-            let (prog_tx, prog_rx) = mpsc::channel();
-            let fwd_bridge = fwd_tx.clone();
-            let bridge_handle = thread::spawn(move || {
-                while let Ok(evt) = prog_rx.recv() {
-                    let _ = fwd_bridge.send(ScanMessage::Progress(evt));
-                }
-            });
-
-            let _ = fwd_tx.send(ScanMessage::Progress(ScanProgressEvent::CategoryStarted {
-                title: cat_title.to_string(),
+            let (progress, bridge) = forward_progress(fwd_tx.clone());
+            let _ = progress.send(ScanProgressEvent::CategoryStarted {
+                title: category.title().to_string(),
                 index: 1,
                 total: 1,
-            }));
+            });
 
             let scan = CategoryScanner::scan(
                 &ScanContext {
                     layout: &layout,
                     host: &*host,
                 },
-                cat_id,
-                cat_title,
+                category,
                 &ignore,
-                Some(prog_tx),
+                Some(progress),
                 Some(cancel_clone),
             );
-            let _ = bridge_handle.join();
+            let _ = bridge.join();
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
         self.open(Screen::Scanning(
-            ProgressState::new(format!("Scanning {cat_title}")),
+            ProgressState::new(format!("Scanning {}", category.title())),
             fwd_rx,
             cancel_flag,
         ));
@@ -1966,63 +1883,27 @@ impl App {
         let cancel_clone = Arc::clone(&cancel_flag);
 
         thread::spawn(move || {
-            let categories = [
-                ("dev", "Developer Caches"),
-                ("junk", "System Junk"),
-                ("ai", "AI Tool Caches"),
-                ("trash", "Trash"),
-                ("orphans", "Orphaned App Files"),
-            ];
-            let total = categories.len();
-            let mut scans = Vec::new();
-
-            for (idx, (id, title)) in categories.iter().enumerate() {
-                if cancel_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let _ = fwd_tx.send(ScanMessage::Progress(ScanProgressEvent::CategoryStarted {
-                    title: title.to_string(),
-                    index: idx + 1,
-                    total,
-                }));
-
-                let (prog_tx, prog_rx) = mpsc::channel();
-                let fwd_bridge = fwd_tx.clone();
-                let bridge_handle = thread::spawn(move || {
-                    while let Ok(evt) = prog_rx.recv() {
-                        let _ = fwd_bridge.send(ScanMessage::Progress(evt));
-                    }
-                });
-
-                let mut scan = CategoryScanner::scan(
-                    &ScanContext {
-                        layout: &layout,
-                        host: &*host,
-                    },
-                    id,
-                    title,
-                    &ignore,
-                    Some(prog_tx),
-                    Some(Arc::clone(&cancel_clone)),
-                );
-                if *id == "orphans" {
-                    for group in &mut scan.groups {
-                        for item in &mut group.items {
-                            item.selected = false;
-                        }
-                    }
-                }
-                scans.push(scan);
-                let _ = bridge_handle.join();
-            }
-
+            let (progress, bridge) = forward_progress(fwd_tx.clone());
+            let scans = scan_all_categories(
+                &ScanContext {
+                    layout: &layout,
+                    host: &*host,
+                },
+                &ignore,
+                Some(progress),
+                Some(cancel_clone),
+            );
+            let _ = bridge.join();
             let scan = CategoryScan::combined("All Caches", scans);
             let _ = fwd_tx.send(ScanMessage::Finished(scan));
         });
 
         self.open(Screen::Scanning(
-            ProgressState::new("Scanning Developer Caches, 1 of 4"),
+            ProgressState::new(format!(
+                "Scanning {}, 1 of {}",
+                Category::ALL[0].title(),
+                Category::ALL.len()
+            )),
             fwd_rx,
             cancel_flag,
         ));
@@ -3426,6 +3307,86 @@ mod tests {
 
         assert_eq!(help_row(&app, "Up one level"), Some("⎋ / ←"));
         assert_eq!(help_row(&app, "Quit explore"), Some("q"));
+    }
+
+    mod clean_all {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::host::fake::FakeHost;
+        use std::time::SystemTime;
+
+        fn app_with_an_old_orphan() -> (tempfile::TempDir, App) {
+            let (temp, layout) = sandbox();
+            let orphan = layout.user("Library/Caches/com.gone.app");
+            std::fs::create_dir_all(&orphan).unwrap();
+            std::fs::write(orphan.join("data"), [1_u8; 8192]).unwrap();
+            let then = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
+            for path in [orphan.join("data"), orphan.clone()] {
+                std::fs::File::open(path)
+                    .unwrap()
+                    .set_modified(then)
+                    .unwrap();
+            }
+            let host = FakeHost::default();
+            host.reply("mdfind", "");
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = Arc::new(host);
+            (temp, app)
+        }
+
+        /// Reads the finished scan off the channel, before the Select screen resets its rows.
+        fn finished_scan(app: &App) -> CategoryScan {
+            let Screen::Scanning(_, rx, _) = &app.screen else {
+                panic!("expected the scanning screen");
+            };
+            loop {
+                match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                    ScanMessage::Finished(scan) => return scan,
+                    _ => continue,
+                }
+            }
+        }
+
+        fn orphan_rows(scan: &CategoryScan) -> Vec<bool> {
+            scan.groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .filter(|item| item.role.is_some() && item.path.ends_with("com.gone.app"))
+                .map(|item| item.selected)
+                .collect()
+        }
+
+        #[test]
+        fn the_orphans_row_starts_the_old_orphan_selected() {
+            let (_temp, mut app) = app_with_an_old_orphan();
+
+            app.start_clean_subcategory(CleanSubcategory::Orphans);
+
+            assert_eq!(orphan_rows(&finished_scan(&app)), [true]);
+        }
+
+        #[test]
+        fn the_all_row_leaves_orphan_rows_unselected() {
+            let (_temp, mut app) = app_with_an_old_orphan();
+
+            app.start_clean_subcategory(CleanSubcategory::All);
+
+            assert_eq!(orphan_rows(&finished_scan(&app)), [false]);
+        }
+
+        #[test]
+        fn the_all_row_counts_every_category() {
+            let (_temp, mut app) = app_with_an_old_orphan();
+
+            app.start_clean_subcategory(CleanSubcategory::All);
+
+            let Screen::Scanning(progress, _, cancel) = &app.screen else {
+                panic!("expected the scanning screen");
+            };
+            cancel.store(true, Ordering::Relaxed);
+            assert_eq!(progress.headline, "Scanning Developer Caches, 1 of 5");
+        }
     }
 
     mod slim_apps {
