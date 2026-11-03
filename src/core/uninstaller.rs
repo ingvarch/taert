@@ -604,9 +604,9 @@ fn parse_process_table(table: &str) -> Vec<(u32, u32, String)> {
 }
 
 /// This process and everything that started it, the terminal included.
-fn own_lineage(table: &[(u32, u32, String)]) -> HashSet<u32> {
+fn own_lineage(table: &[(u32, u32, String)], me: u32) -> HashSet<u32> {
     let mut lineage = HashSet::new();
-    let mut current = std::process::id();
+    let mut current = me;
     while lineage.insert(current) {
         match table.iter().find(|(pid, _, _)| *pid == current) {
             Some((_, parent, _)) => current = *parent,
@@ -1134,7 +1134,7 @@ impl Uninstaller<'_> {
         let folders = program_folders(plan);
         // Whatever `ps` printed before it failed still names processes to stop.
         let table = parse_process_table(&list_processes(self.host).stdout);
-        let lineage = own_lineage(&table);
+        let lineage = own_lineage(&table, self.host.pid());
         let inside = table
             .iter()
             .filter(|(_, _, program)| is_inside_any(program, &folders));
@@ -2521,6 +2521,22 @@ mod run_tests {
     }
 
     #[test]
+    fn a_fake_process_with_the_test_pid_is_still_asked_to_quit() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let host = FakeHost::default();
+        let me = std::process::id();
+        host.reply(PS, &running(&foo.path, me));
+        host.reply(PS, "");
+
+        let report = run(&plan_of(&foo, Vec::new()), &host, &layout);
+
+        assert!(host.ran("/usr/bin/osascript -e tell application id \"com.acme.foo\" to quit"));
+        assert!(host.signals.lock().unwrap().is_empty());
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+    }
+
+    #[test]
     fn an_app_that_ignores_quit_is_terminated() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
@@ -2575,7 +2591,8 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let terminal = installed(&layout, "Foo", "com.acme.foo");
         let host = FakeHost::default();
-        let me = std::process::id();
+        host.set_pid(4100);
+        let me = host.pid();
         host.reply(
             PS,
             &format!("{me} 1 {}/Contents/MacOS/foo\n", terminal.path.display()),
@@ -2592,7 +2609,8 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let code = installed(&layout, "Foo", "com.acme.foo");
         let host = FakeHost::default();
-        let me = std::process::id();
+        host.set_pid(4100);
+        let me = host.pid();
         let table = format!(
             "{me} 1 {path}/Contents/MacOS/shell\n4242 1 {path}/Contents/MacOS/helper\n",
             path = code.path.display()
