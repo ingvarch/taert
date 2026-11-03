@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -186,6 +186,9 @@ impl Sortable for ScanItem {
         self.path.display().to_string().to_lowercase()
     }
 }
+
+/// A scan that ends sooner opens its folder with no dialog.
+const MEASURING_DIALOG_DELAY: Duration = Duration::from_millis(150);
 
 pub struct AnalyzeState {
     pub root: PathBuf,
@@ -440,7 +443,7 @@ impl AnalyzeState {
                     || name.ends_with(".framework")
                     || name.ends_with(".bundle"));
 
-            let size = if is_dir && !is_package {
+            let size = if is_dir {
                 let cached_size = cache.read().unwrap().get_size(p);
                 if let Some(s) = cached_size {
                     total_bytes_accum += s;
@@ -1004,7 +1007,9 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     }
 
     // Measuring Modal
-    if let Some(ref prog) = state.current_progress {
+    if let Some(ref prog) = state.current_progress
+        && state.started_at.elapsed() > MEASURING_DIALOG_DELAY
+    {
         render_measuring_modal(frame, prog, state.spinner_idx, theme);
     }
 
@@ -1409,7 +1414,7 @@ mod tests {
             }),
             spinner_idx: 0,
             status_notice: None,
-            started_at: Instant::now(),
+            started_at: Instant::now() - (MEASURING_DIALOG_DELAY + Duration::from_millis(50)),
             overlay: AnalyzeOverlay::None,
             cache: Arc::new(RwLock::new(StorageCache::new())),
             sort_order: SortOrder::default(),
@@ -1781,5 +1786,83 @@ mod tests {
         assert!(state.status_notice.as_ref().unwrap().contains("name"));
         state.set_sort(SortOrder::Size);
         assert_eq!(state.sort_order, SortOrder::Size);
+    }
+
+    fn folder_with_bundle() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("X.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        fs::write(app.join("Contents/bin"), vec![1_u8; 65536]).unwrap();
+        (temp, app)
+    }
+
+    fn scan_with(cache: &Arc<RwLock<StorageCache>>, dir: &Path) -> FolderSnapshot {
+        AnalyzeState::scan_folder(
+            dir,
+            &IgnoreStore::default(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            cache.clone(),
+        )
+    }
+
+    #[test]
+    fn a_bundle_size_in_the_cache_is_used_by_the_scan() {
+        let (temp, app) = folder_with_bundle();
+        let mtime = fs::metadata(&app).unwrap().modified().ok();
+        let cache = Arc::new(RwLock::new(StorageCache::new()));
+        cache
+            .write()
+            .unwrap()
+            .put_size(app.clone(), 12345, 1, mtime);
+
+        let snapshot = scan_with(&cache, temp.path());
+
+        let item = snapshot.children.iter().find(|c| c.path == app).unwrap();
+        assert!(item.is_package);
+        assert_eq!(item.size_bytes, 12345);
+    }
+
+    #[test]
+    fn a_scan_stores_the_size_of_each_bundle() {
+        let (temp, app) = folder_with_bundle();
+        let cache = Arc::new(RwLock::new(StorageCache::new()));
+
+        let snapshot = scan_with(&cache, temp.path());
+
+        let item = snapshot.children.iter().find(|c| c.path == app).unwrap();
+        assert!(item.size_bytes >= 65536);
+        assert_eq!(cache.read().unwrap().get_size(&app), Some(item.size_bytes));
+    }
+
+    fn measuring_state() -> (tempfile::TempDir, AnalyzeState) {
+        let (temp, mut state) = explore_fixture();
+        state.cache.write().unwrap().clear();
+        state.start_measuring(state.root.join("sub"));
+        (temp, state)
+    }
+
+    #[test]
+    fn the_measuring_dialog_waits_before_it_shows() {
+        let (_temp, mut state) = measuring_state();
+        assert!(state.measuring_rx.is_some());
+        assert!(!screen(&state, 100, 30).contains("Measuring"));
+
+        state.started_at = Instant::now() - (MEASURING_DIALOG_DELAY + Duration::from_millis(50));
+        assert!(screen(&state, 100, 30).contains("Measuring"));
+    }
+
+    #[test]
+    fn a_quick_scan_opens_the_folder_with_no_dialog_drawn() {
+        let (_temp, mut state) = measuring_state();
+        let mut drawn = Vec::new();
+        while state.measuring_rx.is_some() {
+            drawn.push(screen(&state, 100, 30));
+            state.tick();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(state.levels.len(), 2);
+        assert!(drawn.iter().all(|s| !s.contains("Measuring")));
+        assert!(!screen(&state, 100, 30).contains("Measuring"));
     }
 }

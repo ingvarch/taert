@@ -248,7 +248,7 @@ Nominal file lengths (`metadata.len()`) do not reflect actual disk occupancy on 
 
 Limits:
 
-- Deduplication applies to the total of the measured folder; a folder that holds only the second copy of a file is measured again when opened and shows its own full size, so the sizes of sibling folders can add up to more than the parent.
+- A file that has several copies counts once in the total of the measured folder. Each folder below it counts the file once too, if it holds at least one copy. A later copy adds its size only to the folders above it that hold no earlier copy, up to the first folder that already counts the file. So a folder that holds only the second copy shows its full size, and the sizes of sibling folders can add up to more than the parent. One walk gives every folder its own exact size, and the cache drops nothing because of copies.
 - A clone whose twin sits outside the measured folder still counts in full, though removing it frees nothing.
 - The freed total of a cleanup adds up row sizes, so two rows that share blocks count twice.
 
@@ -259,9 +259,9 @@ Explore Storage uses a two-tier in-memory cache ([`StorageCache`](file:///Users/
 1. **Subtree Directory Aggregation**:
    When a directory is scanned, `DirSizer` collects all visited subdirectories and direct file sizes. Upon walk completion, directories are sorted from deepest to shallowest and aggregated bottom-up:
    $$\text{size}(D) = \text{direct\_bytes}(D) + \sum_{C \in \text{children}(D)} \text{size}(C)$$
-   This pre-computes exact recursive sizes for every subdirectory in the tree in a single pass ($O(D \log D)$ in $< 2\text{ ms}$).
+   This pre-computes exact recursive sizes for every subdirectory in the tree in a single pass ($O(D \log D)$ in $< 2\text{ ms}$). A later copy of a file adds its size to `direct_bytes` of its folder and subtracts it from the first folder above that already counts the file, so the sum stays right at every level.
 2. **Instant Drill-Down**:
-   When navigating into a subfolder, its children's sizes are already present in the cache. Directory listings load in $< 1\text{ ms}$ without additional disk traversal.
+   When navigating into a subfolder, its children's sizes are already present in the cache, packages (`.app`, `.framework`, `.bundle`) included. Directory listings load in $< 1\text{ ms}$ without additional disk traversal. The measuring dialog shows only after 150 ms, so a folder that loads faster opens with no dialog.
 3. **Snapshot Caching**:
    Constructed `FolderSnapshot` structures are cached in memory. Re-visiting a previously viewed folder restores the view instantly in the same frame without spawning a background thread.
 4. **Cache Invalidation**:

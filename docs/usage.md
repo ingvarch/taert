@@ -26,7 +26,7 @@ taert
 - **Large Files**: Flat list of the largest and oldest files and packages across your home folder (or any given path) to answer "what big things did I forget about?". Shows item name, enclosing top-level folder, size, and last used date (queried via Spotlight, fallback to modified date). `⇧S`, `⇧N`, and `⇧D` sort by size, name, or last used date. Filter interactively with `/`, reveal in Finder with `O`, and select with `Space`. Selected items move to the Trash upon confirmation.
 - **System Status**: A live overview refreshed every second: CPU and GPU load, per-core activity, temperatures, memory breakdown and pressure, storage volumes and disk speed, battery charge and health, top processes, and network speed. Each panel sits in its own frame. On wide terminals (≥100 columns) the panels sit in two columns, and from 170 columns in three; on narrower ones they stack and scroll. CPU and memory face each other, as do network and storage, so their graphs line up, and taller windows give each graph more rows. The process lists keep a fixed size, and tall windows add a list of the top processes by memory. Reading all of it needs no administrator rights. `taert status` prints the same data once.
 
-Every screen shows its sections in colored frames. While taert scans or measures, a framed card in the middle of the window shows the progress.
+Every screen shows its sections in colored frames. While taert scans or measures, a framed card in the middle of the window shows the progress. In Explore Storage the card appears only when measuring takes longer than 150 ms.
 
 ### Keyboard Shortcuts
 

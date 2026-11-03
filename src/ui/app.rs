@@ -2413,6 +2413,25 @@ mod tests {
     }
 
     #[test]
+    fn esc_cancels_the_measuring_while_the_dialog_is_hidden() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = analyze_app(dir.path());
+        analyze(&app).cache.write().unwrap().clear();
+
+        app.handle_key(KeyCode::Enter);
+        assert!(analyze(&app).measuring_rx.is_some());
+        assert!(!screen_text(&app).contains("Measuring"));
+
+        app.handle_key(KeyCode::Esc);
+
+        let state = analyze(&app);
+        assert!(state.measuring_rx.is_none());
+        assert!(state.cancel_flag.load(Ordering::Relaxed));
+        assert_eq!(state.levels.len(), 1);
+    }
+
+    #[test]
     fn q_leaves_explore_from_any_folder() {
         let dir = tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
