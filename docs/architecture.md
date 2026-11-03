@@ -126,6 +126,7 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 Items slated for removal are classified via `cleaner::item_removal_mode`:
 - **Personal files, user apps, and orphaned files**: user app bundles, orphaned files (`taert clean orphans`), and leftovers in home folders (`~/Library`, `~/.config`, etc.) move to the Trash by default via `NSFileManager` (`Host::trash`). In Explore Storage (`taert analyze`), users can choose between "Move to Trash" (default) and "Delete Permanently".
 - **Permanent removal**: caches and logs (`taert clean`), build artifacts (`taert purge`), Docker objects (`taert docker`), emptying the Trash, root files (`/Library/...`), and items with `contents_only = true` are permanently deleted.
+- **Uninstall plans**: rows of an uninstall plan go by `uninstaller::route`, worked out once per plan and shared by the review, the confirmation, and the run. A cask bundle goes to Homebrew. Receipts, and rows or bundles the user cannot remove, go to root and are removed permanently. Everything else goes to the Trash unless `--permanent` is set.
 - **`--permanent` override**: passing `--permanent` forces permanent deletion across all subcommands, bypassing the Trash.
 - **Reporting**: outcomes and progress report both `trashed_bytes` ("Moved X to the Trash. Empty it to get the space back.") and `freed_bytes` ("Removed Y permanently.").
 

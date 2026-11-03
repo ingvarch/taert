@@ -8,7 +8,7 @@ use crate::core::cleaner::{
 };
 use crate::core::history::ItemOutcome;
 use crate::core::host::Host;
-use crate::core::scanner::CategoryScan;
+use crate::core::scanner::{CategoryScan, ScanItem};
 use crate::core::stores::IgnoreStore;
 
 /// Where a command reads the answers to its prompts and writes what it prints.
@@ -22,10 +22,14 @@ pub struct PlainRunner;
 
 impl PlainRunner {
     pub fn scan_text(scan: &CategoryScan) -> String {
-        Self::scan_text_with_options(scan, false)
+        Self::scan_text_with_options(scan, |item| item_removal_mode(item, &scan.id, false))
     }
 
-    pub fn scan_text_with_options(scan: &CategoryScan, permanent: bool) -> String {
+    /// Lists the rows, each with the place `mode` says it goes to.
+    pub fn scan_text_with_options(
+        scan: &CategoryScan,
+        mode: impl Fn(&ScanItem) -> RemovalMode,
+    ) -> String {
         let mut text = format!("\n=== {} ===\n", scan.title);
         if scan.groups.is_empty() {
             text.push_str("No items found.\n");
@@ -38,28 +42,20 @@ impl PlainRunner {
             text.push_str(&format!("\n[{}]\n", group.tool));
             for item in &group.items {
                 let status_mark = if item.selected { "[x]" } else { "[ ]" };
-                let dest = match item_removal_mode(item, &scan.id, permanent) {
-                    RemovalMode::Trash => " (Trash)",
-                    RemovalMode::Permanent => " (Permanent)",
-                };
                 text.push_str(&format!(
-                    "  {:3}. {} {:>9}  {}{}\n",
+                    "  {:3}. {} {:>9}  {} {}\n",
                     index,
                     status_mark,
                     format_bytes(item.size_bytes),
                     item.path.display(),
-                    dest
+                    mode(item).label()
                 ));
                 for folder in &item.also {
-                    let folder_dest = match item_removal_mode(folder, &scan.id, permanent) {
-                        RemovalMode::Trash => " (Trash)",
-                        RemovalMode::Permanent => " (Permanent)",
-                    };
                     text.push_str(&format!(
-                        "{:22}{}{}\n",
+                        "{:22}{} {}\n",
                         "",
                         folder.path.display(),
-                        folder_dest
+                        mode(folder).label()
                     ));
                 }
                 index += 1;
@@ -150,37 +146,60 @@ impl PlainRunner {
         }
     }
 
-    /// Confirm permanent deletion in plain text
-    pub fn prompt_confirm(scan: &CategoryScan, console: &mut Console) -> io::Result<bool> {
-        let selected_bytes = scan.total_selected_bytes();
-        let selected_count = scan.selected_items().len();
+    /// Lists the selected rows with where each goes, and asks for a "yes".
+    pub fn prompt_confirm(
+        scan: &CategoryScan,
+        console: &mut Console,
+        mode: impl Fn(&ScanItem) -> RemovalMode,
+    ) -> io::Result<bool> {
+        let selected = scan.selected_items();
         let out = &mut *console.out;
 
-        if selected_count == 0 {
+        if selected.is_empty() {
             writeln!(out, "\nNothing selected for deletion.")?;
             return Ok(false);
         }
 
-        writeln!(out, "\nSelected items for permanent deletion:")?;
-        for item in scan.selected_items() {
+        writeln!(out, "\nSelected items:")?;
+        for item in &selected {
             writeln!(
                 out,
-                "  - {:>9}  {}",
+                "  - {:>9}  {} {}",
                 format_bytes(item.size_bytes),
-                item.path.display()
+                item.path.display(),
+                mode(item).label()
             )?;
             for folder in &item.also {
-                writeln!(out, "{:15}{}", "", folder.path.display())?;
+                writeln!(
+                    out,
+                    "{:15}{} {}",
+                    "",
+                    folder.path.display(),
+                    mode(folder).label()
+                )?;
             }
         }
 
-        writeln!(
-            out,
-            "\nWARNING: Permanent deletion of {} item(s) ({}).",
-            selected_count,
-            format_bytes(selected_bytes)
-        )?;
-        write!(out, "Type 'yes' to confirm permanent deletion: ")?;
+        let count_and_size = |wanted: RemovalMode| {
+            let rows = selected.iter().filter(|item| mode(item) == wanted);
+            let bytes: u64 = rows.clone().map(|item| item.size_bytes).sum();
+            (rows.count(), format_bytes(bytes))
+        };
+        let (trashed, trashed_size) = count_and_size(RemovalMode::Trash);
+        if trashed > 0 {
+            writeln!(
+                out,
+                "\nMove {trashed} item(s) ({trashed_size}) to the Trash."
+            )?;
+        }
+        let (gone, gone_size) = count_and_size(RemovalMode::Permanent);
+        if gone > 0 {
+            writeln!(
+                out,
+                "\nWARNING: Permanent deletion of {gone} item(s) ({gone_size})."
+            )?;
+        }
+        write!(out, "Type 'yes' to confirm: ")?;
         out.flush()?;
 
         let mut input = String::new();
@@ -406,6 +425,7 @@ impl PlainRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cleaner::item_removal_mode;
     use crate::core::scanner::{ScanItem, ToolGroup};
     use std::path::PathBuf;
 
@@ -449,6 +469,70 @@ mod tests {
         let text = PlainRunner::scan_text(&scan_with_note());
         assert!(
             text.contains("Note: Safari needs Full Disk Access."),
+            "{text}"
+        );
+    }
+
+    fn confirmation(scan: &CategoryScan, mode: impl Fn(&ScanItem) -> RemovalMode) -> String {
+        let mut input = io::Cursor::new(b"no\n".to_vec());
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut console = Console {
+            input: &mut input,
+            out: &mut out,
+            err: &mut err,
+        };
+        PlainRunner::prompt_confirm(scan, &mut console, mode).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn scan_of(id: &str, rows: Vec<ScanItem>) -> CategoryScan {
+        CategoryScan {
+            id: id.to_string(),
+            title: "Test".to_string(),
+            groups: vec![ToolGroup {
+                tool: "Test".to_string(),
+                items: rows,
+            }],
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_plain_confirmation_names_the_trash() {
+        let row = ScanItem::new(PathBuf::from("/big.bin"), 5000, true, false);
+        let scan = scan_of(crate::core::large_files::SCAN_ID, vec![row]);
+
+        let text = confirmation(&scan, |item| item_removal_mode(item, &scan.id, false));
+
+        assert!(text.contains("(Trash)"), "{text}");
+        assert!(text.contains("to the Trash"), "{text}");
+        assert!(!text.contains("Permanent deletion"), "{text}");
+        assert!(text.contains("Type 'yes' to confirm: "), "{text}");
+    }
+
+    #[test]
+    fn the_plain_confirmation_names_both_places() {
+        let kept = ScanItem::new(PathBuf::from("/trashed"), 2000, true, false);
+        let gone = ScanItem::new(PathBuf::from("/gone"), 3000, true, false);
+        let scan = scan_of("clean", vec![kept, gone]);
+
+        let text = confirmation(&scan, |item| {
+            if item.path.ends_with("trashed") {
+                RemovalMode::Trash
+            } else {
+                RemovalMode::Permanent
+            }
+        });
+
+        let (trashed, gone) = (format_bytes(2000), format_bytes(3000));
+        assert!(
+            text.contains(&format!("Move 1 item(s) ({trashed}) to the Trash.")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "WARNING: Permanent deletion of 1 item(s) ({gone})."
+            )),
             "{text}"
         );
     }

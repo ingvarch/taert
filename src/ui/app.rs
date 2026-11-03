@@ -111,7 +111,8 @@ fn review_state(plan: &UninstallPlan) -> SelectState {
     if plan.apps.is_empty() {
         return SelectState::unavailable("Uninstall", plan.notes.join(" "));
     }
-    let mut state = SelectState::with_preserved_selection(plan.scan.clone());
+    let mut state = SelectState::with_preserved_selection(plan.scan.clone())
+        .with_routes(uninstaller::routes(plan));
     state.notes = plan.notes.clone();
     state
 }
@@ -3244,6 +3245,37 @@ mod tests {
             wait_for_removal(&mut app);
 
             assert!(!bundle.exists());
+        }
+
+        #[test]
+        fn the_review_of_a_cask_app_says_permanent() {
+            let (_temp, app) = app_in_sandbox();
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let mut plan = plan_for(&foo, &app);
+            plan.apps[0].cask = Some("foo-app".to_string());
+
+            let review = screen_text(&offline(App::with_plan(
+                plan,
+                IgnoreStore::default(),
+                Config::default(),
+            )));
+
+            let line_with = |needle: &str| {
+                review
+                    .lines()
+                    .find(|line| line.contains(needle))
+                    .unwrap_or_else(|| panic!("no line with {needle}\n{review}"))
+            };
+            assert!(
+                line_with("/Applications/").contains("(Permanent)"),
+                "{review}"
+            );
+            assert!(
+                line_with("/Library/Caches/").contains("(Trash)"),
+                "{review}"
+            );
+            assert_eq!(review.matches("(Permanent)").count(), 1, "{review}");
+            assert_eq!(review.matches("(Trash)").count(), 1, "{review}");
         }
 
         #[test]

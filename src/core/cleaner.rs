@@ -11,6 +11,8 @@ use super::docker::{DockerClient, DockerRemover};
 use super::history::{ItemOutcome, OutcomeKind};
 use super::homebrew;
 use super::host::Host;
+use super::large_files;
+use super::leftovers::UninstallRole;
 use super::safety::{FileIdentity, Safety, SafetyError};
 use super::scanner::ScanItem;
 use super::stores::IgnoreStore;
@@ -22,39 +24,26 @@ pub enum RemovalMode {
     Trash,
 }
 
-/// Determines the default removal mode for a whole scan.
-pub fn scan_removal_mode(scan_id: &str, permanent: bool) -> RemovalMode {
-    if permanent {
-        return RemovalMode::Permanent;
-    }
-    match scan_id {
-        "analyze" | "large" => RemovalMode::Trash,
-        _ => RemovalMode::Permanent,
+impl RemovalMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Trash => "(Trash)",
+            Self::Permanent => "(Permanent)",
+        }
     }
 }
 
 /// Determines whether an item goes to the Trash or is permanently removed.
+/// Rows of an uninstall plan get theirs from `uninstaller::Route::mode`.
 pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> RemovalMode {
     if permanent || item.contents_only || item.docker.is_some() || item.brew.is_some() {
-        return RemovalMode::Permanent;
-    }
-    if scan_id != super::uninstaller::PLAN_ID
-        && matches!(
-            item.role,
-            Some(super::leftovers::UninstallRole::Leftover { .. })
-        )
+        RemovalMode::Permanent
+    } else if matches!(item.role, Some(UninstallRole::Leftover { .. }))
+        || scan_id == large_files::SCAN_ID
     {
-        return RemovalMode::Trash;
-    }
-    match scan_id {
-        super::uninstaller::PLAN_ID => {
-            if super::uninstaller::needs_root(item) {
-                RemovalMode::Permanent
-            } else {
-                RemovalMode::Trash
-            }
-        }
-        _ => scan_removal_mode(scan_id, permanent),
+        RemovalMode::Trash
+    } else {
+        RemovalMode::Permanent
     }
 }
 
@@ -501,6 +490,7 @@ mod tests {
     use crate::core::homebrew::BrewTask;
     use crate::core::host::MacHost;
     use crate::core::host::fake::FakeHost;
+    use crate::core::layout::Layout;
     use crate::core::sizer::DirSizer;
     use std::cell::{Cell, RefCell};
     use std::os::unix::fs::PermissionsExt;
@@ -744,7 +734,7 @@ mod tests {
         let item = brew_item(Path::new("lib 1.0"), Path::new("/fake/Cellar/lib"));
 
         assert_eq!(
-            item_removal_mode(&item, "large", false),
+            item_removal_mode(&item, large_files::SCAN_ID, false),
             RemovalMode::Permanent
         );
     }
@@ -1076,36 +1066,48 @@ mod tests {
             RemovalMode::Permanent
         );
         assert_eq!(
-            item_removal_mode(&item, "analyze", false),
+            item_removal_mode(&item, large_files::SCAN_ID, false),
             RemovalMode::Trash
         );
         assert_eq!(
-            item_removal_mode(&item, "analyze", true),
-            RemovalMode::Permanent
-        );
-        assert_eq!(item_removal_mode(&item, "large", false), RemovalMode::Trash);
-        assert_eq!(
-            item_removal_mode(&item, "large", true),
+            item_removal_mode(&item, large_files::SCAN_ID, true),
             RemovalMode::Permanent
         );
 
         let mut contents_only = item.clone();
         contents_only.contents_only = true;
         assert_eq!(
-            item_removal_mode(&contents_only, "analyze", false),
+            item_removal_mode(&contents_only, large_files::SCAN_ID, false),
             RemovalMode::Permanent
+        );
+    }
+
+    #[test]
+    fn large_file_rows_go_to_the_trash() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        fs::write(home.join("big.bin"), vec![b'a'; 20_000]).unwrap();
+        let layout = Layout {
+            home: home.clone(),
+            root: PathBuf::from("/"),
+            user_cache: None,
+        };
+
+        let scan = large_files::scan(
+            &home,
+            &large_files::LargeScanOptions::new(10_000, None, 10),
+            &layout,
+            &FakeHost::default(),
+            &IgnoreStore::default(),
+            None,
+            None,
         );
 
-        let root_item = ScanItem::new(
-            PathBuf::from("/Library/PrivilegedHelperTools/foo"),
-            100,
-            true,
-            false,
-        );
-        assert_eq!(
-            item_removal_mode(&root_item, "uninstall", false),
-            RemovalMode::Permanent
-        );
+        let rows: Vec<_> = scan.groups.iter().flat_map(|g| &g.items).collect();
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert_eq!(item_removal_mode(row, &scan.id, false), RemovalMode::Trash);
+        }
     }
 
     #[test]
@@ -1130,20 +1132,6 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].path, file_path);
         assert_eq!(outcomes[0].outcome, OutcomeKind::Removed);
-    }
-
-    #[test]
-    fn scan_removal_mode_agrees_with_item_removal_mode() {
-        let item = ScanItem::new(PathBuf::from("/test/file"), 100, false, false);
-        for id in ["clean", "purge", "docker", "large", "analyze", "dev"] {
-            for permanent in [false, true] {
-                assert_eq!(
-                    scan_removal_mode(id, permanent),
-                    item_removal_mode(&item, id, permanent),
-                    "mismatch for id={id}, permanent={permanent}"
-                );
-            }
-        }
     }
 
     #[test]
