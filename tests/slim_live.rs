@@ -56,6 +56,10 @@ impl Host for TempTrashHost {
     fn uid(&self) -> u32 {
         MacHost.uid()
     }
+
+    fn pid(&self) -> u32 {
+        MacHost.pid()
+    }
 }
 
 /// Runs a copy of the executable outside the bundle.

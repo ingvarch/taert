@@ -33,6 +33,7 @@ pub trait Host: Send + Sync {
     /// Moves a file or folder to the system Trash.
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
     fn uid(&self) -> u32;
+    fn pid(&self) -> u32;
 }
 
 pub struct MacHost;
@@ -152,6 +153,10 @@ impl Host for MacHost {
     fn uid(&self) -> u32 {
         unsafe { libc::getuid() }
     }
+
+    fn pid(&self) -> u32 {
+        std::process::id()
+    }
 }
 
 /// Quotes a string for /bin/sh.
@@ -183,6 +188,7 @@ pub mod fake {
         pub trash_error: Mutex<Option<String>>,
         pub simulate_trash: Mutex<bool>,
         pub uid: Mutex<Option<u32>>,
+        pub pid: Mutex<Option<u32>>,
     }
 
     impl FakeHost {
@@ -277,6 +283,10 @@ pub mod fake {
         pub fn set_uid(&self, uid: u32) {
             *self.uid.lock().unwrap() = Some(uid);
         }
+
+        pub fn set_pid(&self, pid: u32) {
+            *self.pid.lock().unwrap() = Some(pid);
+        }
     }
 
     impl Host for FakeHost {
@@ -347,6 +357,10 @@ pub mod fake {
         fn uid(&self) -> u32 {
             self.uid.lock().unwrap().unwrap_or(501)
         }
+
+        fn pid(&self) -> u32 {
+            self.pid.lock().unwrap().unwrap_or(u32::MAX)
+        }
     }
 }
 
@@ -403,6 +417,14 @@ mod tests {
         assert_eq!(host.uid(), 501);
         host.set_uid(777);
         assert_eq!(host.uid(), 777);
+    }
+
+    #[test]
+    fn fake_host_has_no_real_pid() {
+        let host = fake::FakeHost::default();
+        assert_eq!(host.pid(), u32::MAX);
+        host.set_pid(4100);
+        assert_eq!(host.pid(), 4100);
     }
 
     #[test]
