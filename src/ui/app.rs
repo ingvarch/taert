@@ -1508,6 +1508,8 @@ impl App {
                     let mut apps_slimmed = 0usize;
                     let total_candidates = selected_items.len();
                     let mut failures = Vec::new();
+                    let mut notes = Vec::new();
+                    let mut any_trashed = false;
                     let history = HistoryLog::new(layout.history_path());
                     let session = history.start_run("slim", "interactive", Some(total_candidates));
 
@@ -1539,10 +1541,14 @@ impl App {
                             &*host,
                             false,
                         ) {
-                            Ok(saved) => {
-                                total_saved += saved;
+                            Ok(done) => {
+                                total_saved += done.saved;
                                 total_trashed += app_size;
                                 apps_slimmed += 1;
+                                any_trashed |= done.old_app.is_none();
+                                if done.old_app.is_some() || done.holding_left.is_some() {
+                                    notes.push(done.summary(&installed_app.name));
+                                }
                             }
                             Err((step, err)) => {
                                 failures.push(crate::core::cleaner::RemovalFailure {
@@ -1553,16 +1559,16 @@ impl App {
                         }
                     }
                     session.finish();
+                    if any_trashed {
+                        notes.push(slim::TRASH_NOTE.to_string());
+                    }
 
                     let report = RemovalReport {
                         freed_bytes: total_saved,
                         trashed_bytes: total_trashed,
                         removed_count: apps_slimmed,
                         failures,
-                        notes: vec![
-                            "Clones share blocks, so the space comes back when the Trash is emptied."
-                                .to_string(),
-                        ],
+                        notes,
                     };
                     let _ = tx.send(RemovalMessage::Finished(report));
                 });
@@ -3420,6 +3426,118 @@ mod tests {
 
         assert_eq!(help_row(&app, "Up one level"), Some("⎋ / ←"));
         assert_eq!(help_row(&app, "Quit explore"), Some("q"));
+    }
+
+    mod slim_apps {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::bytes::format_bytes;
+        use crate::core::host::fake::FakeHost;
+        use crate::core::slim::testing::{fake_ditto, holding_of, write_test_app};
+
+        const TRASH_NOTE: &str =
+            "Clones share blocks, so the space comes back when the Trash is emptied.";
+
+        /// Slims the app at `bundle` from the slim list and returns the outcome report.
+        fn slim_in_list(layout: Layout, bundle: &Path, host: FakeHost) -> RemovalReport {
+            let scan = CategoryScan {
+                id: slim::SCAN_ID.to_string(),
+                title: "Slim Universal Apps".to_string(),
+                notes: Vec::new(),
+                groups: vec![ToolGroup {
+                    tool: "Applications".to_string(),
+                    items: vec![ScanItem::new(bundle.to_path_buf(), 11, false, false)],
+                }],
+            };
+            let mut app = select_app(scan);
+            app.layout = layout;
+            app.host = Arc::new(host);
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let ModalOverlay::Outcome(report) = &select(&app).overlay else {
+                panic!("expected the outcome dialog");
+            };
+            assert_eq!(report.removed_count, 1, "{:?}", report.failures);
+            report.clone()
+        }
+
+        fn ready_host(bundle: &Path) -> FakeHost {
+            let host = FakeHost::idle();
+            host.reply("ditto", "");
+            fake_ditto(&host, bundle);
+            host.reply("codesign", "");
+            host.reply("spctl", "");
+            host
+        }
+
+        #[test]
+        fn a_refused_trash_names_the_old_app_in_the_report() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            let host = ready_host(&bundle);
+            host.fail_trash("denied");
+
+            let report = slim_in_list(layout, &bundle, host);
+
+            let expected = format!(
+                "Slimmed X, saved {}. The old app is still at {} (could not move it to the Trash: denied)",
+                format_bytes(report.freed_bytes),
+                holding_of(&bundle).join("X.app").display()
+            );
+            assert!(report.notes.contains(&expected), "{:?}", report.notes);
+            assert!(
+                !report.notes.contains(&TRASH_NOTE.to_string()),
+                "{:?}",
+                report.notes
+            );
+        }
+
+        #[test]
+        fn a_folder_left_after_the_trash_is_named_in_the_report() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            let host = ready_host(&bundle);
+
+            let report = slim_in_list(layout, &bundle, host);
+
+            let holding = holding_of(&bundle);
+            let error = std::fs::remove_dir(&holding).unwrap_err().to_string();
+            let done = slim::SlimDone {
+                saved: report.freed_bytes,
+                old_app: None,
+                holding_left: Some((holding, error)),
+            };
+            assert!(
+                report.notes.contains(&done.summary("X")),
+                "{:?}",
+                report.notes
+            );
+            assert!(
+                report.notes.contains(&TRASH_NOTE.to_string()),
+                "{:?}",
+                report.notes
+            );
+        }
+
+        #[test]
+        fn an_old_app_in_the_trash_brings_the_trash_note() {
+            let (_temp, layout) = sandbox();
+            let bundle = layout.user("Applications/X.app");
+            write_test_app(&bundle, "com.vendor.x");
+            let host = ready_host(&bundle);
+            host.simulate_trash();
+
+            let report = slim_in_list(layout, &bundle, host);
+
+            assert_eq!(report.notes, vec![TRASH_NOTE.to_string()]);
+        }
     }
 
     mod compress {

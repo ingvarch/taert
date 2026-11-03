@@ -1403,12 +1403,11 @@ fn handle_slim(
         return ExitCode::FAILURE;
     }
 
-    let skip_developer_id = std::env::var("TAERT_SLIM_ALLOW_ADHOC").is_ok();
     if args.names.is_empty() {
-        return pick_apps_to_slim(cli, use_plain, ignore, context, skip_developer_id, console);
+        return pick_apps_to_slim(cli, use_plain, ignore, context, console);
     }
 
-    let installed = apps::find_apps(layout);
+    let installed = crate::core::slim::candidate_apps(layout);
     let matching = if cli.force {
         Matching::Exact
     } else {
@@ -1423,7 +1422,13 @@ fn handle_slim(
     };
 
     let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
-    let running = crate::core::slim::running_processes(host);
+    let running = match crate::core::slim::running_processes(host) {
+        Ok(running) => running,
+        Err(error) => {
+            let _ = writeln!(console.err, "Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let history_session = (!cli.dry_run).then(|| {
         let history = HistoryLog::new(layout.history_path());
@@ -1439,8 +1444,7 @@ fn handle_slim(
             ignore,
             &rosetta,
             Some(&running),
-            skip_developer_id,
-            true,
+            false,
         ) {
             Ok(b) => b,
             Err(reason) => {
@@ -1507,15 +1511,27 @@ fn handle_slim(
                     app.name,
                     format_bytes(intel_size)
                 );
-                let _ = writeln!(
-                    console.out,
-                    "Clones share blocks, so the space comes back when the Trash is emptied."
-                );
+                let _ = writeln!(console.out, "{}", crate::core::slim::TRASH_NOTE);
             }
             continue;
         }
 
-        if !cli.force && use_plain {
+        if !cli.force {
+            if cli.json {
+                let err = serde_json::json!({
+                    "error": "confirmation needed, pass --force",
+                    "app": app.name,
+                });
+                let _ = writeln!(
+                    console.out,
+                    "{}",
+                    serde_json::to_string_pretty(&err).unwrap_or_default()
+                );
+                if let Some(session) = history_session {
+                    session.finish();
+                }
+                return ExitCode::FAILURE;
+            }
             let _ = write!(console.out, "Slim {}? [y/N]: ", app.name);
             let _ = console.out.flush();
             let mut input = String::new();
@@ -1533,33 +1549,29 @@ fn handle_slim(
         let Some(session) = history_session.as_ref() else {
             unreachable!("a dry run continues before the slim step");
         };
-        let slim_res =
-            crate::core::slim::slim_app_logged(session, app, &binaries, host, skip_developer_id);
+        let slim_res = crate::core::slim::slim_app_logged(session, app, &binaries, host, false);
         match slim_res {
-            Ok(saved) => {
+            Ok(done) => {
                 if cli.json {
-                    let report = serde_json::json!({
+                    let mut report = serde_json::json!({
                         "name": app.name,
                         "path": app.path,
-                        "saved_bytes": saved,
+                        "saved_bytes": done.saved,
                         "success": true,
                     });
+                    if let Some((old_path, _)) = &done.old_app {
+                        report["old_app_path"] = serde_json::json!(old_path);
+                    }
                     let _ = writeln!(
                         console.out,
                         "{}",
                         serde_json::to_string_pretty(&report).unwrap_or_default()
                     );
                 } else {
-                    let _ = writeln!(
-                        console.out,
-                        "Slimmed {}, saved {} of Intel code. Original was moved to Trash.",
-                        app.name,
-                        format_bytes(saved)
-                    );
-                    let _ = writeln!(
-                        console.out,
-                        "Clones share blocks, so the space comes back when the Trash is emptied."
-                    );
+                    let _ = writeln!(console.out, "{}", done.summary(&app.name));
+                    if done.old_app.is_none() {
+                        let _ = writeln!(console.out, "{}", crate::core::slim::TRASH_NOTE);
+                    }
                 }
             }
             Err((step, error)) => {
@@ -1603,7 +1615,6 @@ fn pick_apps_to_slim(
     use_plain: bool,
     ignore: &IgnoreStore,
     context: &ScanContext,
-    skip_developer_id: bool,
     console: &mut Console,
 ) -> ExitCode {
     let ScanContext { layout, host } = *context;
@@ -1614,26 +1625,26 @@ fn pick_apps_to_slim(
         return run_tui(&mut app, cli, console);
     }
 
-    let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
-
     if cli.json {
-        let installed = apps::find_apps(layout);
+        let installed = crate::core::slim::candidate_apps(layout);
         let rosetta = crate::core::slim::rosetta_bundle_ids(layout);
         let running = crate::core::slim::running_processes(host);
 
         let infos: Vec<crate::core::slim::SlimAppInfo> = installed
             .into_iter()
             .map(|app| {
-                match crate::core::slim::check_eligibility(
-                    &app,
-                    host,
-                    layout,
-                    ignore,
-                    &rosetta,
-                    Some(&running),
-                    skip_developer_id,
-                    false,
-                ) {
+                let eligible = running.as_ref().map_err(Clone::clone).and_then(|running| {
+                    crate::core::slim::check_eligibility(
+                        &app,
+                        host,
+                        layout,
+                        ignore,
+                        &rosetta,
+                        Some(running),
+                        false,
+                    )
+                });
+                match eligible {
                     Ok(binaries) => {
                         let intel_bytes: u64 = binaries
                             .iter()
@@ -1686,6 +1697,8 @@ fn pick_apps_to_slim(
         };
     }
 
+    let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
+
     let _ = write!(
         console.out,
         "{}",
@@ -1723,18 +1736,14 @@ fn pick_apps_to_slim(
     let session = history.start_run("slim", mode, Some(chosen.len()));
 
     let mut total_saved = 0u64;
+    let mut any_trashed = false;
     for app in &chosen {
         let (binaries, _) = crate::core::slim::find_universal_binaries(&app.path);
-        match crate::core::slim::slim_app_logged(&session, app, &binaries, host, skip_developer_id)
-        {
-            Ok(saved) => {
-                total_saved += saved;
-                let _ = writeln!(
-                    console.out,
-                    "Slimmed {}, saved {} of Intel code.",
-                    app.name,
-                    format_bytes(saved)
-                );
+        match crate::core::slim::slim_app_logged(&session, app, &binaries, host, false) {
+            Ok(done) => {
+                total_saved += done.saved;
+                any_trashed |= done.old_app.is_none();
+                let _ = writeln!(console.out, "{}", done.summary(&app.name));
             }
             Err((step, error)) => {
                 let _ = writeln!(
@@ -1748,11 +1757,11 @@ fn pick_apps_to_slim(
     session.finish();
 
     if total_saved > 0 {
-        let _ = writeln!(
-            console.out,
-            "\nTotal saved: {}. Clones share blocks, so the space comes back when the Trash is emptied.",
-            format_bytes(total_saved)
-        );
+        let _ = write!(console.out, "\nTotal saved: {}.", format_bytes(total_saved));
+        if any_trashed {
+            let _ = write!(console.out, " {}", crate::core::slim::TRASH_NOTE);
+        }
+        let _ = writeln!(console.out);
     }
 
     ExitCode::SUCCESS
@@ -1830,21 +1839,49 @@ mod tests {
     }
 
     fn slim(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
+        slim_typed(args, "", true, host, layout)
+    }
+
+    fn slim_typed(
+        args: &[&str],
+        typed: &str,
+        use_plain: bool,
+        host: &FakeHost,
+        layout: &Layout,
+    ) -> Ran {
         let cli = parse(args);
         let Some(Command::Slim(ref slim_args)) = cli.command else {
             panic!("not a slim command");
         };
         let context = ScanContext { layout, host };
-        run("", |console| {
+        run(typed, |console| {
             handle_slim(
                 slim_args,
                 &cli,
-                true,
+                use_plain,
                 &IgnoreStore::default(),
                 &context,
                 console,
             )
         })
+    }
+
+    /// A universal app "Fat" that passes every check, and a Mac that can slim it.
+    fn slim_ready(layout: &Layout) -> (FakeHost, std::path::PathBuf) {
+        slim_ready_signed_by(layout, "Developer ID Application: Acme Corp (123)")
+    }
+
+    fn slim_ready_signed_by(layout: &Layout, authority: &str) -> (FakeHost, std::path::PathBuf) {
+        use crate::core::slim::testing::{fake_ditto, write_test_app};
+        let app = layout.user("Applications/Fat.app");
+        write_test_app(&app, "com.vendor.fat");
+        let host = apple_silicon_host();
+        host.reply("codesign -dv", &format!("Authority={authority}\n"));
+        host.reply("codesign --verify", "");
+        host.reply("spctl", "");
+        host.reply("ditto", "");
+        fake_ditto(&host, &app);
+        (host, app)
     }
 
     fn doctor_report(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
@@ -2798,6 +2835,341 @@ mod tests {
             "Error: No installed app matches 'NonExistentApp12345'\n"
         );
         assert!(!host.ran("codesign"));
+    }
+
+    #[test]
+    fn slim_asks_before_rewriting_in_a_terminal() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+
+        let ran = slim_typed(&["slim", "Fat"], "n\n", false, &host, &layout);
+
+        assert!(ran.ok);
+        assert!(ran.out.contains("Slim Fat? [y/N]: "));
+        assert!(ran.out.contains("Cancelled."));
+        assert!(!host.ran("ditto"));
+    }
+
+    #[test]
+    fn slim_goes_on_after_a_yes_in_a_terminal() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+
+        let ran = slim_typed(&["slim", "Fat"], "y\n", false, &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Slimmed Fat, saved"));
+        assert!(host.ran("ditto"));
+    }
+
+    #[test]
+    fn slim_json_without_force_refuses() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+
+        let ran = slim(&["slim", "Fat", "--json"], &host, &layout);
+
+        assert!(!ran.ok);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(json["error"], "confirmation needed, pass --force");
+        assert_eq!(json["app"], "Fat");
+        assert!(!host.ran("ditto"));
+    }
+
+    #[test]
+    fn slim_with_force_skips_the_question() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+
+        let ran = slim_typed(&["slim", "Fat", "--force"], "", false, &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(!ran.out.contains("Slim Fat?"));
+        assert!(host.ran("ditto"));
+    }
+
+    /// The allocated size of the binary in an app made by `slim_ready`.
+    fn binary_size(app: &std::path::Path) -> u64 {
+        let binary = app.join("Contents/MacOS/testapp");
+        crate::core::sizer::DirSizer::allocated_size(&std::fs::metadata(binary).unwrap())
+    }
+
+    /// Gives the app made by `slim_ready` an Intel slice large enough to free blocks.
+    fn make_slim_save_space(app: &std::path::Path) {
+        let binary = app.join("Contents/MacOS/testapp");
+        std::fs::write(binary, crate::core::slim::testing::big_fat_binary()).unwrap();
+    }
+
+    fn refused_trash_summary(app: &std::path::Path) -> String {
+        let old = app.with_file_name("Fat.app.taert-slim-tmp/Fat.app");
+        let done = crate::core::slim::SlimDone {
+            saved: binary_size(&old).saturating_sub(binary_size(app)),
+            old_app: Some((old, "denied".to_string())),
+            holding_left: None,
+        };
+        done.summary("Fat")
+    }
+
+    #[test]
+    fn slim_says_where_the_old_app_is_when_the_trash_refuses() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        host.fail_trash("denied");
+
+        let plain = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        assert!(plain.ok, "{}", plain.err);
+        assert!(
+            plain
+                .out
+                .contains(&format!("{}\n", refused_trash_summary(&app))),
+            "{}",
+            plain.out
+        );
+        assert!(!plain.out.contains("space comes back"));
+    }
+
+    #[test]
+    fn slim_says_what_it_saved_when_the_old_app_is_in_the_trash() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        make_slim_save_space(&app);
+        host.simulate_trash();
+        let before = binary_size(&app);
+
+        let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let done = crate::core::slim::SlimDone {
+            saved: before - binary_size(&app),
+            old_app: None,
+            holding_left: None,
+        };
+        assert!(
+            ran.out.contains(&format!(
+                "{}\nClones share blocks, so the space comes back when the Trash is emptied.\n",
+                done.summary("Fat")
+            )),
+            "{}",
+            ran.out
+        );
+    }
+
+    #[test]
+    fn slim_names_the_holding_folder_it_could_not_remove() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        let before = binary_size(&app);
+
+        let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let holding = app.with_file_name("Fat.app.taert-slim-tmp");
+        let error = std::fs::remove_dir(&holding).unwrap_err().to_string();
+        let done = crate::core::slim::SlimDone {
+            saved: before.saturating_sub(binary_size(&app)),
+            old_app: None,
+            holding_left: Some((holding, error)),
+        };
+        assert!(
+            ran.out.contains(&format!("{}\n", done.summary("Fat"))),
+            "{}",
+            ran.out
+        );
+    }
+
+    #[test]
+    fn slim_picker_says_where_the_old_app_is_when_the_trash_refuses() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        make_slim_save_space(&app);
+        host.fail_trash("denied");
+
+        let ran = slim_typed(&["slim", "--force"], "all\n", true, &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(
+            ran.out
+                .contains(&format!("{}\n", refused_trash_summary(&app))),
+            "{}",
+            ran.out
+        );
+        assert!(ran.out.contains("Total saved: "), "{}", ran.out);
+        assert!(!ran.out.contains("space comes back"), "{}", ran.out);
+    }
+
+    #[test]
+    fn slim_picker_says_the_space_comes_back_when_the_old_app_is_in_the_trash() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        make_slim_save_space(&app);
+        host.simulate_trash();
+        let before = binary_size(&app);
+
+        let ran = slim_typed(&["slim", "--force"], "all\n", true, &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let done = crate::core::slim::SlimDone {
+            saved: before - binary_size(&app),
+            old_app: None,
+            holding_left: None,
+        };
+        assert!(
+            ran.out.contains(&format!("{}\n", done.summary("Fat"))),
+            "{}",
+            ran.out
+        );
+        assert!(
+            ran.out.contains(&format!(
+                "Total saved: {}. Clones share blocks, so the space comes back when the Trash is emptied.",
+                format_bytes(done.saved)
+            )),
+            "{}",
+            ran.out
+        );
+    }
+
+    #[test]
+    fn slim_json_list_checks_each_app_once() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+
+        let ran = slim(&["slim", "--json"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let checks = host
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("codesign --verify"))
+            .count();
+        assert_eq!(checks, 1);
+    }
+
+    /// What a crash or a refused Trash call leaves: the old app in the holding folder.
+    fn leave_old_app(app: &std::path::Path) -> std::path::PathBuf {
+        let old = app.with_file_name("Fat.app.taert-slim-tmp/Fat.app");
+        crate::core::slim::testing::write_test_app(&old, "com.vendor.fat");
+        old
+    }
+
+    #[test]
+    fn slim_json_list_leaves_out_the_old_app_in_a_holding_folder() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        leave_old_app(&app);
+
+        let ran = slim(&["slim", "--json"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let paths: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec![app.to_str().unwrap()]);
+    }
+
+    #[test]
+    fn slim_by_name_names_the_holding_folder_left_from_an_earlier_run() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        let old = leave_old_app(&app);
+
+        let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(
+            ran.err.contains(&format!(
+                "{} is left from an earlier run",
+                old.parent().unwrap().display()
+            )),
+            "{}",
+            ran.err
+        );
+        assert!(!host.ran("ditto"));
+        assert!(old.join("Contents/MacOS/testapp").exists());
+    }
+
+    #[test]
+    fn slim_json_list_refuses_every_app_when_the_process_list_fails() {
+        let (_temp, layout) = sandbox();
+        let (_ready, _app) = slim_ready(&layout);
+        let host = FakeHost::default();
+        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host.fail("/bin/ps", "");
+
+        let ran = slim(&["slim", "--json"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let list = json.as_array().unwrap();
+        assert!(!list.is_empty());
+        for entry in list {
+            assert_eq!(entry["eligible"], false);
+            assert!(
+                entry["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Could not list running programs")
+            );
+        }
+    }
+
+    #[test]
+    fn slim_json_names_the_old_app_only_when_the_trash_refuses() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_ready(&layout);
+        host.fail_trash("denied");
+        let old = app.with_file_name("Fat.app.taert-slim-tmp/Fat.app");
+
+        let refused = slim(&["slim", "Fat", "--force", "--json"], &host, &layout);
+
+        let json: serde_json::Value = serde_json::from_str(&refused.out).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["old_app_path"], old.to_str().unwrap());
+
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+        host.simulate_trash();
+
+        let moved = slim(&["slim", "Fat", "--force", "--json"], &host, &layout);
+
+        let json: serde_json::Value = serde_json::from_str(&moved.out).unwrap();
+        assert_eq!(json["success"], true);
+        assert!(json.get("old_app_path").is_none());
+    }
+
+    #[test]
+    fn slim_stops_when_the_process_list_fails() {
+        let (_temp, layout) = sandbox();
+        let (_ready, _app) = slim_ready(&layout);
+        let host = FakeHost::default();
+        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host.fail("/bin/ps", "");
+
+        let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(ran.err.contains("Could not list running programs"));
+        assert!(!host.ran("ditto"));
+    }
+
+    #[test]
+    fn test_env_var_has_no_effect() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready_signed_by(&layout, "Mac Developer: Someone");
+        unsafe { std::env::set_var("TAERT_SLIM_ALLOW_ADHOC", "1") };
+
+        let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
+
+        unsafe { std::env::remove_var("TAERT_SLIM_ALLOW_ADHOC") };
+        assert!(!ran.ok);
+        assert!(ran.err.contains("Not signed with a Developer ID"));
+        assert!(!host.ran("ditto"));
     }
 
     #[test]

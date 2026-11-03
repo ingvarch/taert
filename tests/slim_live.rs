@@ -14,9 +14,11 @@ use tempfile::tempdir;
 
 use taert::core::apps::InstalledApp;
 use taert::core::host::{Host, MacHost, Output};
+use taert::core::sizer::DirSizer;
 use taert::core::slim;
 
 /// Runs the real signing tools and moves "trashed" items into a temporary folder.
+/// `slim_app` trashes `<holding>/<name>`, so the item there is named like the app.
 struct TempTrashHost {
     trash: PathBuf,
 }
@@ -173,9 +175,26 @@ fn test_live_build_and_slim_universal_app() {
     let host = TempTrashHost {
         trash: temp.path().join("trash"),
     };
-    let saved =
+    let done =
         slim::slim_app(&app, &binaries, &host, true).expect("Slimming live universal app failed");
-    assert_eq!(saved, intel_size);
+    let old_exe = temp
+        .path()
+        .join("trash/LiveUniversalApp.app/Contents/MacOS/liveapp");
+    assert_eq!(
+        done.saved,
+        DirSizer::allocated_size(&fs::metadata(&old_exe).unwrap())
+            - DirSizer::allocated_size(&fs::metadata(&exe_path).unwrap())
+    );
+    assert_eq!(done.old_app, None);
+
+    // The old app went to the trash under its own name, and the holding folder is gone
+    assert!(temp.path().join("trash/LiveUniversalApp.app").exists());
+    assert!(
+        !temp
+            .path()
+            .join("LiveUniversalApp.app.taert-slim-tmp")
+            .exists()
+    );
 
     // Verify it still exists at the original path
     assert!(app_path.exists());
