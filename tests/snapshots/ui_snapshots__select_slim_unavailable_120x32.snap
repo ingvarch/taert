@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: select_screen(&state)
+---
+ taert › Optimize › Slim apps                                                                   0 of 0 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+
+                                                            !
+
+                                           Slim Universal Apps isn't available
+                                 Slimming universal apps requires an Apple Silicon Mac.
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⎋  Back    ?  More                                                                                   Review items  ↵

@@ -73,7 +73,11 @@ pub enum ScanMessage {
     PurgeProgress(PurgeScanEvent),
     Finished(CategoryScan),
     Homebrew(homebrew::Inventory),
-    Failed(String),
+    Failed {
+        id: String,
+        title: String,
+        problem: String,
+    },
     AppsFound(Vec<InstalledApp>),
     Planned(UninstallPlan),
 }
@@ -109,7 +113,7 @@ fn forward_progress(
 
 fn review_state(plan: &UninstallPlan) -> SelectState {
     if plan.apps.is_empty() {
-        return SelectState::unavailable("Uninstall", plan.notes.join(" "));
+        return SelectState::unavailable(&plan.scan.id, &plan.scan.title, plan.notes.join(" "));
     }
     let mut state = SelectState::with_preserved_selection(plan.scan.clone())
         .with_routes(uninstaller::routes(plan));
@@ -554,9 +558,10 @@ impl App {
                     ScanMessage::Progress(evt) => {
                         progress.apply_category(evt);
                     }
-                    ScanMessage::Failed(problem) => {
-                        self.screen =
-                            Screen::Select(Box::new(SelectState::unavailable("Docker", problem)));
+                    ScanMessage::Failed { id, title, problem } => {
+                        self.screen = Screen::Select(Box::new(SelectState::unavailable(
+                            &id, &title, problem,
+                        )));
                         break;
                     }
                     ScanMessage::AppsFound(found) => {
@@ -1731,7 +1736,11 @@ impl App {
         thread::spawn(move || {
             let message = match docker::DockerClient::connect().and_then(|client| client.scan()) {
                 Ok(scan) => ScanMessage::Finished(scan),
-                Err(error) => ScanMessage::Failed(error.to_string()),
+                Err(error) => ScanMessage::Failed {
+                    id: docker::SCAN_ID.to_string(),
+                    title: docker::TITLE.to_string(),
+                    problem: error.to_string(),
+                },
             };
             let _ = tx.send(message);
         });
@@ -1789,14 +1798,15 @@ impl App {
         let cancel_scan = cancel.clone();
 
         thread::spawn(move || {
-            let (progress, bridge) = forward_progress(tx.clone());
             if !slim::is_apple_silicon(&*host) {
-                let _ = bridge.join();
-                let _ = tx.send(ScanMessage::Failed(
-                    "Slimming universal apps requires an Apple Silicon Mac.".to_string(),
-                ));
+                let _ = tx.send(ScanMessage::Failed {
+                    id: slim::SCAN_ID.to_string(),
+                    title: slim::TITLE.to_string(),
+                    problem: "Slimming universal apps requires an Apple Silicon Mac.".to_string(),
+                });
                 return;
             }
+            let (progress, bridge) = forward_progress(tx.clone());
             let scan = slim::slim_scan(&layout, &*host, &ignore, Some(progress), Some(cancel_scan));
             let _ = bridge.join();
             let _ = tx.send(ScanMessage::Finished(scan));
@@ -1959,6 +1969,7 @@ mod tests {
     use crate::ui::analyze::SortOrder;
     use ratatui::backend::TestBackend;
     use std::path::Path;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     /// An app that sees an empty Mac: no files at its home and a host that runs nothing.
@@ -1974,6 +1985,55 @@ mod tests {
 
     fn new_app() -> App {
         offline(App::new(IgnoreStore::default(), Config::default()))
+    }
+
+    #[test]
+    fn a_failed_slim_scan_shows_its_own_name() {
+        let mut app = new_app();
+
+        app.handle_key(KeyCode::Char('8'));
+        let started = Instant::now();
+        while matches!(app.screen, Screen::Scanning(..)) {
+            assert!(started.elapsed() < Duration::from_secs(2), "still scanning");
+            thread::sleep(Duration::from_millis(10));
+            app.poll_scan();
+        }
+
+        assert_eq!(select(&app).scan.id, slim::SCAN_ID);
+        assert_eq!(select(&app).scan.title, "Slim Universal Apps");
+        let text = screen_text(&app);
+        assert!(
+            text.contains("Slim Universal Apps isn't available"),
+            "{text}"
+        );
+        assert!(text.contains("requires an Apple Silicon Mac"), "{text}");
+        assert!(text.contains("Slim apps"), "{text}");
+        assert!(!text.contains("Docker"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_docker_read_still_says_docker() {
+        let mut app = new_app();
+        let (tx, rx) = mpsc::channel();
+        tx.send(ScanMessage::Failed {
+            id: docker::SCAN_ID.to_string(),
+            title: docker::TITLE.to_string(),
+            problem: "Can't reach Docker.".to_string(),
+        })
+        .unwrap();
+        app.screen = Screen::Scanning(
+            ProgressState::new("Reading Docker"),
+            rx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        app.poll_scan();
+
+        assert_eq!(select(&app).scan.id, docker::SCAN_ID);
+        assert_eq!(select(&app).scan.title, "Docker");
+        let text = screen_text(&app);
+        assert!(text.contains("Docker isn't available"), "{text}");
+        assert!(text.contains("Can't reach Docker."), "{text}");
     }
 
     fn analyze_app(dir: &Path) -> App {
@@ -3157,7 +3217,7 @@ mod tests {
         }
 
         #[test]
-        fn a_plan_with_no_apps_shows_why() {
+        fn a_plan_with_no_apps_keeps_the_plan_id() {
             let (_temp, mut app) = app_in_sandbox();
             let foo = installed(&app, "Foo", "com.acme.foo");
             let mut plan = plan_for(&foo, &app);
@@ -3170,8 +3230,15 @@ mod tests {
 
             deliver(&mut app, ScanMessage::Planned(plan));
 
+            assert_eq!(select(&app).scan.id, PLAN_ID);
             let text = screen_text(&app);
+            assert!(text.contains("Uninstall apps"), "{text}");
+            assert!(text.contains("Review isn't available"), "{text}");
             assert!(text.contains("needs the uninstaller"), "{text}");
+            assert_footer(&app, &["Uninstall"], &["Review items"]);
+
+            app.handle_key(KeyCode::Esc);
+            assert_eq!(select(&app).scan.id, apps::LIST_ID);
         }
 
         #[test]

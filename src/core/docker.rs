@@ -27,6 +27,7 @@ use super::safety::Safety;
 use super::scanner::{CategoryScan, ScanItem, ToolGroup};
 
 pub const SCAN_ID: &str = "docker";
+pub const TITLE: &str = "Docker";
 const GROUP_IMAGES: &str = "Images";
 const GROUP_VOLUMES: &str = "Volumes (data is deleted for good)";
 const GROUP_NETWORKS: &str = "Networks";
@@ -232,7 +233,7 @@ pub fn unused_objects(
     Ok(CategoryScan {
         notes: Vec::new(),
         id: SCAN_ID.to_string(),
-        title: "Docker".to_string(),
+        title: TITLE.to_string(),
         groups,
     })
 }
