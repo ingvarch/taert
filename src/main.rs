@@ -21,6 +21,7 @@ use crate::core::date_utils::{format_rfc3339, format_system_time, parse_rfc3339}
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
+use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
 use crate::core::layout::Layout;
@@ -90,6 +91,8 @@ fn main() -> ExitCode {
         Some(Command::Uninstall(ref args)) => {
             handle_uninstall(args, &cli, use_plain, &ignore, &context, console)
         }
+
+        Some(Command::Brew) => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
 
         Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore, &context),
 
@@ -241,6 +244,55 @@ fn handle_docker(
             ExitCode::FAILURE
         }
     }
+}
+
+fn handle_brew(
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    config: &Config,
+    context: &ScanContext,
+    console: &mut Console,
+) -> ExitCode {
+    let inventory = match homebrew::scan(context.layout, context.host) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            let _ = writeln!(console.err, "Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if cli.json {
+        return match serde_json::to_string_pretty(&inventory) {
+            Ok(json) => {
+                let _ = writeln!(console.out, "{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                let _ = writeln!(console.err, "Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if use_plain {
+        let notes = PlainRunner::notes_text(&inventory.notes);
+        let list = homebrew::plain_text(&inventory);
+        let notes = if list.is_empty() {
+            notes.trim_start()
+        } else {
+            &notes
+        };
+        let _ = write!(console.out, "{list}{notes}");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut app = ui::app::App::with_select(
+        homebrew::list_scan(&inventory),
+        ignore.clone(),
+        config.clone(),
+    );
+    run_tui(&mut app, cli, console)
 }
 
 fn handle_large(
@@ -1715,6 +1767,138 @@ mod tests {
                 console,
             )
         })
+    }
+
+    const BREW_INFO: &str = include_str!("../tests/fixtures/brew_info.json");
+    const BREW_INFO_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1";
+
+    fn brew(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
+        let cli = parse(args);
+        let context = ScanContext { layout, host };
+        run("", |console| {
+            handle_brew(
+                &cli,
+                true,
+                &IgnoreStore::default(),
+                &Config::default(),
+                &context,
+                console,
+            )
+        })
+    }
+
+    #[test]
+    fn brew_json_has_the_documented_keys() {
+        let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(BREW_INFO_LINE, BREW_INFO);
+
+        let ran = brew(&["brew", "--json"], &host, &layout);
+
+        assert!(ran.ok);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let packages = json["packages"].as_array().unwrap();
+        assert_eq!(packages.len(), 12);
+        assert_eq!(json["notes"], serde_json::json!([]));
+        let mut keys: Vec<&str> = packages[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "apps",
+                "kind",
+                "name",
+                "on_request",
+                "outdated",
+                "pinned",
+                "size_bytes",
+                "used_by",
+                "version"
+            ]
+        );
+        let ghostty = packages.iter().find(|p| p["name"] == "ghostty").unwrap();
+        assert_eq!(ghostty["kind"], "cask");
+        assert_eq!(ghostty["apps"], serde_json::json!(["Ghostty.app"]));
+        let go = packages.iter().find(|p| p["name"] == "go").unwrap();
+        assert_eq!(go["kind"], "formula");
+        assert_eq!(go["used_by"], serde_json::json!(["golangci-lint", "gosec"]));
+    }
+
+    #[test]
+    fn brew_plain_prints_one_row_per_package() {
+        let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(BREW_INFO_LINE, BREW_INFO);
+
+        let ran = brew(&["brew", "--plain"], &host, &layout);
+
+        assert!(ran.ok);
+        assert!(ran.out.starts_with("Formulae\n"));
+        assert!(ran.out.contains("\nCasks (remove with taert uninstall)\n"));
+        let row = |name: &str| {
+            ran.out
+                .lines()
+                .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+                .unwrap()
+        };
+        let go: Vec<&str> = row("go").split_whitespace().collect();
+        assert_eq!(&go[..2], ["go", "1.27.3"]);
+        assert_eq!(&go[4..], ["on", "request", "-", "-", "2"]);
+        assert!(row("bun").contains("outdated"));
+        assert!(row("fd").contains("pinned"));
+        assert!(row("ada-url").contains("dependency"));
+        assert_eq!(ran.out.lines().filter(|l| l.starts_with("  ")).count(), 12);
+    }
+
+    #[test]
+    fn brew_plain_says_when_homebrew_is_missing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = brew(&["brew", "--plain"], &host, &layout);
+
+        assert!(ran.ok);
+        assert_eq!(ran.out, "Note: Homebrew is not installed.\n");
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn brew_json_says_when_homebrew_is_missing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = brew(&["brew", "--json"], &host, &layout);
+
+        assert!(ran.ok);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(json["packages"], serde_json::json!([]));
+        assert_eq!(
+            json["notes"],
+            serde_json::json!(["Homebrew is not installed."])
+        );
+    }
+
+    #[test]
+    fn brew_reports_a_failed_read_as_an_error_in_every_mode() {
+        let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.fail(BREW_INFO_LINE, "Error: broken tap");
+
+        for mode in ["--plain", "--json"] {
+            let ran = brew(&["brew", mode], &host, &layout);
+
+            assert!(!ran.ok);
+            assert!(ran.out.is_empty());
+            assert_eq!(
+                ran.err,
+                "Error: Homebrew did not list its packages: Error: broken tap\n"
+            );
+        }
     }
 
     fn uninstall(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {

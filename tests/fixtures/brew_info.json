@@ -1,0 +1,1413 @@
+{
+  "formulae": [
+    {
+      "name": "actionlint",
+      "full_name": "actionlint",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Static checker for GitHub Actions workflow files",
+      "license": "MIT",
+      "homepage": "https://rhysd.github.io/actionlint/",
+      "versions": {
+        "stable": "1.7.12",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/rhysd/actionlint/archive/refs/tags/v1.7.12.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "454800bd4f854592bcfe79b161f71d56e35940eb7016e48a26dd356adc9d400a"
+        },
+        "head": {
+          "url": "https://github.com/rhysd/actionlint.git",
+          "branch": "main",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 1,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/actionlint/blobs/sha256:cf32eeac6a6f6dcd816944d78ad0c1553952c3c2b5c72c71ea4fb71aa777ca75",
+              "sha256": "cf32eeac6a6f6dcd816944d78ad0c1553952c3c2b5c72c71ea4fb71aa777ca75"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "go",
+        "ronn"
+      ],
+      "dependencies": [
+        "shellcheck"
+      ],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/actionlint/1.7.12/sbom.spdx.json",
+          "version": "1.7.12",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701820,
+          "runtime_dependencies": [
+            {
+              "full_name": "gmp",
+              "version": "6.3.0",
+              "revision": 0,
+              "bottle_rebuild": 1,
+              "pkg_version": "6.3.0",
+              "declared_directly": false,
+              "compatibility_version": 1
+            },
+            {
+              "full_name": "shellcheck",
+              "version": "0.11.0",
+              "revision": 0,
+              "bottle_rebuild": 1,
+              "pkg_version": "0.11.0",
+              "declared_directly": true,
+              "compatibility_version": 1
+            }
+          ],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "1.7.12",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/a/actionlint.rb",
+      "ruby_source_checksum": {
+        "sha256": "402a4f23ba2c8f06841d2e385f8b709b249456e23af0338dc7bf3c95f39fae72"
+      }
+    },
+    {
+      "name": "ada-url",
+      "full_name": "ada-url",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "WHATWG-compliant and fast URL parser written in modern C++",
+      "license": "Apache-2.0 OR MIT",
+      "homepage": "https://ada-url.com",
+      "versions": {
+        "stable": "4.0.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/ada-url/ada/archive/refs/tags/v4.0.0.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "6d6c7ef7dd2e329320d34eb2ab29ccdc879ee3935af9dfb894a6640e58dc381d"
+        },
+        "head": {
+          "url": "https://github.com/ada-url/ada.git",
+          "branch": "main",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 1,
+      "version_scheme": 0,
+      "compatibility_version": 2,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any",
+              "url": "https://ghcr.io/v2/homebrew/core/ada-url/blobs/sha256:c47d62dbcf1d8a254f88fab01691998b85fcfa8eb37331dcc672447fa76275cc",
+              "sha256": "c47d62dbcf1d8a254f88fab01691998b85fcfa8eb37331dcc672447fa76275cc"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "cmake",
+        "cxxopts"
+      ],
+      "dependencies": [
+        "fmt",
+        "simdutf"
+      ],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [
+        {
+          "python": "build"
+        }
+      ],
+      "uses_from_macos_bounds": [
+        {}
+      ],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/ada-url/4.0.0/sbom.spdx.json",
+          "version": "4.0.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1791899712,
+          "runtime_dependencies": [
+            {
+              "full_name": "fmt",
+              "version": "12.2.0",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "12.2.0",
+              "declared_directly": true
+            },
+            {
+              "full_name": "icu4c@78",
+              "version": "78.3",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "78.3",
+              "declared_directly": false
+            },
+            {
+              "full_name": "simdutf",
+              "version": "9.2.1",
+              "revision": 1,
+              "bottle_rebuild": 0,
+              "pkg_version": "9.2.1_1",
+              "declared_directly": true
+            }
+          ],
+          "installed_on_request": false
+        },
+        {
+          "sbom": "/opt/homebrew/Cellar/ada-url/4.0.0_1/sbom.spdx.json",
+          "version": "4.0.0_1",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701852,
+          "runtime_dependencies": [
+            {
+              "full_name": "fmt",
+              "version": "12.2.0",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "12.2.0",
+              "declared_directly": true,
+              "compatibility_version": 2
+            },
+            {
+              "full_name": "icu4c@79",
+              "version": "79.1",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "79.1",
+              "declared_directly": false,
+              "compatibility_version": 1
+            },
+            {
+              "full_name": "simdutf",
+              "version": "9.3.3",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "9.3.3",
+              "declared_directly": true,
+              "compatibility_version": 7
+            }
+          ],
+          "installed_on_request": false
+        }
+      ],
+      "linked_keg": "4.0.0_1",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/a/ada-url.rb",
+      "ruby_source_checksum": {
+        "sha256": "52379177f404f68787018154cfee6754b42455bf376830d5c27123946d1a93d5"
+      }
+    },
+    {
+      "name": "brotli",
+      "full_name": "brotli",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Generic-purpose lossless compression algorithm by Google",
+      "license": "MIT",
+      "homepage": "https://github.com/google/brotli",
+      "versions": {
+        "stable": "1.2.1",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f"
+        },
+        "head": {
+          "url": "https://github.com/google/brotli.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": 1,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any",
+              "url": "https://ghcr.io/v2/homebrew/core/brotli/blobs/sha256:c5a6fba2965b2423acfbf5084a4d8291bf95b96bbc64b534c8ef83a480413e49",
+              "sha256": "c5a6fba2965b2423acfbf5084a4d8291bf95b96bbc64b534c8ef83a480413e49"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "cmake"
+      ],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/brotli/1.2.0/sbom.spdx.json",
+          "version": "1.2.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1791899713,
+          "runtime_dependencies": [],
+          "installed_on_request": false
+        },
+        {
+          "sbom": "/opt/homebrew/Cellar/brotli/1.2.1/sbom.spdx.json",
+          "version": "1.2.1",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701853,
+          "runtime_dependencies": [],
+          "installed_on_request": false
+        }
+      ],
+      "linked_keg": "1.2.1",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/b/brotli.rb",
+      "ruby_source_checksum": {
+        "sha256": "dd52c7983ad63e4f322a3d44f610dec3ada3448583c3c66e35030ebbaee3433c"
+      }
+    },
+    {
+      "name": "bun",
+      "full_name": "bun",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Incredibly fast JavaScript runtime, bundler, test runner, and package manager",
+      "license": "MIT AND LGPL-2.0-or-later AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND IJG AND LGPL-2.1-or-later AND Zlib AND (Apache-2.0 WITH LLVM-exception)",
+      "homepage": "https://bun.com/",
+      "versions": {
+        "stable": "1.4.4",
+        "head": null,
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/oven-sh/bun.git",
+          "tag": "bun-v1.4.4",
+          "revision": "38afee6c84fcf48c0edb2466aa4b27d287a59c30",
+          "using": null,
+          "checksum": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 1,
+      "version_scheme": 0,
+      "compatibility_version": 1,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": "/opt/homebrew/Cellar",
+              "url": "https://ghcr.io/v2/homebrew/core/bun/blobs/sha256:040e2cad4ffa635a17f79f513a8a9648e484db77da281bec277fc93f2165e9ca",
+              "sha256": "040e2cad4ffa635a17f79f513a8a9648e484db77da281bec277fc93f2165e9ca"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "cmake",
+        "llvm",
+        "ninja",
+        "rust"
+      ],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [
+        {
+          "llvm": "build"
+        },
+        {
+          "perl": "build"
+        },
+        {
+          "python": "build"
+        },
+        {
+          "ruby": "build"
+        },
+        {
+          "unzip": "build"
+        }
+      ],
+      "uses_from_macos_bounds": [
+        {},
+        {},
+        {},
+        {},
+        {}
+      ],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/bun/1.4.2/sbom.spdx.json",
+          "version": "1.4.2",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1791899664,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "1.4.2",
+      "pinned": false,
+      "outdated": true,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/b/bun.rb",
+      "ruby_source_checksum": {
+        "sha256": "8d5549ebc350cb339e759b02014738257428a0e0f807fdada23d1093a3289829"
+      }
+    },
+    {
+      "name": "crush",
+      "full_name": "charmbracelet/tap/crush",
+      "tap": "charmbracelet/tap",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "A powerful terminal-based AI assistant for developers, providing intelligent coding assistance directly in your terminal.",
+      "license": "FSL-1.1-MIT",
+      "homepage": "https://charm.sh/crush",
+      "versions": {
+        "stable": "0.99.0",
+        "head": null,
+        "bottle": false
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/charmbracelet/crush/releases/download/v0.99.0/crush_0.99.0_Darwin_arm64.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "661c8754359b0c6ccb6076c01f99fe4134c3819888ddc60c372b9d7c336898d3"
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {},
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/crush/0.99.0/sbom.spdx.json",
+          "version": "0.99.0",
+          "used_options": [],
+          "built_as_bottle": false,
+          "poured_from_bottle": false,
+          "time": 1793701982,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "0.99.0",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "05ca715ce5ea379d3f05bbf486a0d0c3d8e000e2",
+      "ruby_source_path": "crush.rb",
+      "ruby_source_checksum": {
+        "sha256": "107a98e97a692cbcc94f4e697ce0647eb3085e28646bfbe29910294e42466c09"
+      }
+    },
+    {
+      "name": "fd",
+      "full_name": "fd",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Simple, fast and user-friendly alternative to find",
+      "license": "Apache-2.0 OR MIT",
+      "homepage": "https://github.com/sharkdp/fd",
+      "versions": {
+        "stable": "10.5.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/sharkdp/fd/archive/refs/tags/v10.5.0.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "e6d9e90730bf316101691e49d59cc02565278dc3779d33a77423801569484851"
+        },
+        "head": {
+          "url": "https://github.com/sharkdp/fd.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/fd/blobs/sha256:f8ccfce40967859000e4512fd37b8f0ee178572f3f131d6d6fa37faac4205f16",
+              "sha256": "f8ccfce40967859000e4512fd37b8f0ee178572f3f131d6d6fa37faac4205f16"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "rust"
+      ],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [
+        "fdclone"
+      ],
+      "conflicts_with_reasons": [
+        "both install `fd` binaries"
+      ],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/fd/10.5.0/sbom.spdx.json",
+          "version": "10.5.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793702540,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "10.5.0",
+      "pinned": true,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/f/fd.rb",
+      "ruby_source_checksum": {
+        "sha256": "0ee1efe3ec6eaf81f2027c589b377899acfe562f7629a77c0f9829105af48956"
+      }
+    },
+    {
+      "name": "go",
+      "full_name": "go",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [
+        "go@1.27",
+        "golang",
+        "google-go"
+      ],
+      "versioned_formulae": [
+        "go@1.26",
+        "go@1.25",
+        "go@1.24",
+        "go@1.23",
+        "go@1.22"
+      ],
+      "desc": "Open source programming language to build simple/reliable/efficient software",
+      "license": "BSD-3-Clause",
+      "homepage": "https://go.dev/",
+      "versions": {
+        "stable": "1.27.3",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://go.dev/dl/go1.27.3.src.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "6e7749035cf360f06b2575d162ea79df9fda8ef671889e5c375f8e50777f26bb"
+        },
+        "head": {
+          "url": "https://go.googlesource.com/go.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": 13,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/go/blobs/sha256:c7bf84a6f727873581b3e1b5f79c1254cd5856f1241534e2f6943a8acc193e6e",
+              "sha256": "c7bf84a6f727873581b3e1b5f79c1254cd5856f1241534e2f6943a8acc193e6e"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/go/1.27.3/sbom.spdx.json",
+          "version": "1.27.3",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701892,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "1.27.3",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/g/go.rb",
+      "ruby_source_checksum": {
+        "sha256": "60d78711c1300f95a5f3f5ef6f0a1892517e5bdff0c6068d2b0c71bd3233b1f9"
+      }
+    },
+    {
+      "name": "golangci-lint",
+      "full_name": "golangci-lint",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Fast linters runner for Go",
+      "license": "GPL-3.0-only",
+      "homepage": "https://golangci-lint.run/",
+      "versions": {
+        "stable": "2.15.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/golangci/golangci-lint.git",
+          "tag": "v2.15.0",
+          "revision": "25c5369a93aacb8cccea0d46e1569ca4a194564d",
+          "using": null,
+          "checksum": null
+        },
+        "head": {
+          "url": "https://github.com/golangci/golangci-lint.git",
+          "branch": "main",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/golangci-lint/blobs/sha256:307c70daa7188049fa69662b254540e08f52f0b63eb7f63a33612598d7ab5b86",
+              "sha256": "307c70daa7188049fa69662b254540e08f52f0b63eb7f63a33612598d7ab5b86"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [],
+      "dependencies": [
+        "go"
+      ],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/golangci-lint/2.15.0/sbom.spdx.json",
+          "version": "2.15.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701894,
+          "runtime_dependencies": [
+            {
+              "full_name": "go",
+              "version": "1.27.3",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "1.27.3",
+              "declared_directly": true,
+              "compatibility_version": 13
+            }
+          ],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "2.15.0",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/g/golangci-lint.rb",
+      "ruby_source_checksum": {
+        "sha256": "0040d1b19fcbb5c14abb2fb1a749490290f0cd16ea9a8b6ce76e28da2e2c0c21"
+      }
+    },
+    {
+      "name": "gosec",
+      "full_name": "gosec",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Golang security checker",
+      "license": "Apache-2.0",
+      "homepage": "https://securego.io/",
+      "versions": {
+        "stable": "2.30.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/securego/gosec/archive/refs/tags/v2.30.0.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "58ad3a584453ad31f0b646818bcd1cc005afd20ef507d71cd41821fbba506332"
+        },
+        "head": {
+          "url": "https://github.com/securego/gosec.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": 1,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/gosec/blobs/sha256:7dba80f404f85b06207eadbbd40fb2ba5089f636e7ace683e7a4305460069d6d",
+              "sha256": "7dba80f404f85b06207eadbbd40fb2ba5089f636e7ace683e7a4305460069d6d"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [],
+      "dependencies": [
+        "go"
+      ],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/gosec/2.30.0/sbom.spdx.json",
+          "version": "2.30.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701895,
+          "runtime_dependencies": [
+            {
+              "full_name": "go",
+              "version": "1.27.3",
+              "revision": 0,
+              "bottle_rebuild": 0,
+              "pkg_version": "1.27.3",
+              "declared_directly": true,
+              "compatibility_version": 13
+            }
+          ],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "2.30.0",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/g/gosec.rb",
+      "ruby_source_checksum": {
+        "sha256": "cf9f4c906808121201526e027afcb6a69364e9ee17c34fecc8b2197efa3de55b"
+      }
+    },
+    {
+      "name": "shellcheck",
+      "full_name": "shellcheck",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Static analysis and lint tool, for (ba)sh scripts",
+      "license": "GPL-3.0-or-later",
+      "homepage": "https://www.shellcheck.net/",
+      "versions": {
+        "stable": "0.11.0",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/koalaman/shellcheck/archive/refs/tags/v0.11.0.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "8b07554f92e4fbfc33f1539a1f475f21c6503ceae8f806efcc518b1f529f7102"
+        },
+        "head": {
+          "url": "https://github.com/koalaman/shellcheck.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "patches": [],
+      "local_patch_checksums": {},
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": 1,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 1,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any",
+              "url": "https://ghcr.io/v2/homebrew/core/shellcheck/blobs/sha256:102f7f385855df8eabf5c9017b8d729a02a5ccca810aa23e3ae700a46226ab70",
+              "sha256": "102f7f385855df8eabf5c9017b8d729a02a5ccca810aa23e3ae700a46226ab70"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": [
+        "cabal-install",
+        "ghc",
+        "pandoc"
+      ],
+      "dependencies": [
+        "gmp"
+      ],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "no_linkage_dependencies": [],
+      "uses_from_macos": [
+        "libffi"
+      ],
+      "uses_from_macos_bounds": [
+        {}
+      ],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "sbom": "/opt/homebrew/Cellar/shellcheck/0.11.0/sbom.spdx.json",
+          "version": "0.11.0",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1793701819,
+          "runtime_dependencies": [
+            {
+              "full_name": "gmp",
+              "version": "6.3.0",
+              "revision": 0,
+              "bottle_rebuild": 1,
+              "pkg_version": "6.3.0",
+              "declared_directly": true,
+              "compatibility_version": 1
+            }
+          ],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "0.11.0",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "19cbd423bc45bb2df6c05b6ca9ea15b5a5a39c3e",
+      "ruby_source_path": "Formula/s/shellcheck.rb",
+      "ruby_source_checksum": {
+        "sha256": "679919721a39399c8998750bc3650cf270b07584075196a2126f10edfbfd3058"
+      }
+    }
+  ],
+  "casks": [
+    {
+      "token": "codex",
+      "full_token": "codex",
+      "old_tokens": [],
+      "tap": "homebrew/cask",
+      "name": [
+        "Codex"
+      ],
+      "desc": "OpenAI's coding agent that runs in your terminal",
+      "homepage": "https://github.com/openai/codex",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-aarch64-apple-darwin.tar.gz",
+      "url_specs": {},
+      "version": "0.166.0",
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "installed": "0.166.0",
+      "installed_time": 1793707018,
+      "bundle_version": null,
+      "bundle_short_version": null,
+      "pinned": false,
+      "pinned_version": null,
+      "outdated": false,
+      "sha256": "55a440cb579f970abe7c79ab181e54b0ea4c419be99f333bbd868eebac9c21f0",
+      "artifacts": [
+        {
+          "binary": [
+            "bin/codex"
+          ],
+          "target": "/opt/homebrew/bin/codex"
+        },
+        {
+          "generate_completions_from_executable": [
+            "bin/codex",
+            "completion",
+            {
+              "base_name": null,
+              "shell_parameter_format": null,
+              "shells": [
+                "bash",
+                "zsh",
+                "fish"
+              ]
+            }
+          ]
+        },
+        {
+          "zap": [
+            {
+              "rmdir": "~/.codex"
+            }
+          ]
+        }
+      ],
+      "caveats": null,
+      "caveats_rosetta": null,
+      "depends_on": {},
+      "conflicts_with": null,
+      "container": null,
+      "rename": [],
+      "auto_updates": null,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "tap_git_head": "43394476f065f0f6283efa68072bb757c88398ab",
+      "languages": [],
+      "ruby_source_path": "Casks/c/codex.rb",
+      "ruby_source_checksum": {
+        "sha256": "5f45f3fc158bf2dd1fc7c82b293fe667c27c64ff5aab76b120b4f1704e589a6d"
+      }
+    },
+    {
+      "token": "ghostty",
+      "full_token": "ghostty",
+      "old_tokens": [],
+      "tap": "homebrew/cask",
+      "name": [
+        "Ghostty"
+      ],
+      "desc": "Terminal emulator that uses platform-native UI and GPU acceleration",
+      "homepage": "https://ghostty.org/",
+      "url": "https://release.files.ghostty.org/1.4.0/Ghostty.dmg",
+      "url_specs": {},
+      "version": "1.4.0",
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "installed": "1.3.1",
+      "installed_time": 1788907278,
+      "bundle_version": "18457",
+      "bundle_short_version": "1.4.0",
+      "pinned": false,
+      "pinned_version": null,
+      "outdated": false,
+      "sha256": "3a02075dbd24318d778426af41dee5507d53ecc4578ede96912ec9ce6d18d3e8",
+      "artifacts": [
+        {
+          "uninstall": [
+            {
+              "quit": "com.mitchellh.ghostty"
+            }
+          ]
+        },
+        {
+          "app": [
+            "Ghostty.app"
+          ],
+          "target": "/Applications/Ghostty.app"
+        },
+        {
+          "manpage": [
+            "/Applications/Ghostty.app/Contents/Resources/man/man5/ghostty.5"
+          ],
+          "target": "/opt/homebrew/share/man/man5/ghostty.5"
+        },
+        {
+          "manpage": [
+            "/Applications/Ghostty.app/Contents/Resources/man/man1/ghostty.1"
+          ],
+          "target": "/opt/homebrew/share/man/man1/ghostty.1"
+        },
+        {
+          "zsh_completion": [
+            "/Applications/Ghostty.app/Contents/Resources/zsh/site-functions/_ghostty"
+          ],
+          "target": "/opt/homebrew/share/zsh/site-functions/_ghostty"
+        },
+        {
+          "bash_completion": [
+            "/Applications/Ghostty.app/Contents/Resources/bash-completion/completions/ghostty.bash"
+          ],
+          "target": "/opt/homebrew/etc/bash_completion.d/ghostty"
+        },
+        {
+          "fish_completion": [
+            "/Applications/Ghostty.app/Contents/Resources/fish/vendor_completions.d/ghostty.fish"
+          ],
+          "target": "/opt/homebrew/share/fish/vendor_completions.d/ghostty.fish"
+        },
+        {
+          "zap": [
+            {
+              "trash": [
+                "~/.cache/ghostty",
+                "~/.config/ghostty",
+                "~/Library/Application Support/com.mitchellh.ghostty",
+                "~/Library/Caches/com.mitchellh.ghostty",
+                "~/Library/HTTPStorages/com.mitchellh.ghostty",
+                "~/Library/Preferences/com.mitchellh.ghostty.plist",
+                "~/Library/Saved Application State/com.mitchellh.ghostty.savedState",
+                "~/Library/WebKit/com.mitchellh.ghostty"
+              ]
+            }
+          ]
+        }
+      ],
+      "caveats": null,
+      "caveats_rosetta": null,
+      "depends_on": {
+        "macos": {
+          ">=": [
+            "13"
+          ]
+        }
+      },
+      "conflicts_with": {
+        "cask": [
+          "ghostty@tip"
+        ]
+      },
+      "container": null,
+      "rename": [],
+      "auto_updates": true,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "tap_git_head": "43394476f065f0f6283efa68072bb757c88398ab",
+      "languages": [],
+      "ruby_source_path": "Casks/g/ghostty.rb",
+      "ruby_source_checksum": {
+        "sha256": "f6d4c878645d7843175d56d430056bb80723c0cfd32009f220abbdcb7d4dc31d"
+      }
+    }
+  ]
+}

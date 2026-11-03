@@ -91,6 +91,7 @@ taert/
 │   │   ├── catalog.rs          # Known cache definitions and path catalogs
 │   │   ├── cleaner.rs          # Safe removal engine with progress events
 │   │   ├── docker.rs           # Unused Docker objects and their removal through the daemon API
+│   │   ├── homebrew.rs         # Installed Homebrew formulae and casks, sizes, and what uses them
 │   │   ├── host.rs             # System commands and root scripts, behind a trait for tests
 │   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
 │   │   ├── layout.rs           # Where a Mac keeps apps and their files

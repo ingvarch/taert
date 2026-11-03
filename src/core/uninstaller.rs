@@ -22,6 +22,7 @@ use super::apps::{
 };
 use super::cleaner::{Cleaner, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport};
 use super::history::{ItemOutcome, OutcomeKind};
+use super::homebrew;
 use super::host::{Host, Output, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
@@ -51,7 +52,6 @@ const OSASCRIPT: &str = "/usr/bin/osascript";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const DEFAULTS: &str = "/usr/bin/defaults";
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
-const BREW_PATHS: &[&str] = &["opt/homebrew/bin/brew", "usr/local/bin/brew"];
 const DOCK_DOMAIN: &str = "com.apple.dock";
 const DOCK_LISTS: &[&str] = &["persistent-apps", "persistent-others", "recent-apps"];
 const CONTAINER_METADATA: &str = ".com.apple.containermanagerd.metadata.plist";
@@ -1186,14 +1186,6 @@ impl Uninstaller<'_> {
         tally.note(format!("{name} was still running when it was removed."));
     }
 
-    fn brew(&self) -> Option<String> {
-        BREW_PATHS
-            .iter()
-            .map(|path| self.layout.system(path))
-            .find(|path| path.exists())
-            .map(|path| path.display().to_string())
-    }
-
     fn is_tracked_by_homebrew(&self, token: &str) -> bool {
         CASKROOMS
             .iter()
@@ -1202,19 +1194,11 @@ impl Uninstaller<'_> {
 
     /// Without `--zap`: the plan lists what goes, and a zap could reach further.
     fn brew_uninstall(&self, token: &str, bundle: &Path) -> BrewResult {
-        let Some(brew) = self.brew() else {
+        let Some(brew) = homebrew::find(self.layout) else {
             return BrewResult::NotTracked;
         };
-        let args = [
-            "HOMEBREW_NO_AUTO_UPDATE=1",
-            "HOMEBREW_NO_ENV_HINTS=1",
-            "NONINTERACTIVE=1",
-            &brew,
-            "uninstall",
-            "--cask",
-            token,
-        ];
-        let output = self.host.run("/usr/bin/env", &args, BREW_TIMEOUT);
+        let args = ["uninstall", "--cask", token];
+        let output = homebrew::run_brew(self.host, &brew.path, &args, BREW_TIMEOUT);
         if output.ok && is_gone(bundle) {
             BrewResult::Removed
         } else if self.is_tracked_by_homebrew(token) {

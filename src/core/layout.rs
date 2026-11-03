@@ -87,6 +87,11 @@ impl Layout {
         roots
     }
 
+    /// Where Homebrew can live, Apple Silicon first.
+    pub fn homebrew_prefixes(&self) -> Vec<PathBuf> {
+        vec![self.system("opt/homebrew"), self.system("usr/local")]
+    }
+
     pub fn volumes(&self) -> Vec<PathBuf> {
         let Ok(volumes) = std::fs::read_dir(self.system("Volumes")) else {
             return Vec::new();

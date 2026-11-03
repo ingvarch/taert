@@ -39,22 +39,23 @@ pub enum MainMenuChoice {
     ProjectCleanup, // 2
     DockerCleanup,  // 3
     UninstallApps,  // 4
-    Doctor,         // 5
-    StartupItems,   // 6
-    SlimApps,       // 7
-    Compress,       // 8
-    ExploreStorage, // 9
-    LargeFiles,     // 10
-    SystemStatus,   // 11
-    Preferences,    // 12
-    ProtectedPaths, // 13
+    Homebrew,       // 5
+    Doctor,         // 6
+    StartupItems,   // 7
+    SlimApps,       // 8
+    Compress,       // 9
+    ExploreStorage, // 0
+    LargeFiles,     // no number key
+    SystemStatus,
+    Preferences,
+    ProtectedPaths,
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
-    ("Cleanup", &[0, 1, 2, 3]),
-    ("Optimize", &[4, 5, 6, 7]),
-    ("Inspect", &[8, 9, 10]),
-    ("Settings", &[11, 12]),
+    ("Cleanup", &[0, 1, 2, 3, 4]),
+    ("Optimize", &[5, 6, 7, 8]),
+    ("Inspect", &[9, 10, 11]),
+    ("Settings", &[12, 13]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,12 @@ impl WorkspaceState {
                     "Uninstall apps",
                     "Remove apps with everything they left behind",
                     "Remove an app together with its settings, caches, login\nitems and background helpers. You'll review every file\nbefore anything is removed.",
+                ),
+                (
+                    MainMenuChoice::Homebrew,
+                    "Homebrew",
+                    "Review installed formulae and casks",
+                    "List Homebrew formulae and casks by the space they take.\nSee which ones you installed, which are only dependencies,\nand what uses them. Nothing is removed.",
                 ),
                 (
                     MainMenuChoice::Doctor,
@@ -411,6 +418,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::ProjectCleanup => theme.g.icon_projects,
         MainMenuChoice::DockerCleanup => theme.g.icon_docker,
         MainMenuChoice::UninstallApps => theme.g.icon_uninstall,
+        MainMenuChoice::Homebrew => theme.g.package,
         MainMenuChoice::Doctor => theme.g.icon_doctor,
         MainMenuChoice::StartupItems => theme.g.icon_startup,
         MainMenuChoice::SlimApps => theme.g.icon_uninstall,
@@ -577,7 +585,8 @@ fn detail_data(
         | MainMenuChoice::Compress
         | MainMenuChoice::SlimApps
         | MainMenuChoice::LargeFiles
-        | MainMenuChoice::UninstallApps => storage_summary(system, width, theme),
+        | MainMenuChoice::UninstallApps
+        | MainMenuChoice::Homebrew => storage_summary(system, width, theme),
         MainMenuChoice::ExploreStorage => {
             let mut lines = storage_summary(system, width, theme);
             lines.push(Line::default());
