@@ -2,7 +2,7 @@
 //! Includes modal confirmation dialog, live removal progress dialog with spinner,
 //! and completion outcome dialog.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -78,6 +78,8 @@ pub struct SelectState {
     pub refusals: HashMap<PathBuf, String>,
     /// What the Homebrew list was built from, so a removal can update it without reading brew.
     pub homebrew: Option<homebrew::Inventory>,
+    /// The rows of the Homebrew tree that are open, by their path of names.
+    pub expanded: HashSet<Vec<String>>,
     pub toast: Option<Toast>,
 }
 
@@ -96,6 +98,22 @@ pub enum RowKind {
     Gap,
 }
 
+/// Where a row of the Homebrew tree sits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    /// The names from the top level down to this row.
+    pub path: Vec<String>,
+    pub expandable: bool,
+    pub expanded: bool,
+}
+
+impl TreeRow {
+    /// 0 at the top level.
+    pub fn depth(&self) -> usize {
+        self.path.len() - 1
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlattenedRow {
     pub group_index: usize,
@@ -109,12 +127,20 @@ pub struct FlattenedRow {
     pub item_count: usize,
     pub created: Option<SystemTime>,
     pub more_folders: usize,
+    /// Set on the rows of the Homebrew tree, not while searching.
+    pub tree: Option<TreeRow>,
 }
 
 impl FlattenedRow {
     pub fn is_item(&self) -> bool {
         self.kind == RowKind::Item
     }
+}
+
+/// A heading and the items under it, as the item at `(group, item)` of the scan.
+struct Section {
+    group_index: usize,
+    entries: Vec<(usize, usize, Option<TreeRow>)>,
 }
 
 impl SelectState {
@@ -159,6 +185,7 @@ impl SelectState {
             modes: HashMap::new(),
             refusals: HashMap::new(),
             homebrew: None,
+            expanded: HashSet::new(),
             toast: None,
         };
         state.work_out_modes();
@@ -233,6 +260,7 @@ impl SelectState {
         }
         let mut fresh = Self::homebrew_list(&inventory).with_permanent(self.permanent);
         fresh.search_query = std::mem::take(&mut self.search_query);
+        fresh.expanded = std::mem::take(&mut self.expanded);
         if fresh.flattened_rows().is_empty() {
             // A search that matched only what went would show nothing.
             fresh.search_query.clear();
@@ -285,32 +313,90 @@ impl SelectState {
         }
     }
 
+    /// The groups with the items the search keeps.
+    fn searched_sections(&self) -> Vec<Section> {
+        let query = self.search_query.to_lowercase();
+        self.scan
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g_idx, group)| Section {
+                group_index: g_idx,
+                entries: group
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.folders().any(|folder| {
+                            folder
+                                .path
+                                .display()
+                                .to_string()
+                                .to_lowercase()
+                                .contains(&query)
+                        })
+                    })
+                    .map(|(i_idx, _)| (g_idx, i_idx, None))
+                    .collect(),
+            })
+            .filter(|section| !section.entries.is_empty() || self.search_query.is_empty())
+            .collect()
+    }
+
+    /// The Homebrew groups with the dependencies of the open rows under their formulae.
+    fn homebrew_tree_sections(&self, inventory: &homebrew::Inventory) -> Vec<Section> {
+        let mut places = HashMap::new();
+        for (g_idx, group) in self.scan.groups.iter().enumerate() {
+            for (i_idx, item) in group.items.iter().enumerate() {
+                places.insert(item.path.clone(), (g_idx, i_idx));
+            }
+        }
+        homebrew::tree_sections(inventory, &self.expanded)
+            .into_iter()
+            .filter_map(|(name, rows)| {
+                let group_index = self.scan.groups.iter().position(|g| g.tool == name)?;
+                let entries = rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let (group, item) =
+                            *places.get(Path::new(&homebrew::label(row.package)))?;
+                        let tree = TreeRow {
+                            path: row.path,
+                            expandable: row.expandable,
+                            expanded: row.expanded,
+                        };
+                        Some((group, item, Some(tree)))
+                    })
+                    .collect();
+                Some(Section {
+                    group_index,
+                    entries,
+                })
+            })
+            .collect()
+    }
+
     pub fn flattened_rows(&self) -> Vec<FlattenedRow> {
         let mut rows = Vec::new();
-
-        for (g_idx, group) in self.scan.groups.iter().enumerate() {
-            let matching_items: Vec<(usize, &_)> = group
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| {
-                    let query = self.search_query.to_lowercase();
-                    item.folders().any(|folder| {
-                        folder
-                            .path
-                            .display()
-                            .to_string()
-                            .to_lowercase()
-                            .contains(&query)
-                    })
-                })
-                .collect();
-
-            if matching_items.is_empty() && !self.search_query.is_empty() {
-                continue;
+        let sections = match &self.homebrew {
+            Some(inventory) if self.search_query.is_empty() => {
+                self.homebrew_tree_sections(inventory)
             }
+            _ => self.searched_sections(),
+        };
 
-            let group_bytes: u64 = matching_items.iter().map(|(_, it)| it.size_bytes).sum();
+        for section in sections {
+            let g_idx = section.group_index;
+            let group = &self.scan.groups[g_idx];
+            let top_level = || {
+                section
+                    .entries
+                    .iter()
+                    .filter(|(_, _, tree)| tree.as_ref().is_none_or(|tree| tree.depth() == 0))
+                    .map(|&(g, i, _)| &self.scan.groups[g].items[i])
+            };
+            let group_bytes: u64 = top_level().map(|item| item.size_bytes).sum();
+            let item_count = top_level().count();
             let heading_row = |kind| FlattenedRow {
                 group_index: g_idx,
                 item_index: None,
@@ -323,6 +409,7 @@ impl SelectState {
                 item_count: 0,
                 created: None,
                 more_folders: 0,
+                tree: None,
             };
 
             if !rows.is_empty() {
@@ -336,17 +423,13 @@ impl SelectState {
                 kind: RowKind::Section,
                 group_name: group.tool.clone(),
                 size_bytes: group_bytes,
-                display_path: format!(
-                    "{} items · {}",
-                    matching_items.len(),
-                    format_bytes(group_bytes)
-                ),
-                is_selected: matching_items.iter().all(|(_, it)| it.selected)
-                    && !matching_items.is_empty(),
+                display_path: format!("{} items · {}", item_count, format_bytes(group_bytes)),
+                is_selected: top_level().all(|item| item.selected) && item_count > 0,
                 full_path: None,
-                item_count: matching_items.len(),
+                item_count,
                 created: None,
                 more_folders: 0,
+                tree: None,
             });
 
             if self.sort_order.is_some() {
@@ -363,12 +446,13 @@ impl SelectState {
             }
 
             // Group items
-            for (i_idx, item) in matching_items {
+            for (item_group, i_idx, tree) in section.entries {
+                let item = &self.scan.groups[item_group].items[i_idx];
                 rows.push(FlattenedRow {
-                    group_index: g_idx,
+                    group_index: item_group,
                     item_index: Some(i_idx),
                     kind: RowKind::Item,
-                    group_name: group.tool.clone(),
+                    group_name: self.scan.groups[item_group].tool.clone(),
                     size_bytes: item.size_bytes,
                     display_path: prettify_path(&item.path),
                     is_selected: item.selected,
@@ -376,6 +460,7 @@ impl SelectState {
                     item_count: 0,
                     created: item.modified,
                     more_folders: item.also.len(),
+                    tree,
                 });
             }
 
@@ -401,7 +486,48 @@ impl SelectState {
         self.scan.groups.get(group)?.items.get(item)
     }
 
-    /// The formula Enter uninstalls on the Homebrew list, if the focused row allows it.
+    fn focused_tree(&self) -> Option<TreeRow> {
+        self.flattened_rows().get(self.focused_index)?.tree.clone()
+    }
+
+    /// Enter on the Homebrew list: opens or closes the focused row.
+    pub fn toggle_focused(&mut self) {
+        let Some(tree) = self.focused_tree().filter(|tree| tree.expandable) else {
+            return;
+        };
+        if !self.expanded.remove(&tree.path) {
+            self.expanded.insert(tree.path);
+        }
+    }
+
+    /// Right on the Homebrew list: opens the focused row.
+    pub fn expand_focused(&mut self) {
+        if let Some(tree) = self.focused_tree().filter(|tree| tree.expandable) {
+            self.expanded.insert(tree.path);
+        }
+    }
+
+    /// Left on the Homebrew list: closes the focused row, or moves to its parent.
+    pub fn collapse_focused(&mut self) {
+        let Some(tree) = self.focused_tree() else {
+            return;
+        };
+        if tree.expandable && tree.expanded {
+            self.expanded.remove(&tree.path);
+        } else if tree.depth() > 0 {
+            let parent = &tree.path[..tree.depth()];
+            let rows = self.flattened_rows();
+            if let Some(index) = rows[..self.focused_index]
+                .iter()
+                .rposition(|row| row.tree.as_ref().is_some_and(|t| t.path == parent))
+            {
+                self.focused_index = index;
+                self.path_scroll = 0;
+            }
+        }
+    }
+
+    /// The formula D uninstalls on the Homebrew list, if the focused row allows it.
     fn removable(&self) -> Option<&str> {
         let item = self.focused_item()?;
         if self.refusals.contains_key(&item.path) {
@@ -410,7 +536,7 @@ impl SelectState {
         uninstall_name(item)
     }
 
-    /// Enter on the Homebrew list: says why the focused row stays, or asks to remove only it.
+    /// D on the Homebrew list: says why the focused row stays, or asks to remove only it.
     pub fn uninstall_focused(&mut self) {
         for item in self
             .scan
@@ -617,9 +743,19 @@ impl SelectState {
 
 /// The primary action of the Homebrew list for the focused row.
 pub fn homebrew_primary<'a>(state: &SelectState, enter: &'a str) -> PrimaryAction<'a> {
-    match state.removable() {
-        Some(name) => PrimaryAction::new(format!("Uninstall {name}"), enter),
-        None => PrimaryAction::disabled("Uninstall", enter),
+    match state.focused_tree().filter(|tree| tree.expandable) {
+        Some(tree) if tree.expanded => PrimaryAction::new("Collapse", enter),
+        Some(_) => PrimaryAction::new("Expand", enter),
+        None => PrimaryAction::disabled("Expand", enter),
+    }
+}
+
+/// The disclosure mark of a tree row.
+fn tree_mark(tree: &TreeRow) -> char {
+    match (tree.expandable, tree.expanded) {
+        (false, _) => ' ',
+        (true, false) => '▸',
+        (true, true) => '▾',
     }
 }
 
@@ -828,7 +964,13 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                     theme.body(),
                 )]
             } else if single_row {
-                label_spans(&row.display_path, theme)
+                let mut spans = label_spans(&row.display_path, theme);
+                if let Some(tree) = row.tree.as_ref().filter(|tree| tree.depth() > 0) {
+                    let indent = "  ".repeat(tree.depth() - 1);
+                    let mark = Span::styled(tree_mark(tree).to_string(), theme.callout());
+                    spans.splice(0..0, [Span::raw(indent), mark, Span::raw(" ")]);
+                }
+                spans
             } else if let Some(path) = &row.full_path {
                 let max_len = row_width.saturating_sub(20);
                 let mut spans = row_path_spans(path, row.more_folders, max_len, theme);
@@ -859,11 +1001,15 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             };
 
             let mut list_row = ListRow::new(title_spans)
-                .leading(if single_row {
-                    Span::raw(" ")
-                } else {
-                    Span::styled(bullet, bullet_style)
-                })
+                .leading(
+                    if let Some(tree) = row.tree.as_ref().filter(|tree| tree.depth() == 0) {
+                        Span::styled(tree_mark(tree).to_string(), theme.callout())
+                    } else if single_row {
+                        Span::raw(" ")
+                    } else {
+                        Span::styled(bullet, bullet_style)
+                    },
+                )
                 .detail(detail)
                 .selected(is_focused);
 
@@ -1005,7 +1151,11 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
 
     let mut hints = Vec::new();
     if has_items && state.is_single_row_list() {
-        hints.extend([Hint::new("/", "Search"), Hint::new("↑↓", "Move")]);
+        hints.extend([
+            Hint::new("/", "Search"),
+            Hint::new("↑↓", "Move"),
+            Hint::new("D", "Uninstall"),
+        ]);
     } else if has_items {
         hints.extend([
             Hint::new("␣", "Select"),

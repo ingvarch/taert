@@ -89,6 +89,7 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 - **Running brew**: only through `Host`, as `/usr/bin/env` with `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ENV_HINTS=1`, and `NONINTERACTIVE=1`, so brew neither updates itself nor asks questions.
 - **One call**: `brew info --json=v2 --installed` with a 60 second timeout. A failed call or output taert cannot parse is an error, never an empty list. In the list opened from the main menu, a failed read shows as this message instead of rows.
 - **Used by**: worked out from the dependencies in that same JSON. A formula is used by every installed formula that lists its name or full name. taert never calls `brew uses`, which is slow.
+- **Tree**: the terminal list is built from the `dependencies` of that same JSON, with no new call. `top_level` splits the formulae into those installed on request, those nothing installed needs (found by following `dependencies` from the requested ones), and the rest. `dependencies_of` gives the installed children of a formula, matched by name or full name, largest first. `tree_sections` lists the rows. Each row is keyed by its path of names from the top, so a dependency under two formulae opens on its own, and a name that repeats in its own path does not open. `SelectState` keeps the open paths.
 - **Sizes**: `DirSizer` measures `<prefix>/Cellar/<name>` for a formula and `<prefix>/Caskroom/<token>` for a cask.
 
 ### Cleanup
@@ -105,11 +106,11 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 
 ### Remove one formula
 
-`taert brew uninstall <name>` and the Enter key on the Homebrew list remove one formula through the same `homebrew::run_task` path as the cleanup. There is no second removal path. `uninstall_plan`, `refusal`, and the list run no removing call.
+`taert brew uninstall <name>` and the `D` key on the Homebrew list remove one formula through the same `homebrew::run_task` path as the cleanup. There is no second removal path. `uninstall_plan`, `refusal`, and the list run no removing call.
 
 - **Plan**: `uninstall_plan` makes one `brew info` call, finds a formula by name or full name first and a cask by token second, and returns a scan with one selected row that carries a `BrewTask::Uninstall`.
 - **Refusals**: `refusal` is the one place that decides. In this order: a cask, a pinned formula, a formula that other formulae use. The CLI prints its text as an error. The TUI shows it on the screen and opens no question. The text for a formula in use comes from one function that `run_task` shares, so the two never differ.
-- **The list carries tasks**: `Inventory` remembers the brew that listed the packages, so `list_scan` puts a `BrewTask::Uninstall` on every formula row. A cask row has none. The list keeps one row per package with no check marks, and Enter selects the focused row alone before it opens the existing confirm dialog. `list_refusals` gives the TUI the refusal of each row by its label.
+- **The list carries tasks**: `Inventory` remembers the brew that listed the packages, so `list_scan` puts a `BrewTask::Uninstall` on every formula row. A cask row has none. The scan keeps one item per package (the tree may show it in several rows), with no check marks. `D` selects the focused row alone before it opens the existing confirm dialog. `list_refusals` gives the TUI the refusal of each row by its label.
 - **After the removal**: when the outcome dialog closes, the removed formula leaves the list and the formulae it used are updated (`Inventory::forget`), without reading Homebrew again. The list keeps the inventory it was built from. Opening the list from the menu, or running `taert brew`, reads Homebrew again.
 
 ## Orphaned App Files

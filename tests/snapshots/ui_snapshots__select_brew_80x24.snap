@@ -4,11 +4,14 @@ expression: narrow
 ---
  taert › Homebrew                                       5 packages  ·  365.2 MB
 ────────────────────────────────────────────────────────────────────────────────
-   ╭─ Formulae ───────────────────────────────────────── 4 items · 315.2 MB ─╮
+   ╭─ Formulae ───────────────────────────────────────── 3 items · 312.1 MB ─╮
    │ ▌   go 1.27.3 · on request · used by 2                         250.1 MB │
    │     bun 1.4.2 · on request · outdated                           60.0 MB │
-   │     ada-url 4.0.0_1 · dependency                                 3.1 MB │
    │     fd 10.5.0 · on request · pinned                              2.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Not needed by anything you installed ──────────────── 1 item · 3.1 MB ─╮
+   │     ada-url 4.0.0_1 · dependency                                 3.1 MB │
    ╰─────────────────────────────────────────────────────────────────────────╯
 
    ╭─ Casks · Remove with taert uninstall ──────────────── 1 item · 50.0 MB ─╮
@@ -21,8 +24,5 @@ expression: narrow
 
 
 
-
-
-
 ────────────────────────────────────────────────────────────────────────────────
-  /  Search    ↑↓  Move    ⎋  Back    ?  More                     Uninstall  ↵
+  /  Search    ↑↓  Move    D  Uninstall    ⎋  Back    ?  More        Expand  ↵

@@ -1242,19 +1242,59 @@ fn snapshot_select_brew() {
     assert_snapshot!("select_brew_80x24", narrow);
 }
 
-#[test]
-fn snapshot_select_brew_removable_formula() {
-    let mut state = brew_list();
+/// `golangci-lint` open two levels deep: its `go`, and the `gmp` that `go` needs.
+fn brew_tree() -> SelectState {
+    let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);
+    let mut lint = formula("golangci-lint", "2.1.6", 120_000_000);
+    lint.dependencies = vec!["go".to_string(), "pcre2".to_string()];
+    let mut go = formula("go", "1.27.3", 250_100_000);
+    go.used_by = vec!["golangci-lint".to_string()];
+    go.dependencies = vec!["gmp".to_string()];
+    let mut pcre2 = formula("pcre2", "10.45", 6_000_000);
+    pcre2.on_request = false;
+    pcre2.used_by = vec!["golangci-lint".to_string()];
+    let mut gmp = formula("gmp", "6.3.0", 3_000_000);
+    gmp.on_request = false;
+    gmp.used_by = vec!["go".to_string()];
+    let mut ada = formula("ada-url", "4.0.0_1", 3_100_000);
+    ada.on_request = false;
+    let bun = formula("bun", "1.4.2", 60_000_000);
+    let ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
+    let mut state = SelectState::homebrew_list(&Inventory {
+        packages: vec![go, lint, bun, ghostty, pcre2, ada, gmp],
+        brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+        ..Inventory::default()
+    });
+    for path in [&["golangci-lint"][..], &["golangci-lint", "go"]] {
+        state
+            .expanded
+            .insert(path.iter().map(|name| name.to_string()).collect());
+    }
     state.focused_index = state
         .flattened_rows()
         .iter()
-        .position(|row| row.is_item() && row.display_path.starts_with("bun "))
+        .position(|row| row.is_item() && row.display_path.starts_with("golangci-lint "))
         .unwrap();
+    state
+}
+
+#[test]
+fn snapshot_select_brew_tree() {
+    let state = brew_tree();
     let theme = snapshot_theme();
 
-    assert_snapshot!("select_brew_removable_120x32", select_screen(&state));
+    assert_snapshot!("select_brew_tree_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
-    assert_snapshot!("select_brew_removable_80x24", narrow);
+    assert_snapshot!("select_brew_tree_80x24", narrow);
+}
+
+#[test]
+fn a_nested_tree_mark_has_the_color_of_a_top_level_one() {
+    let theme = snapshot_theme();
+    let screen = cells_at(&brew_tree(), 120, 32, &theme);
+
+    assert_eq!(color_of(&screen, "▸ go 1"), theme.p.secondary);
+    assert_eq!(color_of(&screen, "▾ go 1"), theme.p.secondary);
 }
 
 fn brew_cleanup_row(label: &str, size: u64, uninstall: bool) -> ScanItem {

@@ -1,7 +1,7 @@
 //! Lists the Homebrew packages and the space they take, and removes unused ones through brew.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -24,6 +24,8 @@ const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const GROUP_FORMULA: &str = "Formula";
 const GROUP_FORMULAE: &str = "Formulae";
+const GROUP_UNNEEDED: &str = "Not needed by anything you installed";
+const GROUP_NEEDED: &str = "Needed by what you installed";
 const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
 const GROUP_UNUSED: &str = "Unused dependencies";
 const GROUP_OLD: &str = "Old versions";
@@ -337,7 +339,7 @@ pub fn label_name(label: &str) -> &str {
     label.split_once(" · ").map_or(label, |(name, _)| name)
 }
 
-fn label(package: &Package) -> String {
+pub fn label(package: &Package) -> String {
     let mut label = name_version(package);
     match package.kind {
         PackageKind::Formula => {
@@ -388,8 +390,139 @@ fn uninstall_task(package: &Package, brew: &Path) -> BrewTask {
     }
 }
 
+/// The packages of the list in the order of the inventory, split the way the tree shows them.
+pub struct TopLevel<'a> {
+    /// The formulae installed on request.
+    pub requested: Vec<&'a Package>,
+    /// Formulae not installed on request that no requested formula needs.
+    pub unneeded: Vec<&'a Package>,
+    /// The other formulae: they show only inside the tree.
+    pub needed: Vec<&'a Package>,
+    pub casks: Vec<&'a Package>,
+}
+
+/// The installed formulae that `package` lists as dependencies, largest first.
+pub fn dependencies_of<'a>(inventory: &'a Inventory, package: &Package) -> Vec<&'a Package> {
+    let mut children: Vec<&Package> = inventory
+        .packages
+        .iter()
+        .filter(|candidate| candidate.kind == PackageKind::Formula)
+        .filter(|candidate| {
+            package
+                .dependencies
+                .iter()
+                .any(|dependency| is_named(candidate, dependency))
+        })
+        .collect();
+    children
+        .sort_by(|a, b| (Reverse(a.size_bytes), &a.name).cmp(&(Reverse(b.size_bytes), &b.name)));
+    children
+}
+
+pub fn top_level(inventory: &Inventory) -> TopLevel<'_> {
+    let formulae = || {
+        inventory
+            .packages
+            .iter()
+            .filter(|package| package.kind == PackageKind::Formula)
+    };
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut pending: Vec<&Package> = formulae().filter(|package| package.on_request).collect();
+    while let Some(package) = pending.pop() {
+        for child in dependencies_of(inventory, package) {
+            if reached.insert(&child.name) {
+                pending.push(child);
+            }
+        }
+    }
+
+    let mut top = TopLevel {
+        requested: Vec::new(),
+        unneeded: Vec::new(),
+        needed: Vec::new(),
+        casks: Vec::new(),
+    };
+    for package in formulae() {
+        if package.on_request {
+            top.requested.push(package);
+        } else if reached.contains(package.name.as_str()) {
+            top.needed.push(package);
+        } else {
+            top.unneeded.push(package);
+        }
+    }
+    top.casks = inventory
+        .packages
+        .iter()
+        .filter(|package| package.kind == PackageKind::Cask)
+        .collect();
+    top
+}
+
+/// One row of the tree: a package at a place, named by the path of names from the top.
+pub struct TreeEntry<'a> {
+    pub package: &'a Package,
+    pub path: Vec<String>,
+    pub expandable: bool,
+    pub expanded: bool,
+}
+
+fn push_branch<'a>(
+    inventory: &'a Inventory,
+    package: &'a Package,
+    parent: &[String],
+    expanded: &HashSet<Vec<String>>,
+    rows: &mut Vec<TreeEntry<'a>>,
+) {
+    let mut path = parent.to_vec();
+    path.push(package.name.clone());
+    // A formula inside its own branch is a cycle: it shows, but does not open.
+    let children = if parent.contains(&package.name) {
+        Vec::new()
+    } else {
+        dependencies_of(inventory, package)
+    };
+    let open = !children.is_empty() && expanded.contains(&path);
+    rows.push(TreeEntry {
+        package,
+        path: path.clone(),
+        expandable: !children.is_empty(),
+        expanded: open,
+    });
+    if open {
+        for child in children {
+            push_branch(inventory, child, &path, expanded, rows);
+        }
+    }
+}
+
+/// The rows of each top-level group, with the dependencies of the open rows inside. The name is
+/// the one of the group in `list_scan`.
+pub fn tree_sections<'a>(
+    inventory: &'a Inventory,
+    expanded: &HashSet<Vec<String>>,
+) -> Vec<(&'static str, Vec<TreeEntry<'a>>)> {
+    let top = top_level(inventory);
+    [
+        (GROUP_FORMULAE, top.requested),
+        (GROUP_UNNEEDED, top.unneeded),
+        (GROUP_CASKS, top.casks),
+    ]
+    .into_iter()
+    .filter(|(_, packages)| !packages.is_empty())
+    .map(|(name, packages)| {
+        let mut rows = Vec::new();
+        for package in packages {
+            push_branch(inventory, package, &[], expanded, &mut rows);
+        }
+        (name, rows)
+    })
+    .collect()
+}
+
 /// The packages as a list to browse. A formula row carries the task that removes it, and no row
-/// starts selected.
+/// starts selected. The group of formulae that others need holds the ones that show only inside
+/// the tree.
 pub fn list_scan(inventory: &Inventory) -> CategoryScan {
     let row = |package: &Package| {
         let task = match (package.kind, &inventory.brew) {
@@ -398,18 +531,16 @@ pub fn list_scan(inventory: &Inventory) -> CategoryScan {
         };
         item(label(package), package.size_bytes, false, task)
     };
-    let group = |tool: &str, kind: PackageKind| ToolGroup {
+    let top = top_level(inventory);
+    let group = |tool: &str, packages: &[&Package]| ToolGroup {
         tool: tool.to_string(),
-        items: inventory
-            .packages
-            .iter()
-            .filter(|package| package.kind == kind)
-            .map(row)
-            .collect(),
+        items: packages.iter().map(|package| row(package)).collect(),
     };
     let groups = [
-        group(GROUP_FORMULAE, PackageKind::Formula),
-        group(GROUP_CASKS, PackageKind::Cask),
+        group(GROUP_FORMULAE, &top.requested),
+        group(GROUP_UNNEEDED, &top.unneeded),
+        group(GROUP_NEEDED, &top.needed),
+        group(GROUP_CASKS, &top.casks),
     ]
     .into_iter()
     .filter(|group| !group.items.is_empty())
@@ -891,6 +1022,10 @@ mod tests {
             .unwrap_or_else(|| panic!("no package {name}"))
     }
 
+    fn names(packages: &[&Package]) -> Vec<String> {
+        packages.iter().map(|p| p.name.clone()).collect()
+    }
+
     fn fill(folder: &Path, bytes: usize) {
         fs::create_dir_all(folder).unwrap();
         fs::write(folder.join("data"), vec![1_u8; bytes]).unwrap();
@@ -1200,9 +1335,194 @@ mod tests {
         assert_eq!(scan.title, "Homebrew");
         assert_eq!(scan.notes, ["a note"]);
         let tools: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
-        assert_eq!(tools, ["Formulae", "Casks · Remove with taert uninstall"]);
-        assert_eq!(scan.groups[0].items.len(), 10);
+        assert_eq!(
+            tools,
+            [
+                "Formulae",
+                "Not needed by anything you installed",
+                "Casks · Remove with taert uninstall"
+            ]
+        );
+        assert_eq!(scan.groups[0].items.len(), 8);
         assert_eq!(scan.groups[1].items.len(), 2);
+        assert_eq!(scan.groups[2].items.len(), 2);
+    }
+
+    #[test]
+    fn list_scan_keeps_the_dependencies_you_need_in_a_group_of_their_own() {
+        let mut lib = package(PackageKind::Formula, "lib", "1", 10);
+        lib.on_request = false;
+        let mut app = package(PackageKind::Formula, "app", "1", 20);
+        app.dependencies = vec!["lib".to_string()];
+
+        let scan = list_scan(&Inventory {
+            packages: vec![app, lib],
+            ..Inventory::default()
+        });
+
+        let tools: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
+        assert_eq!(tools, ["Formulae", "Needed by what you installed"]);
+        assert_eq!(
+            scan.groups[1].items[0].path,
+            Path::new("lib 1 · dependency")
+        );
+    }
+
+    #[test]
+    fn the_top_level_holds_the_formulae_you_installed_and_the_ones_nothing_needs() {
+        let inventory = Inventory {
+            packages: packages(),
+            ..Inventory::default()
+        };
+
+        let top = top_level(&inventory);
+
+        assert_eq!(
+            names(&top.requested),
+            [
+                "actionlint",
+                "bun",
+                "crush",
+                "fd",
+                "go",
+                "golangci-lint",
+                "gosec",
+                "shellcheck"
+            ]
+        );
+        assert_eq!(names(&top.unneeded), ["ada-url", "brotli"]);
+        assert!(top.needed.is_empty());
+        assert_eq!(top.casks.len(), 2);
+    }
+
+    #[test]
+    fn a_dependency_of_a_dependency_you_installed_is_needed() {
+        let formula = |name: &str, on_request: bool, dependencies: &[&str]| {
+            let mut package = package(PackageKind::Formula, name, "1", 1);
+            package.on_request = on_request;
+            package.dependencies = dependencies.iter().map(|d| d.to_string()).collect();
+            package
+        };
+        let inventory = Inventory {
+            packages: vec![
+                formula("app", true, &["mid"]),
+                formula("mid", false, &["leaf"]),
+                formula("leaf", false, &[]),
+                formula("orphan", false, &["leaf"]),
+            ],
+            ..Inventory::default()
+        };
+
+        let top = top_level(&inventory);
+
+        assert_eq!(names(&top.requested), ["app"]);
+        assert_eq!(names(&top.needed), ["mid", "leaf"]);
+        assert_eq!(names(&top.unneeded), ["orphan"]);
+    }
+
+    #[test]
+    fn the_children_are_the_installed_dependencies_largest_first() {
+        let mut packages = packages();
+        for (name, bytes) in [("go", 5_000), ("shellcheck", 700)] {
+            packages
+                .iter_mut()
+                .find(|p| p.name == name)
+                .unwrap()
+                .size_bytes = bytes;
+        }
+        let inventory = Inventory {
+            packages,
+            ..Inventory::default()
+        };
+        let children = |name: &str| {
+            names(&dependencies_of(
+                &inventory,
+                named(&inventory.packages, name),
+            ))
+        };
+
+        assert_eq!(children("actionlint"), ["shellcheck"]);
+        assert_eq!(children("golangci-lint"), ["go"]);
+        assert_eq!(children("gosec"), ["go"]);
+        assert!(children("go").is_empty());
+        // gmp and fmt are not installed.
+        assert!(children("shellcheck").is_empty());
+        assert!(children("ada-url").is_empty());
+    }
+
+    #[test]
+    fn the_children_are_found_by_the_full_name_too() {
+        let mut tool = package(PackageKind::Formula, "tool", "1", 1);
+        tool.dependencies = vec!["user/tap/lib".to_string(), "small".to_string()];
+        let mut lib = package(PackageKind::Formula, "lib", "1", 9);
+        lib.full_name = "user/tap/lib".to_string();
+        let small = package(PackageKind::Formula, "small", "1", 2);
+        let inventory = Inventory {
+            packages: vec![tool.clone(), lib, small],
+            ..Inventory::default()
+        };
+
+        assert_eq!(names(&dependencies_of(&inventory, &tool)), ["lib", "small"]);
+    }
+
+    #[test]
+    fn the_children_are_sorted_by_size_whatever_the_inventory_order() {
+        let mut tool = package(PackageKind::Formula, "tool", "1", 1);
+        tool.dependencies = vec!["small".to_string(), "lib".to_string()];
+        let small = package(PackageKind::Formula, "small", "1", 2);
+        let lib = package(PackageKind::Formula, "lib", "1", 9);
+        let inventory = Inventory {
+            packages: vec![tool.clone(), small, lib],
+            ..Inventory::default()
+        };
+
+        assert_eq!(names(&dependencies_of(&inventory, &tool)), ["lib", "small"]);
+    }
+
+    #[test]
+    fn tree_sections_open_the_expanded_paths_and_stop_at_a_cycle() {
+        let mut a = package(PackageKind::Formula, "a", "1", 9_000);
+        a.dependencies = vec!["b".to_string(), "lib".to_string()];
+        let mut b = package(PackageKind::Formula, "b", "1", 5_000);
+        b.on_request = false;
+        b.dependencies = vec!["a".to_string(), "lib".to_string()];
+        let mut lib = package(PackageKind::Formula, "lib", "1", 100);
+        lib.on_request = false;
+        let inventory = Inventory {
+            packages: vec![a, b, lib],
+            ..Inventory::default()
+        };
+        let path =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        // The repeated `a` and the leaf `lib` are asked to open too.
+        let expanded: HashSet<Vec<String>> = [
+            path(&["a"]),
+            path(&["a", "b"]),
+            path(&["a", "b", "a"]),
+            path(&["a", "lib"]),
+        ]
+        .into_iter()
+        .collect();
+
+        let sections = tree_sections(&inventory, &expanded);
+
+        let groups: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
+        assert_eq!(groups, ["Formulae"]);
+        let rows: Vec<(Vec<String>, bool, bool)> = sections[0]
+            .1
+            .iter()
+            .map(|row| (row.path.clone(), row.expandable, row.expanded))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (path(&["a"]), true, true),
+                (path(&["a", "b"]), true, true),
+                (path(&["a", "b", "a"]), false, false),
+                (path(&["a", "b", "lib"]), false, false),
+                (path(&["a", "lib"]), false, false),
+            ]
+        );
     }
 
     fn rows(scan: &CategoryScan) -> Vec<(String, u64)> {
@@ -2212,18 +2532,16 @@ Would remove: /opt/homebrew/Cellar/go/1.0
 
         let scan = list_scan(&inventory);
 
-        let formulae: Vec<&Package> = inventory
-            .packages
+        let top = top_level(&inventory);
+        let tasks: Vec<_> = scan.groups[..2]
             .iter()
-            .filter(|package| package.kind == PackageKind::Formula)
-            .collect();
-        let tasks: Vec<_> = scan.groups[0]
-            .items
-            .iter()
+            .flat_map(|group| &group.items)
             .map(|i| i.brew.clone())
             .collect();
-        let expected: Vec<_> = formulae
+        let expected: Vec<_> = top
+            .requested
             .iter()
+            .chain(&top.unneeded)
             .map(|package| {
                 Some(BrewTask::Uninstall {
                     name: package.name.clone(),
@@ -2233,7 +2551,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
             })
             .collect();
         assert_eq!(tasks, expected);
-        assert!(scan.groups[1].items.iter().all(|item| item.brew.is_none()));
+        assert!(scan.groups[2].items.iter().all(|item| item.brew.is_none()));
         assert!(
             scan.groups
                 .iter()
