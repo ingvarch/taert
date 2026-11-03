@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Homebrew sorting**: `⇧S`, `⇧N`, and `⇧D` sort the Homebrew list by size, name, or install date, at the top level, inside open rows, and in search results. An `INSTALLED` column shows when each package was installed. The order is not saved.
+
 ### Changed
 - **Explore Storage**: a folder that changed since your last visit, or that was cached more than 15 minutes ago, opens at once with `Updating…` and is measured again in the background. Its rows change when the new sizes are in.
+- **Homebrew list**: `⇧D` now sorts by install date. `d`, `Backspace`, and `Delete` uninstall the focused formula.
 
 ### Fixed
 - **Slim apps**: on a Mac that is not Apple Silicon, the interface leaves the scanning screen and shows why under the name `Slim Universal Apps`.

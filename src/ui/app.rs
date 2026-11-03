@@ -779,7 +779,7 @@ impl App {
                     KeyCode::Left if state.scan.id == homebrew::SCAN_ID => {
                         state.collapse_focused();
                     }
-                    KeyCode::Char('D' | 'd') | KeyCode::Backspace | KeyCode::Delete
+                    KeyCode::Char('d') | KeyCode::Backspace | KeyCode::Delete
                         if state.scan.id == homebrew::SCAN_ID =>
                     {
                         state.uninstall_focused();
@@ -1232,13 +1232,13 @@ impl App {
             hints.push(Hint::new("?", "Toggle help"));
             HelpSection::new("General", hints)
         };
-        let sort_section = || {
+        let sort_section = |date: &'static str| {
             HelpSection::new(
                 "Sort by",
                 vec![
                     Hint::new("⇧S", "Size"),
                     Hint::new("⇧N", "Name"),
-                    Hint::new("⇧D", "Date created"),
+                    Hint::new("⇧D", date),
                 ],
             )
         };
@@ -1269,22 +1269,24 @@ impl App {
             ],
             Screen::Select(state) if state.is_single_row_list() => {
                 let mut hints = vec![Hint::new("/", "Search")];
-                if state
+                let has_rows = state
                     .scan
                     .groups
                     .iter()
-                    .any(|group| !group.items.is_empty())
-                {
+                    .any(|group| !group.items.is_empty());
+                if has_rows {
                     hints.extend([
                         Hint::new("↵ / →", "Expand"),
                         Hint::new("↵ / ←", "Collapse"),
                         Hint::new("D / ⌫", "Uninstall"),
                     ]);
                 }
-                vec![
-                    HelpSection::new("Homebrew", hints),
-                    general(vec![navigate, back]),
-                ]
+                let mut sections = vec![HelpSection::new("Homebrew", hints)];
+                if has_rows {
+                    sections.push(sort_section("Date installed"));
+                }
+                sections.push(general(vec![navigate, back]));
+                sections
             }
             Screen::Select(state) => {
                 let enter = match state.scan.id.as_str() {
@@ -1304,7 +1306,7 @@ impl App {
                 hints.push(Hint::new("↵", enter));
                 let mut sections = vec![HelpSection::new("Select items", hints)];
                 if state.sort_order.is_some() {
-                    sections.push(sort_section());
+                    sections.push(sort_section("Date created"));
                 }
                 sections.push(general(vec![navigate, back]));
                 sections
@@ -1322,7 +1324,7 @@ impl App {
                         Hint::new("D / ⌫", "Delete selected"),
                     ],
                 ),
-                sort_section(),
+                sort_section("Date created"),
                 general(vec![navigate, Hint::new("q", "Quit explore")]),
             ],
             Screen::SystemStatus(state) => {
@@ -2196,6 +2198,7 @@ mod tests {
 
         let table = select_app(scan_with_id(docker::SCAN_ID));
         assert_eq!(titles(&table), ["Select items", "Sort by", "General"]);
+        assert_eq!(help_row(&table, "Date created"), Some("⇧D"));
 
         let list = select_app(scan_with_id("dev"));
         assert_eq!(titles(&list), ["Select items", "General"]);
@@ -2212,6 +2215,7 @@ mod tests {
 
         let keys: Vec<_> = sections[1].shortcuts.iter().map(|h| h.key).collect();
         assert_eq!(keys, ["⇧S", "⇧N", "⇧D"]);
+        assert_eq!(help_row(&app, "Date created"), Some("⇧D"));
     }
 
     #[test]
@@ -4028,6 +4032,7 @@ mod tests {
         use crate::core::sizer::DirSizer;
         use crate::ui::components::toast::ToastKind;
         use crate::ui::select::RowKind;
+        use std::time::SystemTime;
 
         const BREW_START: &str =
             "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1";
@@ -4146,12 +4151,195 @@ mod tests {
         }
 
         #[test]
-        fn the_list_keeps_the_order_of_the_scan_and_is_not_a_table() {
+        fn the_list_starts_as_a_table_sorted_by_size() {
             let app = brew_app();
 
-            assert!(select(&app).sort_order.is_none());
-            let first = &select(&app).scan.groups[0].items[0];
-            assert!(first.path.to_string_lossy().starts_with("fd "));
+            assert_eq!(select(&app).sort_order, Some(SortOrder::Size));
+            assert_eq!(shown(&app), ["  go", "  fd", "  ghostty"]);
+            assert_eq!(focused_path(&app), ["go"]);
+        }
+
+        fn days_ago(days: u64) -> Option<SystemTime> {
+            Some(SystemTime::now() - Duration::from_secs(days * 24 * 3600))
+        }
+
+        fn dated(kind: PackageKind, name: &str, bytes: u64, days: Option<u64>) -> Package {
+            let mut package = package(kind, name, bytes);
+            package.installed_at = days.and_then(days_ago);
+            package
+        }
+
+        fn sorted_app() -> App {
+            brew_list_app(&Inventory {
+                packages: vec![
+                    dated(PackageKind::Formula, "bun", 5_000, Some(1)),
+                    dated(PackageKind::Formula, "zed", 9_000, Some(30)),
+                    dated(PackageKind::Formula, "act", 1_000, None),
+                    dated(PackageKind::Cask, "zcask", 9_000, Some(2)),
+                    dated(PackageKind::Cask, "acask", 100, Some(10)),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            })
+        }
+
+        #[test]
+        fn shift_letters_sort_the_homebrew_list() {
+            let mut app = sorted_app();
+
+            app.handle_key(KeyCode::Char('N'));
+            assert_eq!(
+                shown(&app),
+                ["  act", "  bun", "  zed", "  acask", "  zcask"]
+            );
+            app.handle_key(KeyCode::Char('D'));
+            assert_eq!(
+                shown(&app),
+                ["  bun", "  zed", "  act", "  zcask", "  acask"]
+            );
+            app.handle_key(KeyCode::Char('S'));
+            assert_eq!(
+                shown(&app),
+                ["  zed", "  bun", "  act", "  zcask", "  acask"]
+            );
+        }
+
+        #[test]
+        fn shift_d_sorts_and_d_uninstalls() {
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+
+            app.handle_key(KeyCode::Char('D'));
+
+            let state = select(&app);
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert!(state.toast.is_none());
+            assert_eq!(selected(&app), 0);
+            assert_eq!(state.sort_order, Some(SortOrder::Date));
+            app.handle_key(KeyCode::Char('d'));
+            assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
+        }
+
+        #[test]
+        fn the_sort_keys_do_not_work_while_typing_a_search() {
+            let mut app = sorted_app();
+
+            press(&mut app, &[KeyCode::Char('/'), KeyCode::Char('N')]);
+
+            assert_eq!(select(&app).sort_order, Some(SortOrder::Size));
+            assert_eq!(select(&app).search_query, "N");
+        }
+
+        #[test]
+        fn children_sort_by_the_same_key() {
+            let mut tool = package(PackageKind::Formula, "tool", 100);
+            tool.dependencies = vec!["zlib".to_string(), "abc".to_string()];
+            let mut zlib = package(PackageKind::Formula, "zlib", 9_000);
+            zlib.on_request = false;
+            let mut abc = package(PackageKind::Formula, "abc", 10);
+            abc.on_request = false;
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![tool, zlib, abc],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            app.handle_key(KeyCode::Enter);
+
+            app.handle_key(KeyCode::Char('N'));
+            assert_eq!(shown(&app), ["▾ tool", "    abc", "    zlib"]);
+            app.handle_key(KeyCode::Char('S'));
+            assert_eq!(shown(&app), ["▾ tool", "    zlib", "    abc"]);
+        }
+
+        #[test]
+        fn sorting_keeps_the_open_rows_and_the_focused_row() {
+            let mut go = package(PackageKind::Formula, "go", 250_000);
+            go.used_by = vec!["golangci-lint".to_string()];
+            let mut lint = package(PackageKind::Formula, "golangci-lint", 120_000);
+            lint.dependencies = vec!["go".to_string()];
+            let bun = package(PackageKind::Formula, "bun", 60_000);
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![go, lint, bun],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            focus_path(&mut app, &["golangci-lint"]);
+            app.handle_key(KeyCode::Enter);
+            focus_path(&mut app, &["golangci-lint", "go"]);
+            let expanded = select(&app).expanded.clone();
+
+            app.handle_key(KeyCode::Char('N'));
+
+            assert_eq!(focused_path(&app), ["golangci-lint", "go"]);
+            assert_eq!(select(&app).expanded, expanded);
+            assert_eq!(shown(&app)[0], "  bun");
+            assert!(shown(&app).contains(&"▾ golangci-lint".to_string()));
+            app.handle_key(KeyCode::Char('S'));
+            assert_eq!(focused_path(&app), ["golangci-lint", "go"]);
+        }
+
+        #[test]
+        fn search_results_sort_by_the_same_key() {
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![
+                    package(PackageKind::Formula, "gamma", 1_000),
+                    package(PackageKind::Formula, "golf", 9_000),
+                    package(PackageKind::Formula, "gnu", 5_000),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            press(
+                &mut app,
+                &[KeyCode::Char('/'), KeyCode::Char('g'), KeyCode::Enter],
+            );
+            assert_eq!(shown(&app), ["golf", "gnu", "gamma"]);
+
+            app.handle_key(KeyCode::Char('N'));
+            assert_eq!(shown(&app), ["gamma", "gnu", "golf"]);
+            let state = select(&app);
+            let focused = &state.flattened_rows()[state.focused_index];
+            assert!(
+                focused.display_path.starts_with("golf "),
+                "{}",
+                focused.display_path
+            );
+            app.handle_key(KeyCode::Char('S'));
+            assert_eq!(shown(&app), ["golf", "gnu", "gamma"]);
+            app.handle_key(KeyCode::Char('N'));
+            press(&mut app, &[KeyCode::Char('/'), KeyCode::Esc]);
+            assert_eq!(shown(&app), ["  gamma", "  gnu", "  golf"]);
+        }
+
+        #[test]
+        fn the_date_column_shows_when_a_package_was_installed() {
+            let app = brew_list_app(&Inventory {
+                packages: vec![
+                    dated(PackageKind::Formula, "recent", 2_000, Some(3)),
+                    dated(PackageKind::Formula, "undated", 1_000, None),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+
+            let text = screen_text(&app);
+
+            assert!(text.contains("INSTALLED"), "{text}");
+            let line = |name: &str| text.lines().find(|l| l.contains(name)).unwrap();
+            assert!(line("recent").contains("3 days ago"), "{text}");
+            assert!(line("undated").contains('—'), "{text}");
+        }
+
+        #[test]
+        fn a_removal_keeps_the_sort() {
+            let mut run = Removal::open(&[("aaa", &[]), ("bbb", &[]), ("ccc", &[])], false);
+            run.app.handle_key(KeyCode::Char('N'));
+
+            run.remove("bbb");
+            run.close_outcome();
+
+            assert_eq!(select(&run.app).sort_order, Some(SortOrder::Name));
+            assert_eq!(shown(&run.app), ["  aaa", "  ccc"]);
         }
 
         #[test]
@@ -4181,7 +4369,7 @@ mod tests {
 
             press(&mut app, &[KeyCode::Char('n'), KeyCode::Char('N')]);
             assert_eq!(selected(&app), 0);
-            assert!(select(&app).sort_order.is_none());
+            assert_eq!(select(&app).sort_order, Some(SortOrder::Name));
         }
 
         #[test]
@@ -4192,10 +4380,27 @@ mod tests {
             assert_footer(
                 &app,
                 &[],
-                &[
-                    "Select", "All", "None", "Review", "Remove", "Reveal", "Sort",
-                ],
+                &["Select", "All", "None", "Review", "Remove", "Reveal"],
             );
+            assert_footer(&app, &["⇧S/N/D  Sort: Size"], &[]);
+        }
+
+        #[test]
+        fn the_footer_names_the_current_sort() {
+            let mut app = brew_app();
+
+            app.handle_key(KeyCode::Char('N'));
+
+            assert_footer(&app, &["⇧S/N/D  Sort: Name"], &[]);
+        }
+
+        #[test]
+        fn the_help_sheet_names_the_sort_keys() {
+            let app = brew_app();
+
+            assert_eq!(help_row(&app, "Size"), Some("⇧S"));
+            assert_eq!(help_row(&app, "Name"), Some("⇧N"));
+            assert_eq!(help_row(&app, "Date installed"), Some("⇧D"));
         }
 
         #[test]
@@ -4293,6 +4498,7 @@ mod tests {
                 assert!(screen_text(&app).contains(title), "{title}");
                 assert_footer(&app, &["⎋  Back"], &["Uninstall", "↵"]);
                 assert_eq!(help_row(&app, "Uninstall"), None, "{title}");
+                assert_eq!(help_row(&app, "Size"), None, "{title}");
             }
         }
 
@@ -4454,7 +4660,7 @@ mod tests {
                 app.host = host.clone();
                 focus_on(&mut app, name);
 
-                app.handle_key(KeyCode::Char('D'));
+                app.handle_key(KeyCode::Char('d'));
 
                 let state = select(&app);
                 let toast = state.toast.as_ref().expect(name);
@@ -4472,7 +4678,7 @@ mod tests {
             let mut app = refusal_app();
             focus_on(&mut app, "fd");
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             let state = select(&app);
             assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
@@ -4491,11 +4697,11 @@ mod tests {
         fn a_cancelled_question_does_not_carry_its_row_into_the_next_d() {
             let mut app = refusal_app();
             focus_on(&mut app, "fd");
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
             app.handle_key(KeyCode::Esc);
 
             focus_on(&mut app, "lib");
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             assert_eq!(selected(&app), 0);
             assert!(select(&app).toast.is_some());
@@ -4514,7 +4720,7 @@ mod tests {
                 Config::default(),
             ));
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             assert_eq!(
                 select(&app).toast.as_ref().unwrap().text,
@@ -4562,7 +4768,7 @@ mod tests {
             for (name, text) in refusals {
                 focus_on(&mut app, name);
 
-                app.handle_key(KeyCode::Char('D'));
+                app.handle_key(KeyCode::Char('d'));
 
                 let state = select(&app);
                 let toast = state.toast.as_ref().expect(name);
@@ -4831,12 +5037,7 @@ mod tests {
 
         #[test]
         fn d_backspace_and_delete_ask_to_remove_a_formula_and_enter_does_not() {
-            for key in [
-                KeyCode::Char('D'),
-                KeyCode::Char('d'),
-                KeyCode::Backspace,
-                KeyCode::Delete,
-            ] {
+            for key in [KeyCode::Char('d'), KeyCode::Backspace, KeyCode::Delete] {
                 let mut app = refusal_app();
                 focus_on(&mut app, "fd");
 
@@ -4866,7 +5067,7 @@ mod tests {
                 ("pin", "pin is pinned. Run brew unpin pin first."),
                 ("lib", "lib stays: app, tool use it."),
             ];
-            for key in [KeyCode::Char('D'), KeyCode::Backspace, KeyCode::Delete] {
+            for key in [KeyCode::Char('d'), KeyCode::Backspace, KeyCode::Delete] {
                 for (name, text) in refusals {
                     let mut app = refusal_app();
                     let host = Arc::new(FakeHost::default());
@@ -4891,7 +5092,7 @@ mod tests {
             app.handle_key(KeyCode::Enter);
             focus_path(&mut app, &["golangci-lint", "go"]);
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             let state = select(&app);
             assert_eq!(
@@ -4916,7 +5117,7 @@ mod tests {
             app.handle_key(KeyCode::Enter);
             focus_path(&mut app, &["app", "lib"]);
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             let state = select(&app);
             assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
@@ -4933,7 +5134,7 @@ mod tests {
             focus_path(&mut app, &["actionlint", "shellcheck"]);
             app.handle_key(KeyCode::Enter);
             focus_on(&mut app, "fd");
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
             let Screen::Select(state) = &mut app.screen else {
                 panic!("expected the select screen");
             };
@@ -5066,7 +5267,7 @@ mod tests {
                 ..Inventory::default()
             });
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('d'));
 
             assert!(matches!(select(&app).overlay, ModalOverlay::None));
             assert!(select(&app).toast.is_none());
@@ -5155,10 +5356,10 @@ mod tests {
                     .count()
             }
 
-            /// D and y on the focused row, then waits for the outcome.
+            /// `d` and `y` on the focused row, then waits for the outcome.
             fn remove(&mut self, name: &str) {
                 focus_on(&mut self.app, name);
-                self.app.handle_key(KeyCode::Char('D'));
+                self.app.handle_key(KeyCode::Char('d'));
                 self.app.handle_key(KeyCode::Char('y'));
                 while self.app.removal_rx.is_some() {
                     self.app.poll_removal();
@@ -5242,7 +5443,7 @@ mod tests {
             let mut run = Removal::open(&[("app", &["lib"]), ("lib", &[])], false);
             focus_on(&mut run.app, "lib");
             assert!(labels(&run.app).iter().any(|l| l.contains("used by 1")));
-            run.app.handle_key(KeyCode::Char('D'));
+            run.app.handle_key(KeyCode::Char('d'));
             assert_eq!(
                 select(&run.app).toast.as_ref().unwrap().text,
                 "lib stays: app use it."
@@ -5254,7 +5455,7 @@ mod tests {
             assert_eq!(labels(&run.app).len(), 1);
             assert!(!labels(&run.app)[0].contains("used by"));
             focus_on(&mut run.app, "lib");
-            run.app.handle_key(KeyCode::Char('D'));
+            run.app.handle_key(KeyCode::Char('d'));
             let state = select(&run.app);
             assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
             assert!(state.toast.is_none());

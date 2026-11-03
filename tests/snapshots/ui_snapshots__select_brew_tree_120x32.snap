@@ -5,24 +5,24 @@ expression: select_screen(&state)
  taert › Homebrew                                                                               7 packages  ·  492.2 MB
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Formulae ───────────────────────────────────────────────────────────────────────────────── 3 items · 430.1 MB ─╮
-   │   ▸ go 1.27.3 · on request · used by 1                                      ━━━━━━━━━────────  50.8%   250.1 MB │
-   │ ▌ ▾ golangci-lint 2.1.6 · on request                                        ━━━━─────────────  24.4%   120.0 MB │
-   │     ▾ go 1.27.3 · on request · used by 1                                    ━━━━━━━━━────────  50.8%   250.1 MB │
-   │         gmp 6.3.0 · dependency · used by 1                                  ─────────────────   0.6%     3.0 MB │
-   │       pcre2 10.45 · dependency · used by 1                                  ─────────────────   1.2%     6.0 MB │
-   │     bun 1.4.2 · on request                                                  ━━───────────────  12.2%    60.0 MB │
+   │     NAME                                                 INSTALLED          SHARE                        SIZE ↓ │
+   │   ▸ go 1.27.3 · on request · used by 1                   5 weeks ago        ━━━━━━━━━────────  50.8%   250.1 MB │
+   │ ▌ ▾ golangci-lint 2.1.6 · on request                     5 days ago         ━━━━─────────────  24.4%   120.0 MB │
+   │     ▾ go 1.27.3 · on request · used by 1                 5 weeks ago        ━━━━━━━━━────────  50.8%   250.1 MB │
+   │         gmp 6.3.0 · dependency · used by 1               —                  ─────────────────   0.6%     3.0 MB │
+   │       pcre2 10.45 · dependency · used by 1               5 days ago         ─────────────────   1.2%     6.0 MB │
+   │     bun 1.4.2 · on request                               24 hours ago       ━━───────────────  12.2%    60.0 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
    ╭─ Not needed by anything you installed ──────────────────────────────────────────────────────── 1 item · 3.1 MB ─╮
-   │     ada-url 4.0.0_1 · dependency                                            ─────────────────   0.6%     3.1 MB │
+   │     NAME                                                 INSTALLED          SHARE                        SIZE ↓ │
+   │     ada-url 4.0.0_1 · dependency                         3 days ago         ─────────────────   0.6%     3.1 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
    ╭─ Casks · Remove with taert uninstall ──────────────────────────────────────────────────────── 1 item · 50.0 MB ─╮
-   │     ghostty 1.3.1                                                           ━━───────────────  10.2%    50.0 MB │
+   │     NAME                                                 INSTALLED          SHARE                        SIZE ↓ │
+   │     ghostty 1.3.1                                        12 days ago        ━━───────────────  10.2%    50.0 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-
 
 
 
@@ -33,4 +33,4 @@ expression: select_screen(&state)
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  /  Search    ↑↓  Move    D  Uninstall    ⎋  Back    ?  More                                              Collapse  ↵
+  /  Search    ↑↓  Move    D  Uninstall    ⇧S/N/D  Sort: Size    ⎋  Back    ?  More                        Collapse  ↵

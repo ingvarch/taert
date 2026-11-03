@@ -36,6 +36,7 @@ use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 pub use crate::core::cache::{CachedSnapshot, ChildItem, FolderSnapshot, StorageCache};
 use crate::core::cleaner::{RemovalProgress, RemovalReport};
+use crate::core::homebrew::Package;
 use crate::core::path_utils::prettify_path;
 use crate::core::safety::Safety;
 use crate::core::scanner::ScanItem;
@@ -186,6 +187,20 @@ impl Sortable for ScanItem {
 
     fn sort_name(&self) -> String {
         self.path.display().to_string().to_lowercase()
+    }
+}
+
+impl Sortable for &Package {
+    fn sort_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    fn sort_date(&self) -> Option<SystemTime> {
+        self.installed_at
+    }
+
+    fn sort_name(&self) -> String {
+        self.name.to_lowercase()
     }
 }
 
