@@ -2958,11 +2958,6 @@ mod tests {
     }
 
     /// Gives the app made by `slim_ready` an Intel slice large enough to free blocks.
-    fn make_slim_save_space(app: &std::path::Path) {
-        let binary = app.join("Contents/MacOS/testapp");
-        std::fs::write(binary, crate::core::slim::testing::big_fat_binary()).unwrap();
-    }
-
     fn refused_trash_summary(app: &std::path::Path) -> String {
         let old = app.with_file_name("Fat.app.taert-slim-tmp/Fat.app");
         let done = crate::core::slim::SlimDone {
@@ -2996,7 +2991,7 @@ mod tests {
     fn slim_says_what_it_saved_when_the_old_app_is_in_the_trash() {
         let (_temp, layout) = sandbox();
         let (host, app) = slim_ready(&layout);
-        make_slim_save_space(&app);
+        crate::core::slim::testing::make_slim_save_space(&app);
         host.simulate_trash();
         let before = binary_size(&app);
 
@@ -3045,7 +3040,7 @@ mod tests {
     fn slim_picker_says_where_the_old_app_is_when_the_trash_refuses() {
         let (_temp, layout) = sandbox();
         let (host, app) = slim_ready(&layout);
-        make_slim_save_space(&app);
+        crate::core::slim::testing::make_slim_save_space(&app);
         host.fail_trash("denied");
 
         let ran = slim_typed(&["slim", "--force"], "all\n", true, &host, &layout);
@@ -3065,7 +3060,7 @@ mod tests {
     fn slim_picker_says_the_space_comes_back_when_the_old_app_is_in_the_trash() {
         let (_temp, layout) = sandbox();
         let (host, app) = slim_ready(&layout);
-        make_slim_save_space(&app);
+        crate::core::slim::testing::make_slim_save_space(&app);
         host.simulate_trash();
         let before = binary_size(&app);
 
