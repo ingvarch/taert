@@ -3848,14 +3848,14 @@ mod tests {
         assert!(added.ok);
         assert_eq!(added.out, format!("Protected path: {path}\n"));
         let saved = IgnoreStore::load_from(&layout.ignore_path()).unwrap();
-        assert!(saved.contains(&path));
+        assert!(saved.roots.contains(&path));
 
         let removed = ignore(&["ignore", "remove", &path], &layout);
 
         assert!(removed.ok);
         assert_eq!(removed.out, format!("Removed from ignore list: {path}\n"));
         let saved = IgnoreStore::load_from(&layout.ignore_path()).unwrap();
-        assert!(!saved.contains(&path));
+        assert!(!saved.roots.contains(&path));
     }
 
     #[test]

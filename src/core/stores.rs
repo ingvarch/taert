@@ -65,13 +65,6 @@ impl IgnoreStore {
             .retain(|r| r.as_str() != path && r.as_str() != trimmed);
         self.roots.len() < initial_len
     }
-
-    pub fn contains(&self, path: &str) -> bool {
-        let trimmed = path.trim_end_matches('/');
-        self.roots
-            .iter()
-            .any(|r| r.as_str() == path || r.as_str() == trimmed)
-    }
 }
 
 use super::schedule::ScheduleFrequency;

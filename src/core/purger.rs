@@ -11,8 +11,8 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
 use super::path_utils::{expand_tilde, prettify_path};
-use super::scanner::{CategoryScan, ScanItem, ToolGroup};
-use super::sizer::DirSizer;
+use super::safety::Safety;
+use super::scanner::{CategoryScan, ScanItem, ToolGroup, scan_folder};
 use super::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "purge";
@@ -163,6 +163,7 @@ impl Purger {
             }
 
             let artifact_names_filter = artifact_names.clone();
+            let ignored = ignore.clone();
             // Serial, so it holds no pool: a walk on one would keep `size_of` below waiting.
             let walker = jwalk::WalkDir::new(root)
                 .parallelism(jwalk::Parallelism::Serial)
@@ -179,7 +180,7 @@ impl Purger {
                             if name == ".git" {
                                 return false;
                             }
-                            true
+                            !Safety::is_ignored(&entry.path(), &ignored)
                         }
                         Err(_) => false,
                     });
@@ -224,15 +225,6 @@ impl Purger {
                 };
 
                 if Self::is_artifact(&file_name, &artifact_names, parent) {
-                    if ignore.contains(&path.to_string_lossy()) {
-                        continue;
-                    }
-
-                    let size = DirSizer::size_of(&path);
-                    if size == 0 {
-                        continue;
-                    }
-
                     let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
                     let selected_by_age = match modified {
                         Some(m) => match now.duration_since(m) {
@@ -243,9 +235,13 @@ impl Purger {
                     };
 
                     let project_name = Self::project_label(&path, root);
-                    let item = ScanItem::new(path, size, selected_by_age, false);
+                    let Some(item) = scan_folder(path, selected_by_age, ignore, &None) else {
+                        continue;
+                    };
                     if let Some(ref tx) = progress {
-                        let _ = tx.send(PurgeScanEvent::Found { bytes: size });
+                        let _ = tx.send(PurgeScanEvent::Found {
+                            bytes: item.size_bytes,
+                        });
                     }
                     projects_map.entry(project_name).or_default().push(item);
                 }
@@ -282,7 +278,7 @@ mod tests {
         let target_dir = project_dir.join("target");
         fs::create_dir_all(&target_dir).unwrap();
         fs::write(project_dir.join("Cargo.toml"), "[package]").unwrap();
-        fs::write(target_dir.join("binary"), b"123456").unwrap();
+        fs::write(target_dir.join("binary"), vec![1u8; 2048]).unwrap();
         temp
     }
 
@@ -297,6 +293,76 @@ mod tests {
         assert_eq!(scan.groups[0].tool, "my-rust-project");
         assert_eq!(scan.groups[0].items.len(), 1);
         assert!(scan.groups[0].items[0].size_bytes > 0);
+    }
+
+    #[test]
+    fn an_artifact_under_an_ignored_folder_is_not_listed() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("keep/app/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(temp.path().join("keep/app/Cargo.toml"), "[package]").unwrap();
+        fs::write(target.join("binary"), vec![1u8; 2048]).unwrap();
+        let ignore = IgnoreStore::new(vec![temp.path().join("keep").display().to_string()]);
+
+        let scan = Purger::scan_projects(temp.path(), 0, &[], &ignore);
+
+        assert!(scan.groups.is_empty());
+    }
+
+    #[test]
+    fn an_artifact_that_holds_an_ignored_folder_is_not_listed() {
+        let temp = tempdir().unwrap();
+        let keep = temp.path().join("app/target/keep");
+        fs::create_dir_all(&keep).unwrap();
+        fs::write(temp.path().join("app/Cargo.toml"), "[package]").unwrap();
+        fs::write(keep.join("binary"), vec![1u8; 2048]).unwrap();
+        let ignore = IgnoreStore::new(vec![keep.display().to_string()]);
+
+        let scan = Purger::scan_projects(temp.path(), 0, &[], &ignore);
+
+        assert!(scan.groups.is_empty());
+    }
+
+    #[test]
+    fn a_project_next_to_an_ignored_one_is_still_listed() {
+        let temp = tempdir().unwrap();
+        let keep = temp.path().join("team/keep");
+        let target = temp.path().join("team/other/target");
+        fs::create_dir_all(&keep).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("binary"), vec![1u8; 2048]).unwrap();
+        let ignore = IgnoreStore::new(vec![keep.display().to_string()]);
+
+        let scan = Purger::scan_projects(temp.path(), 0, &[], &ignore);
+
+        assert_eq!(scan.groups.len(), 1);
+        assert_eq!(scan.groups[0].items[0].path, target);
+    }
+
+    #[test]
+    fn the_walk_does_not_enter_an_ignored_folder() {
+        let temp = tempdir().unwrap();
+        let keep = temp.path().join("keep");
+        fs::create_dir_all(keep.join("app/target")).unwrap();
+        fs::write(keep.join("app/Cargo.toml"), "[package]").unwrap();
+        fs::write(keep.join("app/target/binary"), vec![1u8; 2048]).unwrap();
+        let ignore = IgnoreStore::new(vec![keep.display().to_string()]);
+        let (tx, rx) = mpsc::channel();
+
+        Purger::scan_multiple_roots(
+            &[temp.path().to_path_buf()],
+            0,
+            &[],
+            &ignore,
+            Some(tx),
+            None,
+        );
+
+        let inside = prettify_path(&keep);
+        assert!(!rx.try_iter().any(|event| matches!(
+            event,
+            PurgeScanEvent::Walking(p) if p.starts_with(&inside)
+        )));
     }
 
     #[test]

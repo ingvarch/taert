@@ -27,7 +27,7 @@ Disk cleanup tools must never compromise system integrity, user credentials, or 
 1. **System Root Protection**:
    `Safety::is_critical_root` strictly prevents operations on `/`, `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/var`, `/etc`, and user home root `~`. Attempts to delete these paths fail immediately before any filesystem calls.
 2. **Credential Isolation**:
-   `Safety::is_credential_path` protects identity stores including `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.gpg`, `~/.kube`, `~/.docker`, `~/.claude`, `~/.config`, `~/.cargo`, `~/.rustup`, `~/.gem`, `~/.nvm`, `~/.pyenv`, `~/.rbenv`, `~/.ollama`, and `~/.lmstudio`, except cache folders that stay scannable (`~/.docker/cli-plugins/.cache`, `~/.docker/buildx/cache`, `~/.cargo/registry/cache`, `~/.cargo/registry/index`, `~/.cargo/git/db`, `~/.cargo/git/checkouts`, `~/.ollama/logs`, `~/.lmstudio/server-logs`).
+   `Safety::is_credential_root` protects identity stores including `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.gpg`, `~/.kube`, `~/.docker`, `~/.claude`, `~/.config`, `~/.cargo`, `~/.rustup`, `~/.gem`, `~/.nvm`, `~/.pyenv`, `~/.rbenv`, `~/.ollama`, `~/.lmstudio`, and `~/Library/Keychains`, except cache folders that stay scannable (`~/.docker/cli-plugins/.cache`, `~/.docker/buildx/cache`, `~/.cargo/registry/cache`, `~/.cargo/registry/index`, `~/.cargo/git/db`, `~/.cargo/git/checkouts`, `~/.ollama/logs`, `~/.lmstudio/server-logs`).
 3. **Symlink Rejection**:
    `Safety::has_symlink_component` verifies that no path or parent component is a symbolic link. Deletion operations refuse to follow symlinks to prevent accidental directory traversal outside the intended target.
 4. **Cloud Storage & APFS Dataless Protection**:
