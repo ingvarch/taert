@@ -84,7 +84,6 @@ const CONFIG_FILES: &[&str] = &[
 
 const RECEIPTS: &str = "private/var/db/receipts";
 const SYSTEM_REPORTS: &str = "Library/Logs/DiagnosticReports";
-const CASKROOMS: &[&str] = &["opt/homebrew/Caskroom", "usr/local/Caskroom"];
 
 /// Browser profiles and license or plugin state, compared by the start of the
 /// path below the home folder or the root. Removing it takes a decision of its own.
@@ -128,10 +127,30 @@ const DATA_LIBRARIES: &[&str] = &[
     "library/containers/com.isaacmarovitz.whisky",
 ];
 
+/// A Homebrew cask and the prefix whose Caskroom holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cask {
+    pub token: String,
+    pub prefix: PathBuf,
+}
+
+impl Cask {
+    /// The cask's folder in the Caskroom of its prefix.
+    fn room(&self) -> PathBuf {
+        self.prefix.join("Caskroom").join(&self.token)
+    }
+}
+
+impl Serialize for Cask {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.token)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppPlan {
     pub app: InstalledApp,
-    pub cask: Option<String>,
+    pub cask: Option<Cask>,
     pub login_helpers: Vec<String>,
     /// Another copy of the app stays, so only this bundle goes.
     pub shared: bool,
@@ -280,32 +299,31 @@ fn app_bundles_in(folder: &Path) -> usize {
 }
 
 /// `brew uninstall` removes all a cask installed, more than the review showed.
-fn cask_has_several_apps(token: &str, layout: &Layout) -> bool {
-    CASKROOMS.iter().any(|room| {
-        folders_in(&layout.system(room).join(token))
-            .iter()
-            .any(|version| {
-                let nested: usize = folders_in(version).iter().map(|f| app_bundles_in(f)).sum();
-                app_bundles_in(version) + nested > 1
-            })
+fn cask_has_several_apps(cask: &Cask) -> bool {
+    folders_in(&cask.room()).iter().any(|version| {
+        let nested: usize = folders_in(version).iter().map(|f| app_bundles_in(f)).sum();
+        app_bundles_in(version) + nested > 1
     })
 }
 
 /// The cask that installed an app. More than one candidate means none, because
 /// Homebrew must not uninstall a cask taert only guessed.
-fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<String> {
+fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<Cask> {
     let name = app.path.file_name()?;
-    let mut tokens = HashSet::new();
-    for room in CASKROOMS {
-        for cask in folders_in(&layout.system(room)) {
-            if cask_holds(&cask, &app.path, name) {
-                tokens.insert(cask.file_name()?.to_string_lossy().into_owned());
+    let mut found = Vec::new();
+    for prefix in layout.homebrew_prefixes() {
+        for folder in folders_in(&prefix.join("Caskroom")) {
+            let token = folder.file_name()?.to_string_lossy().into_owned();
+            if cask_holds(&folder, &app.path, name) && is_cask_token(&token) {
+                found.push(Cask {
+                    token,
+                    prefix: prefix.clone(),
+                });
             }
         }
     }
-    let mut tokens = tokens.into_iter().filter(|token| is_cask_token(token));
-    match (tokens.next(), tokens.next()) {
-        (Some(token), None) => Some(token),
+    match found.len() {
+        1 => found.pop(),
         _ => None,
     }
 }
@@ -403,7 +421,7 @@ pub fn build_plan(
         }
 
         let mut cask = find_cask(app, request.layout);
-        if let Some(token) = cask.take_if(|token| cask_has_several_apps(token, request.layout)) {
+        if let Some(Cask { token, .. }) = cask.take_if(|cask| cask_has_several_apps(cask)) {
             plan.notes.push(format!(
                 "The Homebrew cask {token} holds more apps, so only {} goes and Homebrew keeps listing the cask.",
                 app.name
@@ -439,7 +457,7 @@ pub fn build_plan(
         }
 
         let tool = match &cask {
-            Some(token) => format!("{} (Homebrew cask {token})", app.name),
+            Some(cask) => format!("{} (Homebrew cask {})", app.name, cask.token),
             None => app.name.clone(),
         };
         let (_, login_helpers) = embedded_bundle_ids(&app.path, app.bundle_id.as_deref());
@@ -1192,22 +1210,21 @@ impl Uninstaller<'_> {
         tally.note(format!("{name} was still running when it was removed."));
     }
 
-    fn is_tracked_by_homebrew(&self, token: &str) -> bool {
-        CASKROOMS
-            .iter()
-            .any(|room| self.layout.system(room).join(token).exists())
+    fn is_tracked_by_homebrew(cask: &Cask) -> bool {
+        cask.room().exists()
     }
 
     /// Without `--zap`: the plan lists what goes, and a zap could reach further.
-    fn brew_uninstall(&self, token: &str, bundle: &Path) -> BrewResult {
-        let Some(brew) = homebrew::find(self.layout) else {
+    fn brew_uninstall(&self, cask: &Cask, bundle: &Path) -> BrewResult {
+        let Some(brew) = homebrew::brew_in(&cask.prefix) else {
             return BrewResult::NotTracked;
         };
+        let token = cask.token.as_str();
         let args = ["uninstall", "--cask", token];
         let output = homebrew::run_removing(self.host, &brew.path, &args);
         if output.ok && is_gone(bundle) {
             BrewResult::Removed
-        } else if self.is_tracked_by_homebrew(token) {
+        } else if Self::is_tracked_by_homebrew(cask) {
             BrewResult::Failed(format!(
                 "Homebrew could not remove it. Run: brew uninstall --cask {token}"
             ))
@@ -1234,11 +1251,11 @@ impl Uninstaller<'_> {
         job: &mut Job,
         tally: &mut Tally<F, O>,
     ) {
-        let (Some(bundle), Some(token)) = (job.pending_bundle(), job.plan.cask.as_deref()) else {
+        let (Some(bundle), Some(cask)) = (job.pending_bundle(), job.plan.cask.as_ref()) else {
             return;
         };
         self.count_bundle(job, bundle, tally);
-        match self.brew_uninstall(token, &bundle.path) {
+        match self.brew_uninstall(cask, &bundle.path) {
             BrewResult::Removed => {
                 tally.removed_permanent(bundle);
                 job.bundle_done = true;
@@ -2062,9 +2079,78 @@ mod plan_tests {
 
         let plan = plan_for(&[foo], &layout);
 
-        assert_eq!(plan.apps[0].cask.as_deref(), Some("foo-app"));
+        assert_eq!(plan.apps[0].cask.as_ref().unwrap().token, "foo-app");
         assert!(!plan.apps[0].shared);
         assert!(has_row(&plan, &data));
+    }
+
+    fn caskroom_link(layout: &Layout, prefix: &str, app: &InstalledApp) {
+        let room = layout.system(prefix).join("Caskroom/foo-app/1.0");
+        fs::create_dir_all(&room).unwrap();
+        std::os::unix::fs::symlink(&app.path, room.join("Foo.app")).unwrap();
+    }
+
+    #[test]
+    fn the_plan_json_keeps_the_cask_token() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        caskroom_link(&layout, "usr/local", &foo);
+
+        let plan = plan_for(std::slice::from_ref(&foo), &layout);
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["apps"][0]["cask"], serde_json::json!("foo-app"));
+
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let plan = plan_for(std::slice::from_ref(&foo), &layout);
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["apps"][0]["cask"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_cask_in_usr_local_keeps_its_prefix() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        caskroom_link(&layout, "usr/local", &foo);
+
+        let plan = plan_for(std::slice::from_ref(&foo), &layout);
+
+        let cask = plan.apps[0].cask.as_ref().unwrap();
+        assert_eq!(cask.token, "foo-app");
+        assert_eq!(cask.prefix, layout.system("usr/local"));
+    }
+
+    #[test]
+    fn a_bundle_both_caskrooms_hold_has_no_cask() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        caskroom_link(&layout, "opt/homebrew", &foo);
+        caskroom_link(&layout, "usr/local", &foo);
+
+        let plan = plan_for(std::slice::from_ref(&foo), &layout);
+
+        assert!(plan.apps[0].cask.is_none());
+        assert_eq!(plan.scan.groups[0].tool, "Foo");
+    }
+
+    #[test]
+    fn several_apps_in_another_caskroom_do_not_count() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        caskroom_link(&layout, "opt/homebrew", &foo);
+        let other = layout.system("usr/local/Caskroom/foo-app/1.0");
+        fs::create_dir_all(other.join("A.app")).unwrap();
+        fs::create_dir_all(other.join("B.app")).unwrap();
+
+        let plan = plan_for(std::slice::from_ref(&foo), &layout);
+
+        let cask = plan.apps[0].cask.as_ref().unwrap();
+        assert_eq!(cask.prefix, layout.system("opt/homebrew"));
+        assert!(
+            !plan.notes.iter().any(|n| n.contains("holds more apps")),
+            "{:?}",
+            plan.notes
+        );
     }
 
     #[test]
@@ -2172,7 +2258,7 @@ mod plan_tests {
 
         let plan = plan_for(&[foo], &layout);
 
-        assert_eq!(plan.apps[0].cask.as_deref(), Some("foo-app"));
+        assert_eq!(plan.apps[0].cask.as_ref().unwrap().token, "foo-app");
         assert_eq!(plan.scan.groups[0].tool, "Foo (Homebrew cask foo-app)");
     }
 
@@ -2726,10 +2812,13 @@ mod run_tests {
         assert_eq!(report.notes, ["From the plan"]);
     }
 
-    fn with_cask(layout: &Layout, plan: &mut UninstallPlan, token: &str) -> PathBuf {
-        file(layout.system("opt/homebrew/bin/brew"));
-        plan.apps[0].cask = Some(token.to_string());
-        folder(layout.system("opt/homebrew/Caskroom").join(token))
+    fn with_cask(layout: &Layout, plan: &mut UninstallPlan, prefix: &str, token: &str) -> PathBuf {
+        file(layout.system(prefix).join("bin/brew"));
+        plan.apps[0].cask = Some(Cask {
+            token: token.to_string(),
+            prefix: layout.system(prefix),
+        });
+        folder(layout.system(prefix).join("Caskroom").join(token))
     }
 
     fn removing(path: &Path) -> impl Fn() + Send + 'static {
@@ -2745,7 +2834,7 @@ mod run_tests {
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let cache = folder(layout.user("Library/Caches/com.acme.foo"));
         let mut plan = plan_of(&foo, vec![leftover(&cache)]);
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.reply("/usr/bin/env", "");
         host.when("/usr/bin/env", removing(&foo.path));
@@ -2766,7 +2855,7 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let mut plan = plan_of(&foo, vec![]);
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.reply("/usr/bin/env", "");
         host.when("/usr/bin/env", removing(&foo.path));
@@ -2787,13 +2876,94 @@ mod run_tests {
         assert_eq!(removals, [&expected]);
     }
 
+    fn cask_plan_in(layout: &Layout, foo: &InstalledApp, prefix: &str) -> UninstallPlan {
+        let link = layout.system(prefix).join("Caskroom/foo-app/1.0");
+        fs::create_dir_all(&link).unwrap();
+        std::os::unix::fs::symlink(&foo.path, link.join("Foo.app")).unwrap();
+        let host = FakeHost::default();
+        let ignore = IgnoreStore::default();
+        let apps = std::slice::from_ref(foo);
+        let request = PlanRequest {
+            selected: apps,
+            installed: apps,
+            ignore: &ignore,
+            host: &host,
+            layout,
+        };
+        build_plan(&request, None, None)
+    }
+
+    #[test]
+    fn a_cask_goes_through_the_brew_of_its_prefix() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let plan = cask_plan_in(&layout, &foo, "usr/local");
+        file(layout.system("opt/homebrew/bin/brew"));
+        let brew = file(layout.system("usr/local/bin/brew"));
+        let host = FakeHost::default();
+        host.reply("/usr/bin/env", "");
+        host.when("/usr/bin/env", removing(&foo.path));
+        host.when(
+            "/usr/bin/env",
+            removing(&layout.system("usr/local/Caskroom/foo-app")),
+        );
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        let expected = format!(
+            "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1 {} uninstall --cask foo-app",
+            brew.display()
+        );
+        let calls = host.calls.lock().unwrap();
+        let removals: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.contains("uninstall --cask"))
+            .collect();
+        assert_eq!(removals, [&expected]);
+    }
+
+    #[test]
+    fn a_cask_whose_prefix_has_no_brew_is_not_tracked() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let plan = cask_plan_in(&layout, &foo, "usr/local");
+        file(layout.system("opt/homebrew/bin/brew"));
+        let host = FakeHost::default();
+        host.fail("/usr/bin/env", "Error: Cask 'foo-app' is not installed.");
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(!host.ran("/usr/bin/env"));
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!foo.path.exists());
+    }
+
+    #[test]
+    fn a_failed_brew_looks_only_in_its_own_caskroom() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let plan = cask_plan_in(&layout, &foo, "opt/homebrew");
+        let host = FakeHost::default();
+        file(layout.system("opt/homebrew/bin/brew"));
+        file(layout.system("usr/local/bin/brew"));
+        fs::create_dir_all(layout.system("usr/local/Caskroom/foo-app/1.0")).unwrap();
+        fs::remove_dir_all(layout.system("opt/homebrew/Caskroom/foo-app")).unwrap();
+        host.fail("/usr/bin/env", "Cask is not installed");
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!foo.path.exists());
+    }
+
     #[test]
     fn a_cask_homebrew_keeps_is_a_failure_and_the_files_stay() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let cache = folder(layout.user("Library/Caches/com.acme.foo"));
         let mut plan = plan_of(&foo, vec![leftover(&cache)]);
-        with_cask(&layout, &mut plan, "foo-app");
+        with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.fail("/usr/bin/env", "sudo: a password is required");
 
@@ -2814,7 +2984,7 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let mut plan = plan_of(&foo, Vec::new());
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         fs::remove_dir_all(&room).unwrap();
         let host = FakeHost::default();
         host.fail("/usr/bin/env", "Cask is not installed");
@@ -3022,7 +3192,7 @@ mod run_tests {
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let mut plan = plan_of(&foo, Vec::new());
         plan.apps[0].login_helpers = vec!["com.acme.foo.login".to_string()];
-        with_cask(&layout, &mut plan, "foo-app");
+        with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.fail("/usr/bin/env", "sudo: a password is required");
         host.reply(PS, &running(&foo.path, 4242));
@@ -3041,7 +3211,7 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo", "com.acme.foo");
         let mut plan = plan_of(&foo, Vec::new());
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.reply("/usr/bin/env", "");
         host.when("/usr/bin/env", removing(&foo.path));
@@ -3061,7 +3231,7 @@ mod run_tests {
         let helpers = layout.system("Library/PrivilegedHelperTools");
         let helper = file(helpers.join("com.acme.foo.helper"));
         let mut plan = plan_of(&foo, vec![leftover(&helper)]);
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.reply("/usr/bin/env", "");
         host.when("/usr/bin/env", removing(&foo.path));
@@ -3951,7 +4121,7 @@ mod run_tests {
         let mut plan = plan_of(&foo, Vec::new());
         assert_eq!(routes(&plan)[&foo.path], Route::User);
 
-        with_cask(&layout, &mut plan, "foo-app");
+        with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
 
         assert_eq!(routes(&plan)[&foo.path], Route::Homebrew);
         assert_eq!(Route::Homebrew.mode(false), RemovalMode::Permanent);
@@ -4056,7 +4226,7 @@ mod run_tests {
         let receipt = receipt_row(&layout);
         file(receipt.path.clone());
         let mut plan = plan_of(&foo, vec![receipt]);
-        let room = with_cask(&layout, &mut plan, "foo-app");
+        let room = with_cask(&layout, &mut plan, "opt/homebrew", "foo-app");
         let host = FakeHost::default();
         host.reply("/usr/bin/env", "");
         host.when("/usr/bin/env", removing(&foo.path));

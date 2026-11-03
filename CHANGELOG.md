@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Uninstall**: a Homebrew cask is removed with the brew of the Homebrew install that holds it, so a cask in `/usr/local` no longer fails on a Mac that also has `/opt/homebrew`.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added
