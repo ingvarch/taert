@@ -19,8 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Startup items**: `taert startup --json` prints an object with `items` and `notes` instead of a list of items.
 - **Platforms**: removed code and gates for platforms taert does not ship on, and the crate fails with a compile error elsewhere.
 
+### Removed
+- `taert optimize` is gone; `taert doctor` replaces it (removed in 5a80563, never recorded).
+
 ### Fixed
 - **Scheduled cleanup**: a Homebrew upgrade no longer removes the launch agent, because the cask has no `uninstall` stanza; `taert schedule show` says when the agent file is missing and how to load it again. Category names are stored in lower case, each name once. A failed `launchctl bootstrap` fails `taert schedule set` and saves nothing, and the Preferences row applies with `Enter` and shows the error. `show` reports the newer of the last run and the last skip. An unreadable lock file fails the run instead of ending it silently. The unreleased `config.json` fallback is gone: settings are TOML only.
+- **Doctor**: wake times use the zone in `pmset -g log`.
+- **Doctor**: the largest apps are sorted by memory.
+- **Doctor**: heat counts only `CPU_Speed_Limit` below 100 and the two warning levels.
+- **Doctor**: the network rate covers the whole check.
+- **Doctor**: energy findings use the change in `IDLEW`, not the `POWER` column. A check under 4 seconds skips them.
+- **Doctor**: a check that could not run is skipped with its reason, in plain, JSON, and the terminal screen.
+- **Doctor**: wake and memory findings name the process that asked and the swap used.
+- **Doctor**: plain output prints `kill <pid>` or `taert analyze` for actions.
+- **Doctor**: the narrow layout shows evidence and action, wrapped by words, and warnings are yellow.
+- **Doctor**: the status line shows errors in red and successes in green.
+- **Doctor**: stopping a process sends a confirmed `SIGTERM`, starts on Cancel, and shows a failed signal. The dialog is titled Stop Process.
+- **Doctor**: the unused ask-an-app-to-quit action is removed.
 - **Interactive dry-run and history locking**: `--dry-run` refuses to open interactive screens with an error directing to `--plain`; history writes take an exclusive lock on the history directory to keep concurrent lines and prunes safe; compress and slim log saved bytes under outcome `changed`; history help text matches its behavior.
 - **Large files and clone counting**: relative roots canonicalize properly and apply exclusions to credential stores and Library folders; scanning a folder inside Library no longer drops all rows; age filtering runs before the limit heap using effective Spotlight last-used dates; values above 100 years for `--older-than` are rejected by clap, and overflow during age cutoff calculation returns an empty scan instead of panicking; progress reports only final kept rows; virtual machine bundles (`.pvm`, `.vmwarevm`, `.utm`) are treated as single items; reveal in Finder hint shows across all select screens; subfolders holding duplicate hardlinks or APFS clones display their own size when measured individually.
 - **Startup items**: `taert startup --all` no longer lets root write to a path in the home folder, shows the Background Task Management entries, and times out on its own. `disable` and `enable` read the state again and report it. Daemons come from `launchctl print system` without `--all`. A name that fits several items is refused. A login item's path is saved before the item is removed, and a `disabled_login_items.json` that taert cannot read is never written over. Security login items are read-only. Notes show in the TUI and in `--json`. A disabled item that still runs offers "stop". Login item paths reach AppleScript as arguments. A login item can be named by its path. Services that macOS ships under a label outside `com.apple.`, such as `com.openssh.ssh-agent`, are hidden and read-only, and so are daemons whose files launchd does not show, unless an app outside Apple registered them. A service with no plist in `~/Library/LaunchAgents`, `/Library/LaunchAgents`, or `/Library/LaunchDaemons`, such as one an app registered, is read-only and says where to switch it, because launchd forgets it once it stops. A daemon keeps its plist only from `/Library/LaunchDaemons`, and an agent only from a `LaunchAgents` folder, so root never loads a plist from the home folder. `taert doctor` offers to switch off a broken item only when taert can switch it, and otherwise says why. NetworkExtension services are named after their extension, not the last number of their version.

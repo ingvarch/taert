@@ -493,3 +493,328 @@ fn a_note_shows_when_the_scan_found_no_rows() {
     let text = render_text(&SelectState::new(scan), 100, 30);
     assert!(text.contains("Safari needs Full Disk Access."), "{text}");
 }
+
+mod doctor {
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+    use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
+    use taert::ui::doctor::{DoctorActionConfirm, DoctorScreenState, render_doctor};
+    use taert::ui::env::UiEnv;
+
+    use super::*;
+
+    fn theme() -> Theme {
+        Theme::with_env(UiEnv::default())
+    }
+
+    fn draw(w: u16, h: u16, state: &DoctorScreenState, theme: &Theme) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render_doctor(f, state, theme)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    fn text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn finding(
+        id: &str,
+        severity: FindingSeverity,
+        title: &str,
+        evidence: &str,
+        action: &str,
+        target: Option<FindingAction>,
+    ) -> Finding {
+        Finding {
+            id: id.to_string(),
+            severity,
+            title: title.to_string(),
+            evidence: evidence.to_string(),
+            action: action.to_string(),
+            action_target: target,
+        }
+    }
+
+    fn report(findings: Vec<Finding>) -> DoctorReport {
+        DoctorReport {
+            seconds: 10,
+            findings,
+            checks: Vec::new(),
+        }
+    }
+
+    fn cpu_report() -> DoctorReport {
+        report(vec![
+            finding(
+                "sustained_cpu",
+                FindingSeverity::Warning,
+                "node is using 190% CPU",
+                "pid 4123, for the whole check",
+                "Quit it if you don't need it.",
+                Some(FindingAction::KillProcess {
+                    pid: 4123,
+                    name: "node".to_string(),
+                }),
+            ),
+            finding(
+                "wake_reasons",
+                FindingSeverity::Notice,
+                "The Mac woke 14 times in the last 24 hours",
+                "12 times for wifibt",
+                "Network features can wake the Mac while it sleeps.",
+                None,
+            ),
+        ])
+    }
+
+    fn snapshot_report() -> DoctorReport {
+        let mut report = cpu_report();
+        report.findings.insert(
+            1,
+            finding(
+                "sleep_blocker",
+                FindingSeverity::Warning,
+                "Something is keeping the Mac awake",
+                "caffeinate has held PreventUserIdleSystemSleep for 02:14:09",
+                "Quit it to let the Mac sleep.",
+                Some(FindingAction::KillProcess {
+                    pid: 70001,
+                    name: "caffeinate".to_string(),
+                }),
+            ),
+        );
+        report.checks = [
+            "sustained_cpu",
+            "energy",
+            "memory",
+            "disk_space",
+            "sleep_blockers",
+            "wake_reasons",
+            "heat",
+            "network",
+            "startup",
+        ]
+        .into_iter()
+        .map(CheckResult::ok)
+        .collect();
+        report
+    }
+
+    #[test]
+    fn all_clear_card_marks_a_skipped_check() {
+        let theme = theme();
+        let mut report = report(Vec::new());
+        report.checks = vec![
+            CheckResult::ok("sustained_cpu"),
+            CheckResult::skipped("network", "nettop timed out"),
+        ];
+        let state = DoctorScreenState::new_done(report);
+
+        let buffer = draw(120, 32, &state, &theme);
+
+        let shown = text(&buffer);
+        assert!(shown.contains("Sustained CPU usage"));
+        assert!(shown.contains("Sustained network bandwidth (skipped: nettop timed out)"));
+        assert!(!shown.contains("Power assertions"));
+        assert!(!shown.contains("look normal"));
+    }
+
+    #[test]
+    fn doctor_shows_evidence_and_action_when_narrow() {
+        let theme = theme();
+        let state = DoctorScreenState::new_done(snapshot_report());
+
+        for (w, h) in [(80, 24), (50, 16)] {
+            let shown = text(&draw(w, h, &state, &theme));
+            assert!(shown.contains("pid 4123, for the whole check"), "{w}x{h}");
+            assert!(shown.contains("Quit it if you don't need it."), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn doctor_wraps_long_title_inside_the_narrow_card() {
+        let theme = theme();
+        let title = "The Mac woke 14 times in the last 24 hours";
+        let state = DoctorScreenState::new_done(report(vec![finding(
+            "x",
+            FindingSeverity::Notice,
+            title,
+            "e",
+            "a",
+            None,
+        )]));
+
+        let buffer = draw(50, 16, &state, &theme);
+
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .filter(|row| ["Mac", "woke", "hours"].iter().any(|w| row.contains(w)))
+            .collect();
+        for word in title.split(' ') {
+            assert!(rows.iter().any(|r| r.contains(word)), "{word} was cut");
+        }
+        for row in rows
+            .iter()
+            .filter(|r| r.contains("woke") || r.contains("hours"))
+        {
+            assert!(row.trim_end().ends_with('\u{2502}'), "border lost: {row:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_splits_a_long_path_inside_the_narrow_card() {
+        let theme = theme();
+        let path = "/opt/homebrew/Cellar/postgresql@16/16.4/bin/postgres";
+        let state = DoctorScreenState::new_done(report(vec![finding(
+            "x",
+            FindingSeverity::Notice,
+            "Title",
+            &format!("Missing executable at {path}"),
+            "a",
+            None,
+        )]));
+
+        let buffer = draw(50, 16, &state, &theme);
+
+        let shown: String = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .flat_map(|row| {
+                row.trim_end_matches(['\u{2502}', ' '])
+                    .trim_start_matches(['\u{2502}', ' '])
+                    .to_string()
+                    .chars()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(shown.contains(path), "path was cut");
+    }
+
+    #[test]
+    fn doctor_wraps_long_evidence_by_words_when_narrow() {
+        let theme = theme();
+        let state = DoctorScreenState::new_done(report(vec![finding(
+            "x",
+            FindingSeverity::Notice,
+            "Title",
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo",
+            "Do something sensible about it.",
+            None,
+        )]));
+
+        let shown = text(&draw(40, 20, &state, &theme));
+
+        for word in ["alpha", "juliet", "kilo", "sensible"] {
+            assert!(shown.contains(word), "{word} was cut");
+        }
+    }
+
+    #[test]
+    fn doctor_wraps_long_evidence_and_action_by_words_when_wide() {
+        let theme = theme();
+        let evidence = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november";
+        let action = "oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu";
+        let state = DoctorScreenState::new_done(report(vec![finding(
+            "x",
+            FindingSeverity::Warning,
+            "Title",
+            evidence,
+            action,
+            None,
+        )]));
+
+        let buffer = draw(120, 32, &state, &theme);
+
+        assert!(
+            text(&buffer).contains("Suggested Action:"),
+            "not the wide layout"
+        );
+        let words: Vec<&str> = evidence.split(' ').chain(action.split(' ')).collect();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .filter(|row| row.split_whitespace().any(|t| words.contains(&t)))
+            .collect();
+        for word in &words {
+            assert!(
+                rows.iter()
+                    .any(|r| r.split_whitespace().any(|t| t == *word)),
+                "{word} was cut"
+            );
+        }
+        for row in &rows {
+            assert!(row.trim_end().ends_with('\u{2502}'), "border lost: {row:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_warning_is_yellow_and_critical_is_red() {
+        let theme = theme();
+        let state = DoctorScreenState::new_done(report(vec![
+            finding("a", FindingSeverity::Warning, "Warn title", "e", "a", None),
+            finding("b", FindingSeverity::Critical, "Crit title", "e", "a", None),
+        ]));
+
+        let buffer = draw(120, 32, &state, &theme);
+
+        let symbol_fg = |title: &str| {
+            let y = (0..buffer.area.height)
+                .find(|&y| row_text(&buffer, y).contains(title))
+                .unwrap();
+            let x = (0..buffer.area.width)
+                .find(|&x| buffer[(x, y)].symbol() == theme.g.warning)
+                .unwrap();
+            buffer[(x, y)].fg
+        };
+        assert_eq!(symbol_fg("Warn title"), theme.warning().fg.unwrap());
+        assert_eq!(symbol_fg("Crit title"), theme.danger().fg.unwrap());
+    }
+
+    #[test]
+    fn doctor_status_line_styles_errors() {
+        let theme = theme();
+        let message = "Failed to disable daemon: The administrator password was not given";
+        let first_letter_fg = |state: &DoctorScreenState| {
+            let buffer = draw(120, 32, state, &theme);
+            let x = buffer.area.width - 1 - message.chars().count() as u16;
+            assert_eq!(buffer[(x, 0)].symbol(), "F");
+            buffer[(x, 0)].fg
+        };
+
+        let mut state = DoctorScreenState::new_done(cpu_report());
+        state.message = Some((message.to_string(), true));
+        assert_eq!(first_letter_fg(&state), theme.danger().fg.unwrap());
+
+        state.message = Some((message.to_string(), false));
+        assert_eq!(first_letter_fg(&state), theme.success().fg.unwrap());
+
+        state.message = None;
+        let buffer = draw(120, 32, &state, &theme);
+        let x = buffer.area.width - 1 - "2 findings".len() as u16;
+        assert_eq!(buffer[(x, 0)].symbol(), "2");
+        assert_eq!(buffer[(x, 0)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn the_stop_dialog_names_sigterm() {
+        let theme = theme();
+        let mut state = DoctorScreenState::new_done(cpu_report());
+        state.confirm = Some(DoctorActionConfirm::KillProcess {
+            pid: 4123,
+            name: "node".to_string(),
+        });
+
+        let shown = text(&draw(80, 24, &state, &theme));
+
+        assert!(shown.contains("SIGTERM"));
+        assert!(shown.contains("Stop Process"));
+        assert!(!shown.contains("Force Quit"));
+    }
+}

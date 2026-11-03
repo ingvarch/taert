@@ -22,8 +22,8 @@ const TOP_PROCESSES: usize = 60;
 const MIN_VOLUME_BYTES: u64 = 1_000_000_000;
 const UNKNOWN_MINUTES: i64 = 65535;
 const MAX_SENSOR_CELSIUS: f32 = 130.0;
-const DISK_CRITICAL_FREE: f64 = 0.05;
-const DISK_WARNING_FREE: f64 = 0.10;
+pub const DISK_CRITICAL_FREE: f64 = 0.05;
+pub const DISK_WARNING_FREE: f64 = 0.10;
 const BATTERY_WARNING_HEALTH: u8 = 80;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -28,7 +28,7 @@ pub trait Host: Send + Sync {
         prompt: &str,
         timeout: Duration,
     ) -> Result<String, String>;
-    fn signal(&self, pid: u32, signal: i32);
+    fn signal(&self, pid: u32, signal: i32) -> Result<(), String>;
     fn pause(&self, duration: Duration);
     /// Moves a file or folder to the system Trash.
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
@@ -133,10 +133,11 @@ impl Host for MacHost {
         })
     }
 
-    fn signal(&self, pid: u32, signal: i32) {
-        unsafe {
-            libc::kill(pid as libc::pid_t, signal);
+    fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
+        if unsafe { libc::kill(pid as libc::pid_t, signal) } == -1 {
+            return Err(std::io::Error::last_os_error().to_string());
         }
+        Ok(())
     }
 
     fn pause(&self, duration: Duration) {
@@ -184,6 +185,7 @@ pub mod fake {
         pub admin_effect: Mutex<Option<Effect>>,
         pub run_effects: Mutex<Vec<(String, Effect)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
+        pub signal_error: Mutex<Option<String>>,
         pub trashed: Mutex<Vec<PathBuf>>,
         pub trash_error: Mutex<Option<String>>,
         pub simulate_trash: Mutex<bool>,
@@ -333,8 +335,12 @@ pub mod fake {
             Ok(self.admin_stdout.lock().unwrap().clone())
         }
 
-        fn signal(&self, pid: u32, signal: i32) {
+        fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
             self.signals.lock().unwrap().push((pid, signal));
+            match self.signal_error.lock().unwrap().clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
 
         fn pause(&self, _duration: Duration) {}
@@ -435,5 +441,12 @@ mod tests {
         let output = MacHost.run("/bin/sh", &["-c", &line], Duration::from_secs(5));
 
         assert_eq!(output.stdout, tricky);
+    }
+
+    #[test]
+    fn signal_to_a_missing_process_is_an_error() {
+        let result = MacHost.signal(2_000_000_000, 0);
+
+        assert!(result.unwrap_err().contains("No such process"));
     }
 }

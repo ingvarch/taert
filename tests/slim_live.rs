@@ -39,8 +39,8 @@ impl Host for TempTrashHost {
         MacHost.run_admin_output(script, prompt, timeout)
     }
 
-    fn signal(&self, pid: u32, signal: i32) {
-        MacHost.signal(pid, signal);
+    fn signal(&self, pid: u32, signal: i32) -> Result<(), String> {
+        MacHost.signal(pid, signal)
     }
 
     fn pause(&self, duration: Duration) {

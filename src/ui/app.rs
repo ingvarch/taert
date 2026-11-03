@@ -1113,22 +1113,23 @@ impl App {
                             } else if let Some(action) = state.confirm.take() {
                                 state.message = None;
                                 match action {
-                                    DoctorActionConfirm::QuitApp {
-                                        name, bundle_id, ..
-                                    } => {
-                                        let target = bundle_id.unwrap_or(name);
-                                        let script =
-                                            format!("tell application \"{target}\" to quit");
-                                        let _ = self.host.run(
-                                            "/usr/bin/osascript",
-                                            &["-e", &script],
-                                            Duration::from_secs(3),
-                                        );
-                                        state.remove_selected_finding();
-                                    }
-                                    DoctorActionConfirm::KillProcess { pid, .. } => {
-                                        self.host.signal(pid, libc::SIGTERM);
-                                        state.remove_selected_finding();
+                                    DoctorActionConfirm::KillProcess { pid, name } => {
+                                        state.message =
+                                            Some(match self.host.signal(pid, libc::SIGTERM) {
+                                                Ok(()) => {
+                                                    state.remove_selected_finding();
+                                                    (
+                                                        format!(
+                                                            "Sent SIGTERM to {name} (PID {pid})"
+                                                        ),
+                                                        false,
+                                                    )
+                                                }
+                                                Err(error) => (
+                                                    format!("Could not stop {name}: {error}"),
+                                                    true,
+                                                ),
+                                            });
                                     }
                                     DoctorActionConfirm::DisableStartupItem { item } => {
                                         let res = startup::disable_item(
@@ -3530,6 +3531,123 @@ mod tests {
         };
         assert_eq!(state.findings().len(), 1);
         assert!(matches!(&state.message, Some((m, true)) if m.contains("denied")));
+    }
+
+    fn doctor_finding(
+        target: Option<crate::core::doctor::FindingAction>,
+    ) -> crate::core::doctor::Finding {
+        crate::core::doctor::Finding {
+            id: "x".into(),
+            severity: crate::core::doctor::FindingSeverity::Warning,
+            title: "t".into(),
+            evidence: "e".into(),
+            action: "a".into(),
+            action_target: target,
+        }
+    }
+
+    fn doctor_app(
+        target: Option<crate::core::doctor::FindingAction>,
+    ) -> (App, Arc<crate::core::host::fake::FakeHost>) {
+        let report = crate::core::doctor::DoctorReport {
+            seconds: 1,
+            findings: vec![doctor_finding(target)],
+            checks: Vec::new(),
+        };
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let mut app = new_app();
+        app.host = host.clone();
+        app.screen = Screen::Doctor(DoctorScreenState::new_done(report));
+        (app, host)
+    }
+
+    fn kill_dialog(app: &mut App) {
+        let Screen::Doctor(state) = &mut app.screen else {
+            panic!("expected the doctor screen");
+        };
+        state.confirm = Some(DoctorActionConfirm::KillProcess {
+            pid: 4242,
+            name: "node".into(),
+        });
+        state.confirm_button = 0;
+    }
+
+    #[test]
+    fn a_sent_signal_removes_the_finding() {
+        let (mut app, host) = doctor_app(None);
+        kill_dialog(&mut app);
+
+        app.handle_key(KeyCode::Enter);
+
+        let Screen::Doctor(state) = &app.screen else {
+            panic!("expected the doctor screen");
+        };
+        assert_eq!(*host.signals.lock().unwrap(), [(4242, libc::SIGTERM)]);
+        assert!(state.findings().is_empty());
+        assert!(matches!(&state.message, Some((m, false)) if m.contains("Sent SIGTERM to node")));
+    }
+
+    #[test]
+    fn a_failed_signal_keeps_the_finding_and_shows_the_error() {
+        let (mut app, host) = doctor_app(None);
+        *host.signal_error.lock().unwrap() = Some("Operation not permitted".into());
+        kill_dialog(&mut app);
+
+        app.handle_key(KeyCode::Enter);
+
+        let Screen::Doctor(state) = &app.screen else {
+            panic!("expected the doctor screen");
+        };
+        assert_eq!(state.findings().len(), 1);
+        assert!(
+            matches!(&state.message, Some((m, true)) if m.contains("Operation not permitted") && m.contains("node"))
+        );
+    }
+
+    #[test]
+    fn kill_and_disable_dialogs_start_on_cancel() {
+        use crate::core::doctor::FindingAction;
+        let item = crate::core::startup::StartupItem {
+            label: "com.test.daemon".into(),
+            name: "Test".into(),
+            app_name: None,
+            app_bundle: None,
+            kind: crate::core::startup::StartupKind::Daemon,
+            state: crate::core::startup::StartupState::Broken,
+            program: None,
+            plist_path: None,
+            pid: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        };
+        let focus_after_request = |target: FindingAction| {
+            let (mut app, host) = doctor_app(Some(target));
+            let Screen::Doctor(state) = &mut app.screen else {
+                panic!("expected the doctor screen");
+            };
+            state.request_action();
+            (state.confirm_button, app, host)
+        };
+
+        let (button, mut app, host) = focus_after_request(FindingAction::KillProcess {
+            pid: 4242,
+            name: "node".into(),
+        });
+        assert_eq!(button, 1);
+        app.handle_key(KeyCode::Enter);
+        let Screen::Doctor(state) = &app.screen else {
+            panic!("expected the doctor screen");
+        };
+        assert!(host.signals.lock().unwrap().is_empty());
+        assert!(state.confirm.is_none());
+
+        let (button, _, _) = focus_after_request(FindingAction::DisableStartupItem { item });
+        assert_eq!(button, 1);
+        let (button, _, _) = focus_after_request(FindingAction::ExploreStorage);
+        assert_eq!(button, 0);
     }
 
     mod brew {

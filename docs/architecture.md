@@ -145,6 +145,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
   - `disable` and `enable` on the command line take a label. A login item can also be named by its name or by its path. A name that fits several items is an error that lists them, with the path of each login item.
   - `taert uninstall` removes only the login item with the app's name and the path of the copy it removes.
   - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
+  - `taert doctor` quits a process by sending `SIGTERM` after a confirmation that starts with focus on Cancel. `Host::signal` returns a `Result`, and a failed signal keeps the finding and shows the error.
   - `taert doctor` offers `taert startup disable` for a broken item only when the item has no read-only reason. Otherwise the finding shows the reason and has no action.
 
 ## Universal App Slimming

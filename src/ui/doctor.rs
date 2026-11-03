@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -19,8 +19,10 @@ use super::components::modal::{Modal, dim_backdrop};
 use super::theme::Theme;
 use crate::core::doctor::{DoctorReport, Finding, FindingAction, FindingSeverity};
 use crate::core::startup::StartupItem;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const SPLIT_MIN_WIDTH: u16 = 100;
+const NARROW_LIST_ROWS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub enum DoctorPhase {
@@ -33,18 +35,8 @@ pub enum DoctorPhase {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DoctorActionConfirm {
-    QuitApp {
-        name: String,
-        bundle_id: Option<String>,
-        pid: Option<u32>,
-    },
-    KillProcess {
-        pid: u32,
-        name: String,
-    },
-    DisableStartupItem {
-        item: StartupItem,
-    },
+    KillProcess { pid: u32, name: String },
+    DisableStartupItem { item: StartupItem },
     ExploreStorage,
 }
 
@@ -152,17 +144,11 @@ impl DoctorScreenState {
             return;
         };
 
-        self.confirm_button = 0;
+        self.confirm_button = match target {
+            FindingAction::ExploreStorage => 0,
+            _ => 1,
+        };
         self.confirm = match target {
-            FindingAction::AskAppToQuit {
-                name,
-                bundle_id,
-                pid,
-            } => Some(DoctorActionConfirm::QuitApp {
-                name,
-                bundle_id,
-                pid,
-            }),
             FindingAction::KillProcess { pid, name } => {
                 Some(DoctorActionConfirm::KillProcess { pid, name })
             }
@@ -227,21 +213,22 @@ pub fn render_doctor(frame: &mut Frame, state: &DoctorScreenState, theme: &Theme
         }
     };
 
-    let status_text = match (&state.message, &state.phase) {
-        (Some((message, _)), _) => message.clone(),
-        (None, DoctorPhase::Checking { .. }) => "Checking...".to_string(),
+    let status = match (&state.message, &state.phase) {
+        (Some((message, true)), _) => Span::styled(message.clone(), theme.danger()),
+        (Some((message, false)), _) => Span::styled(message.clone(), theme.success()),
+        (None, DoctorPhase::Checking { .. }) => Span::raw("Checking..."),
         (None, DoctorPhase::Done(report)) => {
             if report.findings.is_empty() {
-                "All clear".to_string()
+                Span::raw("All clear")
             } else {
-                format!("{} findings", report.findings.len())
+                Span::raw(format!("{} findings", report.findings.len()))
             }
         }
     };
 
     let chrome = AppChrome::new(crumbs)
         .full_width()
-        .status(Line::from(status_text))
+        .status(Line::from(status))
         .hints(hints)
         .behind_dialog(state.confirm.is_some());
 
@@ -256,7 +243,7 @@ pub fn render_doctor(frame: &mut Frame, state: &DoctorScreenState, theme: &Theme
         }
         DoctorPhase::Done(report) => {
             if report.findings.is_empty() {
-                render_all_clear(frame, inner, report.seconds, theme);
+                render_all_clear(frame, inner, report, theme);
             } else {
                 let is_split = inner.width >= SPLIT_MIN_WIDTH;
                 if is_split {
@@ -272,7 +259,15 @@ pub fn render_doctor(frame: &mut Frame, state: &DoctorScreenState, theme: &Theme
                     render_findings_list(frame, chunks[0], state, report, theme);
                     render_finding_details(frame, chunks[2], state, theme);
                 } else {
-                    render_findings_list(frame, inner, state, report, theme);
+                    let list_height =
+                        (report.findings.len() + FRAME_ROWS).min(NARROW_LIST_ROWS) as u16;
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+                        .split(inner);
+
+                    render_findings_list(frame, chunks[0], state, report, theme);
+                    render_narrow_details(frame, chunks[1], state, theme);
                 }
             }
         }
@@ -321,11 +316,11 @@ fn render_checking_card(
     frame.render_widget(Paragraph::new(card_lines), area);
 }
 
-fn render_all_clear(frame: &mut Frame, area: Rect, seconds: u64, theme: &Theme) {
+fn render_all_clear(frame: &mut Frame, area: Rect, report: &DoctorReport, theme: &Theme) {
     let width = area.width as usize;
     let color = theme.p.teal;
 
-    let rows = vec![
+    let mut rows = vec![
         Line::from(vec![
             Span::styled(format!("{} ", theme.g.success), theme.success()),
             Span::styled(
@@ -335,53 +330,64 @@ fn render_all_clear(frame: &mut Frame, area: Rect, seconds: u64, theme: &Theme) 
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            format!(
-                "Checked for {seconds} seconds. CPU, memory, disk, heat, and network look normal."
-            ),
+            format!("Checked for {} seconds.", report.seconds),
             theme.callout(),
         )),
         Line::from(""),
-        Line::from(Span::styled("Checks verified:", theme.footnote())),
-        Line::from(Span::styled(
-            "  • Sustained CPU usage (top)",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Background energy and wakeups",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Memory pressure and swap activity",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • APFS disk space headroom",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Power assertions (sleep blockers)",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Wake reasons and wake requests (last 24h)",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Thermal throttling and performance warnings",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Sustained network bandwidth",
-            theme.footnote(),
-        )),
-        Line::from(Span::styled(
-            "  • Launchd agents and login items",
-            theme.footnote(),
-        )),
+        Line::from(Span::styled("Checks:", theme.footnote())),
     ];
+    for check in &report.checks {
+        rows.push(match (&check.status[..], &check.reason) {
+            ("skipped", reason) => Line::from(Span::styled(
+                format!(
+                    "  • {} (skipped: {})",
+                    check.label(),
+                    reason.as_deref().unwrap_or_default()
+                ),
+                theme.warning(),
+            )),
+            _ => Line::from(Span::styled(
+                format!("  • {}", check.label()),
+                theme.footnote(),
+            )),
+        });
+    }
 
     let card_lines = card("Diagnosis", Vec::new(), rows, width, 0, color, theme);
     frame.render_widget(Paragraph::new(card_lines), area);
+}
+
+/// Splits `text` into lines of at most `width` columns, breaking between words.
+/// A word wider than `width` is cut into chunks of `width` columns.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        if let Some(line) = lines.last_mut()
+            && line.width() + 1 + word.width() <= width
+        {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        let mut chunk = String::new();
+        for ch in word.chars() {
+            if !chunk.is_empty() && chunk.width() + ch.width().unwrap_or(0) > width {
+                lines.push(std::mem::take(&mut chunk));
+            }
+            chunk.push(ch);
+        }
+        lines.push(chunk);
+    }
+    lines
+}
+
+fn severity_style(severity: FindingSeverity, theme: &Theme) -> Style {
+    match severity {
+        FindingSeverity::Critical => theme.danger(),
+        FindingSeverity::Warning => theme.warning(),
+        FindingSeverity::Notice => theme.callout(),
+        FindingSeverity::Info => theme.footnote(),
+    }
 }
 
 fn render_findings_list(
@@ -413,13 +419,12 @@ fn render_findings_list(
         .take(frame_rows)
     {
         let is_selected = idx == state.selected_index;
-        let (leading_sym, leading_style) = match finding.severity {
-            FindingSeverity::Critical | FindingSeverity::Warning => {
-                (theme.g.warning, theme.danger())
-            }
-            FindingSeverity::Notice => (theme.g.bullet, theme.callout()),
-            FindingSeverity::Info => (theme.g.file, theme.footnote()),
+        let leading_sym = match finding.severity {
+            FindingSeverity::Critical | FindingSeverity::Warning => theme.g.warning,
+            FindingSeverity::Notice => theme.g.bullet,
+            FindingSeverity::Info => theme.g.file,
         };
+        let leading_style = severity_style(finding.severity, theme);
 
         let title_spans = vec![Span::styled(finding.title.clone(), theme.body())];
 
@@ -444,11 +449,19 @@ fn render_finding_details(frame: &mut Frame, area: Rect, state: &DoctorScreenSta
         return;
     };
 
-    let (badge_text, badge_style) = match finding.severity {
-        FindingSeverity::Critical => ("Critical", theme.danger()),
-        FindingSeverity::Warning => ("Warning", theme.danger()),
-        FindingSeverity::Notice => ("Notice", theme.callout()),
-        FindingSeverity::Info => ("Info", theme.footnote()),
+    let badge_text = match finding.severity {
+        FindingSeverity::Critical => "Critical",
+        FindingSeverity::Warning => "Warning",
+        FindingSeverity::Notice => "Notice",
+        FindingSeverity::Info => "Info",
+    };
+    let badge_style = severity_style(finding.severity, theme);
+    let text_width = frame_w.saturating_sub(FRAME_SIDES + 2);
+    let indented = |text: &str, style: Style| -> Vec<Line<'static>> {
+        wrap_words(text, text_width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(format!("  {line}"), style)))
+            .collect()
     };
 
     let mut rows = vec![
@@ -464,17 +477,14 @@ fn render_finding_details(frame: &mut Frame, area: Rect, state: &DoctorScreenSta
         )),
         Line::from(""),
         Line::from(Span::styled("Evidence:", theme.callout())),
-        Line::from(Span::styled(
-            format!("  {}", finding.evidence),
-            theme.body(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled("Suggested Action:", theme.callout())),
-        Line::from(Span::styled(
-            format!("  {}", finding.action),
-            theme.success(),
-        )),
     ];
+    rows.extend(indented(&finding.evidence, theme.body()));
+    rows.push(Line::from(""));
+    rows.push(Line::from(Span::styled(
+        "Suggested Action:",
+        theme.callout(),
+    )));
+    rows.extend(indented(&finding.action, theme.success()));
 
     if finding.action_target.is_some() {
         rows.push(Line::from(""));
@@ -488,6 +498,45 @@ fn render_finding_details(frame: &mut Frame, area: Rect, state: &DoctorScreenSta
     frame.render_widget(Paragraph::new(card_lines), area);
 }
 
+fn render_narrow_details(frame: &mut Frame, area: Rect, state: &DoctorScreenState, theme: &Theme) {
+    let frame_w = area.width as usize;
+    let Some(finding) = state.selected_finding() else {
+        return;
+    };
+    let text_width = frame_w.saturating_sub(FRAME_SIDES);
+
+    let mut rows: Vec<Line<'static>> = wrap_words(&finding.title, text_width)
+        .into_iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line,
+                theme.body().add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+    for (label, text, style) in [
+        ("Evidence", &finding.evidence, theme.body()),
+        ("Action", &finding.action, theme.success()),
+    ] {
+        rows.extend(
+            wrap_words(&format!("{label}: {text}"), text_width)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, style))),
+        );
+    }
+
+    let card_lines = card(
+        "Details",
+        Vec::new(),
+        rows,
+        frame_w,
+        0,
+        theme.p.accent,
+        theme,
+    );
+    frame.render_widget(Paragraph::new(card_lines), area);
+}
+
 fn render_confirm_modal(
     frame: &mut Frame,
     area: Rect,
@@ -498,16 +547,12 @@ fn render_confirm_modal(
     dim_backdrop(frame.buffer_mut(), area);
 
     let (title, message, action_label, tint) = match confirm {
-        DoctorActionConfirm::QuitApp { name, .. } => (
-            "Ask App to Quit",
-            format!("Politely ask '{name}' to quit via macOS system events?"),
-            "Ask to Quit",
-            theme.p.orange,
-        ),
         DoctorActionConfirm::KillProcess { name, pid } => (
-            "Force Quit Process",
-            format!("Send termination signal (SIGTERM) to '{name}' (PID {pid})?"),
-            "Force Quit",
+            "Stop Process",
+            format!(
+                "Send SIGTERM to '{name}' (PID {pid})? The program can ignore it or take a moment to close."
+            ),
+            "Send SIGTERM",
             theme.p.orange,
         ),
         DoctorActionConfirm::DisableStartupItem { item } => (
@@ -546,4 +591,15 @@ fn render_confirm_modal(
             Span::styled(" Cancel", theme.callout()),
         ]))
         .render(frame, area, theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_words;
+
+    #[test]
+    fn wrap_words_splits_a_word_wider_than_the_width() {
+        assert_eq!(wrap_words("abcdefgh", 3), ["abc", "def", "gh"]);
+        assert_eq!(wrap_words("ab cdefg", 3), ["ab", "cde", "fg"]);
+    }
 }
