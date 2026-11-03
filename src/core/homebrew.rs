@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,6 +57,8 @@ pub struct Package {
     pub dependencies: Vec<String>,
     #[serde(skip)]
     pub path: PathBuf,
+    #[serde(skip)]
+    pub installed_at: Option<SystemTime>,
 }
 
 /// What a row of the cleanup list asks Homebrew to do.
@@ -129,6 +131,7 @@ struct RawKeg {
     version: String,
     #[serde(default)]
     installed_on_request: bool,
+    time: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +142,11 @@ struct RawCask {
     outdated: bool,
     #[serde(default)]
     artifacts: Vec<Value>,
+    installed_time: Option<u64>,
+}
+
+fn unix_time(seconds: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
 /// The first Homebrew prefix that has a `brew`.
@@ -252,6 +260,12 @@ fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
         apps: Vec::new(),
         dependencies: raw.dependencies.clone(),
         path: cellar_of(prefix, &raw.name),
+        installed_at: raw
+            .installed
+            .iter()
+            .filter_map(|keg| keg.time)
+            .max()
+            .map(unix_time),
     }
 }
 
@@ -269,6 +283,7 @@ fn cask_package(raw: &RawCask, prefix: &Path) -> Package {
         apps: cask_apps(&raw.artifacts),
         dependencies: Vec::new(),
         path: prefix.join("Caskroom").join(&raw.token),
+        installed_at: raw.installed_time.map(unix_time),
     }
 }
 
@@ -476,21 +491,26 @@ pub struct TreeEntry<'a> {
     pub expanded: bool,
 }
 
+/// Orders the packages of one level of the tree.
+pub type Sort<'s> = &'s dyn Fn(&mut [&Package]);
+
 fn push_branch<'a>(
     inventory: &'a Inventory,
     package: &'a Package,
     parent: &[String],
     expanded: &HashSet<Vec<String>>,
+    sort: Sort,
     rows: &mut Vec<TreeEntry<'a>>,
 ) {
     let mut path = parent.to_vec();
     path.push(package.name.clone());
     // A formula inside its own branch is a cycle: it shows, but does not open.
-    let children = if parent.contains(&package.name) {
+    let mut children = if parent.contains(&package.name) {
         Vec::new()
     } else {
         dependencies_of(inventory, package)
     };
+    sort(&mut children);
     let open = !children.is_empty() && expanded.contains(&path);
     rows.push(TreeEntry {
         package,
@@ -500,16 +520,18 @@ fn push_branch<'a>(
     });
     if open {
         for child in children {
-            push_branch(inventory, child, &path, expanded, rows);
+            push_branch(inventory, child, &path, expanded, sort, rows);
         }
     }
 }
 
 /// The rows of each top-level group, with the dependencies of the open rows inside. The name is
-/// the one of the group in `list_scan`.
+/// the one of the group in `list_scan`. `sort` orders the top-level rows of each group and the
+/// children of every open row.
 pub fn tree_sections<'a>(
     inventory: &'a Inventory,
     expanded: &HashSet<Vec<String>>,
+    sort: Sort,
 ) -> Vec<(&'static str, Vec<TreeEntry<'a>>)> {
     let top = top_level(inventory);
     [
@@ -519,10 +541,11 @@ pub fn tree_sections<'a>(
     ]
     .into_iter()
     .filter(|(_, packages)| !packages.is_empty())
-    .map(|(name, packages)| {
+    .map(|(name, mut packages)| {
+        sort(&mut packages);
         let mut rows = Vec::new();
         for package in packages {
-            push_branch(inventory, package, &[], expanded, &mut rows);
+            push_branch(inventory, package, &[], expanded, sort, &mut rows);
         }
         (name, rows)
     })
@@ -538,7 +561,10 @@ pub fn list_scan(inventory: &Inventory) -> CategoryScan {
             (PackageKind::Formula, Some(brew)) => Some(uninstall_task(package, brew)),
             _ => None,
         };
-        item(label(package), package.size_bytes, false, task)
+        ScanItem {
+            modified: package.installed_at,
+            ..item(label(package), package.size_bytes, false, task)
+        }
     };
     let top = top_level(inventory);
     let group = |tool: &str, packages: &[&Package]| ToolGroup {
@@ -995,6 +1021,7 @@ pub mod testing {
             apps: Vec::new(),
             dependencies: Vec::new(),
             path: PathBuf::new(),
+            installed_at: None,
         }
     }
 
@@ -1499,6 +1526,114 @@ mod tests {
         assert_eq!(names(&dependencies_of(&inventory, &tool)), ["lib", "small"]);
     }
 
+    fn by_size(rows: &mut [&Package]) {
+        rows.sort_by(|a, b| {
+            (Reverse(a.size_bytes), &a.name).cmp(&(Reverse(b.size_bytes), &b.name))
+        });
+    }
+
+    fn by_name(rows: &mut [&Package]) {
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    #[test]
+    fn the_install_time_comes_from_the_newest_keg_or_the_cask() {
+        let packages = packages();
+
+        assert_eq!(
+            named(&packages, "ada-url").installed_at,
+            Some(unix_time(1_793_701_852))
+        );
+        assert_eq!(
+            named(&packages, "actionlint").installed_at,
+            Some(unix_time(1_793_701_820))
+        );
+        assert_eq!(
+            named(&packages, "codex").installed_at,
+            Some(unix_time(1_793_707_018))
+        );
+        assert_eq!(
+            named(&packages, "ghostty").installed_at,
+            Some(unix_time(1_788_907_278))
+        );
+    }
+
+    #[test]
+    fn the_newest_keg_wins_and_a_missing_time_is_none() {
+        let json = r#"{"formulae":[
+            {"name":"two","installed":[{"version":"2.0","time":200},{"version":"1.0","time":100}]},
+            {"name":"null","installed":[{"version":"1.0","time":null}]},
+            {"name":"none","installed":[{"version":"1.0"}]}
+        ],"casks":[{"token":"nodate","installed":"1","installed_time":null}]}"#;
+
+        let packages = parse_packages(json, Path::new("/opt/homebrew")).unwrap();
+
+        assert_eq!(named(&packages, "two").installed_at, Some(unix_time(200)));
+        assert_eq!(named(&packages, "null").installed_at, None);
+        assert_eq!(named(&packages, "none").installed_at, None);
+        assert_eq!(named(&packages, "nodate").installed_at, None);
+    }
+
+    #[test]
+    fn list_scan_rows_carry_the_install_time() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(INFO_LINE_START, BREW_INFO);
+        let inventory = Inventory {
+            packages: packages(),
+            brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+            ..Inventory::default()
+        };
+
+        let scan = list_scan(&inventory);
+        let row = scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .find(|item| label_name(&item.path.to_string_lossy()).starts_with("ada-url"))
+            .unwrap();
+        let plan = uninstall_plan(&layout, &host, "actionlint").unwrap();
+
+        assert_eq!(row.modified, Some(unix_time(1_793_701_852)));
+        assert_eq!(plan.groups[0].items[0].modified, None);
+    }
+
+    #[test]
+    fn tree_sections_sort_each_level_with_the_given_sort() {
+        let mut zeta = package(PackageKind::Formula, "zeta", "1", 9_000);
+        zeta.dependencies = vec!["big".to_string(), "aaa".to_string()];
+        let mut big = package(PackageKind::Formula, "big", "1", 800);
+        big.on_request = false;
+        let mut aaa = package(PackageKind::Formula, "aaa", "1", 10);
+        aaa.on_request = false;
+        let mid = package(PackageKind::Formula, "mid", "1", 5_000);
+        let zcask = package(PackageKind::Cask, "zcask", "1", 9_000);
+        let acask = package(PackageKind::Cask, "acask", "1", 100);
+        let inventory = Inventory {
+            packages: vec![zeta, mid, big, aaa, zcask, acask],
+            ..Inventory::default()
+        };
+        let expanded: HashSet<Vec<String>> = [vec!["zeta".to_string()]].into_iter().collect();
+        let shown = |sort: &dyn Fn(&mut [&Package])| -> Vec<(&str, Vec<String>)> {
+            tree_sections(&inventory, &expanded, sort)
+                .into_iter()
+                .map(|(group, rows)| (group, rows.iter().map(|r| r.path.join("/")).collect()))
+                .collect()
+        };
+
+        let name = shown(&by_name);
+        let size = shown(&by_size);
+
+        let groups = |shown: &[(&str, Vec<String>)]| -> Vec<String> {
+            shown.iter().map(|(g, _)| g.to_string()).collect()
+        };
+        assert_eq!(groups(&name), groups(&size));
+        assert_eq!(name[0].1, ["mid", "zeta", "zeta/aaa", "zeta/big"]);
+        assert_eq!(name[1].1, ["acask", "zcask"]);
+        assert_eq!(size[0].1, ["zeta", "zeta/big", "zeta/aaa", "mid"]);
+        assert_eq!(size[1].1, ["zcask", "acask"]);
+    }
+
     #[test]
     fn tree_sections_open_the_expanded_paths_and_stop_at_a_cycle() {
         let mut a = package(PackageKind::Formula, "a", "1", 9_000);
@@ -1524,7 +1659,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let sections = tree_sections(&inventory, &expanded);
+        let sections = tree_sections(&inventory, &expanded, &by_size);
 
         let groups: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
         assert_eq!(groups, ["Formulae"]);
@@ -1587,7 +1722,7 @@ mod tests {
             scan.groups
                 .iter()
                 .flat_map(|group| &group.items)
-                .all(|row| !row.selected && row.modified.is_none())
+                .all(|row| !row.selected)
         );
     }
 

@@ -212,11 +212,13 @@ impl SelectState {
         let mut state = Self::new(homebrew::list_scan(inventory));
         state.refusals = homebrew::list_refusals(inventory);
         state.homebrew = Some(inventory.clone());
+        state.set_sort(SortOrder::default());
+        state.move_to_start();
         state
     }
 
     /// Closes the outcome of a removal on the Homebrew list. The formulae that went leave the
-    /// list and the ones they used are updated, with the search and the focus kept.
+    /// list and the ones they used are updated, with the sort, the search, and the focus kept.
     pub fn close_homebrew_outcome(&mut self) {
         let overlay = std::mem::replace(&mut self.overlay, ModalOverlay::None);
         let ModalOverlay::Outcome(report) = overlay else {
@@ -249,6 +251,9 @@ impl SelectState {
             inventory.forget(name);
         }
         let mut fresh = Self::homebrew_list(&inventory).with_permanent(self.permanent);
+        if let Some(order) = self.sort_order {
+            fresh.set_sort(order);
+        }
         fresh.search_query = std::mem::take(&mut self.search_query);
         fresh.expanded = std::mem::take(&mut self.expanded);
         if fresh.flattened_rows().is_empty() {
@@ -292,10 +297,12 @@ impl SelectState {
 
         let Some(focused) = focused else { return };
         let rows = self.flattened_rows();
+        let tree_path = |row: &FlattenedRow| row.tree.as_ref().map(|tree| tree.path.clone());
         let same_item = |row: &FlattenedRow| {
             row.is_item()
                 && row.group_index == focused.group_index
                 && row.full_path == focused.full_path
+                && tree_path(row) == tree_path(&focused)
         };
         if let Some(index) = rows.iter().position(same_item) {
             self.focused_index = index;
@@ -340,7 +347,8 @@ impl SelectState {
                 places.insert(item.path.clone(), (g_idx, i_idx));
             }
         }
-        homebrew::tree_sections(inventory, &self.expanded)
+        let order = self.sort_order.unwrap_or_default();
+        homebrew::tree_sections(inventory, &self.expanded, &|rows| order.sort_children(rows))
             .into_iter()
             .filter_map(|(name, rows)| {
                 let group_index = self.scan.groups.iter().position(|g| g.tool == name)?;
@@ -423,7 +431,9 @@ impl SelectState {
 
             if self.sort_order.is_some() {
                 let is_cache = |item: &ScanItem| item.docker == Some(DockerObject::BuildCache);
-                let date = if self.scan.id == apps::LIST_ID
+                let date = if self.scan.id == homebrew::SCAN_ID {
+                    "INSTALLED"
+                } else if self.scan.id == apps::LIST_ID
                     || self.scan.id == large_files::SCAN_ID
                     || group.items.iter().any(is_cache)
                 {
@@ -1143,6 +1153,9 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             Hint::new("↑↓", "Move"),
             Hint::new("D", "Uninstall"),
         ]);
+        if let Some(order) = state.sort_order {
+            hints.push(Hint::new("⇧S/N/D", order.hint_label()));
+        }
     } else if has_items {
         hints.extend([
             Hint::new("␣", "Select"),

@@ -1231,6 +1231,7 @@ fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Pac
         apps: Vec::new(),
         dependencies: Vec::new(),
         path: PathBuf::new(),
+        installed_at: None,
     }
 }
 
@@ -1246,6 +1247,10 @@ fn brew_list() -> SelectState {
     ada.on_request = false;
     let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
     ghostty.apps = vec!["Ghostty.app".to_string()];
+    go.installed_at = days_ago(40);
+    bun.installed_at = days_ago(1);
+    ada.installed_at = days_ago(3);
+    ghostty.installed_at = days_ago(12);
     SelectState::homebrew_list(&Inventory {
         packages: vec![go, bun, ada, fd, ghostty],
         brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
@@ -1279,8 +1284,14 @@ fn brew_tree() -> SelectState {
     gmp.used_by = vec!["go".to_string()];
     let mut ada = formula("ada-url", "4.0.0_1", 3_100_000);
     ada.on_request = false;
-    let bun = formula("bun", "1.4.2", 60_000_000);
-    let ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
+    let mut bun = formula("bun", "1.4.2", 60_000_000);
+    let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
+    lint.installed_at = days_ago(5);
+    go.installed_at = days_ago(40);
+    bun.installed_at = days_ago(1);
+    ghostty.installed_at = days_ago(12);
+    pcre2.installed_at = days_ago(5);
+    ada.installed_at = days_ago(3);
     let mut state = SelectState::homebrew_list(&Inventory {
         packages: vec![go, lint, bun, ghostty, pcre2, ada, gmp],
         brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
@@ -1307,6 +1318,22 @@ fn snapshot_select_brew_tree() {
     assert_snapshot!("select_brew_tree_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_brew_tree_80x24", narrow);
+}
+
+#[test]
+fn snapshot_select_brew_by_date() {
+    let mut state = brew_list();
+    state.set_sort(SortOrder::Date);
+
+    assert_snapshot!("select_brew_by_date_120x32", select_screen(&state));
+}
+
+#[test]
+fn snapshot_select_brew_tree_by_name() {
+    let mut state = brew_tree();
+    state.set_sort(SortOrder::Name);
+
+    assert_snapshot!("select_brew_tree_by_name_120x32", select_screen(&state));
 }
 
 #[test]
