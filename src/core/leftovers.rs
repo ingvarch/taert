@@ -20,6 +20,10 @@ use super::safety::FileIdentity;
 use super::startup::launch_program;
 
 const MIN_NAME: usize = 2;
+pub(crate) const CONTAINER_METADATA: &[&str] = &[
+    ".com.apple.containermanagerd.metadata.plist",
+    ".com.apple.containermanager.metadata.plist",
+];
 const MIN_CHANNEL_BASE: usize = 3;
 const MIN_FAMILY_PARTS: usize = 3;
 const MIN_NAME_OUTSIDE_HOME: usize = 5;
@@ -403,8 +407,11 @@ fn native_host_program(manifest: &Path) -> Option<String> {
     value.get("path")?.as_str().map(str::to_string)
 }
 
-fn container_owner(container: &Path) -> Option<String> {
-    let metadata = container.join(".com.apple.containermanagerd.metadata.plist");
+pub(crate) fn container_owner(container: &Path) -> Option<String> {
+    let metadata = CONTAINER_METADATA
+        .iter()
+        .map(|name| container.join(name))
+        .find(|path| path.exists())?;
     let info = Value::from_file(metadata).ok()?.into_dictionary()?;
     info.get("MCMMetadataIdentifier")?
         .as_string()
@@ -1458,6 +1465,25 @@ mod tests {
 
         assert_found(&found, &mine, Evidence::BundleId);
         assert_absent(&found, &theirs);
+    }
+
+    #[test]
+    fn the_older_metadata_name_names_the_owner() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Foo", "com.acme.foo");
+        let container = folder(
+            layout
+                .user("Library/Containers")
+                .join("6F9619FF-8B86-D011-B42D-00C04FC964FF"),
+        );
+        let mut dict = plist::Dictionary::new();
+        dict.insert("MCMMetadataIdentifier".to_string(), "com.acme.foo".into());
+        let metadata = container.join(".com.apple.containermanager.metadata.plist");
+        plist::to_file_xml(metadata, &plist::Value::Dictionary(dict)).unwrap();
+
+        let found = find(&target, &layout);
+
+        assert_found(&found, &container, Evidence::BundleId);
     }
 
     #[test]

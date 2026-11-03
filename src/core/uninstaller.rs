@@ -28,8 +28,8 @@ use super::homebrew;
 use super::host::{Host, shell_quote};
 use super::layout::Layout;
 use super::leftovers::{
-    Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary, vendor_token,
-    without_channel,
+    CONTAINER_METADATA, Evidence, Leftover, UninstallRole, find_leftovers, has_id_boundary,
+    vendor_token, without_channel,
 };
 use super::path_utils::prettify_path;
 use super::processes;
@@ -55,7 +55,6 @@ const DEFAULTS: &str = "/usr/bin/defaults";
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
 const DOCK_DOMAIN: &str = "com.apple.dock";
 const DOCK_LISTS: &[&str] = &["persistent-apps", "persistent-others", "recent-apps"];
-const CONTAINER_METADATA: &str = ".com.apple.containermanagerd.metadata.plist";
 const LOCKED_FLAGS: u32 =
     libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
 
@@ -490,7 +489,7 @@ fn is_container_stub(path: &Path) -> bool {
         return false;
     };
     let names: Vec<_> = entries.flatten().map(|entry| entry.file_name()).collect();
-    names.len() == 1 && names[0] == CONTAINER_METADATA
+    names.len() == 1 && CONTAINER_METADATA.iter().any(|name| names[0] == *name)
 }
 
 fn can_access(path: &Path, mode: libc::c_int) -> bool {
@@ -3745,12 +3744,26 @@ mod run_tests {
         let (_temp, layout) = sandbox();
         let emptied = layout.user("Library/Containers/com.acme.emptied");
         fs::create_dir_all(&emptied).unwrap();
-        fs::write(emptied.join(CONTAINER_METADATA), b"x").unwrap();
+        fs::write(emptied.join(CONTAINER_METADATA[0]), b"x").unwrap();
         let full = folder(layout.user("Library/Containers/com.acme.full"));
-        fs::write(full.join(CONTAINER_METADATA), b"x").unwrap();
+        fs::write(full.join(CONTAINER_METADATA[0]), b"x").unwrap();
 
         assert!(is_container_stub(&emptied));
         assert!(!is_container_stub(&full));
+    }
+
+    #[test]
+    fn a_stub_with_the_older_metadata_name_is_emptied() {
+        let (_temp, layout) = sandbox();
+        let emptied = layout.user("Library/Containers/com.acme.emptied");
+        fs::create_dir_all(&emptied).unwrap();
+        fs::write(
+            emptied.join(".com.apple.containermanager.metadata.plist"),
+            b"x",
+        )
+        .unwrap();
+
+        assert!(is_container_stub(&emptied));
     }
 
     #[test]
