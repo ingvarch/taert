@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Uninstall**: a Homebrew cask is removed with the brew of the Homebrew install that holds it, so a cask in `/usr/local` no longer fails on a Mac that also has `/opt/homebrew`.
+- **Main menu**: in a short window the menu scrolls with the highlighted row, so every row can be reached, and the first or last line says how many rows are out of view.
 
 ## [0.6.0] - 2026-11-03
 

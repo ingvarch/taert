@@ -460,27 +460,104 @@ fn menu_row(state: &WorkspaceState, index: usize, width: usize, theme: &Theme) -
         .render_line(width, theme)
 }
 
+/// Menu lines with a mark on each line that holds a menu row.
+struct MenuLines {
+    lines: Vec<Line<'static>>,
+    is_row: Vec<bool>,
+    selected: usize,
+}
+
+impl MenuLines {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            is_row: Vec::new(),
+            selected: 0,
+        }
+    }
+
+    fn text(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+        self.is_row.push(false);
+    }
+
+    /// Adds one frame. `body` holds `(line, row index)` pairs, with `None` for a description line.
+    fn frame(
+        &mut self,
+        title: &str,
+        body: Vec<(Line<'static>, Option<usize>)>,
+        width: usize,
+        theme: &Theme,
+        selected_index: usize,
+    ) {
+        let color = section_color(title, theme);
+        let first = self.lines.len() + 1;
+        for (k, (_, row)) in body.iter().enumerate() {
+            if *row == Some(selected_index) {
+                self.selected = first + k;
+            }
+        }
+        let marks: Vec<bool> = body.iter().map(|(_, row)| row.is_some()).collect();
+        let rows = body.into_iter().map(|(line, _)| line).collect();
+        self.lines
+            .extend(card(title, Vec::new(), rows, width, 0, color, theme));
+        self.is_row.push(false);
+        self.is_row.extend(marks);
+        self.is_row.push(false);
+    }
+
+    /// Cuts the lines to `height` around the selected row and says how many rows are out of view.
+    fn window(self, height: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let total = self.lines.len();
+        if total <= height || height == 0 {
+            return self.lines;
+        }
+        let offset = self.selected.saturating_sub(height / 2).min(total - height);
+        let last = offset + height - 1;
+        let above = self.is_row[..=offset].iter().filter(|&&r| r).count();
+        let below = self.is_row[last..].iter().filter(|&&r| r).count();
+        let hidden_above = offset > 0 && above > 0;
+        let hidden_below = last < total - 1 && below > 0;
+
+        let mut lines: Vec<Line<'static>> =
+            self.lines.into_iter().skip(offset).take(height).collect();
+        if hidden_above {
+            lines[0] = hint_line(format!("{above} more above"), theme);
+        }
+        if hidden_below {
+            lines[height - 1] = hint_line(format!("{below} more below"), theme);
+        }
+        lines
+    }
+}
+
+fn hint_line(text: String, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(text, theme.footnote()))
+}
+
 fn render_regular_menu(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
     let width = area.width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
 
-    let mut lines = vec![
-        Line::from(Span::styled("Your Mac, crystal clean.", theme.callout())),
-        Line::from(""),
-    ];
+    let mut menu = MenuLines::new();
+    menu.text(Line::from(Span::styled(
+        "Your Mac, crystal clean.",
+        theme.callout(),
+    )));
+    menu.text(Line::from(""));
 
     for (title, indices) in MENU_SECTIONS {
         let mut rows = Vec::new();
         for &i in indices {
-            rows.push(menu_row(state, i, inner, theme));
+            rows.push((menu_row(state, i, inner, theme), Some(i)));
             if i == state.selected_index {
-                rows.push(render_desc_line(state.items[i].2, inner, theme));
+                rows.push((render_desc_line(state.items[i].2, inner, theme), None));
             }
         }
-        let color = section_color(title, theme);
-        lines.extend(card(title, Vec::new(), rows, width, 0, color, theme));
+        menu.frame(title, rows, width, theme, state.selected_index);
     }
 
+    let lines = menu.window(area.height as usize, theme);
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -521,19 +598,19 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
 
     let width = chunks[0].width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
-    let mut sidebar = Vec::new();
+    let mut sidebar = MenuLines::new();
     let mut detail_color = theme.p.accent;
     for (title, indices) in MENU_SECTIONS {
-        let color = section_color(title, theme);
         if indices.contains(&state.selected_index) {
-            detail_color = color;
+            detail_color = section_color(title, theme);
         }
         let rows = indices
             .iter()
-            .map(|&i| menu_row(state, i, inner, theme))
+            .map(|&i| (menu_row(state, i, inner, theme), Some(i)))
             .collect();
-        sidebar.extend(card(title, Vec::new(), rows, width, 0, color, theme));
+        sidebar.frame(title, rows, width, theme, state.selected_index);
     }
+    let sidebar = sidebar.window(chunks[0].height as usize, theme);
     frame.render_widget(Paragraph::new(sidebar), chunks[0]);
 
     let (choice, title, _, long_desc) = &state.items[state.selected_index];
