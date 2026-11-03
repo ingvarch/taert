@@ -5,9 +5,11 @@
 //! universal apps, strips the Intel architecture slices from Mach-O fat binaries while preserving
 //! ARM code and code signatures, and safely moves the original bundle to the Trash.
 
-use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -21,11 +23,13 @@ use plist::Value;
 use serde::{Deserialize, Serialize};
 
 use super::apps::{self, InstalledApp};
+use super::bytes::format_bytes;
 use super::history::{HistorySession, ItemOutcome};
 use super::host::Host;
 use super::layout::Layout;
-use super::safety::{FileIdentity, Safety};
+use super::safety::Safety;
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
+use super::sizer::DirSizer;
 use super::stores::IgnoreStore;
 
 pub const SCAN_ID: &str = "slim";
@@ -36,9 +40,19 @@ pub const CPU_TYPE_I386: u32 = 7;
 pub const CPU_TYPE_X86_64: u32 = 0x01000007;
 pub const CPU_TYPE_ARM64: u32 = 0x0100000c;
 
+pub const PS_FAILED: &str = "Could not list running programs";
+
+pub const LINKED_APP: &str = "The app is a link. Slim the app it points to";
+
+pub const TRASH_NOTE: &str =
+    "Clones share blocks, so the space comes back when the Trash is emptied.";
+
 pub const APP_MANAGEMENT_HINT: &str = "macOS refused. Allow your terminal in System Settings > Privacy & Security > App Management, or move the app to the Trash in Finder";
 
+const HOLDING_SUFFIX: &str = ".taert-slim-tmp";
+
 const RENAME_SWAP: libc::c_uint = 0x0000_0002;
+const XATTR_NOFOLLOW: libc::c_int = 0x0001;
 
 unsafe extern "C" {
     fn renamex_np(
@@ -298,10 +312,14 @@ pub fn rewrite_fat_binary(data: &[u8]) -> Result<Vec<u8>, SlimError> {
 /// Reads relative paths sealed by file hash from a bundle's `_CodeSignature/CodeResources`.
 /// Files sealed by file hash must NOT be modified, as doing so breaks the bundle seal.
 pub fn read_sealed_hashes(code_resources_path: &Path) -> HashSet<String> {
-    let mut sealed = HashSet::new();
+    try_read_sealed_hashes(code_resources_path).unwrap_or_default()
+}
+
+fn try_read_sealed_hashes(code_resources_path: &Path) -> Option<HashSet<String>> {
     let Ok(Value::Dictionary(dict)) = Value::from_file(code_resources_path) else {
-        return sealed;
+        return None;
     };
+    let mut sealed = HashSet::new();
     for key in ["files2", "files"] {
         if let Some(Value::Dictionary(files_dict)) = dict.get(key) {
             for (path, val) in files_dict {
@@ -315,7 +333,57 @@ pub fn read_sealed_hashes(code_resources_path: &Path) -> HashSet<String> {
             }
         }
     }
-    sealed
+    Some(sealed)
+}
+
+/// The seal of the nearest nested bundle around `file`, with the folder its keys start from.
+/// The last rule also finds `<nested>/Contents/_CodeSignature`, when `folder` is `<nested>/Contents`.
+fn nested_seal(file: &Path, contents: &Path) -> Option<(PathBuf, PathBuf)> {
+    for folder in file.ancestors().skip(1) {
+        if folder == contents || !folder.starts_with(contents) {
+            return None;
+        }
+        if let Ok(rest) = file.strip_prefix(folder.join("Versions"))
+            && let Some(version) = rest.components().next()
+        {
+            let base = folder.join("Versions").join(version);
+            for seal in ["_CodeSignature/CodeResources", "Resources/CodeResources"] {
+                if base.join(seal).is_file() {
+                    return Some((base.join(seal), base));
+                }
+            }
+        }
+        if folder.join("_CodeSignature/CodeResources").is_file() {
+            return Some((
+                folder.join("_CodeSignature/CodeResources"),
+                folder.to_path_buf(),
+            ));
+        }
+    }
+    None
+}
+
+/// Whether the bundle's seal covers `file` by hash, so rewriting it would break the seal.
+fn is_sealed(
+    file: &Path,
+    contents: &Path,
+    top: &HashSet<String>,
+    nested: &mut HashMap<PathBuf, Option<HashSet<String>>>,
+) -> bool {
+    let (sealed, base) = match nested_seal(file, contents) {
+        Some((seal, base)) => {
+            let hashes = nested
+                .entry(seal.clone())
+                .or_insert_with(|| try_read_sealed_hashes(&seal));
+            match hashes {
+                Some(hashes) => (&*hashes, base),
+                None => return true,
+            }
+        }
+        None => (top, contents.to_path_buf()),
+    };
+    file.strip_prefix(&base)
+        .is_ok_and(|rel| sealed.contains(rel.to_string_lossy().as_ref()))
 }
 
 /// Discovers universal Mach-O binaries in an app bundle that qualify for slimming.
@@ -327,7 +395,7 @@ pub fn find_universal_binaries(bundle: &Path) -> (Vec<PathBuf>, u64) {
     } else {
         HashSet::new()
     };
-
+    let mut nested_seals = HashMap::new();
     let contents = bundle.join("Contents");
     if !contents.exists() {
         return (Vec::new(), 0);
@@ -350,11 +418,8 @@ pub fn find_universal_binaries(bundle: &Path) -> (Vec<PathBuf>, u64) {
             continue;
         }
 
-        if let Ok(rel) = path.strip_prefix(&contents) {
-            let rel_str = rel.to_string_lossy();
-            if sealed_paths.contains(rel_str.as_ref()) {
-                continue;
-            }
+        if is_sealed(&path, &contents, &sealed_paths, &mut nested_seals) {
+            continue;
         }
 
         if let Ok(Some(header)) = parse_fat_header_from_file(&path) {
@@ -410,16 +475,17 @@ pub fn is_apple_silicon(host: &dyn Host) -> bool {
 pub type Processes = [(u32, u32, String)];
 
 /// Retrieves running processes from `ps`.
-pub fn running_processes(host: &dyn Host) -> Vec<(u32, u32, String)> {
+pub fn running_processes(host: &dyn Host) -> Result<Vec<(u32, u32, String)>, String> {
     let out = host.run(
         "/bin/ps",
         &["-axo", "pid=,ppid=,comm="],
         Duration::from_secs(5),
     );
     if !out.ok {
-        return Vec::new();
+        return Err(PS_FAILED.to_string());
     }
-    out.stdout
+    Ok(out
+        .stdout
         .lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
@@ -428,12 +494,11 @@ pub fn running_processes(host: &dyn Host) -> Vec<(u32, u32, String)> {
             let comm = parts.collect::<Vec<_>>().join(" ");
             Some((pid, ppid, comm))
         })
-        .collect()
+        .collect())
 }
 
 /// Verifies whether an app qualifies for slimming according to safety and integrity rules.
 /// Returns the qualifying universal binaries or an error describing why it stays.
-#[allow(clippy::too_many_arguments)]
 pub fn check_eligibility(
     app: &InstalledApp,
     host: &dyn Host,
@@ -442,7 +507,6 @@ pub fn check_eligibility(
     rosetta_apps: &HashSet<String>,
     running: Option<&Processes>,
     skip_developer_id: bool,
-    deep_verify: bool,
 ) -> Result<Vec<PathBuf>, String> {
     // 1. Apple apps: bundle id starting with com.apple.
     if app
@@ -479,14 +543,8 @@ pub fn check_eligibility(
         }
     }
 
-    // 5. Owned by another user
-    if let Ok(meta) = fs::metadata(&app.path) {
-        let uid = meta.uid();
-        let current_uid = unsafe { libc::geteuid() };
-        if uid != current_uid && uid != 0 {
-            return Err("Belongs to another user".to_string());
-        }
-    }
+    // 5. Owned by another user, or holding a setuid or setgid file
+    check_ownership(&app.path, unsafe { libc::geteuid() })?;
     let users_dir = layout
         .home
         .ancestors()
@@ -523,30 +581,81 @@ pub fn check_eligibility(
         }
     }
 
-    // 9. Initial codesign and Gatekeeper verification (run when deep_verify is requested)
-    if deep_verify {
-        let cs = host.run(
-            "codesign",
-            &["--verify", "--deep", "--strict", app.path.to_str().unwrap()],
+    // 9. Signature and Gatekeeper checks of the app as it is now
+    let path = app.path.to_str().unwrap();
+    let verify = host.run(
+        "codesign",
+        &["--verify", "--deep", "--strict", path],
+        Duration::from_secs(30),
+    );
+    if !verify.ok {
+        return Err("Already fails the signature check".to_string());
+    }
+    if !skip_developer_id {
+        let assess = host.run(
+            "spctl",
+            &["--assess", "--type", "execute", path],
             Duration::from_secs(30),
         );
-        if !cs.ok {
-            return Err("Signature verification failed".to_string());
-        }
-
-        if !skip_developer_id {
-            let spctl = host.run(
-                "spctl",
-                &["--assess", "--type", "execute", app.path.to_str().unwrap()],
-                Duration::from_secs(30),
-            );
-            if !spctl.ok {
-                return Err("Gatekeeper assessment failed".to_string());
-            }
+        if !assess.ok {
+            return Err("Already fails the Gatekeeper check".to_string());
         }
     }
 
     Ok(binaries)
+}
+
+/// Every entry under `root` (and `root` itself), sorted, without following links.
+fn walk_entries(root: &Path) -> std::io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    fn visit(path: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) -> std::io::Result<()> {
+        let meta = fs::symlink_metadata(path)?;
+        let is_dir = meta.is_dir();
+        out.push((path.to_path_buf(), meta));
+        if is_dir {
+            let mut names = fs::read_dir(path)?
+                .map(|entry| entry.map(|e| e.file_name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            for name in names {
+                visit(&path.join(name), out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    visit(root, &mut out)?;
+    Ok(out)
+}
+
+/// Refuses a bundle that is a link, has an entry that `expected_uid` does not own,
+/// or has a setuid or setgid entry.
+pub fn check_ownership(root: &Path, expected_uid: u32) -> Result<(), String> {
+    let entries =
+        walk_entries(root).map_err(|e| format!("Could not read {}: {e}", root.display()))?;
+    if entries.first().is_some_and(|(_, meta)| meta.is_symlink()) {
+        return Err(LINKED_APP.to_string());
+    }
+    for (_, meta) in entries {
+        if meta.uid() != expected_uid {
+            return Err("Belongs to another user".to_string());
+        }
+        if meta.mode() & 0o6000 != 0 {
+            return Err("Contains a setuid or setgid file".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// A hash of every entry's path, type, size, modification time, inode and device.
+pub fn fingerprint(root: &Path) -> std::io::Result<u64> {
+    let mut hasher = DefaultHasher::new();
+    for (path, meta) in walk_entries(root)? {
+        path.strip_prefix(root).unwrap_or(&path).hash(&mut hasher);
+        let kind = (meta.is_dir(), meta.is_file(), meta.is_symlink());
+        let modified = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+        (kind, meta.len(), modified, meta.ino(), meta.dev()).hash(&mut hasher);
+    }
+    Ok(hasher.finish())
 }
 
 /// Recursively removes `com.apple.FinderInfo` and `com.apple.ResourceFork` attributes from a tree.
@@ -562,53 +671,145 @@ pub fn clean_ext_attributes(bundle: &Path) {
                 continue;
             };
             unsafe {
-                removexattr(c_path.as_ptr(), c_attr.as_ptr(), 0);
+                removexattr(c_path.as_ptr(), c_attr.as_ptr(), XATTR_NOFOLLOW);
             }
         }
     }
 }
 
-/// Executes the transactional 8-step app slimming pipeline.
+/// What a finished slim leaves behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlimDone {
+    pub saved: u64,
+    /// Where the old app stays, and why it could not go to the Trash.
+    pub old_app: Option<(PathBuf, String)>,
+    /// The holding folder left after the old app went to the Trash, and why it stays.
+    pub holding_left: Option<(PathBuf, String)>,
+}
+
+impl SlimDone {
+    /// What the slim saved, and anything it left behind.
+    pub fn summary(&self, name: &str) -> String {
+        let saved = format!("Slimmed {name}, saved {}.", format_bytes(self.saved));
+        match (&self.old_app, &self.holding_left) {
+            (Some((path, error)), _) => format!(
+                "{saved} The old app is still at {} (could not move it to the Trash: {error})",
+                path.display()
+            ),
+            (None, Some((path, error))) => format!(
+                "{saved} The old app was moved to the Trash, but the folder {} is left (could not remove it: {error}). Move it to the Trash yourself before you slim {name} again.",
+                path.display()
+            ),
+            (None, None) => format!("{saved} The old app was moved to the Trash."),
+        }
+    }
+}
+
+/// Slims an app in a holding folder `<name>.taert-slim-tmp` next to it, in 8 steps.
 ///
-/// 1. Clones the app next to itself via `ditto --clone`.
-/// 2. Rewrites the binaries in the copy.
+/// 1. Clones the app to `<holding>/<name>` via `ditto --clone`. A holding folder left from an
+///    earlier run stops the call: it can hold the only copy of an app, so it is never removed.
+/// 2. Rewrites the binaries in the clone.
 /// 3. Checks that each rewritten file still has an ARM slice.
-/// 4. Checks the copy with `codesign --verify --deep --strict` and `spctl --assess --type execute`.
-/// 5. If verification fails, removes `com.apple.FinderInfo` and `com.apple.ResourceFork` and verifies again.
-/// 6. Confirms that the original app hasn't changed and is not running.
-/// 7. Atomically swaps the copy and original via `renamex_np` and `RENAME_SWAP`.
-/// 8. Moves the unslimmed original app to the Trash via `Host::trash`.
+/// 4. Checks the clone with `codesign --verify --deep --strict` and `spctl --assess --type execute`.
+/// 5. If `codesign` fails, removes `com.apple.FinderInfo` and `com.apple.ResourceFork` and checks again.
+/// 6. Confirms that the original app is unchanged and not running.
+/// 7. Atomically swaps the clone and the original via `renamex_np` and `RENAME_SWAP`.
+/// 8. Moves the old app, now at `<holding>/<name>`, to the Trash via `Host::trash`.
 ///
-/// On any failure before or during swap, the copy is deleted and the original stays unmodified.
-/// Returns `Ok(intel_saved_bytes)` on success or `Err((failed_step_number, error_message))`.
+/// On any failure up to step 7 the holding folder is removed and the original stays as it was.
+/// After the swap nothing is removed: if the Trash refuses, the result says where the old app is.
+/// Returns `Err((failed_step_number, error_message))` when the app was not slimmed.
 pub fn slim_app(
     app: &InstalledApp,
     binaries: &[PathBuf],
     host: &dyn Host,
     skip_developer_id: bool,
-) -> Result<u64, (usize, String)> {
-    let orig_meta = fs::metadata(&app.path).map_err(|e| (1, e.to_string()))?;
-    let orig_mtime = orig_meta.modified().ok();
-    let orig_identity = FileIdentity::of(&app.path);
+) -> Result<SlimDone, (usize, String)> {
+    check_ownership(&app.path, unsafe { libc::geteuid() }).map_err(|e| (1, e))?;
+    let before = fingerprint(&app.path).map_err(|e| (1, e.to_string()))?;
 
     let parent = app
         .path
         .parent()
         .unwrap_or_else(|| Path::new("/Applications"));
     let file_name = app.path.file_name().unwrap().to_str().unwrap();
-    let copy_path = parent.join(format!("{file_name}.taert-slim-tmp"));
+    let holding = parent.join(format!("{file_name}{HOLDING_SUFFIX}"));
+    if let Err(error) = fs::create_dir(&holding) {
+        return Err((
+            1,
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "{} is left from an earlier run; check it, move it to the Trash yourself, then run again",
+                    holding.display()
+                )
+            } else {
+                format!("Could not create {}: {error}", holding.display())
+            },
+        ));
+    }
+    let clone = holding.join(file_name);
 
-    if copy_path.exists() {
-        let _ = fs::remove_dir_all(&copy_path);
+    let saved = match stage_clone(app, binaries, host, skip_developer_id, &clone, before) {
+        Ok(saved) => saved,
+        Err(failure) => {
+            let _ = fs::remove_dir_all(&holding);
+            return Err(failure);
+        }
+    };
+
+    // Step 7: Atomic swap of the clone and the original via renamex_np(RENAME_SWAP)
+    let (Ok(c_clone), Ok(c_orig)) = (
+        CString::new(clone.as_os_str().as_bytes()),
+        CString::new(app.path.as_os_str().as_bytes()),
+    ) else {
+        let _ = fs::remove_dir_all(&holding);
+        return Err((7, "Failed to encode paths for swap".to_string()));
+    };
+    if unsafe { renamex_np(c_clone.as_ptr(), c_orig.as_ptr(), RENAME_SWAP) } != 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = fs::remove_dir_all(&holding);
+        let msg = if err.kind() == std::io::ErrorKind::PermissionDenied {
+            APP_MANAGEMENT_HINT.to_string()
+        } else {
+            format!("Atomic swap failed: {err}")
+        };
+        return Err((7, msg));
     }
 
-    // Step 1: Clone app next to itself with ditto --clone
+    // Step 8: Move the old app to the Trash. The app is slimmed either way.
+    match host.trash(&clone) {
+        Ok(()) => Ok(SlimDone {
+            saved,
+            old_app: None,
+            holding_left: fs::remove_dir(&holding)
+                .err()
+                .map(|error| (holding, error.to_string())),
+        }),
+        Err(error) => Ok(SlimDone {
+            saved,
+            old_app: Some((clone, error)),
+            holding_left: None,
+        }),
+    }
+}
+
+/// Steps 1 to 6 of `slim_app`: builds the slimmed clone and checks it. Returns the bytes saved.
+fn stage_clone(
+    app: &InstalledApp,
+    binaries: &[PathBuf],
+    host: &dyn Host,
+    skip_developer_id: bool,
+    clone: &Path,
+    before: u64,
+) -> Result<u64, (usize, String)> {
+    // Step 1: Clone the app with ditto --clone
     let clone_out = host.run(
         "ditto",
         &[
             "--clone",
             app.path.to_str().unwrap(),
-            copy_path.to_str().unwrap(),
+            clone.to_str().unwrap(),
         ],
         Duration::from_secs(120),
     );
@@ -621,146 +822,90 @@ pub fn slim_app(
         return Err((1, err));
     }
 
-    // Helper to safely clean up the copy on failure
-    let cleanup_copy = |step: usize, msg: String| {
-        let _ = fs::remove_dir_all(&copy_path);
-        Err((step, msg))
-    };
+    let mut saved = 0u64;
 
-    let mut total_intel_saved = 0u64;
-
-    // Step 2: Rewrite binaries in the copy
+    // Step 2: Rewrite binaries in the clone
     for bin in binaries {
         let Ok(rel) = bin.strip_prefix(&app.path) else {
-            return cleanup_copy(2, format!("Invalid binary prefix: {}", bin.display()));
+            return Err((2, format!("Invalid binary prefix: {}", bin.display())));
         };
-        let copy_bin = copy_path.join(rel);
-        let orig_bytes = match fs::read(&copy_bin) {
-            Ok(b) => b,
-            Err(e) => {
-                return cleanup_copy(2, format!("Failed reading {}: {e}", copy_bin.display()));
-            }
-        };
-
-        let orig_intel_size = match parse_fat_header(&orig_bytes) {
-            Ok(Some(h)) => h
-                .slices
-                .iter()
-                .filter(|s| s.cputype == CPU_TYPE_X86_64 || s.cputype == CPU_TYPE_I386)
-                .map(|s| s.size)
-                .sum(),
-            _ => 0,
-        };
-        total_intel_saved += orig_intel_size;
-
-        let rewritten = match rewrite_fat_binary(&orig_bytes) {
-            Ok(b) => b,
-            Err(e) => {
-                return cleanup_copy(2, format!("Failed rewriting {}: {e}", copy_bin.display()));
-            }
-        };
-
-        if let Err(e) = fs::write(&copy_bin, &rewritten) {
-            return cleanup_copy(2, format!("Failed writing {}: {e}", copy_bin.display()));
-        }
+        let clone_bin = clone.join(rel);
+        let orig_bytes = fs::read(&clone_bin)
+            .map_err(|e| (2, format!("Failed reading {}: {e}", clone_bin.display())))?;
+        let rewritten = rewrite_fat_binary(&orig_bytes)
+            .map_err(|e| (2, format!("Failed rewriting {}: {e}", clone_bin.display())))?;
+        let allocated_before = fs::metadata(bin)
+            .map(|meta| DirSizer::allocated_size(&meta))
+            .map_err(|e| (2, format!("Failed reading {}: {e}", bin.display())))?;
+        fs::write(&clone_bin, &rewritten)
+            .map_err(|e| (2, format!("Failed writing {}: {e}", clone_bin.display())))?;
         if let Ok(meta) = fs::metadata(bin) {
-            let _ = fs::set_permissions(&copy_bin, meta.permissions());
+            let _ = fs::set_permissions(&clone_bin, meta.permissions());
         }
+        let allocated_after = fs::metadata(&clone_bin)
+            .map(|meta| DirSizer::allocated_size(&meta))
+            .map_err(|e| (2, format!("Failed reading {}: {e}", clone_bin.display())))?;
+        saved += allocated_before.saturating_sub(allocated_after);
     }
 
     // Step 3: Check that each rewritten file still has an ARM slice
     for bin in binaries {
         let Ok(rel) = bin.strip_prefix(&app.path) else {
-            return cleanup_copy(3, format!("Invalid binary prefix: {}", bin.display()));
+            return Err((3, format!("Invalid binary prefix: {}", bin.display())));
         };
-        let copy_bin = copy_path.join(rel);
-        let bytes = match fs::read(&copy_bin) {
-            Ok(b) => b,
-            Err(e) => {
-                return cleanup_copy(3, format!("Failed reading {}: {e}", copy_bin.display()));
-            }
-        };
+        let clone_bin = clone.join(rel);
+        let bytes = fs::read(&clone_bin)
+            .map_err(|e| (3, format!("Failed reading {}: {e}", clone_bin.display())))?;
         match parse_fat_header(&bytes) {
             Ok(Some(header)) if header.slices.iter().any(|s| s.cputype == CPU_TYPE_ARM64) => {}
-            _ => return cleanup_copy(3, format!("File {} missing ARM slice", copy_bin.display())),
+            _ => {
+                return Err((3, format!("File {} missing ARM slice", clone_bin.display())));
+            }
         }
     }
 
-    // Step 4 & 5: Check copy with codesign and spctl; remove xattrs and retry if needed
-    let check_signatures = |path: &Path| -> bool {
-        let cs = host.run(
+    // Steps 4 and 5: Check the clone; only a failed codesign check cleans xattrs and tries again
+    let clone_str = clone.to_str().unwrap();
+    let verify = || {
+        let out = host.run(
             "codesign",
-            &["--verify", "--deep", "--strict", path.to_str().unwrap()],
+            &["--verify", "--deep", "--strict", clone_str],
             Duration::from_secs(30),
         );
-        if !cs.ok {
-            return false;
-        }
-        if skip_developer_id {
-            return true;
-        }
-        let sp = host.run(
-            "spctl",
-            &["--assess", "--type", "execute", path.to_str().unwrap()],
-            Duration::from_secs(30),
-        );
-        sp.ok
+        out.ok
     };
-
-    if !check_signatures(&copy_path) {
-        // Step 5: Remove FinderInfo and ResourceFork xattrs and verify again
-        clean_ext_attributes(&copy_path);
-        if !check_signatures(&copy_path) {
-            return cleanup_copy(
-                4,
-                "Signature or Gatekeeper verification failed on copy".to_string(),
-            );
+    if !verify() {
+        clean_ext_attributes(clone);
+        if !verify() {
+            return Err((4, "Signature verification failed on copy".to_string()));
+        }
+    }
+    if !skip_developer_id {
+        let assess = host.run(
+            "spctl",
+            &["--assess", "--type", "execute", clone_str],
+            Duration::from_secs(30),
+        );
+        if !assess.ok {
+            return Err((4, "Gatekeeper verification failed on copy".to_string()));
         }
     }
 
-    // Step 6: Confirm original app hasn't changed and isn't running
-    if FileIdentity::of(&app.path) != orig_identity {
-        return cleanup_copy(6, "Original app inode or device changed".to_string());
+    // Step 6: Confirm the original app hasn't changed and isn't running
+    if fingerprint(&app.path).ok() != Some(before) {
+        return Err((6, "Original app changed".to_string()));
     }
-    if fs::metadata(&app.path).ok().and_then(|m| m.modified().ok()) != orig_mtime {
-        return cleanup_copy(6, "Original app modification time changed".to_string());
-    }
-    let running = running_processes(host);
+    let running = running_processes(host).map_err(|e| (6, e))?;
     let is_running = running.iter().any(|(_, _, comm)| {
         let comm_path = Path::new(comm);
         comm_path.starts_with(&app.path)
             || comm.contains(&format!("{}/Contents/MacOS/", app.path.display()))
     });
     if is_running {
-        return cleanup_copy(6, "App started running during slimming".to_string());
+        return Err((6, "App started running during slimming".to_string()));
     }
 
-    // Step 7: Atomic swap of copy and original via renamex_np(RENAME_SWAP)
-    let Ok(c_copy) = CString::new(copy_path.as_os_str().as_bytes()) else {
-        return cleanup_copy(7, "Failed to encode copy path for swap".to_string());
-    };
-    let Ok(c_orig) = CString::new(app.path.as_os_str().as_bytes()) else {
-        return cleanup_copy(7, "Failed to encode original path for swap".to_string());
-    };
-
-    let res = unsafe { renamex_np(c_copy.as_ptr(), c_orig.as_ptr(), RENAME_SWAP) };
-    if res != 0 {
-        let err = std::io::Error::last_os_error();
-        let _ = fs::remove_dir_all(&copy_path);
-        let msg = if err.kind() == std::io::ErrorKind::PermissionDenied {
-            APP_MANAGEMENT_HINT.to_string()
-        } else {
-            format!("Atomic swap failed: {err}")
-        };
-        return Err((7, msg));
-    }
-
-    // Step 8: Move the old unslimmed app (now located at copy_path) to Trash
-    if let Err(e) = host.trash(&copy_path) {
-        return Err((8, format!("Failed to move old app to Trash: {e}")));
-    }
-
-    Ok(total_intel_saved)
+    Ok(saved)
 }
 
 /// Slims an app bundle and logs the outcome to the history session on success.
@@ -770,12 +915,25 @@ pub fn slim_app_logged(
     binaries: &[PathBuf],
     host: &dyn Host,
     skip_developer_id: bool,
-) -> Result<u64, (usize, String)> {
+) -> Result<SlimDone, (usize, String)> {
     let result = slim_app(app, binaries, host, skip_developer_id);
-    if let Ok(saved) = result {
-        session.record_item(&ItemOutcome::changed(app.path.clone(), saved));
+    if let Ok(done) = &result {
+        session.record_item(&ItemOutcome::changed(app.path.clone(), done.saved));
     }
     result
+}
+
+/// Installed apps, except an old app that an earlier slim left in its holding folder.
+pub fn candidate_apps(layout: &Layout) -> Vec<InstalledApp> {
+    apps::find_apps(layout)
+        .into_iter()
+        .filter(|app| {
+            !app.path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|folder| folder.to_string_lossy().ends_with(HOLDING_SUFFIX))
+        })
+        .collect()
 }
 
 /// Runs a scan over installed apps to prepare a `CategoryScan` for the TUI and CLI.
@@ -798,7 +956,7 @@ pub fn slim_scan(
         return scan;
     }
 
-    let installed = apps::find_apps(layout);
+    let installed = candidate_apps(layout);
     let rosetta = rosetta_bundle_ids(layout);
     let running = running_processes(host);
 
@@ -817,16 +975,11 @@ pub fn slim_scan(
                 let _ = tx.send(ScanProgressEvent::ScanningPath(app.name.clone()));
             }
 
-            match check_eligibility(
-                app,
-                host,
-                layout,
-                ignore,
-                &rosetta,
-                Some(&running),
-                false,
-                false,
-            ) {
+            let Ok(running) = &running else {
+                scan.notes.push(format!("{} stays: {PS_FAILED}.", app.name));
+                continue;
+            };
+            match check_eligibility(app, host, layout, ignore, &rosetta, Some(running), false) {
                 Ok(binaries) => {
                     let intel_size: u64 = binaries
                         .iter()
@@ -884,30 +1037,15 @@ pub struct SlimAppInfo {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
     use crate::core::history::{HistoryLog, OutcomeKind};
     use crate::core::host::fake::FakeHost;
+    use crate::core::sizer::DirSizer;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    fn make_fat_binary_32(slices: &[(u32, u32, u32, u32, u32)], payloads: &[&[u8]]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&FAT_MAGIC.to_be_bytes());
-        buf.extend_from_slice(&(slices.len() as u32).to_be_bytes());
-        for s in slices {
-            buf.extend_from_slice(&s.0.to_be_bytes()); // cputype
-            buf.extend_from_slice(&s.1.to_be_bytes()); // cpusubtype
-            buf.extend_from_slice(&s.2.to_be_bytes()); // offset
-            buf.extend_from_slice(&s.3.to_be_bytes()); // size
-            buf.extend_from_slice(&s.4.to_be_bytes()); // align
-        }
-        for (s, p) in slices.iter().zip(payloads) {
-            if buf.len() < s.2 as usize {
-                buf.resize(s.2 as usize, 0);
-            }
-            buf.extend_from_slice(p);
-        }
-        buf
-    }
 
     fn make_fat_binary_64(slices: &[(u32, u32, u64, u64, u32)], payloads: &[&[u8]]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -1012,28 +1150,6 @@ mod tests {
         assert_eq!(err, SlimError::NoArmSlice);
     }
 
-    fn write_test_app(bundle: &Path, id: &str) {
-        let macos = bundle.join("Contents/MacOS");
-        fs::create_dir_all(&macos).unwrap();
-        let p_x86 = b"X86_PAYLOAD";
-        let p_arm = b"ARM_PAYLOAD";
-        let slices = [
-            (CPU_TYPE_X86_64, 3, 4096, p_x86.len() as u32, 12),
-            (CPU_TYPE_ARM64, 0, 8192, p_arm.len() as u32, 14),
-        ];
-        let bin = make_fat_binary_32(&slices, &[p_x86, p_arm]);
-        fs::write(macos.join("testapp"), bin).unwrap();
-
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>{id}</string>
-<key>CFBundleExecutable</key><string>testapp</string>
-</dict></plist>"#
-        );
-        fs::write(bundle.join("Contents/Info.plist"), plist).unwrap();
-    }
-
     fn test_env() -> (tempfile::TempDir, Layout) {
         let temp = tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -1063,16 +1179,7 @@ mod tests {
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            true,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Apple apps are part of macOS");
     }
 
@@ -1093,16 +1200,7 @@ mod tests {
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            true,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(
             res.unwrap_err(),
             "App Store apps are managed by the App Store"
@@ -1127,7 +1225,7 @@ mod tests {
         let ignore = IgnoreStore::default();
         let mut rosetta = HashSet::new();
         rosetta.insert("com.vendor.rosetta".to_string());
-        let res = check_eligibility(&app, &host, &layout, &ignore, &rosetta, None, true, false);
+        let res = check_eligibility(&app, &host, &layout, &ignore, &rosetta, None, true);
         assert_eq!(res.unwrap_err(), "Set to open using Rosetta");
     }
 
@@ -1160,7 +1258,6 @@ mod tests {
             &HashSet::new(),
             Some(&processes),
             true,
-            false,
         );
         assert_eq!(res.unwrap_err(), "App is currently running");
     }
@@ -1183,16 +1280,7 @@ mod tests {
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            true,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Belongs to another user");
     }
 
@@ -1213,16 +1301,7 @@ mod tests {
         let host = FakeHost::idle();
         host.reply("codesign", "Authority=Mac Developer\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            false,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
         assert_eq!(res.unwrap_err(), "Not signed with a Developer ID");
     }
 
@@ -1247,17 +1326,8 @@ mod tests {
         );
         host.fail("codesign --verify", "code has been modified\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            false,
-            true,
-        );
-        assert_eq!(res.unwrap_err(), "Signature verification failed");
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        assert_eq!(res.unwrap_err(), "Already fails the signature check");
     }
 
     #[test]
@@ -1282,17 +1352,8 @@ mod tests {
         host.reply("codesign --verify", "");
         host.fail("spctl", "rejected\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            false,
-            true,
-        );
-        assert_eq!(res.unwrap_err(), "Gatekeeper assessment failed");
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        assert_eq!(res.unwrap_err(), "Already fails the Gatekeeper check");
     }
 
     #[test]
@@ -1312,16 +1373,7 @@ mod tests {
         let host = FakeHost::idle();
         let mut ignore = IgnoreStore::default();
         ignore.add(ignored_app.to_string_lossy().to_string());
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            true,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert!(res.is_err());
     }
 
@@ -1351,17 +1403,33 @@ mod tests {
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(
-            &app,
-            &host,
-            &layout,
-            &ignore,
-            &HashSet::new(),
-            None,
-            true,
-            false,
-        );
+        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Already Apple Silicon only");
+    }
+
+    /// Cloning works and nothing is checked yet.
+    fn cloning_host(app_path: &Path) -> FakeHost {
+        let host = FakeHost::idle();
+        host.reply("ditto", "");
+        fake_ditto(&host, app_path);
+        host
+    }
+
+    fn ready_host(app_path: &Path) -> FakeHost {
+        let host = cloning_host(app_path);
+        host.reply("codesign", "");
+        host.reply("spctl", "");
+        host
+    }
+
+    fn binaries_of(app_path: &Path) -> Vec<PathBuf> {
+        vec![app_path.join("Contents/MacOS/testapp")]
+    }
+
+    fn assert_arm_only(binary: &Path) {
+        let header = parse_fat_header_from_file(binary).unwrap().unwrap();
+        assert_eq!(header.slices.len(), 1);
+        assert_eq!(header.slices[0].cputype, CPU_TYPE_ARM64);
     }
 
     #[test]
@@ -1369,74 +1437,98 @@ mod tests {
         let dir = tempdir().unwrap();
         let app_path = dir.path().join("TargetApp.app");
         write_test_app(&app_path, "com.vendor.target");
-
-        let app = InstalledApp {
-            name: "TargetApp".to_string(),
-            path: app_path.clone(),
-            bundle_id: Some("com.vendor.target".to_string()),
-            executable: Some("testapp".to_string()),
-            size_bytes: 10000,
-            last_used: None,
-        };
-        let binaries = vec![app_path.join("Contents/MacOS/testapp")];
-        let host = FakeHost::idle();
-        host.reply("ditto", "");
-        host.when("ditto", {
-            let app_path = app_path.clone();
-            let copy_path = dir.path().join("TargetApp.app.taert-slim-tmp");
-            move || {
-                let _ = fs::create_dir_all(&copy_path);
-                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
-                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
-                    let dest = copy_path.join(rel);
-                    if entry.file_type().is_dir() {
-                        let _ = fs::create_dir_all(&dest);
-                    } else if entry.file_type().is_file() {
-                        let _ = fs::copy(entry.path(), dest);
-                    }
-                }
-            }
-        });
-        // Make codesign verify fail
+        let app = app_for(&app_path, "com.vendor.target");
+        let host = cloning_host(&app_path);
         host.fail("codesign", "verification failed\n");
 
-        let res = slim_app(&app, &binaries, &host, true);
-        assert!(res.is_err());
-        let (step, _) = res.unwrap_err();
-        assert_eq!(step, 4);
+        let (step, _) = slim_app(&app, &binaries_of(&app_path), &host, true).unwrap_err();
 
-        // Original remains in place
+        assert_eq!(step, 4);
         assert!(app_path.exists());
-        // Copy has been cleaned up
-        let copy_path = dir.path().join("TargetApp.app.taert-slim-tmp");
-        assert!(!copy_path.exists());
+        assert!(!holding_of(&app_path).exists());
+    }
+
+    #[test]
+    fn test_leftover_holding_folder_is_never_removed() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("SwapApp.app");
+        write_test_app(&app_path, "com.vendor.swap");
+        let holding = holding_of(&app_path);
+        fs::create_dir_all(holding.join("SwapApp.app")).unwrap();
+        fs::write(holding.join("SwapApp.app/marker"), "old").unwrap();
+        let host = ready_host(&app_path);
+
+        let (step, message) = slim_app(
+            &app_for(&app_path, "com.vendor.swap"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(step, 1);
+        assert!(message.contains(&holding.display().to_string()));
+        assert!(message.contains("left from an earlier run"));
+        assert!(holding.join("SwapApp.app/marker").exists());
+        assert!(!host.ran("ditto"));
+    }
+
+    #[test]
+    fn test_failed_ditto_removes_partial_copy() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let before = fs::read(app_path.join("Contents/MacOS/testapp")).unwrap();
+        let host = FakeHost::idle();
+        host.when("ditto", {
+            let partial = holding_of(&app_path).join("X.app");
+            move || {
+                fs::create_dir_all(&partial).unwrap();
+                fs::write(partial.join("partial"), "half").unwrap();
+            }
+        });
+        host.fail("ditto", "boom");
+
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        );
+
+        assert!(matches!(result, Err((1, _))));
+        assert!(!holding_of(&app_path).exists());
+        assert_eq!(
+            fs::read(app_path.join("Contents/MacOS/testapp")).unwrap(),
+            before
+        );
     }
 
     #[test]
     fn test_failed_swap_leaves_original() {
         let dir = tempdir().unwrap();
-        let app_path = dir.path().join("SwapFailApp.app");
-        write_test_app(&app_path, "com.vendor.swapfail");
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let before = fs::read(app_path.join("Contents/MacOS/testapp")).unwrap();
+        let host = ready_host(&app_path);
+        host.when("/bin/ps", {
+            let clone = holding_of(&app_path).join("X.app");
+            move || fs::remove_dir_all(&clone).unwrap()
+        });
 
-        let app = InstalledApp {
-            name: "SwapFailApp".to_string(),
-            path: app_path.clone(),
-            bundle_id: Some("com.vendor.swapfail".to_string()),
-            executable: Some("testapp".to_string()),
-            size_bytes: 10000,
-            last_used: None,
-        };
-        let binaries = vec![app_path.join("Contents/MacOS/testapp")];
-        let host = FakeHost::idle();
-        // Here ditto does not create the copy_path, so swap will fail
-        host.reply("ditto", "");
-        host.reply("codesign", "");
-        host.reply("spctl", "");
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        );
 
-        let res = slim_app(&app, &binaries, &host, true);
-        assert!(res.is_err());
-        // Original remains in place
-        assert!(app_path.exists());
+        assert!(matches!(result, Err((7, _))), "{result:?}");
+        assert_eq!(
+            fs::read(app_path.join("Contents/MacOS/testapp")).unwrap(),
+            before
+        );
+        assert!(!holding_of(&app_path).exists());
     }
 
     #[test]
@@ -1447,46 +1539,567 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_trash_reports_done_with_old_app_path() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let host = ready_host(&app_path);
+        host.fail_trash("denied");
+
+        let done = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        )
+        .unwrap();
+
+        let old = holding_of(&app_path).join("X.app");
+        assert_eq!(done.old_app, Some((old.clone(), "denied".to_string())));
+        assert_arm_only(&app_path.join("Contents/MacOS/testapp"));
+        assert!(old.exists());
+        assert!(holding_of(&app_path).exists());
+    }
+
+    #[test]
     fn test_host_trash_call_comes_last() {
         let dir = tempdir().unwrap();
         let app_path = dir.path().join("SwapApp.app");
         write_test_app(&app_path, "com.vendor.swap");
+        let host = ready_host(&app_path);
+        host.simulate_trash();
 
-        let app = InstalledApp {
-            name: "SwapApp".to_string(),
-            path: app_path.clone(),
-            bundle_id: Some("com.vendor.swap".to_string()),
-            executable: Some("testapp".to_string()),
-            size_bytes: 10000,
-            last_used: None,
+        let done = slim_app(
+            &app_for(&app_path, "com.vendor.swap"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(done.old_app, None);
+        assert_eq!(done.holding_left, None);
+        assert_eq!(
+            host.trashed(),
+            vec![holding_of(&app_path).join("SwapApp.app")]
+        );
+        assert_arm_only(&app_path.join("Contents/MacOS/testapp"));
+        assert!(!holding_of(&app_path).exists());
+    }
+
+    #[test]
+    fn test_holding_folder_left_after_the_trash_is_reported() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        // The Trash call succeeds but leaves the old app in the holding folder.
+        let host = ready_host(&app_path);
+
+        let done = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            true,
+        )
+        .unwrap();
+
+        let holding = holding_of(&app_path);
+        assert_eq!(done.old_app, None);
+        let (left, error) = done.holding_left.clone().expect("the folder stays");
+        assert_eq!(left, holding);
+        assert!(!error.is_empty());
+        assert!(holding.exists());
+    }
+
+    #[test]
+    fn test_summary_says_what_a_slim_saved_and_left() {
+        let saved = format_bytes(2048);
+        let trashed = SlimDone {
+            saved: 2048,
+            old_app: None,
+            holding_left: None,
         };
-        let binaries = vec![app_path.join("Contents/MacOS/testapp")];
+        assert_eq!(
+            trashed.summary("X"),
+            format!("Slimmed X, saved {saved}. The old app was moved to the Trash.")
+        );
+
+        let refused = SlimDone {
+            old_app: Some((
+                PathBuf::from("/A/X.app.taert-slim-tmp/X.app"),
+                "denied".to_string(),
+            )),
+            ..trashed.clone()
+        };
+        assert_eq!(
+            refused.summary("X"),
+            format!(
+                "Slimmed X, saved {saved}. The old app is still at /A/X.app.taert-slim-tmp/X.app (could not move it to the Trash: denied)"
+            )
+        );
+
+        let left = SlimDone {
+            holding_left: Some((
+                PathBuf::from("/A/X.app.taert-slim-tmp"),
+                "Directory not empty".to_string(),
+            )),
+            ..trashed
+        };
+        assert_eq!(
+            left.summary("X"),
+            format!(
+                "Slimmed X, saved {saved}. The old app was moved to the Trash, but the folder /A/X.app.taert-slim-tmp is left (could not remove it: Directory not empty). Move it to the Trash yourself before you slim X again."
+            )
+        );
+    }
+
+    #[test]
+    fn test_root_owned_files_and_setuid_are_refused() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("SetuidApp.app");
+        write_test_app(&app_path, "com.vendor.setuid");
+        let binary = app_path.join("Contents/MacOS/testapp");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o4755)).unwrap();
         let host = FakeHost::idle();
+
+        let result = check_eligibility(
+            &app_for(&app_path, "com.vendor.setuid"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &HashSet::new(),
+            None,
+            true,
+        );
+        assert_eq!(result.unwrap_err(), "Contains a setuid or setgid file");
+
+        let other = unsafe { libc::geteuid() } + 1;
+        assert_eq!(
+            check_ownership(&app_path, other).unwrap_err(),
+            "Belongs to another user"
+        );
+        assert_eq!(
+            check_ownership(&binary, other).unwrap_err(),
+            "Belongs to another user"
+        );
+    }
+
+    #[test]
+    fn test_linked_app_is_refused() {
+        let (_dir, layout) = test_env();
+        let real = layout.home.join("Elsewhere/Linked.app");
+        write_test_app(&real, "com.vendor.linked");
+        let helper = real.join("Contents/MacOS/helper");
+        fs::write(&helper, "helper").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o4755)).unwrap();
+        let binary_before = fs::read(real.join("Contents/MacOS/testapp")).unwrap();
+        let link = layout.system("Applications").join("Linked.app");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let app = app_for(&link, "com.vendor.linked");
+        let host = FakeHost::idle();
+        host.reply(
+            "codesign -dv",
+            "Authority=Developer ID Application: Acme Corp (123)\n",
+        );
+        host.reply("codesign --verify", "");
+        host.reply("spctl", "");
         host.reply("ditto", "");
-        host.when("ditto", {
-            let app_path = app_path.clone();
-            let copy_path = dir.path().join("SwapApp.app.taert-slim-tmp");
-            move || {
-                let _ = fs::create_dir_all(&copy_path);
-                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
-                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
-                    let dest = copy_path.join(rel);
-                    if entry.file_type().is_dir() {
-                        let _ = fs::create_dir_all(&dest);
-                    } else if entry.file_type().is_file() {
-                        let _ = fs::copy(entry.path(), dest);
-                    }
-                }
-            }
-        });
-        host.reply("codesign", "");
+        fake_ditto(&host, &link);
+        let ignore = IgnoreStore::default();
+
+        let eligibility =
+            check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        assert_eq!(eligibility.unwrap_err(), LINKED_APP);
+
+        let result = slim_app(&app, &binaries_of(&link), &host, false);
+        assert_eq!(result, Err((1, LINKED_APP.to_string())));
+        assert!(!host.ran("ditto"));
+        assert_eq!(fs::read_link(&link).unwrap(), real);
+        assert_eq!(
+            fs::read(real.join("Contents/MacOS/testapp")).unwrap(),
+            binary_before
+        );
+        assert_eq!(fs::metadata(&helper).unwrap().mode() & 0o7777, 0o4755);
+        assert!(!holding_of(&link).exists());
+        assert!(!holding_of(&real).exists());
+
+        let scan = slim_scan(&layout, &host, &ignore, None, None);
+        assert!(scan.groups.is_empty());
+        assert!(
+            scan.notes.contains(&format!("Linked stays: {LINKED_APP}.")),
+            "{:?}",
+            scan.notes
+        );
+    }
+
+    #[test]
+    fn test_ownership_passes_for_own_plain_files() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Plain.app");
+        write_test_app(&app_path, "com.vendor.plain");
+
+        let me = unsafe { libc::geteuid() };
+
+        assert_eq!(check_ownership(&app_path, me), Ok(()));
+    }
+
+    fn app_with_scan_host(layout: &Layout, name: &str) -> FakeHost {
+        let app_path = layout.system("Applications").join(format!("{name}.app"));
+        write_test_app(&app_path, &format!("com.vendor.{name}"));
+        let host = FakeHost::idle();
+        host.reply(
+            "codesign -dv",
+            "Authority=Developer ID Application: Acme Corp (123)\n",
+        );
+        host
+    }
+
+    #[test]
+    fn test_scan_lists_already_failing_signature() {
+        let (_dir, layout) = test_env();
+        let host = app_with_scan_host(&layout, "Broken");
+        host.fail("codesign --verify", "code has been modified\n");
+
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+
+        assert!(scan.groups.is_empty());
+        assert!(
+            scan.notes
+                .contains(&"Broken stays: Already fails the signature check.".to_string()),
+            "{:?}",
+            scan.notes
+        );
+    }
+
+    #[test]
+    fn test_scan_lists_already_failing_gatekeeper() {
+        let (_dir, layout) = test_env();
+        let host = app_with_scan_host(&layout, "Rejected");
+        host.reply("codesign --verify", "");
+        host.fail("spctl", "rejected\n");
+
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+
+        assert!(scan.groups.is_empty());
+        assert!(
+            scan.notes
+                .contains(&"Rejected stays: Already fails the Gatekeeper check.".to_string()),
+            "{:?}",
+            scan.notes
+        );
+    }
+
+    #[test]
+    fn test_scan_lists_a_sound_app() {
+        let (_dir, layout) = test_env();
+        let host = app_with_scan_host(&layout, "Sound");
+        host.reply("codesign --verify", "");
         host.reply("spctl", "");
 
-        let res = slim_app(&app, &binaries, &host, true);
-        assert!(res.is_ok(), "Expected Ok but got: {:?}", res);
-        // host.trashed() must contain the copy_path
-        let copy_path = dir.path().join("SwapApp.app.taert-slim-tmp");
-        assert_eq!(host.trashed(), vec![copy_path]);
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+
+        assert_eq!(scan.groups.len(), 1, "{:?}", scan.notes);
+    }
+
+    #[test]
+    fn test_scan_leaves_out_the_old_app_in_a_holding_folder() {
+        let (_dir, layout) = test_env();
+        let host = app_with_scan_host(&layout, "Sound");
+        host.reply("codesign --verify", "");
+        host.reply("spctl", "");
+        let app_path = layout.system("Applications/Sound.app");
+        write_test_app(&holding_of(&app_path).join("Sound.app"), "com.vendor.Sound");
+
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+
+        let listed: Vec<&PathBuf> = scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .map(|item| &item.path)
+            .collect();
+        assert_eq!(listed, vec![&app_path]);
+    }
+
+    #[test]
+    fn test_xattr_retry_only_after_codesign_failure() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let marked = holding_of(&app_path).join("X.app/Contents/Info.plist");
+        let host = cloning_host(&app_path);
+        host.when("ditto", {
+            let marked = marked.clone();
+            move || set_finder_info(&marked)
+        });
+        host.reply("codesign", "");
+        host.fail("spctl", "rejected\n");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        host.when("spctl", {
+            let (marked, seen) = (marked.clone(), seen.clone());
+            move || seen.lock().unwrap().push(has_finder_info(&marked))
+        });
+
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            false,
+        );
+
+        assert!(matches!(result, Err((4, _))), "{result:?}");
+        assert_eq!(*seen.lock().unwrap(), vec![true]);
+    }
+
+    #[test]
+    fn test_xattr_cleanup_runs_after_codesign_failure() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let marked = holding_of(&app_path).join("X.app/Contents/Info.plist");
+        let host = cloning_host(&app_path);
+        host.when("ditto", {
+            let marked = marked.clone();
+            move || set_finder_info(&marked)
+        });
+        host.fail("codesign", "resource fork not allowed\n");
+        host.reply("codesign", "");
+        host.reply("spctl", "");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        host.when("spctl", {
+            let (marked, seen) = (marked.clone(), seen.clone());
+            move || seen.lock().unwrap().push(has_finder_info(&marked))
+        });
+
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            false,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*seen.lock().unwrap(), vec![false]);
+    }
+
+    fn write_nested_seal(path: &Path, key: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>files2</key><dict>
+<key>{key}</key><dict><key>hash2</key><data>AAAA</data></dict>
+</dict></dict></plist>"#
+        );
+        fs::write(path, plist).unwrap();
+    }
+
+    fn fat_x86_arm() -> Vec<u8> {
+        let slices = [
+            (CPU_TYPE_X86_64, 3, 4096, 4, 12),
+            (CPU_TYPE_ARM64, 0, 16384, 4, 14),
+        ];
+        make_fat_binary_32(&slices, &[b"x86!", b"arm!"])
+    }
+
+    #[test]
+    fn test_file_sealed_by_nested_framework_is_left_alone() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Nested.app");
+        write_test_app(&app_path, "com.vendor.nested");
+        let version = app_path.join("Contents/Frameworks/F.framework/Versions/A");
+        fs::create_dir_all(version.join("Resources")).unwrap();
+        fs::write(version.join("Resources/helper"), fat_x86_arm()).unwrap();
+        write_nested_seal(
+            &version.join("_CodeSignature/CodeResources"),
+            "Resources/helper",
+        );
+
+        let (found, _) = find_universal_binaries(&app_path);
+
+        assert_eq!(found, vec![app_path.join("Contents/MacOS/testapp")]);
+    }
+
+    #[test]
+    fn test_file_sealed_by_a_versions_resources_seal_is_left_alone() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Nested.app");
+        write_test_app(&app_path, "com.vendor.nested");
+        let version = app_path.join("Contents/Frameworks/F.framework/Versions/A");
+        fs::create_dir_all(version.join("Resources")).unwrap();
+        fs::write(version.join("Resources/helper"), fat_x86_arm()).unwrap();
+        write_nested_seal(&version.join("Resources/CodeResources"), "Resources/helper");
+
+        let (found, _) = find_universal_binaries(&app_path);
+
+        assert_eq!(found, vec![app_path.join("Contents/MacOS/testapp")]);
+    }
+
+    #[test]
+    fn test_nested_app_and_flat_bundle_seals_are_read() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Nested.app");
+        write_test_app(&app_path, "com.vendor.nested");
+        let helper_app = app_path.join("Contents/Library/Helper.app");
+        fs::create_dir_all(helper_app.join("Contents/MacOS")).unwrap();
+        fs::write(helper_app.join("Contents/MacOS/h"), fat_x86_arm()).unwrap();
+        write_nested_seal(
+            &helper_app.join("Contents/_CodeSignature/CodeResources"),
+            "MacOS/h",
+        );
+        let flat = app_path.join("Contents/PlugIns/P.bundle");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(flat.join("p"), fat_x86_arm()).unwrap();
+        write_nested_seal(&flat.join("_CodeSignature/CodeResources"), "p");
+
+        let (found, _) = find_universal_binaries(&app_path);
+
+        assert_eq!(found, vec![app_path.join("Contents/MacOS/testapp")]);
+    }
+
+    #[test]
+    fn test_file_under_an_unreadable_nested_seal_is_left_alone() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Nested.app");
+        write_test_app(&app_path, "com.vendor.nested");
+        let flat = app_path.join("Contents/PlugIns/P.bundle");
+        fs::create_dir_all(flat.join("_CodeSignature")).unwrap();
+        fs::write(flat.join("p"), fat_x86_arm()).unwrap();
+        fs::write(flat.join("_CodeSignature/CodeResources"), "not a plist").unwrap();
+
+        let (found, _) = find_universal_binaries(&app_path);
+
+        assert_eq!(found, vec![app_path.join("Contents/MacOS/testapp")]);
+    }
+
+    #[test]
+    fn test_unsealed_file_in_a_nested_bundle_is_still_listed() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Nested.app");
+        write_test_app(&app_path, "com.vendor.nested");
+        let flat = app_path.join("Contents/PlugIns/P.bundle");
+        fs::create_dir_all(&flat).unwrap();
+        fs::write(flat.join("p"), fat_x86_arm()).unwrap();
+        write_nested_seal(&flat.join("_CodeSignature/CodeResources"), "other");
+
+        let (found, _) = find_universal_binaries(&app_path);
+
+        assert!(found.contains(&flat.join("p")));
+    }
+
+    #[test]
+    fn test_change_inside_contents_stops_the_swap() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+        let host = ready_host(&app_path);
+        host.when("spctl", {
+            let plist = app_path.join("Contents/Info.plist");
+            move || {
+                let mut file = fs::OpenOptions::new().append(true).open(&plist).unwrap();
+                file.write_all(b" ").unwrap();
+            }
+        });
+
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.x"),
+            &binaries_of(&app_path),
+            &host,
+            false,
+        );
+
+        assert!(matches!(result, Err((6, _))), "{result:?}");
+        let header = parse_fat_header_from_file(&app_path.join("Contents/MacOS/testapp"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(header.slices.len(), 2);
+        assert!(!holding_of(&app_path).exists());
+    }
+
+    #[test]
+    fn test_fingerprint_sees_deep_changes_and_ignores_none() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("X.app");
+        write_test_app(&app_path, "com.vendor.x");
+
+        let first = fingerprint(&app_path).unwrap();
+        assert_eq!(fingerprint(&app_path).unwrap(), first);
+
+        fs::write(app_path.join("Contents/MacOS/extra"), "x").unwrap();
+        assert_ne!(fingerprint(&app_path).unwrap(), first);
+    }
+
+    #[test]
+    fn test_failed_ps_refuses() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Psy.app");
+        write_test_app(&app_path, "com.vendor.psy");
+        let host = FakeHost::default();
+        host.fail("/bin/ps", "");
+        host.reply(
+            "codesign -dv",
+            "Authority=Developer ID Application: Acme Corp (123)\n",
+        );
+        host.reply("codesign --verify", "");
+        host.reply("spctl", "");
+        host.reply("ditto", "");
+        fake_ditto(&host, &app_path);
+
+        assert_eq!(
+            running_processes(&host).unwrap_err(),
+            "Could not list running programs"
+        );
+
+        let result = slim_app(
+            &app_for(&app_path, "com.vendor.psy"),
+            &binaries_of(&app_path),
+            &host,
+            false,
+        );
+        assert!(matches!(result, Err((6, _))), "{result:?}");
+        assert!(!holding_of(&app_path).exists());
+
+        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        assert!(scan.groups.is_empty());
+        assert!(
+            scan.notes
+                .contains(&"Psy stays: Could not list running programs.".to_string()),
+            "{:?}",
+            scan.notes
+        );
+    }
+
+    #[test]
+    fn test_removexattr_leaves_symlink_target_alone() {
+        let dir = tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "data").unwrap();
+        set_finder_info(&outside);
+        let bundle = dir.path().join("B.app");
+        fs::create_dir_all(&bundle).unwrap();
+        std::os::unix::fs::symlink(&outside, bundle.join("link")).unwrap();
+
+        clean_ext_attributes(&bundle);
+
+        assert!(has_finder_info(&outside));
+    }
+
+    #[test]
+    fn test_savings_use_allocated_sizes() {
+        let dir = tempdir().unwrap();
+        let app_path = dir.path().join("Big.app");
+        write_test_app(&app_path, "com.vendor.big");
+        let binary = app_path.join("Contents/MacOS/testapp");
+        fs::write(&binary, big_fat_binary()).unwrap();
+        let before = DirSizer::allocated_size(&fs::metadata(&binary).unwrap());
+        let (found, intel) = find_universal_binaries(&app_path);
+        let host = ready_host(&app_path);
+
+        let done = slim_app(&app_for(&app_path, "com.vendor.big"), &found, &host, true).unwrap();
+
+        let after = DirSizer::allocated_size(&fs::metadata(&binary).unwrap());
+        assert_ne!(before - after, intel, "the fixture must tell the two apart");
+        assert_eq!(done.saved, before - after);
     }
 
     #[test]
@@ -1494,45 +2107,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let app_path = dir.path().join("SwapApp.app");
         write_test_app(&app_path, "com.vendor.swap");
-
-        let app = InstalledApp {
-            name: "SwapApp".to_string(),
-            path: app_path.clone(),
-            bundle_id: Some("com.vendor.swap".to_string()),
-            executable: Some("testapp".to_string()),
-            size_bytes: 10000,
-            last_used: None,
-        };
-        let binaries = vec![app_path.join("Contents/MacOS/testapp")];
-        let host = FakeHost::idle();
-        host.reply("ditto", "");
-        host.when("ditto", {
-            let app_path = app_path.clone();
-            let copy_path = dir.path().join("SwapApp.app.taert-slim-tmp");
-            move || {
-                let _ = fs::create_dir_all(&copy_path);
-                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
-                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
-                    let dest = copy_path.join(rel);
-                    if entry.file_type().is_dir() {
-                        let _ = fs::create_dir_all(&dest);
-                    } else if entry.file_type().is_file() {
-                        let _ = fs::copy(entry.path(), dest);
-                    }
-                }
-            }
-        });
-        host.reply("codesign", "");
-        host.reply("spctl", "");
+        let app = app_for(&app_path, "com.vendor.swap");
+        let host = ready_host(&app_path);
 
         let history_dir = tempdir().unwrap();
-        let log_file = history_dir.path().join("history.jsonl");
-        let log = HistoryLog::new(log_file.clone());
+        let log = HistoryLog::new(history_dir.path().join("history.jsonl"));
         let session = log.start_run("slim", "force", Some(1));
 
-        let res = slim_app_logged(&session, &app, &binaries, &host, true);
-        assert!(res.is_ok());
-        let saved = res.unwrap();
+        let done = slim_app_logged(&session, &app, &binaries_of(&app_path), &host, true).unwrap();
         session.finish();
 
         let runs = log.load_runs().unwrap();
@@ -1540,53 +2122,159 @@ mod tests {
         assert_eq!(runs[0].items.len(), 1);
         assert_eq!(runs[0].items[0].outcome, OutcomeKind::Changed);
         assert_eq!(runs[0].items[0].path, app.path.to_string_lossy());
-        assert_eq!(runs[0].items[0].bytes, saved);
+        assert_eq!(runs[0].items[0].bytes, done.saved);
 
-        // A second test with a failing codesign leaves the run with no items.
         let dir2 = tempdir().unwrap();
         let app_path2 = dir2.path().join("TargetApp.app");
         write_test_app(&app_path2, "com.vendor.target");
-
-        let app2 = InstalledApp {
-            name: "TargetApp".to_string(),
-            path: app_path2.clone(),
-            bundle_id: Some("com.vendor.target".to_string()),
-            executable: Some("testapp".to_string()),
-            size_bytes: 10000,
-            last_used: None,
-        };
-        let binaries2 = vec![app_path2.join("Contents/MacOS/testapp")];
-        let host2 = FakeHost::idle();
-        host2.reply("ditto", "");
-        host2.when("ditto", {
-            let app_path = app_path2.clone();
-            let copy_path = dir2.path().join("TargetApp.app.taert-slim-tmp");
-            move || {
-                let _ = fs::create_dir_all(&copy_path);
-                for entry in jwalk::WalkDir::new(&app_path).into_iter().flatten() {
-                    let rel = entry.path().strip_prefix(&app_path).unwrap().to_path_buf();
-                    let dest = copy_path.join(rel);
-                    if entry.file_type().is_dir() {
-                        let _ = fs::create_dir_all(&dest);
-                    } else if entry.file_type().is_file() {
-                        let _ = fs::copy(entry.path(), dest);
-                    }
-                }
-            }
-        });
+        let host2 = cloning_host(&app_path2);
         host2.fail("codesign", "verification failed\n");
 
         let history_dir2 = tempdir().unwrap();
-        let log_file2 = history_dir2.path().join("history.jsonl");
-        let log2 = HistoryLog::new(log_file2.clone());
+        let log2 = HistoryLog::new(history_dir2.path().join("history.jsonl"));
         let session2 = log2.start_run("slim", "force", Some(1));
 
-        let res2 = slim_app_logged(&session2, &app2, &binaries2, &host2, true);
+        let res2 = slim_app_logged(
+            &session2,
+            &app_for(&app_path2, "com.vendor.target"),
+            &binaries_of(&app_path2),
+            &host2,
+            true,
+        );
         assert!(res2.is_err());
         session2.finish();
 
         let runs2 = log2.load_runs().unwrap();
         assert_eq!(runs2.len(), 1);
         assert!(runs2[0].items.is_empty());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::core::host::fake::FakeHost;
+
+    pub fn make_fat_binary_32(slices: &[(u32, u32, u32, u32, u32)], payloads: &[&[u8]]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&FAT_MAGIC.to_be_bytes());
+        buf.extend_from_slice(&(slices.len() as u32).to_be_bytes());
+        for s in slices {
+            buf.extend_from_slice(&s.0.to_be_bytes()); // cputype
+            buf.extend_from_slice(&s.1.to_be_bytes()); // cpusubtype
+            buf.extend_from_slice(&s.2.to_be_bytes()); // offset
+            buf.extend_from_slice(&s.3.to_be_bytes()); // size
+            buf.extend_from_slice(&s.4.to_be_bytes()); // align
+        }
+        for (s, p) in slices.iter().zip(payloads) {
+            if buf.len() < s.2 as usize {
+                buf.resize(s.2 as usize, 0);
+            }
+            buf.extend_from_slice(p);
+        }
+        buf
+    }
+
+    /// A fat binary whose Intel slice is large enough that slimming it frees blocks.
+    pub fn big_fat_binary() -> Vec<u8> {
+        let payload = vec![0xAB_u8; 1_000_003];
+        let slices = [
+            (CPU_TYPE_X86_64, 3, 4096, payload.len() as u32, 12),
+            (CPU_TYPE_ARM64, 0, 1_015_808, 4, 14),
+        ];
+        make_fat_binary_32(&slices, &[&payload, b"arm!"])
+    }
+
+    pub fn write_test_app(bundle: &Path, id: &str) {
+        let macos = bundle.join("Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        let p_x86 = b"X86_PAYLOAD";
+        let p_arm = b"ARM_PAYLOAD";
+        let slices = [
+            (CPU_TYPE_X86_64, 3, 4096, p_x86.len() as u32, 12),
+            (CPU_TYPE_ARM64, 0, 8192, p_arm.len() as u32, 14),
+        ];
+        let bin = make_fat_binary_32(&slices, &[p_x86, p_arm]);
+        fs::write(macos.join("testapp"), bin).unwrap();
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{id}</string>
+<key>CFBundleExecutable</key><string>testapp</string>
+</dict></plist>"#
+        );
+        fs::write(bundle.join("Contents/Info.plist"), plist).unwrap();
+    }
+
+    pub fn app_for(path: &Path, id: &str) -> InstalledApp {
+        InstalledApp {
+            name: path.file_stem().unwrap().to_string_lossy().into_owned(),
+            path: path.to_path_buf(),
+            bundle_id: Some(id.to_string()),
+            executable: Some("testapp".to_string()),
+            size_bytes: 10000,
+            last_used: None,
+        }
+    }
+
+    pub fn holding_of(app: &Path) -> PathBuf {
+        let name = app.file_name().unwrap().to_string_lossy();
+        app.with_file_name(format!("{name}.taert-slim-tmp"))
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        let meta = fs::symlink_metadata(from).unwrap();
+        if meta.is_dir() {
+            fs::create_dir_all(to).unwrap();
+            for entry in fs::read_dir(from).unwrap().flatten() {
+                copy_tree(&entry.path(), &to.join(entry.file_name()));
+            }
+        } else {
+            fs::copy(from, to).unwrap();
+        }
+    }
+
+    /// A `ditto` that copies the app to where `slim_app` asks: inside the holding folder.
+    pub fn fake_ditto(host: &FakeHost, app: &Path) {
+        let (app, clone) = (
+            app.to_path_buf(),
+            holding_of(app).join(app.file_name().unwrap()),
+        );
+        host.when("ditto", move || copy_tree(&app, &clone));
+    }
+
+    const FINDER_INFO: &[u8] = b"com.apple.FinderInfo\0";
+
+    pub fn set_finder_info(path: &Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut value = [0_u8; 32];
+        value[0] = 1;
+        let result = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                FINDER_INFO.as_ptr().cast(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    pub fn has_finder_info(path: &Path) -> bool {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let size = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                FINDER_INFO.as_ptr().cast(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+            )
+        };
+        size >= 0
     }
 }

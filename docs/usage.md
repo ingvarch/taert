@@ -505,7 +505,9 @@ taert slim --dry-run
 
 # Structured JSON report of eligible and ineligible apps
 taert slim --json
-taert slim Slack --json
+
+# Slim an app and print the result as JSON (--json needs --force)
+taert slim Slack --json --force
 
 # Slim without interactive confirmation prompt
 taert slim Slack --force
@@ -513,23 +515,31 @@ taert slim Slack --force
 
 #### How Slimming Works
 
+`taert slim` asks `Slim X? [y/N]: ` before it rewrites an app, in a terminal and in plain output. Anything but `y` cancels. `--force` skips the question. `--json` without `--force` does not ask: it prints `{"error": "confirmation needed, pass --force", "app": "X"}` and fails.
+
 1. **Safety Check**: Checks that your Mac runs Apple Silicon (`sysctl hw.optional.arm64`). If run on an Intel Mac, `taert slim` stops immediately with a clear message: `"Slimming universal apps requires an Apple Silicon Mac."`
-2. **APFS Clone**: Clones the candidate application bundle alongside itself using `ditto --clone` on APFS without duplicating disk blocks.
-3. **Binary Thinning**: Scans the Mach-O fat headers inside the cloned bundle and strips x86_64 slices, rewriting the fat headers to retain only ARM slices with standard power-of-two alignment. Files sealed by whole-file hashes in `_CodeSignature/CodeResources` are left alone to ensure code signing integrity.
+2. **APFS Clone**: Makes a holding folder `<name>.app.taert-slim-tmp` next to the app and clones the app into it, as `<holding>/<name>.app`, using `ditto --clone` on APFS without duplicating disk blocks. If the holding folder already exists, taert stops and names it: it is left from an earlier run and can hold the only copy of an app. taert never removes or moves it. Check it, move it to the Trash yourself, then run again. The slim list, `--json`, and `taert slim <name>` leave out an app inside a holding folder.
+3. **Binary Thinning**: Scans the Mach-O fat headers inside the cloned bundle and strips x86_64 slices, rewriting the fat headers to retain only ARM slices with standard power-of-two alignment. Files sealed by whole-file hashes in `_CodeSignature/CodeResources` are left alone to ensure code signing integrity. A file inside a nested bundle (a framework, a helper app, a plug-in) is checked against the seal of the nearest nested bundle that has one. If that seal cannot be read, the file is left alone.
 4. **ARM Verification**: Inspects Mach-O architecture headers to verify that a valid ARM slice (`CPU_TYPE_ARM64` / `CPU_TYPE_ARM64_32`) is present and preserved.
-5. **Signature & Gatekeeper Verification**: Validates the slimmed bundle using `codesign --verify --deep --strict` and `spctl -a -t exec`. If extended attributes (`com.apple.FinderInfo` or `com.apple.ResourceFork`) interfere, taert cleans them up and retries verification.
-6. **Original Bundle Verification**: Verifies that the original application bundle remained unchanged and that no process inside it was launched while slimming was in progress.
-7. **Atomic Swap & Trash**: Atomically exchanges the slimmed copy and the original bundle using APFS `renamex_np(RENAME_SWAP)`, then moves the original unslimmed app to the Trash (`Host::trash`). If any verification step fails prior to the swap, the temporary clone is removed and the original application is left completely untouched.
+5. **Signature & Gatekeeper Verification**: Validates the slimmed bundle using `codesign --verify --deep --strict` and `spctl -a -t exec`. Only a failed `codesign` check makes taert remove the extended attributes (`com.apple.FinderInfo` or `com.apple.ResourceFork`) and check both again once. A failed `spctl` check after a passing `codesign` check stops the run.
+6. **Original Bundle Verification**: Compares a fingerprint of the whole original bundle (every path, type, size, modification time, inode, and device) with the one taken before step 2, and lists running programs with `ps`. A change anywhere inside the bundle, a program started from it, or a failed `ps` stops the run.
+7. **Atomic Swap & Trash**: Atomically exchanges the slimmed copy and the original bundle using APFS `renamex_np(RENAME_SWAP)`, then moves the old app, now at `<holding>/<name>.app`, to the Trash (`Host::trash`), so the Trash item is called `<name>.app`, and removes the empty holding folder. If any step fails before the swap, the holding folder is removed and the original application is left completely untouched. After the swap taert removes nothing.
+
+For each slimmed app taert prints one line: `Slimmed X, saved N. The old app was moved to the Trash.` If the Trash refuses the old app, taert still reports the app as slimmed and says where the old app is: `Slimmed X, saved N. The old app is still at <path> (could not move it to the Trash: <error>)`. `--json` adds `"old_app_path"` in this case only. If taert cannot remove the empty holding folder after the Trash step, the line names it, because the next run stops at that folder: `Slimmed X, saved N. The old app was moved to the Trash, but the folder <holding> is left (could not remove it: <error>). Move it to the Trash yourself before you slim X again.` The interface shows this line only when the old app or the holding folder stays. The note that the space comes back when the Trash is emptied shows only when at least one old app went to the Trash.
+
+The saved size is the allocated size of each rewritten binary before, minus the allocated size after. The estimate in the list and in `--dry-run` is the sum of the Intel slice sizes.
 
 #### Eligibility & Exclusion Rules
 
-`taert slim` verifies that each application is safe to slim:
+`taert slim` verifies that each application is safe to slim, in the list, in `--json`, and for a named app:
 - **System Applications**: Apple bundles (`com.apple.*`) and system roots are strictly refused.
 - **Mac App Store Apps**: Apps with an App Store receipt (`_MASReceipt`) are skipped because macOS App Store verification requires the original unmodified bundle.
-- **Running Applications**: Running applications are detected via `/bin/ps` and skipped to prevent file locks and memory corruptions.
+- **Running Applications**: Running applications are detected via `/bin/ps` and skipped to prevent file locks and memory corruptions. If `ps` fails, every app is refused with "Could not list running programs".
 - **Rosetta Preference**: Apps configured to run under Rosetta (`LSArchitecturesForX86_64` in `com.apple.LaunchServices.plist`) are excluded so Rosetta compatibility is not broken.
-- **User Ownership**: Only user-owned applications can be slimmed without root escalation. If permissions fail, `taert` reports a hint to grant App Management in System Settings.
-- **Developer ID Signing**: Only apps signed with a valid Developer ID certification authority (or ad-hoc signed when `TAERT_SLIM_ALLOW_ADHOC=1` is set) are eligible.
+- **Links**: A bundle path that is a symbolic link is refused ("The app is a link. Slim the app it points to"), because the clone would copy the app it points to. Slim that app by its own path.
+- **Ownership**: The bundle and every file and folder in it must belong to you. A bundle owned by root is refused ("Belongs to another user"), because the copy would make a root-owned helper yours. A bundle with a setuid or setgid file is refused ("Contains a setuid or setgid file"). If permissions fail, `taert` reports a hint to grant App Management in System Settings.
+- **Developer ID Signing**: Only apps signed with a valid Developer ID certification authority are eligible.
+- **Signature and Gatekeeper**: An app that already fails `codesign --verify --deep --strict` ("Already fails the signature check") or `spctl` ("Already fails the Gatekeeper check") stays as it is. Apps without Intel code are not checked.
 
 ### Transparent APFS Compression (`taert compress`)
 
