@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `taert optimize` is gone; `taert doctor` replaces it (removed in 5a80563, never recorded).
 
 ### Fixed
+- **Explore Storage cache**: entering a folder no longer measures it again when its parent was already measured. Hardlinks and clones no longer drop folder sizes from the cache, apps and other packages use the cache, and the measuring dialog shows only after 150 ms.
 - **Orphaned app files**: a row starts selected only when nothing inside it changed for 30 days, as for app caches. Before, only the folder and its direct children counted, so a recent file deeper inside did not protect it. A row with a part taert cannot read starts unselected.
 - **Uninstall**: a container named by a UUID that has only the older `.com.apple.containermanager.metadata.plist` is now listed, and an emptied container holding only that file is removed instead of reported as a failure.
 - **Flags that do nothing**: `taert schedule`, `taert ignore` and `taert config` now stop with an error when given `--dry-run` or `--json`. Before, `--dry-run` still ran the scheduled cleanup, wrote the schedule agent, and saved the ignore list and settings.

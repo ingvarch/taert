@@ -159,14 +159,6 @@ impl StorageCache {
         self.snapshots.retain(|p, _| !p.starts_with(prefix));
     }
 
-    /// Invalidate a single path and its ancestor snapshots (since totals change).
-    pub fn invalidate_path(&mut self, path: &Path) {
-        self.sizes.remove(path);
-        self.snapshots.remove(path);
-        // Also remove ancestor snapshots since their children list/totals are affected
-        self.snapshots.retain(|p, _| !path.starts_with(p));
-    }
-
     /// Clear all cached sizes and snapshots.
     pub fn clear(&mut self) {
         self.sizes.clear();
@@ -189,7 +181,7 @@ impl StorageCache {
         &mut self,
         root: &Path,
         mut dirs: HashSet<PathBuf>,
-        direct_bytes: HashMap<PathBuf, u64>,
+        direct_bytes: HashMap<PathBuf, i64>,
         direct_files: HashMap<PathBuf, usize>,
     ) {
         dirs.insert(root.to_path_buf());
@@ -198,7 +190,7 @@ impl StorageCache {
         // Sort from deepest to shallowest (most path components to least)
         sorted_dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
 
-        let mut recursive_bytes: HashMap<PathBuf, u64> = HashMap::with_capacity(sorted_dirs.len());
+        let mut recursive_bytes: HashMap<PathBuf, i64> = HashMap::with_capacity(sorted_dirs.len());
         let mut recursive_files: HashMap<PathBuf, usize> =
             HashMap::with_capacity(sorted_dirs.len());
 
@@ -231,6 +223,10 @@ impl StorageCache {
         for (dir_path, bytes) in recursive_bytes {
             let files = *recursive_files.get(&dir_path).unwrap_or(&0);
             let mtime = fs::metadata(&dir_path).ok().and_then(|m| m.modified().ok());
+            let bytes = u64::try_from(bytes).unwrap_or_else(|_| {
+                debug_assert!(false, "negative size for {dir_path:?}");
+                0
+            });
             self.sizes.insert(
                 dir_path,
                 CachedDirSize {
@@ -262,7 +258,7 @@ mod tests {
         assert_eq!(cache.get_size(&dir), Some(1024));
         assert_eq!(cache.size_count(), 1);
 
-        cache.invalidate_path(&dir);
+        cache.invalidate_prefix(&dir);
         assert_eq!(cache.get_size(&dir), None);
         assert_eq!(cache.size_count(), 0);
     }
