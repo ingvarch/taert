@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Main menu**: in a short window the menu scrolls with the highlighted row, so every row can be reached, and the first or last line says how many rows are out of view.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added

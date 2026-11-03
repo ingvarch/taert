@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: "home_screen(&state, 120, 24)"
+---
+ taert                                                                                    118.6 GB available · 24% free
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   2 more above                        ╭─ ◈  Protected paths ────────────────────────────────────────────────────────╮
+   │   ▦ Docker cleanup           › │  │ Manage directories and files permanently protected from                     │
+   │   ⌦ Uninstall apps           › │  │ all automated cleanup and purge operations.                                 │
+   │   ◆ Homebrew                 › │  │                                                                             │
+   ╰────────────────────────────────╯  │ ↵ Open                                                                      │
+   ╭─ Optimize ─────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ✚ Doctor                   › │
+   │   ▲ Startup items            › │
+   │   ⌦ Slim apps                › │
+   │   ✧ Compress                 › │
+   ╰────────────────────────────────╯
+   ╭─ Inspect ──────────────────────╮
+   │   ◔ Explore storage          › │
+   │   ◔ Large files              › │
+   │   ▤ System status            › │
+   ╰────────────────────────────────╯
+   ╭─ Settings ─────────────────────╮
+   │   ⌥ Preferences              › │
+   │ ▌ ◈ Protected paths          › │
+   ╰────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ⎋  Quit    ?  More                                                                               Open  ↵

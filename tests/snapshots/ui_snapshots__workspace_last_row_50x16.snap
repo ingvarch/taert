@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: "home_screen(&state, w, h)"
+---
+ taert              118.6 GB available · 24% free
+──────────────────────────────────────────────────
+   9 more above
+   ╰───────────────────────────────────────────╯
+   ╭─ Inspect ─────────────────────────────────╮
+   │   ◔ Explore storage                     › │
+   │   ◔ Large files                         › │
+   │   ▤ System status                       › │
+   ╰───────────────────────────────────────────╯
+   ╭─ Settings ────────────────────────────────╮
+   │   ⌥ Preferences                         › │
+   │ ▌ ◈ Protected paths                     › │
+   │      Choose paths excluded from cleanup   │
+   ╰───────────────────────────────────────────╯
+──────────────────────────────────────────────────
+  ↑↓  Move    ⎋  Quit    ?  More         Open  ↵

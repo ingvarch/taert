@@ -2036,3 +2036,111 @@ fn a_tool_name_keeps_its_brackets() {
 
     assert!(output.contains("╭─ Cargo (Rust)"), "{output}");
 }
+
+fn content_lines(output: &str, w: u16, h: u16) -> Vec<String> {
+    let menu_cols = if w >= 100 { 37 } else { w as usize };
+    output
+        .lines()
+        .skip(2)
+        .take(h as usize - 4)
+        .map(|line| line.chars().take(menu_cols).collect())
+        .collect()
+}
+
+#[test]
+fn every_menu_row_shows_when_selected() {
+    for (w, h) in [(80, 24), (50, 16), (50, 9), (120, 24)] {
+        for row in 0..14 {
+            let state = home_state(row);
+            let lines = content_lines(&home_screen(&state, w, h), w, h);
+            let title = state.items[row].1;
+            let at = lines
+                .iter()
+                .position(|l| {
+                    l.split_once('▌')
+                        .is_some_and(|(_, rest)| rest.contains(title))
+                })
+                .unwrap_or_else(|| panic!("{title} at {w}x{h}: {lines:#?}"));
+            if w < 100 {
+                let desc: String = state.items[row].2.chars().take(30).collect();
+                assert!(
+                    lines[at + 1].contains(&desc),
+                    "{title} at {w}x{h}: {lines:#?}"
+                );
+            }
+            for line in &lines[at..=(at + usize::from(w < 100))] {
+                assert!(
+                    !line.contains("more above") && !line.contains("more below"),
+                    "{title} at {w}x{h}: {lines:#?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_long_menu_says_how_many_rows_are_hidden() {
+    let check = |w: u16, h: u16, row: usize, first: Option<&str>, last: Option<&str>| {
+        let lines = content_lines(&home_screen(&home_state(row), w, h), w, h);
+        let at = |line: &String, want: &str| {
+            if want == "╰" {
+                line.trim_start().starts_with('╰')
+            } else {
+                line.trim() == want
+            }
+        };
+        if let Some(want) = first {
+            assert!(at(&lines[0], want), "{w}x{h} row {row}: {lines:#?}");
+        }
+        if let Some(want) = last {
+            assert!(
+                at(lines.last().unwrap(), want),
+                "{w}x{h} row {row}: {lines:#?}"
+            );
+        }
+        let hint_above = first.is_some_and(|want| want.ends_with("more above"));
+        let hint_below = last.is_some_and(|want| want.ends_with("more below"));
+        let rest = &lines[usize::from(hint_above)..lines.len() - usize::from(hint_below)];
+        assert!(
+            rest.iter()
+                .all(|l| !l.contains("more above") && !l.contains("more below")),
+            "{w}x{h} row {row}: {lines:#?}"
+        );
+        assert!(
+            lines.iter().all(|l| !l.trim_start().starts_with("0 more")),
+            "{lines:#?}"
+        );
+    };
+    check(80, 24, 0, None, Some("3 more below"));
+    check(80, 24, 13, Some("3 more above"), Some("╰"));
+    check(50, 16, 0, None, Some("9 more below"));
+    check(50, 16, 13, Some("9 more above"), Some("╰"));
+    check(50, 16, 4, None, Some("8 more below"));
+    check(50, 16, 9, Some("6 more above"), Some("2 more below"));
+    check(120, 24, 0, None, Some("2 more below"));
+    check(120, 24, 13, Some("2 more above"), None);
+}
+
+#[test]
+fn a_menu_that_fits_has_no_hint() {
+    for (w, h) in [(100, 30), (120, 32)] {
+        for row in 0..14 {
+            let output = home_screen(&home_state(row), w, h);
+            assert!(
+                !output.contains("more above") && !output.contains("more below"),
+                "{w}x{h} row {row}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn snapshot_workspace_last_row() {
+    let state = home_state(13);
+    for (w, h, label) in [(80, 24, "80x24"), (50, 16, "50x16"), (120, 24, "120x24")] {
+        assert_snapshot!(
+            format!("workspace_last_row_{label}"),
+            home_screen(&state, w, h)
+        );
+    }
+}
