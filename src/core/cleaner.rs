@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use super::docker::{DockerClient, DockerRemover};
 use super::history::{ItemOutcome, OutcomeKind};
+use super::homebrew;
 use super::host::Host;
 use super::safety::{FileIdentity, Safety, SafetyError};
 use super::scanner::ScanItem;
@@ -34,7 +35,7 @@ pub fn scan_removal_mode(scan_id: &str, permanent: bool) -> RemovalMode {
 
 /// Determines whether an item goes to the Trash or is permanently removed.
 pub fn item_removal_mode(item: &ScanItem, scan_id: &str, permanent: bool) -> RemovalMode {
-    if permanent || item.contents_only || item.docker.is_some() {
+    if permanent || item.contents_only || item.docker.is_some() || item.brew.is_some() {
         return RemovalMode::Permanent;
     }
     if scan_id != super::uninstaller::PLAN_ID
@@ -171,6 +172,45 @@ fn connect_docker() -> Result<Box<dyn DockerRemover>, String> {
     }
 }
 
+/// Counts an item that is no file as removed.
+fn record_removed<O: FnMut(&ItemOutcome)>(
+    report: &mut RemovalReport,
+    outcome_cb: Option<&mut O>,
+    item: &ScanItem,
+    bytes: u64,
+) {
+    report.removed_count += 1;
+    if let Some(cb) = outcome_cb {
+        cb(&ItemOutcome {
+            path: item.path.clone(),
+            bytes,
+            outcome: OutcomeKind::Removed,
+            error: None,
+        });
+    }
+}
+
+/// Counts an item that is no file as failed.
+fn record_failed<O: FnMut(&ItemOutcome)>(
+    report: &mut RemovalReport,
+    outcome_cb: Option<&mut O>,
+    item: &ScanItem,
+    error: String,
+) {
+    if let Some(cb) = outcome_cb {
+        cb(&ItemOutcome {
+            path: item.path.clone(),
+            bytes: 0,
+            outcome: OutcomeKind::Failed,
+            error: Some(error.clone()),
+        });
+    }
+    report.failures.push(RemovalFailure {
+        path: item.path.clone(),
+        error,
+    });
+}
+
 pub struct Cleaner<'a> {
     pub host: &'a dyn Host,
     pub mode: RemovalMode,
@@ -293,7 +333,7 @@ impl<'a> Cleaner<'a> {
                 });
             }
 
-            // Docker objects are no files, so nothing below may see them.
+            // Docker objects and brew packages are no files, so nothing below may see them.
             if let Some(object) = &item.docker {
                 let outcome = match &docker {
                     Some(Ok(docker)) => docker.remove(object),
@@ -302,31 +342,20 @@ impl<'a> Cleaner<'a> {
                 };
                 match outcome {
                     Ok(()) => {
-                        report.removed_count += 1;
                         docker_listed_bytes = docker_listed_bytes.saturating_add(item.size_bytes);
-                        if let Some(ref mut cb) = outcome_cb {
-                            cb(&ItemOutcome {
-                                path: item.path.clone(),
-                                bytes: item.size_bytes,
-                                outcome: OutcomeKind::Removed,
-                                error: None,
-                            });
-                        }
+                        record_removed(&mut report, outcome_cb.as_mut(), item, item.size_bytes);
                     }
-                    Err(error) => {
-                        if let Some(ref mut cb) = outcome_cb {
-                            cb(&ItemOutcome {
-                                path: item.path.clone(),
-                                bytes: 0,
-                                outcome: OutcomeKind::Failed,
-                                error: Some(error.clone()),
-                            });
-                        }
-                        report.failures.push(RemovalFailure {
-                            path: item.path.clone(),
-                            error,
-                        });
+                    Err(error) => record_failed(&mut report, outcome_cb.as_mut(), item, error),
+                }
+                continue;
+            }
+            if let Some(task) = &item.brew {
+                match homebrew::run_task(self.host, task) {
+                    Ok(freed) => {
+                        report.freed_bytes = report.freed_bytes.saturating_add(freed);
+                        record_removed(&mut report, outcome_cb.as_mut(), item, freed);
                     }
+                    Err(error) => record_failed(&mut report, outcome_cb.as_mut(), item, error),
                 }
                 continue;
             }
@@ -487,8 +516,10 @@ impl<'a> Cleaner<'a> {
 mod tests {
     use super::*;
     use crate::core::docker::DockerObject;
+    use crate::core::homebrew::BrewTask;
     use crate::core::host::MacHost;
     use crate::core::host::fake::FakeHost;
+    use crate::core::sizer::DirSizer;
     use std::cell::{Cell, RefCell};
     use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
@@ -630,6 +661,110 @@ mod tests {
         assert_eq!(report.removed_count, 1);
         assert_eq!(report.failures[0].error, "Docker is not running");
         assert!(!target.exists());
+    }
+
+    const BREW_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1 /fake/bin/brew cleanup lib";
+
+    fn brew_item(label: &Path, cellar: &Path) -> ScanItem {
+        let mut item = ScanItem::new(label.to_path_buf(), 1, true, false);
+        item.brew = Some(BrewTask::Cleanup {
+            name: "lib".to_string(),
+            brew: PathBuf::from("/fake/bin/brew"),
+            cellar: cellar.to_path_buf(),
+        });
+        item
+    }
+
+    type Recorded = (PathBuf, u64, OutcomeKind, Option<String>);
+
+    fn remove_recording(host: &FakeHost, items: &[ScanItem]) -> (RemovalReport, Vec<Recorded>) {
+        let outcomes = RefCell::new(Vec::new());
+        let report = Cleaner::new(host, RemovalMode::Permanent).remove_items_with_callbacks(
+            items,
+            &IgnoreStore::default(),
+            None::<fn(RemovalProgress)>,
+            Some(|outcome: &ItemOutcome| {
+                outcomes.borrow_mut().push((
+                    outcome.path.clone(),
+                    outcome.bytes,
+                    outcome.outcome,
+                    outcome.error.clone(),
+                ));
+            }),
+        );
+        (report, outcomes.into_inner())
+    }
+
+    #[test]
+    fn a_brew_item_goes_through_brew_and_never_touches_a_file_with_its_label() {
+        let temp = tempdir().unwrap();
+        let label = temp.path().join("lib 1.0");
+        fs::create_dir_all(&label).unwrap();
+        fs::write(label.join("data.bin"), b"keep").unwrap();
+        let cellar = temp.path().join("Cellar/lib");
+        fs::create_dir_all(cellar.join("0.9")).unwrap();
+        fs::write(cellar.join("0.9/data.bin"), vec![1_u8; 50_000]).unwrap();
+        let before = DirSizer::size_of(&cellar);
+        let host = FakeHost::default();
+        host.reply(BREW_LINE, "");
+        let old = cellar.join("0.9");
+        host.when(BREW_LINE, move || fs::remove_dir_all(&old).unwrap());
+
+        let (report, outcomes) = remove_recording(&host, &[brew_item(&label, &cellar)]);
+
+        assert!(label.join("data.bin").exists());
+        assert_eq!(*host.calls.lock().unwrap(), [BREW_LINE]);
+        assert_eq!(report.removed_count, 1);
+        assert!(report.failures.is_empty());
+        assert!(before >= 50_000);
+        assert_eq!(report.freed_bytes, before - DirSizer::size_of(&cellar));
+        assert_eq!(
+            outcomes,
+            [(label, report.freed_bytes, OutcomeKind::Removed, None)]
+        );
+    }
+
+    #[test]
+    fn a_failed_brew_task_is_a_failure_in_the_report_and_the_rest_goes_on() {
+        let temp = tempdir().unwrap();
+        let label = temp.path().join("lib 1.0");
+        let cellar = temp.path().join("Cellar/lib");
+        let file = temp.path().join("cache");
+        fs::create_dir_all(&file).unwrap();
+        let host = FakeHost::default();
+        host.fail(BREW_LINE, "Error: boom\n");
+        let items = [
+            brew_item(&label, &cellar),
+            ScanItem::new(file.clone(), 7, true, false),
+        ];
+
+        let (report, outcomes) = remove_recording(&host, &items);
+
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.freed_bytes, 7);
+        assert_eq!(
+            report.failures,
+            [RemovalFailure {
+                path: label.clone(),
+                error: "Homebrew could not clean up lib: Error: boom".to_string(),
+            }]
+        );
+        assert_eq!(outcomes[0].2, OutcomeKind::Failed);
+        assert_eq!(
+            outcomes[0].3.as_deref(),
+            Some("Homebrew could not clean up lib: Error: boom")
+        );
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_brew_item_is_removed_for_good() {
+        let item = brew_item(Path::new("lib 1.0"), Path::new("/fake/Cellar/lib"));
+
+        assert_eq!(
+            item_removal_mode(&item, "large", false),
+            RemovalMode::Permanent
+        );
     }
 
     #[test]

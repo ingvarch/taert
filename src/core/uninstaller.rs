@@ -45,7 +45,6 @@ const EXIT_POLL: Duration = Duration::from_millis(200);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an app may keep a save dialog open before the quit request counts as ignored.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
-const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const PS: &str = "/bin/ps";
 const OSASCRIPT: &str = "/usr/bin/osascript";
@@ -1198,7 +1197,7 @@ impl Uninstaller<'_> {
             return BrewResult::NotTracked;
         };
         let args = ["uninstall", "--cask", token];
-        let output = homebrew::run_brew(self.host, &brew.path, &args, BREW_TIMEOUT);
+        let output = homebrew::run_brew(self.host, &brew.path, &args, homebrew::BREW_TIMEOUT);
         if output.ok && is_gone(bundle) {
             BrewResult::Removed
         } else if self.is_tracked_by_homebrew(token) {

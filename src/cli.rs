@@ -50,7 +50,7 @@ pub enum Command {
     Uninstall(UninstallArgs),
 
     /// List Homebrew packages and the space they take
-    Brew,
+    Brew(BrewArgs),
 
     /// Browse directory disk usage without modifying files (read-only)
     Analyze(AnalyzeArgs),
@@ -140,6 +140,18 @@ pub enum CleanCategory {
     Ai,
     Trash,
     Orphans,
+}
+
+#[derive(Debug, Args)]
+pub struct BrewArgs {
+    #[command(subcommand)]
+    pub action: Option<BrewAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrewAction {
+    /// Remove unused dependencies and old versions through Homebrew
+    Cleanup,
 }
 
 #[derive(Debug, Args)]

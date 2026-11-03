@@ -10,9 +10,9 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 
 use crate::cli::{
-    CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction,
-    HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs, SlimArgs,
-    StartupArgs, UninstallArgs,
+    BrewAction, CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs,
+    HistoryAction, HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs,
+    SlimArgs, StartupArgs, UninstallArgs,
 };
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
@@ -92,7 +92,12 @@ fn main() -> ExitCode {
             handle_uninstall(args, &cli, use_plain, &ignore, &context, console)
         }
 
-        Some(Command::Brew) => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
+        Some(Command::Brew(ref args)) => match args.action {
+            Some(BrewAction::Cleanup) => {
+                handle_brew_cleanup(&cli, use_plain, &ignore, &context, console)
+            }
+            None => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
+        },
 
         Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore, &context),
 
@@ -238,6 +243,30 @@ fn handle_docker(
     match DockerClient::connect().and_then(|client| client.scan()) {
         Ok(mut scan) => process_scan_result(
             &mut scan, cli, use_plain, ignore, "docker", context, console,
+        ),
+        Err(error) => {
+            let _ = writeln!(console.err, "Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn handle_brew_cleanup(
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    context: &ScanContext,
+    console: &mut Console,
+) -> ExitCode {
+    match homebrew::cleanup_scan(context.layout, context.host) {
+        Ok(mut scan) => process_scan_result(
+            &mut scan,
+            cli,
+            use_plain,
+            ignore,
+            "brew cleanup",
+            context,
+            console,
         ),
         Err(error) => {
             let _ = writeln!(console.err, "Error: {error}");
@@ -1666,6 +1695,7 @@ fn pick_apps_to_slim(
 mod tests {
     use super::*;
     use crate::core::apps::testing::{fake_app, sandbox};
+    use crate::core::homebrew::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO};
     use crate::core::host::fake::FakeHost;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -1769,7 +1799,6 @@ mod tests {
         })
     }
 
-    const BREW_INFO: &str = include_str!("../tests/fixtures/brew_info.json");
     const BREW_INFO_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1";
 
     fn brew(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
@@ -1785,6 +1814,214 @@ mod tests {
                 console,
             )
         })
+    }
+
+    const ENV_START: &str =
+        "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1";
+
+    /// A Mac whose Cellar holds the two unused dependencies of the fixture, an old `bun` and an
+    /// old `fd`, which is pinned.
+    fn brew_cleanup_mac() -> (tempfile::TempDir, Layout, FakeHost) {
+        let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let prefix = layout.system("opt/homebrew");
+        for (folder, bytes) in [
+            ("ada-url/4.0.0_1", 90_000),
+            ("brotli/1.2.1", 40_000),
+            ("bun/1.4.0", 20_000),
+            ("bun/1.4.2", 5_000),
+            ("fd/10.0.0", 8_000),
+            ("fd/10.5.0", 5_000),
+        ] {
+            let folder = prefix.join("Cellar").join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("data"), vec![1_u8; bytes]).unwrap();
+        }
+        let brew = prefix.join("bin/brew");
+        let old = |name: &str, version: &str| {
+            format!(
+                "Would remove: {}/Cellar/{name}/{version} (3 files, 9.9MB)\n",
+                prefix.display()
+            )
+        };
+        let cleanup = old("bun", "1.4.0") + &old("fd", "10.0.0");
+        let host = FakeHost::default();
+        host.reply(
+            &format!("{ENV_START} {} info --json=v2 --installed", brew.display()),
+            BREW_INFO,
+        );
+        host.reply(
+            &format!("{ENV_START} {} autoremove --dry-run", brew.display()),
+            AUTOREMOVE_DRY_RUN,
+        );
+        host.reply(
+            &format!("{ENV_START} {} cleanup --dry-run", brew.display()),
+            &cleanup,
+        );
+        (temp, layout, host)
+    }
+
+    /// Makes brew succeed at `args` and delete `folder`, like the real removal would.
+    fn brew_removes(host: &FakeHost, layout: &Layout, args: &str, folder: &str) {
+        let brew = layout.system("opt/homebrew/bin/brew");
+        let line = format!(
+            "{ENV_START} HOMEBREW_NO_AUTOREMOVE=1 {} {args}",
+            brew.display()
+        );
+        host.reply(&line, "");
+        let folder = layout.system("opt/homebrew/Cellar").join(folder);
+        host.when(&line, move || std::fs::remove_dir_all(&folder).unwrap());
+    }
+
+    fn brew_cleanup(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
+        let cli = parse(args);
+        let context = ScanContext { layout, host };
+        run(typed, |console| {
+            handle_brew_cleanup(&cli, true, &IgnoreStore::default(), &context, console)
+        })
+    }
+
+    fn removal_calls(host: &FakeHost) -> Vec<String> {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.contains("HOMEBREW_NO_AUTOREMOVE=1"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn brew_cleanup_dry_run_shows_the_rows_and_runs_only_the_three_reads() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_cleanup(&["brew", "cleanup", "--dry-run"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("=== Homebrew Cleanup ==="));
+        assert!(ran.out.contains("[Unused dependencies]"));
+        assert!(ran.out.contains("[Old versions]"));
+        assert!(ran.out.contains("[x]"));
+        assert!(ran.out.contains("ada-url 4.0.0_1"));
+        assert!(ran.out.contains("bun 1.4.0"));
+        assert!(ran.out.contains("fd 10.0.0"));
+        let calls = host.calls.lock().unwrap();
+        let tails: Vec<&str> = calls
+            .iter()
+            .map(|call| call.rsplit_once("bin/brew ").unwrap().1)
+            .collect();
+        assert_eq!(
+            tails,
+            [
+                "info --json=v2 --installed",
+                "autoremove --dry-run",
+                "cleanup --dry-run"
+            ]
+        );
+    }
+
+    #[test]
+    fn brew_cleanup_force_removes_the_selected_rows_and_logs_each_package() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+        let cellar = layout.system("opt/homebrew/Cellar");
+        let before = |name: &str| DirSizer::size_of(&cellar.join(name));
+        let (ada, brotli, bun) = (before("ada-url"), before("brotli"), before("bun"));
+        brew_removes(&host, &layout, "uninstall ada-url", "ada-url");
+        brew_removes(&host, &layout, "uninstall brotli", "brotli");
+        brew_removes(&host, &layout, "cleanup bun", "bun/1.4.0");
+
+        let ran = brew_cleanup(&["brew", "cleanup", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}{}", ran.out, ran.err);
+        let mut removals: Vec<String> = removal_calls(&host)
+            .iter()
+            .map(|call| call.rsplit_once("bin/brew ").unwrap().1.to_string())
+            .collect();
+        removals.sort();
+        assert_eq!(
+            removals,
+            ["cleanup bun", "uninstall ada-url", "uninstall brotli"]
+        );
+        assert!(cellar.join("fd/10.0.0").exists());
+
+        let runs = runs_in(&layout);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "brew cleanup");
+        assert_eq!(runs[0].mode, "force");
+        let mut items: Vec<(String, u64)> = runs[0]
+            .items
+            .iter()
+            .inspect(|item| assert_eq!(item.outcome, crate::core::history::OutcomeKind::Removed))
+            .map(|item| (item.path.clone(), item.bytes))
+            .collect();
+        items.sort();
+        let freed_bun = bun - DirSizer::size_of(&cellar.join("bun"));
+        assert_eq!(
+            items,
+            [
+                ("ada-url 4.0.0_1".to_string(), ada),
+                ("brotli 1.2.1".to_string(), brotli),
+                ("bun 1.4.0".to_string(), freed_bun),
+            ]
+        );
+    }
+
+    #[test]
+    fn brew_cleanup_json_prints_the_scan_with_the_task_of_each_row() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_cleanup(&["brew", "cleanup", "--json"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(json["id"], "brew-cleanup");
+        let groups = json["groups"].as_array().unwrap();
+        assert_eq!(groups[0]["tool"], "Unused dependencies");
+        assert_eq!(groups[1]["tool"], "Old versions");
+        let brew = layout.system("opt/homebrew/bin/brew");
+        let cellar = layout.system("opt/homebrew/Cellar");
+        assert_eq!(
+            groups[0]["items"][0]["brew"],
+            serde_json::json!({
+                "action": "uninstall",
+                "name": "ada-url",
+                "brew": brew,
+                "cellar": cellar.join("ada-url"),
+            })
+        );
+        let old = &groups[1]["items"];
+        assert_eq!(old[0]["brew"]["action"], "cleanup");
+        assert_eq!(old[0]["brew"]["name"], "bun");
+        assert_eq!(old[1]["selected"], false);
+        assert_eq!(host.calls.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_plain_brew_cleanup_asks_first_and_a_no_removes_nothing() {
+        let (_temp, layout, host) = brew_cleanup_mac();
+
+        let ran = brew_cleanup(&["brew", "cleanup", "--plain"], "\nno\n", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Type 'yes' to confirm"));
+        assert!(ran.out.ends_with("Operation cancelled.\n"));
+        assert!(removal_calls(&host).is_empty());
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn brew_cleanup_reports_a_failed_read_as_an_error() {
+        let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.fail(ENV_START, "Error: broken tap\n");
+
+        let ran = brew_cleanup(&["brew", "cleanup", "--dry-run"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(
+            ran.err,
+            "Error: Homebrew did not list its packages: Error: broken tap\n"
+        );
+        assert!(ran.out.is_empty());
     }
 
     #[test]

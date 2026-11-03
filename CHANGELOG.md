@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Homebrew packages**: `taert brew` lists installed formulae and casks with their size, whether you installed them, what is outdated or pinned, and what uses them, in the terminal list, plain text, or JSON (`--json`). It only reads.
+- **Homebrew cleanup**: `taert brew cleanup` lists the unused dependencies and old versions Homebrew would remove, and removes the ones you select through `brew uninstall` and `brew cleanup`, never by deleting files itself. It skips a dependency that something uses again, never starts a pinned formula selected, and writes each package to the history.
 - **System status**: `taert status` prints a live snapshot of CPU, memory, storage, battery, processes, and network in plain text or JSON (`--json`).
 - **Orphaned app files**: `taert clean orphans` finds files and containers in `~/Library` left behind by apps that are gone and moves them to the Trash.
 - **Shell completions**: `taert completion` prints completion scripts for bash, fish, and zsh.
