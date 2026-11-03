@@ -1197,7 +1197,7 @@ impl Uninstaller<'_> {
             return BrewResult::NotTracked;
         };
         let args = ["uninstall", "--cask", token];
-        let output = homebrew::run_brew(self.host, &brew.path, &args, homebrew::BREW_TIMEOUT);
+        let output = homebrew::run_removing(self.host, &brew.path, &args);
         if output.ok && is_gone(bundle) {
             BrewResult::Removed
         } else if self.is_tracked_by_homebrew(token) {
@@ -2741,6 +2741,32 @@ mod run_tests {
         assert!(!calls.contains("--zap"), "{calls}");
         assert!(!cache.exists());
         assert_eq!(report.removed_count, 2);
+    }
+
+    #[test]
+    fn a_cask_removal_keeps_homebrew_from_removing_unused_formulae() {
+        let (_temp, layout) = sandbox();
+        let foo = installed(&layout, "Foo", "com.acme.foo");
+        let mut plan = plan_of(&foo, vec![]);
+        let room = with_cask(&layout, &mut plan, "foo-app");
+        let host = FakeHost::default();
+        host.reply("/usr/bin/env", "");
+        host.when("/usr/bin/env", removing(&foo.path));
+        host.when("/usr/bin/env", removing(&room));
+
+        run(&plan, &host, &layout);
+
+        let brew = layout.system("opt/homebrew/bin/brew");
+        let expected = format!(
+            "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 NONINTERACTIVE=1 HOMEBREW_NO_AUTOREMOVE=1 {} uninstall --cask foo-app",
+            brew.display()
+        );
+        let calls = host.calls.lock().unwrap();
+        let removals: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.contains("uninstall --cask"))
+            .collect();
+        assert_eq!(removals, [&expected]);
     }
 
     #[test]
