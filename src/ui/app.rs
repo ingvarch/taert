@@ -59,7 +59,7 @@ use crate::core::uninstaller::{self, PlanRequest, UninstallPlan, Uninstaller};
 pub enum Screen {
     Workspace(WorkspaceState),
     Scanning(ProgressState, Receiver<ScanMessage>, Arc<AtomicBool>),
-    Select(SelectState),
+    Select(Box<SelectState>),
     Review(ReviewState),
     Analyze(Box<AnalyzeState>),
     SystemStatus(Box<SystemStatusState>),
@@ -162,7 +162,7 @@ impl App {
     pub fn with_permanent(mut self, permanent: bool) -> Self {
         self.permanent = permanent;
         if let Screen::Select(select) = self.screen {
-            self.screen = Screen::Select(select.with_permanent(permanent));
+            self.screen = Screen::Select(Box::new(select.with_permanent(permanent)));
         }
         self
     }
@@ -230,7 +230,7 @@ impl App {
     fn with_select_state(state: SelectState, ignore: IgnoreStore, config: Config) -> Self {
         Self {
             theme: Theme::new(),
-            screen: Screen::Select(state),
+            screen: Screen::Select(Box::new(state)),
             back_stack: Vec::new(),
             ignore,
             config,
@@ -275,7 +275,7 @@ impl App {
     /// Opens on the review of a plan made before the TUI started.
     pub fn with_plan(plan: UninstallPlan, ignore: IgnoreStore, config: Config) -> Self {
         let mut app = Self::new(ignore, config);
-        app.screen = Screen::Select(review_state(&plan));
+        app.screen = Screen::Select(Box::new(review_state(&plan)));
         app.plan = Some(plan);
         app
     }
@@ -477,7 +477,7 @@ impl App {
                 self.back_stack.push(ReturnPoint::Preferences(state.focus));
             }
             Screen::Select(state) if state.scan.id == apps::LIST_ID => {
-                self.back_stack.push(ReturnPoint::AppList(Box::new(state)));
+                self.back_stack.push(ReturnPoint::AppList(state));
             }
             _ => {}
         }
@@ -493,7 +493,7 @@ impl App {
                 state.focus = focus;
                 Screen::Preferences(state)
             }
-            Some(ReturnPoint::AppList(state)) => Screen::Select(*state),
+            Some(ReturnPoint::AppList(state)) => Screen::Select(state),
             None => Screen::Workspace(WorkspaceState::new()),
         };
     }
@@ -556,28 +556,30 @@ impl App {
                         progress.apply_category(evt);
                     }
                     ScanMessage::Failed(problem) => {
-                        self.screen = Screen::Select(SelectState::unavailable("Docker", problem));
+                        self.screen =
+                            Screen::Select(Box::new(SelectState::unavailable("Docker", problem)));
                         break;
                     }
                     ScanMessage::AppsFound(found) => {
                         let list = apps::app_scan(&found, &self.layout);
                         self.installed = found;
-                        self.screen = Screen::Select(
+                        self.screen = Screen::Select(Box::new(
                             SelectState::with_preserved_selection(list)
                                 .with_permanent(self.permanent),
-                        );
+                        ));
                         break;
                     }
                     ScanMessage::Planned(plan) => {
-                        self.screen =
-                            Screen::Select(review_state(&plan).with_permanent(self.permanent));
+                        self.screen = Screen::Select(Box::new(
+                            review_state(&plan).with_permanent(self.permanent),
+                        ));
                         self.plan = Some(plan);
                         break;
                     }
                     ScanMessage::Homebrew(inventory) => {
-                        self.screen = Screen::Select(
+                        self.screen = Screen::Select(Box::new(
                             SelectState::homebrew_list(&inventory).with_permanent(self.permanent),
-                        );
+                        ));
                         break;
                     }
                     ScanMessage::Finished(scan) => {
@@ -586,7 +588,8 @@ impl App {
                         } else {
                             SelectState::new(scan)
                         };
-                        self.screen = Screen::Select(state.with_permanent(self.permanent));
+                        self.screen =
+                            Screen::Select(Box::new(state.with_permanent(self.permanent)));
                         break;
                     }
                 }
@@ -877,10 +880,10 @@ impl App {
                         state.report = Some(report);
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        self.screen = Screen::Select(
+                        self.screen = Screen::Select(Box::new(
                             SelectState::with_preserved_selection(state.scan.clone())
                                 .with_permanent(self.permanent),
-                        );
+                        ));
                     }
                     _ => {}
                 }
@@ -2178,7 +2181,7 @@ mod tests {
 
     fn select_app(scan: CategoryScan) -> App {
         let mut app = new_app();
-        app.screen = Screen::Select(SelectState::with_preserved_selection(scan));
+        app.screen = Screen::Select(Box::new(SelectState::with_preserved_selection(scan)));
         app
     }
 
@@ -3720,7 +3723,7 @@ mod tests {
 
         fn brew_list_app(inventory: &Inventory) -> App {
             let mut app = new_app();
-            app.screen = Screen::Select(SelectState::homebrew_list(inventory));
+            app.screen = Screen::Select(Box::new(SelectState::homebrew_list(inventory)));
             app
         }
 
