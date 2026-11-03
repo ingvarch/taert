@@ -525,9 +525,11 @@ impl App {
                 }
                 RemovalMessage::Finished(report) => {
                     if let Screen::Select(ref mut select) = self.screen {
-                        // Deselect successfully cleaned items
-                        for group in &mut select.scan.groups {
-                            group.items.retain(|item| !item.selected);
+                        // The Homebrew list drops its rows when the outcome closes.
+                        if select.scan.id != homebrew::SCAN_ID {
+                            for group in &mut select.scan.groups {
+                                group.items.retain(|item| !item.selected);
+                            }
                         }
                         self.storage_cache.write().unwrap().clear();
                         select.overlay = ModalOverlay::Outcome(report);
@@ -724,11 +726,13 @@ impl App {
                     }
                     ModalOverlay::Outcome(_) => {
                         if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
-                            state.close_overlay();
+                            if state.scan.id == homebrew::SCAN_ID {
+                                state.close_homebrew_outcome();
+                            } else {
+                                state.close_overlay();
+                            }
                             if state.scan.id == uninstaller::PLAN_ID {
                                 self.show_fresh_app_list();
-                            } else if state.scan.id == homebrew::SCAN_ID {
-                                self.launch_brew_scan();
                             }
                         }
                         return;
@@ -3984,12 +3988,13 @@ mod tests {
             assert!(!crate::ui::select::homebrew_primary(select(&app), "↵").enabled);
         }
 
-        fn info_with(names: &[&str]) -> String {
-            let formulae: Vec<_> = names
+        fn info_deps(formulae: &[(&str, &[&str])]) -> String {
+            let formulae: Vec<_> = formulae
                 .iter()
-                .map(|name| {
+                .map(|(name, dependencies)| {
                     serde_json::json!({
                         "name": name,
+                        "dependencies": dependencies,
                         "installed": [{"version": "1", "installed_on_request": true}],
                     })
                 })
@@ -3997,56 +4002,136 @@ mod tests {
             serde_json::json!({"formulae": formulae, "casks": []}).to_string()
         }
 
-        #[test]
-        fn a_removal_from_the_list_goes_through_brew_is_logged_and_the_list_is_read_again() {
-            let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
-            let brew = layout.system("opt/homebrew/bin/brew");
-            let info_line = format!("{BREW_START} {} info --json=v2 --installed", brew.display());
-            let uninstall_line = format!(
-                "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall lib",
-                brew.display()
-            );
-            let cellar = layout.system("opt/homebrew/Cellar/lib");
-            std::fs::create_dir_all(cellar.join("1")).unwrap();
-            std::fs::write(cellar.join("1/data"), vec![1_u8; 50_000]).unwrap();
-            let host = FakeHost::default();
-            // The list, the check before the removal, then the list after it.
-            host.reply(&info_line, &info_with(&["lib", "keep"]));
-            host.reply(&info_line, &info_with(&["lib", "keep"]));
-            host.reply(&info_line, &info_with(&["keep"]));
-            host.reply(&uninstall_line, "");
-            let gone = cellar.clone();
-            host.when(&uninstall_line, move || {
-                std::fs::remove_dir_all(&gone).unwrap();
-            });
-            let before = DirSizer::size_of(&cellar);
-            let inventory = homebrew::scan(&layout, &host).unwrap();
-            let mut app = brew_list_app(&inventory);
-            app.layout = layout;
-            let host = Arc::new(host);
-            app.host = host.clone();
-            focus_on(&mut app, "lib");
+        struct Removal {
+            _temp: tempfile::TempDir,
+            app: App,
+            host: Arc<FakeHost>,
+            brew: std::path::PathBuf,
+            info_line: String,
+        }
 
-            app.handle_key(KeyCode::Enter);
-            app.handle_key(KeyCode::Char('y'));
-            while app.removal_rx.is_some() {
-                app.poll_removal();
-                thread::sleep(Duration::from_millis(5));
+        impl Removal {
+            /// The list is read from `formulae`; removing `lib` succeeds or fails as asked.
+            fn open(formulae: &[(&str, &[&str])], uninstall_fails: bool) -> Self {
+                let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+                let brew = layout.system("opt/homebrew/bin/brew");
+                let info_line =
+                    format!("{BREW_START} {} info --json=v2 --installed", brew.display());
+                let host = FakeHost::default();
+                host.reply(&info_line, &info_deps(formulae));
+                let mut cellars = Vec::new();
+                for (i, (name, _)) in formulae.iter().enumerate() {
+                    let cellar = layout.system(&format!("opt/homebrew/Cellar/{name}"));
+                    std::fs::create_dir_all(cellar.join("1")).unwrap();
+                    std::fs::write(cellar.join("1/data"), vec![1_u8; 20_000 * (i + 1)]).unwrap();
+                    cellars.push((name.to_string(), cellar));
+                }
+                for (name, cellar) in cellars {
+                    let line = format!(
+                        "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall {name}",
+                        brew.display()
+                    );
+                    if uninstall_fails {
+                        host.fail(&line, "Error: boom");
+                    } else {
+                        host.reply(&line, "");
+                        host.when(&line, move || {
+                            std::fs::remove_dir_all(&cellar).unwrap();
+                        });
+                    }
+                }
+                let inventory = homebrew::scan(&layout, &host).unwrap();
+                let mut app = brew_list_app(&inventory);
+                app.layout = layout;
+                let host = Arc::new(host);
+                app.host = host.clone();
+                Self {
+                    _temp: temp,
+                    app,
+                    host,
+                    brew,
+                    info_line,
+                }
             }
 
-            let outcome = screen_text(&app);
+            fn uninstall_line(&self, name: &str) -> String {
+                format!(
+                    "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall {name}",
+                    self.brew.display()
+                )
+            }
+
+            fn info_calls(&self) -> usize {
+                self.host
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|call| **call == self.info_line)
+                    .count()
+            }
+
+            /// Enter and y on the focused row, then waits for the outcome.
+            fn remove(&mut self, name: &str) {
+                focus_on(&mut self.app, name);
+                self.app.handle_key(KeyCode::Enter);
+                self.app.handle_key(KeyCode::Char('y'));
+                while self.app.removal_rx.is_some() {
+                    self.app.poll_removal();
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+
+            fn close_outcome(&mut self) {
+                self.app.handle_key(KeyCode::Enter);
+                assert!(!screen_text(&self.app).contains("Reading Homebrew"));
+            }
+        }
+
+        fn labels(app: &App) -> Vec<String> {
+            select(app)
+                .scan
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .map(|item| item.path.to_string_lossy().into_owned())
+                .collect()
+        }
+
+        fn size_of(app: &App, name: &str) -> u64 {
+            select(app)
+                .scan
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .find(|item| item.path.to_string_lossy().starts_with(&format!("{name} ")))
+                .unwrap()
+                .size_bytes
+        }
+
+        #[test]
+        fn a_removal_from_the_list_goes_through_brew_is_logged_and_the_list_is_not_read_again() {
+            let mut run = Removal::open(&[("lib", &[]), ("keep", &[])], false);
+            let cellar = run.app.layout.system("opt/homebrew/Cellar/lib");
+            let before = DirSizer::size_of(&cellar);
+            let keep_size = size_of(&run.app, "keep");
+
+            run.remove("lib");
+
+            let outcome = screen_text(&run.app);
             assert!(outcome.contains("Uninstall Complete"), "{outcome}");
             assert!(!outcome.contains("Trash"), "{outcome}");
-            let runs = HistoryLog::new(app.layout.history_path())
+            let runs = HistoryLog::new(run.app.layout.history_path())
                 .load_runs()
                 .unwrap();
             assert_eq!(runs.len(), 1);
             assert_eq!(runs[0].command, "brew uninstall");
             assert_eq!(runs[0].items.len(), 1);
             assert_eq!(runs[0].items[0].path, "lib 1");
-            assert!(before >= 50_000);
+            assert!(before >= 20_000);
             assert_eq!(runs[0].items[0].bytes, before);
-            let removals: Vec<String> = host
+            let removals: Vec<String> = run
+                .host
                 .calls
                 .lock()
                 .unwrap()
@@ -4054,23 +4139,197 @@ mod tests {
                 .filter(|call| call.contains("HOMEBREW_NO_AUTOREMOVE=1"))
                 .cloned()
                 .collect();
-            assert_eq!(removals, [uninstall_line]);
+            assert_eq!(removals, [run.uninstall_line("lib")]);
+            // The list, then the check before the removal.
+            assert_eq!(run.info_calls(), 2);
 
-            app.handle_key(KeyCode::Enter);
-            assert!(screen_text(&app).contains("Reading Homebrew"));
-            while matches!(app.screen, Screen::Scanning(..)) {
-                app.poll_scan();
-                thread::sleep(Duration::from_millis(5));
-            }
-            let labels: Vec<_> = select(&app)
-                .scan
-                .groups
-                .iter()
-                .flat_map(|group| &group.items)
-                .map(|item| item.path.to_string_lossy().into_owned())
-                .collect();
+            run.close_outcome();
+
+            assert_eq!(run.info_calls(), 2);
+            assert!(matches!(run.app.screen, Screen::Select(..)));
+            let labels = labels(&run.app);
             assert_eq!(labels.len(), 1);
             assert!(labels[0].starts_with("keep "), "{labels:?}");
+            assert_eq!(size_of(&run.app, "keep"), keep_size);
+        }
+
+        #[test]
+        fn a_dependency_only_the_removed_formula_used_becomes_removable() {
+            let mut run = Removal::open(&[("app", &["lib"]), ("lib", &[])], false);
+            focus_on(&mut run.app, "lib");
+            assert!(labels(&run.app).iter().any(|l| l.contains("used by 1")));
+            run.app.handle_key(KeyCode::Enter);
+            assert_eq!(
+                select(&run.app).toast.as_ref().unwrap().text,
+                "lib stays: app use it."
+            );
+
+            run.remove("app");
+            run.close_outcome();
+
+            assert_eq!(labels(&run.app).len(), 1);
+            assert!(!labels(&run.app)[0].contains("used by"));
+            focus_on(&mut run.app, "lib");
+            run.app.handle_key(KeyCode::Enter);
+            let state = select(&run.app);
+            assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
+            assert!(state.toast.is_none());
+            assert_eq!(selected(&run.app), 1);
+        }
+
+        #[test]
+        fn the_total_drops_by_the_size_of_the_removed_formula() {
+            let mut run = Removal::open(&[("lib", &[]), ("keep", &[])], false);
+            let total = select(&run.app).scan.total_all_bytes();
+            let lib = size_of(&run.app, "lib");
+
+            run.remove("lib");
+            run.close_outcome();
+
+            assert_eq!(select(&run.app).scan.total_all_bytes(), total - lib);
+        }
+
+        #[test]
+        fn a_failed_removal_leaves_the_list_as_it_is_and_reads_nothing() {
+            let mut run = Removal::open(&[("lib", &[]), ("keep", &[])], true);
+            let before = labels(&run.app);
+
+            run.remove("lib");
+            assert!(screen_text(&run.app).contains("Nothing was removed"));
+            run.close_outcome();
+
+            assert_eq!(labels(&run.app), before);
+            assert_eq!(selected(&run.app), 0);
+            assert_eq!(run.info_calls(), 2);
+        }
+
+        #[test]
+        fn removing_the_only_formula_leaves_an_empty_list() {
+            let mut run = Removal::open(&[("lib", &[])], false);
+
+            run.remove("lib");
+            run.close_outcome();
+
+            assert!(labels(&run.app).is_empty());
+        }
+
+        #[test]
+        fn removing_the_only_formula_the_search_matches_clears_the_search() {
+            let mut run = Removal::open(&[("lib", &[]), ("keep", &[])], false);
+            let Screen::Select(state) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            state.search_query = "lib".to_string();
+
+            run.remove("lib");
+            run.close_outcome();
+
+            let state = select(&run.app);
+            assert_eq!(state.search_query, "");
+            assert_eq!(labels(&run.app), ["keep 1 · on request"]);
+            let rows = state.flattened_rows();
+            assert!(rows[state.focused_index].display_path.starts_with("keep "));
+        }
+
+        #[test]
+        fn keys_on_a_search_with_no_match_change_nothing() {
+            let mut run = Removal::open(&[("lib", &[]), ("keep", &[])], false);
+            run.app.handle_key(KeyCode::Char('/'));
+            for c in "zzz".chars() {
+                run.app.handle_key(KeyCode::Char(c));
+            }
+            run.app.handle_key(KeyCode::Enter);
+            assert!(select(&run.app).flattened_rows().is_empty());
+
+            for key in [
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Enter,
+                KeyCode::Char('d'),
+                KeyCode::Delete,
+                KeyCode::Backspace,
+                KeyCode::Char(' '),
+                KeyCode::Char('a'),
+                KeyCode::Char('n'),
+            ] {
+                run.app.handle_key(key);
+                let _ = screen_text(&run.app);
+            }
+
+            let state = select(&run.app);
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert_eq!(selected(&run.app), 0);
+            assert!(!run.host.ran(&run.uninstall_line("lib")));
+        }
+
+        #[test]
+        fn removing_the_last_formula_moves_the_focus_to_the_formula_above() {
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![
+                    package(PackageKind::Formula, "big", 9_000),
+                    package(PackageKind::Formula, "small", 3_000),
+                    package(PackageKind::Cask, "ghostty", 5_000),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            focus_on(&mut app, "small");
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            for item in state.scan.groups.iter_mut().flat_map(|g| &mut g.items) {
+                item.selected = item.path.to_string_lossy().starts_with("small ");
+            }
+            state.overlay = ModalOverlay::Outcome(RemovalReport {
+                removed_count: 1,
+                ..RemovalReport::default()
+            });
+
+            state.close_homebrew_outcome();
+
+            let rows = state.flattened_rows();
+            assert!(
+                rows[state.focused_index].display_path.starts_with("big "),
+                "{}",
+                rows[state.focused_index].display_path
+            );
+        }
+
+        #[test]
+        fn the_search_and_the_focus_survive_the_update() {
+            let mut run = Removal::open(
+                &[("go", &[]), ("fd3", &[]), ("fd2", &[]), ("fd1", &[])],
+                false,
+            );
+            let Screen::Select(state) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            state.search_query = "fd".to_string();
+
+            run.remove("fd2");
+            let focused = select(&run.app).focused_index;
+            run.close_outcome();
+
+            let state = select(&run.app);
+            assert_eq!(state.search_query, "fd");
+            assert_eq!(state.focused_index, focused);
+            let rows = state.flattened_rows();
+            assert!(rows[state.focused_index].display_path.starts_with("fd3 "));
+            assert!(!rows.iter().any(|row| row.display_path.starts_with("go ")));
+
+            run.remove("fd3");
+            run.close_outcome();
+
+            let state = select(&run.app);
+            let rows = state.flattened_rows();
+            assert!(rows[state.focused_index].is_item());
+            assert!(rows[state.focused_index].display_path.starts_with("fd1 "));
         }
     }
 }

@@ -232,7 +232,7 @@ Listing makes one `brew info --json=v2 --installed` call and removes nothing. `-
 
 In a terminal, the list has no check marks, and `Space`, `A`, and `N` do nothing. `Enter` acts on the focused row:
 
-- On a formula that nothing uses, it asks to remove that formula. The question says that Homebrew removes it, and the footer shows `Uninstall <name>` with `↵`. After you confirm, taert removes it as `taert brew uninstall` does, shows the result, and reads the list again, so the formula is gone from it.
+- On a formula that nothing uses, it asks to remove that formula. The question says that Homebrew removes it, and the footer shows `Uninstall <name>` with `↵`. After you confirm, taert removes it as `taert brew uninstall` does, shows the result, and takes the formula off the list without reading Homebrew again. A formula that only it used then shows without `used by` and can be removed, unless it is pinned. A search that found only the removed formula is cleared, so the whole list shows again. Opening the list from the menu, or running `taert brew`, reads Homebrew again.
 - On a cask, a pinned formula, or a formula that other formulae use, it shows the reason at the bottom of the screen and changes nothing. The footer shows `Uninstall` dimmed.
 
 #### Remove a formula (`taert brew uninstall`)

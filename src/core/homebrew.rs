@@ -84,6 +84,17 @@ pub struct Inventory {
     pub brew: Option<PathBuf>,
 }
 
+impl Inventory {
+    /// Drops an uninstalled formula and its name from what the others list as used by it.
+    pub fn forget(&mut self, name: &str) {
+        self.packages
+            .retain(|package| !(package.kind == PackageKind::Formula && package.name == name));
+        for package in &mut self.packages {
+            package.used_by.retain(|user| user != name);
+        }
+    }
+}
+
 pub struct Brew {
     pub prefix: PathBuf,
     pub path: PathBuf,
@@ -966,6 +977,52 @@ mod tests {
         assert_eq!(named(&packages, "shellcheck").used_by, ["actionlint"]);
         assert_eq!(named(&packages, "go").used_by, ["golangci-lint", "gosec"]);
         assert!(named(&packages, "brotli").used_by.is_empty());
+    }
+
+    fn fixture_inventory() -> Inventory {
+        Inventory {
+            packages: packages(),
+            ..Inventory::default()
+        }
+    }
+
+    #[test]
+    fn forget_drops_the_formula_and_its_name_from_what_it_used() {
+        let mut inventory = fixture_inventory();
+
+        inventory.forget("actionlint");
+
+        assert!(inventory.packages.iter().all(|p| p.name != "actionlint"));
+        assert!(named(&inventory.packages, "shellcheck").used_by.is_empty());
+        inventory.forget("golangci-lint");
+        assert_eq!(named(&inventory.packages, "go").used_by, ["gosec"]);
+    }
+
+    #[test]
+    fn forget_keeps_a_cask_with_the_name_of_the_formula() {
+        let mut inventory = Inventory {
+            packages: vec![
+                package(PackageKind::Formula, "x", "1", 0),
+                package(PackageKind::Cask, "x", "1", 0),
+            ],
+            ..Inventory::default()
+        };
+
+        inventory.forget("x");
+
+        assert_eq!(
+            inventory.packages,
+            [package(PackageKind::Cask, "x", "1", 0)]
+        );
+    }
+
+    #[test]
+    fn forget_of_an_unknown_name_changes_nothing() {
+        let mut inventory = fixture_inventory();
+
+        inventory.forget("no-such-formula");
+
+        assert_eq!(inventory.packages, packages());
     }
 
     #[test]
