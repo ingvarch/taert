@@ -1382,11 +1382,11 @@ fn handle_slim(
             }
         }
 
-        let slim_res = if let Some(ref session) = history_session {
-            crate::core::slim::slim_app_logged(session, app, &binaries, host, skip_developer_id)
-        } else {
-            crate::core::slim::slim_app(app, &binaries, host, skip_developer_id)
+        let Some(session) = history_session.as_ref() else {
+            unreachable!("a dry run continues before the slim step");
         };
+        let slim_res =
+            crate::core::slim::slim_app_logged(session, app, &binaries, host, skip_developer_id);
         match slim_res {
             Ok(saved) => {
                 if cli.json {
