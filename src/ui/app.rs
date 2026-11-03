@@ -3271,7 +3271,10 @@ mod tests {
             let (_temp, app) = app_in_sandbox();
             let foo = installed(&app, "Foo", "com.acme.foo");
             let mut plan = plan_for(&foo, &app);
-            plan.apps[0].cask = Some("foo-app".to_string());
+            plan.apps[0].cask = Some(uninstaller::Cask {
+                token: "foo-app".to_string(),
+                prefix: app.layout.system("opt/homebrew"),
+            });
 
             let review = screen_text(&offline(App::with_plan(
                 plan,

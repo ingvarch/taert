@@ -143,9 +143,18 @@ struct RawCask {
 
 /// The first Homebrew prefix that has a `brew`.
 pub fn find(layout: &Layout) -> Option<Brew> {
-    layout.homebrew_prefixes().into_iter().find_map(|prefix| {
-        let path = prefix.join("bin/brew");
-        path.exists().then_some(Brew { prefix, path })
+    layout
+        .homebrew_prefixes()
+        .iter()
+        .find_map(|prefix| brew_in(prefix))
+}
+
+/// The brew of one prefix, if it has one.
+pub fn brew_in(prefix: &Path) -> Option<Brew> {
+    let path = prefix.join("bin/brew");
+    path.exists().then(|| Brew {
+        prefix: prefix.to_path_buf(),
+        path,
     })
 }
 
@@ -1259,6 +1268,17 @@ mod tests {
             named(&inventory.packages, "go").path,
             layout.system("usr/local/Cellar/go")
         );
+    }
+
+    #[test]
+    fn brew_in_finds_only_the_brew_of_that_prefix() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+
+        let brew = brew_in(&layout.system("opt/homebrew")).unwrap();
+
+        assert_eq!(brew.path, layout.system("opt/homebrew/bin/brew"));
+        assert_eq!(brew.prefix, layout.system("opt/homebrew"));
+        assert!(brew_in(&layout.system("usr/local")).is_none());
     }
 
     #[test]
