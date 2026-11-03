@@ -21,7 +21,7 @@ pub const CLEANUP_ID: &str = "brew-cleanup";
 pub const UNINSTALL_ID: &str = "brew-uninstall";
 const INFO_TIMEOUT: Duration = Duration::from_secs(60);
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const GROUP_FORMULA: &str = "Formula";
 const GROUP_FORMULAE: &str = "Formulae";
 const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
@@ -148,7 +148,7 @@ pub fn find(layout: &Layout) -> Option<Brew> {
 }
 
 /// Runs `brew` without auto-update, hints or questions.
-pub fn run_brew(host: &dyn Host, brew: &Path, args: &[&str], timeout: Duration) -> Output {
+fn run_brew(host: &dyn Host, brew: &Path, args: &[&str], timeout: Duration) -> Output {
     run_brew_with(host, brew, &[], args, timeout)
 }
 
@@ -173,14 +173,18 @@ fn read(
 
 /// Runs a brew command that removes something. brew removes only what was named, not every unused
 /// formula too.
-fn remove(host: &dyn Host, brew: &Path, args: &[&str], failure: &str) -> Result<(), String> {
-    let output = run_brew_with(
+pub(crate) fn run_removing(host: &dyn Host, brew: &Path, args: &[&str]) -> Output {
+    run_brew_with(
         host,
         brew,
         &["HOMEBREW_NO_AUTOREMOVE=1"],
         args,
         BREW_TIMEOUT,
-    );
+    )
+}
+
+fn remove(host: &dyn Host, brew: &Path, args: &[&str], failure: &str) -> Result<(), String> {
+    let output = run_removing(host, brew, args);
     if output.ok {
         Ok(())
     } else {
