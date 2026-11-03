@@ -75,14 +75,15 @@ impl Layout {
     /// Folders that can hold a copy of an app without it being listed, with how
     /// deep to look in each.
     pub fn copy_roots(&self) -> Vec<(PathBuf, usize)> {
-        let mut roots = vec![
-            (
-                self.user("Library/Application Support/Setapp/Applications"),
-                1,
-            ),
-            (self.system("opt/homebrew/Caskroom"), 3),
-            (self.system("usr/local/Caskroom"), 3),
-        ];
+        let mut roots = vec![(
+            self.user("Library/Application Support/Setapp/Applications"),
+            1,
+        )];
+        roots.extend(
+            self.homebrew_prefixes()
+                .into_iter()
+                .map(|prefix| (prefix.join("Caskroom"), 3)),
+        );
         roots.extend(self.volumes().into_iter().map(|volume| (volume, 1)));
         roots
     }
@@ -137,6 +138,25 @@ mod tests {
             root: PathBuf::from("/"),
             user_cache: None,
         }
+    }
+
+    #[test]
+    fn copy_roots_hold_the_caskroom_of_each_prefix() {
+        let (_temp, layout) = crate::core::apps::testing::sandbox();
+
+        assert_eq!(
+            layout.copy_roots(),
+            [
+                (
+                    layout
+                        .home
+                        .join("Library/Application Support/Setapp/Applications"),
+                    1
+                ),
+                (layout.root.join("opt/homebrew/Caskroom"), 3),
+                (layout.root.join("usr/local/Caskroom"), 3),
+            ]
+        );
     }
 
     #[test]

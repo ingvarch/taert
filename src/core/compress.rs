@@ -1641,11 +1641,8 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
     }
 
     // 2. Homebrew Cellar
-    let brew_paths = [
-        layout.system("opt/homebrew/Cellar"),
-        layout.system("usr/local/Cellar"),
-    ];
-    for bp in brew_paths {
+    for prefix in layout.homebrew_prefixes() {
+        let bp = prefix.join("Cellar");
         if bp.is_dir() && push("Homebrew Cellar".to_string(), bp, "Package Manager", 0) {
             break;
         }
@@ -1727,6 +1724,28 @@ mod tests {
         }
         fs::write(&file_path, &data).unwrap();
         file_path
+    }
+
+    #[test]
+    fn the_cellar_of_either_prefix_is_a_candidate() {
+        let (_temp, layout) = sandbox();
+        let local = layout.system("usr/local/Cellar");
+        fs::create_dir_all(local.join("foo")).unwrap();
+        make_repetitive_file(&local.join("foo"), "data.txt", 300_000);
+
+        let found = find_compress_candidates(&layout);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Homebrew Cellar");
+        assert_eq!(found[0].path, local);
+
+        let opt = layout.system("opt/homebrew/Cellar");
+        fs::create_dir_all(opt.join("bar")).unwrap();
+        make_repetitive_file(&opt.join("bar"), "data.txt", 300_000);
+
+        let found = find_compress_candidates(&layout);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Homebrew Cellar");
+        assert_eq!(found[0].path, opt);
     }
 
     #[test]
