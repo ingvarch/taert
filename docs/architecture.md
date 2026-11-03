@@ -110,7 +110,7 @@ Everything that touches the running system goes through the `Host` trait in [`ho
 - **Plan**: `uninstall_plan` makes one `brew info` call, finds a formula by name or full name first and a cask by token second, and returns a scan with one selected row that carries a `BrewTask::Uninstall`.
 - **Refusals**: `refusal` is the one place that decides. In this order: a cask, a pinned formula, a formula that other formulae use. The CLI prints its text as an error. The TUI shows it on the screen and opens no question. The text for a formula in use comes from one function that `run_task` shares, so the two never differ.
 - **The list carries tasks**: `Inventory` remembers the brew that listed the packages, so `list_scan` puts a `BrewTask::Uninstall` on every formula row. A cask row has none. The list keeps one row per package with no check marks, and Enter selects the focused row alone before it opens the existing confirm dialog. `list_refusals` gives the TUI the refusal of each row by its label.
-- **After the removal**: when the outcome dialog closes, the TUI reads the list again with the same scan as the menu, so the removed formula is gone.
+- **After the removal**: when the outcome dialog closes, the removed formula leaves the list and the formulae it used are updated (`Inventory::forget`), without reading Homebrew again. The list keeps the inventory it was built from. Opening the list from the menu, or running `taert brew`, reads Homebrew again.
 
 ## Orphaned App Files
 

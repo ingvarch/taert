@@ -74,6 +74,8 @@ pub struct SelectState {
     pub permanent: bool,
     /// Why the Homebrew list leaves a row alone, by the label of the row.
     pub refusals: HashMap<PathBuf, String>,
+    /// What the Homebrew list was built from, so a removal can update it without reading brew.
+    pub homebrew: Option<homebrew::Inventory>,
     pub toast: Option<Toast>,
 }
 
@@ -153,6 +155,7 @@ impl SelectState {
             asks_password: false,
             permanent: false,
             refusals: HashMap::new(),
+            homebrew: None,
             toast: None,
         };
         state.move_to_start();
@@ -163,7 +166,68 @@ impl SelectState {
     pub fn homebrew_list(inventory: &homebrew::Inventory) -> Self {
         let mut state = Self::new(homebrew::list_scan(inventory));
         state.refusals = homebrew::list_refusals(inventory);
+        state.homebrew = Some(inventory.clone());
         state
+    }
+
+    /// Closes the outcome of a removal on the Homebrew list. The formulae that went leave the
+    /// list and the ones they used are updated, with the search and the focus kept.
+    pub fn close_homebrew_outcome(&mut self) {
+        let overlay = std::mem::replace(&mut self.overlay, ModalOverlay::None);
+        let ModalOverlay::Outcome(report) = overlay else {
+            return;
+        };
+        let Some(mut inventory) = self.homebrew.take() else {
+            return;
+        };
+        let removed: Vec<&str> = self
+            .scan
+            .selected_items()
+            .into_iter()
+            .filter_map(|item| {
+                let name = uninstall_name(item)?;
+                let failed = report.failures.iter().any(|failure| {
+                    homebrew::label_name(&item.path.to_string_lossy())
+                        == failure.path.to_string_lossy()
+                });
+                (!failed).then_some(name)
+            })
+            .collect();
+        if removed.is_empty() {
+            self.homebrew = Some(inventory);
+            for item in self.scan.selected_items_mut() {
+                item.selected = false;
+            }
+            return;
+        }
+        for name in removed {
+            inventory.forget(name);
+        }
+        let mut fresh = Self::homebrew_list(&inventory).with_permanent(self.permanent);
+        fresh.search_query = std::mem::take(&mut self.search_query);
+        if fresh.flattened_rows().is_empty() {
+            // A search that matched only what went would show nothing.
+            fresh.search_query.clear();
+        }
+        fresh.focus_item_at_or_before(self.focused_index);
+        *self = fresh;
+    }
+
+    fn focus_item_at_or_before(&mut self, index: usize) {
+        let rows = self.flattened_rows();
+        if rows.is_empty() {
+            self.focused_index = 0;
+            return;
+        }
+        let last = rows.len() - 1;
+        let wanted = index.min(last);
+        if let Some(found) = (0..=wanted)
+            .rev()
+            .chain(wanted + 1..=last)
+            .find(|&i| rows[i].is_item())
+        {
+            self.focused_index = found;
+        }
     }
 
     pub fn with_permanent(mut self, permanent: bool) -> Self {
