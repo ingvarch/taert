@@ -3827,6 +3827,7 @@ mod tests {
                 )),
                 "{screen}"
             );
+            assert!(screen.contains("failed to slim:"), "{screen}");
         }
 
         #[test]
@@ -3872,6 +3873,7 @@ mod tests {
     mod compress {
         use super::*;
         use crate::core::apps::testing::sandbox;
+        use crate::core::bytes::format_bytes;
         use crate::core::compress::UF_COMPRESSED;
         use crate::core::host::fake::FakeHost;
         use std::os::darwin::fs::MetadataExt;
@@ -3982,6 +3984,39 @@ mod tests {
 
             assert!(!is_compressed(&made[1].1));
             assert!(outcome(&app).notes.iter().any(|n| n.contains("Cancelled")));
+        }
+
+        #[test]
+        fn a_compress_says_what_it_saved() {
+            let (_temp, mut app, _made) = prepare(&["Idle"], &[]);
+
+            run_selection(&mut app);
+
+            let screen = screen_text(&app);
+            assert!(screen.contains("Compress Complete"), "{screen}");
+            assert!(
+                screen.contains(&format!(
+                    "Saved {} by compressing 1 file.",
+                    format_bytes(outcome(&app).freed_bytes)
+                )),
+                "{screen}"
+            );
+            assert!(!screen.contains("permanently"), "{screen}");
+            assert!(!screen.contains("Trash"), "{screen}");
+            assert!(!screen.contains("Clean Complete"), "{screen}");
+        }
+
+        #[test]
+        fn a_compress_of_only_running_apps_says_nothing_was_compressed() {
+            let (_temp, mut app, _made) = prepare(&["Run"], &["Run"]);
+
+            run_selection(&mut app);
+
+            let screen = screen_text(&app);
+            assert!(screen.contains("Nothing was compressed"), "{screen}");
+            assert!(screen.contains("1 item failed to compress:"), "{screen}");
+            assert!(!screen.contains("0 B freed"), "{screen}");
+            assert!(!screen.contains("failed to remove"), "{screen}");
         }
     }
 

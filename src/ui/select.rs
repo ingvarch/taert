@@ -29,6 +29,7 @@ use super::theme::Theme;
 use crate::core::apps;
 use crate::core::bytes::format_bytes;
 use crate::core::cleaner::{RemovalMode, RemovalProgress, RemovalReport, item_removal_mode};
+use crate::core::compress;
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::homebrew;
@@ -1085,9 +1086,38 @@ fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             render_removing_dialog(frame, progress, *spinner_idx, cancel.is_some(), theme);
         }
         ModalOverlay::Outcome(report) => {
-            let uninstall = is_plan(state) || state.scan.id == homebrew::SCAN_ID;
-            let slim = state.scan.id == slim::SCAN_ID;
-            render_outcome_dialog(frame, report, uninstall, slim, theme);
+            render_outcome_dialog(frame, report, RunKind::of(state), theme);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RunKind {
+    Remove,
+    Uninstall,
+    Slim,
+    Compress,
+}
+
+impl RunKind {
+    fn of(state: &SelectState) -> Self {
+        let id = state.scan.id.as_str();
+        if is_plan(state) || id == homebrew::SCAN_ID {
+            Self::Uninstall
+        } else if id == slim::SCAN_ID {
+            Self::Slim
+        } else if id == compress::SCAN_ID {
+            Self::Compress
+        } else {
+            Self::Remove
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Slim => "slim",
+            Self::Compress => "compress",
+            Self::Remove | Self::Uninstall => "remove",
         }
     }
 }
@@ -1459,46 +1489,44 @@ fn push_totals(message: &mut Vec<Line<'static>>, report: &RemovalReport, theme: 
     }
 }
 
-fn render_outcome_dialog(
-    frame: &mut Frame,
-    report: &RemovalReport,
-    uninstall: bool,
-    slim: bool,
-    theme: &Theme,
-) {
-    let title = if slim {
-        if report.removed_count > 0 {
-            "Slim Complete"
-        } else {
-            "Nothing was slimmed"
-        }
-    } else {
-        match (report.removed_count > 0, uninstall) {
-            (true, true) => "Uninstall Complete",
-            (true, false) => "Clean Complete",
-            (false, _) => "Nothing was removed",
-        }
+fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKind, theme: &Theme) {
+    let done = report.removed_count > 0;
+    let title = match (kind, done) {
+        (RunKind::Slim, true) => "Slim Complete",
+        (RunKind::Slim, false) => "Nothing was slimmed",
+        (RunKind::Compress, true) => "Compress Complete",
+        (RunKind::Compress, false) => "Nothing was compressed",
+        (RunKind::Uninstall, true) => "Uninstall Complete",
+        (RunKind::Remove, true) => "Clean Complete",
+        (RunKind::Uninstall | RunKind::Remove, false) => "Nothing was removed",
     };
 
     let mut message = Vec::new();
-    if slim {
-        if report.removed_count > 0 {
-            message.push(Line::from(vec![
-                Span::styled("Saved ", theme.body()),
-                Span::styled(format_bytes(report.freed_bytes), theme.success()),
-                Span::styled(" of Intel code.", theme.body()),
-            ]));
-        }
-    } else {
-        push_totals(&mut message, report, theme);
+    let saved = match kind {
+        RunKind::Slim => Some(" of Intel code.".to_string()),
+        RunKind::Compress => Some(format!(
+            " by compressing {}.",
+            plural(report.removed_count, "file", "files")
+        )),
+        RunKind::Remove | RunKind::Uninstall => None,
+    };
+    match saved {
+        Some(tail) if done => message.push(Line::from(vec![
+            Span::styled("Saved ", theme.body()),
+            Span::styled(format_bytes(report.freed_bytes), theme.success()),
+            Span::styled(tail, theme.body()),
+        ])),
+        Some(_) => {}
+        None => push_totals(&mut message, report, theme),
     }
 
     if !report.failures.is_empty() {
         message.push(Line::from(""));
         message.push(Line::from(Span::styled(
             format!(
-                "{} failed to remove:",
-                plural(report.failures.len(), "item", "items")
+                "{} failed to {}:",
+                plural(report.failures.len(), "item", "items"),
+                kind.verb()
             ),
             theme.danger(),
         )));
@@ -1508,7 +1536,7 @@ fn render_outcome_dialog(
                 theme.callout(),
             )));
         }
-        if uninstall {
+        if kind == RunKind::Uninstall {
             let reason = report.failures[0].error.clone();
             message.push(Line::from(Span::styled(reason, theme.callout())));
         }

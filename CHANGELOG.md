@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Uninstall**: an uninstall plan with no apps shows the crumbs `taert › Uninstall apps › Review`, the `Uninstall` button, and the right help for Enter.
 - **Search**: the count in the search line reads `1 result` instead of `1 results`.
 - **Slim apps**: the result in the terminal list shows `Saved N of Intel code.` under `Slim Complete`, or `Nothing was slimmed` when no app was slimmed. It no longer shows the size of the app folder entry as moved to the Trash, or the saved bytes as removed for good.
+- **Compress**: the result in the terminal list shows `Saved N by compressing M files.` under `Compress Complete`, or `Nothing was compressed` when no file was compressed. It no longer says `Clean Complete`, shows the saved bytes as removed for good, or adds a second line with the same bytes. A failure list reads `failed to compress:`, and for slim `failed to slim:`.
 - **Uninstall**: a Homebrew cask is removed with the brew of the Homebrew install that holds it, so a cask in `/usr/local` no longer fails on a Mac that also has `/opt/homebrew`.
 - **Main menu**: in a short window the menu scrolls with the highlighted row, so every row can be reached, and the first or last line says how many rows are out of view.
 

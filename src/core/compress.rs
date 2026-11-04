@@ -1455,15 +1455,9 @@ impl Compressor<'_> {
                 }),
             }
         }
-        let mut note = format!(
-            "Compressed {} files, freed {} via APFS transparent compression.",
-            result.removed_count,
-            super::bytes::format_bytes(result.freed_bytes)
-        );
         if cancelled.load(Ordering::Relaxed) {
-            note.push_str(" Cancelled before the end.");
+            result.notes.push("Cancelled before the end.".to_string());
         }
-        result.notes.push(note);
         result
     }
 
@@ -2583,6 +2577,12 @@ mod tests {
         assert!(reported[1].1 > 0);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].path, refused);
+        assert!(
+            report
+                .notes
+                .iter()
+                .all(|n| !n.contains("via APFS transparent compression"))
+        );
     }
 
     fn make_random_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
