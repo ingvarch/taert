@@ -1370,6 +1370,7 @@ fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Pac
         size_bytes: bytes,
         on_request: true,
         outdated: false,
+        latest_version: None,
         pinned: false,
         used_by: Vec::new(),
         apps: Vec::new(),
@@ -1410,6 +1411,23 @@ fn snapshot_select_brew() {
     assert_snapshot!("select_brew_120x32", select_screen(&state));
     let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
     assert_snapshot!("select_brew_80x24", narrow);
+}
+
+#[test]
+fn snapshot_select_brew_update() {
+    let mut bun = brew_package(PackageKind::Formula, "bun", "1.4.2", 60_000_000);
+    bun.outdated = true;
+    bun.latest_version = Some("1.4.4_1".to_string());
+    bun.installed_at = days_ago(1);
+    let mut fd = brew_package(PackageKind::Formula, "fd", "10.5.0", 2_000_000);
+    fd.installed_at = days_ago(3);
+    let state = SelectState::homebrew_list(&Inventory {
+        packages: vec![bun, fd],
+        brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+        ..Inventory::default()
+    });
+
+    assert_snapshot!("select_brew_update_120x32", select_screen(&state));
 }
 
 /// `golangci-lint` open two levels deep: its `go`, and the `gmp` that `go` needs.

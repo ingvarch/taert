@@ -1789,7 +1789,7 @@ fn pick_apps_to_slim(
 mod tests {
     use super::*;
     use crate::core::apps::testing::{fake_app, sandbox};
-    use crate::core::homebrew::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO};
+    use crate::core::homebrew::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO, BREW_OUTDATED_BUN};
     use crate::core::host::fake::FakeHost;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -1967,6 +1967,11 @@ mod tests {
     }
 
     const BREW_INFO_LINE: &str = "/usr/bin/env HOMEBREW_NO_AUTO_UPDATE=1";
+
+    fn brew_read(layout: &Layout, args: &str) -> String {
+        let brew = layout.system("opt/homebrew/bin/brew");
+        format!("{ENV_START} {} {args}", brew.display())
+    }
 
     fn brew(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
         let cli = parse(args);
@@ -2437,7 +2442,8 @@ mod tests {
     fn brew_json_has_the_documented_keys() {
         let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
         let host = FakeHost::default();
-        host.reply(BREW_INFO_LINE, BREW_INFO);
+        host.reply(&brew_read(&layout, "info"), BREW_INFO);
+        host.reply(&brew_read(&layout, "outdated"), BREW_OUTDATED_BUN);
 
         let ran = brew(&["brew", "--json"], &host, &layout);
 
@@ -2458,6 +2464,7 @@ mod tests {
             [
                 "apps",
                 "kind",
+                "latest_version",
                 "name",
                 "on_request",
                 "outdated",
@@ -2470,6 +2477,9 @@ mod tests {
         let ghostty = packages.iter().find(|p| p["name"] == "ghostty").unwrap();
         assert_eq!(ghostty["kind"], "cask");
         assert_eq!(ghostty["apps"], serde_json::json!(["Ghostty.app"]));
+        let bun = packages.iter().find(|p| p["name"] == "bun").unwrap();
+        assert_eq!(bun["latest_version"], "1.4.4_1");
+        assert_eq!(ghostty["latest_version"], serde_json::Value::Null);
         let go = packages.iter().find(|p| p["name"] == "go").unwrap();
         assert_eq!(go["kind"], "formula");
         assert_eq!(go["used_by"], serde_json::json!(["golangci-lint", "gosec"]));
@@ -2479,7 +2489,8 @@ mod tests {
     fn brew_plain_prints_one_row_per_package() {
         let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
         let host = FakeHost::default();
-        host.reply(BREW_INFO_LINE, BREW_INFO);
+        host.reply(&brew_read(&layout, "info"), BREW_INFO);
+        host.reply(&brew_read(&layout, "outdated"), BREW_OUTDATED_BUN);
 
         let ran = brew(&["brew", "--plain"], &host, &layout);
 
@@ -2495,7 +2506,8 @@ mod tests {
         let go: Vec<&str> = row("go").split_whitespace().collect();
         assert_eq!(&go[..2], ["go", "1.27.3"]);
         assert_eq!(&go[4..], ["on", "request", "-", "-", "2"]);
-        assert!(row("bun").contains("outdated"));
+        assert!(row("bun").contains("1.4.4_1"));
+        assert!(!row("bun").contains("outdated"));
         assert!(row("fd").contains("pinned"));
         assert!(row("ada-url").contains("dependency"));
         assert_eq!(ran.out.lines().filter(|l| l.starts_with("  ")).count(), 12);

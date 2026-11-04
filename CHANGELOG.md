@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Homebrew sorting**: `⇧S`, `⇧N`, and `⇧D` sort the Homebrew list by size, name, or install date, at the top level, inside open rows, and in search results. An `INSTALLED` column shows when each package was installed. The order is not saved.
+- **Homebrew updates**: the Homebrew list shows the new version of each outdated package as `update 1.4.4_1` in the accent style, and the status line adds `N updates`. `taert brew --plain` prints the new version in the `outdated` column, and `--json` has `latest_version` (`null` when up to date). taert reads it with `brew outdated --json=v2`.
 
 ### Changed
 - **Explore Storage**: a folder that changed since your last visit, or that was cached more than 15 minutes ago, opens at once with `Updating…` and is measured again in the background. Its rows change when the new sizes are in.

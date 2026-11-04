@@ -768,14 +768,29 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 
     let single_row = state.is_single_row_list();
     let right_status = if single_row {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(plural(total_count, "package", "packages"), theme.headline()),
             Span::styled("  ·  ", theme.callout()),
             Span::styled(
                 format_bytes(total_shown_bytes),
                 theme.size(total_shown_bytes),
             ),
-        ])
+        ];
+        let updates = state.homebrew.as_ref().map_or(0, |inventory| {
+            inventory
+                .packages
+                .iter()
+                .filter(|package| package.latest_version.is_some())
+                .count()
+        });
+        if updates > 0 {
+            spans.push(Span::styled("  ·  ", theme.callout()));
+            spans.push(Span::styled(
+                plural(updates, "update", "updates"),
+                theme.accent_text(),
+            ));
+        }
+        Line::from(spans)
     } else {
         Line::from(vec![
             Span::styled(format!("{selected_count}"), theme.headline()),
@@ -1168,15 +1183,22 @@ fn section_frame_top(
     }
 }
 
-/// A label row: what it names first, then its details in a quieter style.
+/// A label row: what it names first, then its details in a quieter style. An `update …` detail
+/// gets the accent style.
 fn label_spans(label: &str, theme: &Theme) -> Vec<Span<'static>> {
-    match label.split_once(" · ") {
-        Some((name, details)) => vec![
-            Span::styled(name.to_string(), theme.body()),
-            Span::styled(format!(" · {details}"), theme.footnote()),
-        ],
-        None => vec![Span::styled(label.to_string(), theme.body())],
+    let Some((name, details)) = label.split_once(" · ") else {
+        return vec![Span::styled(label.to_string(), theme.body())];
+    };
+    let mut spans = vec![Span::styled(name.to_string(), theme.body())];
+    for detail in details.split(" · ") {
+        let style = if detail.starts_with("update ") {
+            theme.accent_text()
+        } else {
+            theme.footnote()
+        };
+        spans.push(Span::styled(format!(" · {detail}"), style));
     }
+    spans
 }
 
 fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
@@ -1587,8 +1609,40 @@ mod tests {
     use crate::ui::env::UiEnv;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Style;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn label_spans_show_the_update_part_in_the_accent_style() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let spans = label_spans("bun 1.4.2 · on request · update 1.4.4_1 · pinned", &theme);
+
+        let text: Vec<(&str, Style)> = spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+        assert_eq!(
+            text,
+            [
+                ("bun 1.4.2", theme.body()),
+                (" · on request", theme.footnote()),
+                (" · update 1.4.4_1", theme.accent_text()),
+                (" · pinned", theme.footnote()),
+            ]
+        );
+    }
+
+    #[test]
+    fn label_spans_without_an_update_show_every_detail_in_the_footnote_style() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let spans = label_spans("bun 1.4.2 · on request · outdated", &theme);
+
+        assert_eq!(spans[0].style, theme.body());
+        assert!(spans[1..].iter().all(|s| s.style == theme.footnote()));
+    }
 
     fn plan_with_app(app: &Path) -> CategoryScan {
         let mut item = ScanItem::new(app.to_path_buf(), 100, true, false);
