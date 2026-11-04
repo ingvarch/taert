@@ -5,7 +5,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -271,15 +271,22 @@ fn free_run_id(second: &str, start: u32, used: &HashSet<String>) -> String {
 
 /// Run ids in the history file that start with `prefix`.
 fn run_ids_in(path: &Path, prefix: &str) -> HashSet<String> {
-    let Ok(bytes) = fs::read(path) else {
-        return HashSet::new();
-    };
-    String::from_utf8_lossy(&bytes)
-        .lines()
+    read_lines(path)
+        .unwrap_or_default()
+        .iter()
         .filter(|line| line.contains(prefix))
-        .filter_map(run_of)
+        .filter_map(|line| run_of(line))
         .filter(|run| run.starts_with(prefix))
         .collect()
+}
+
+/// The lines of the history file, with bytes that are not UTF-8 replaced.
+fn read_lines(path: &Path) -> io::Result<Vec<String>> {
+    let bytes = fs::read(path)?;
+    Ok(String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(String::from)
+        .collect())
 }
 
 /// The `run` field of a history line.
@@ -382,24 +389,17 @@ impl HistoryLog {
     }
 
     /// Reads all runs from the file in chronological order.
-    /// Broken or corrupted lines are skipped and never cause failure.
+    /// Broken or corrupted lines are skipped. A read error is returned.
     pub fn load_runs(&self) -> io::Result<Vec<RunRecord>> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
-
         let mut runs: Vec<RunRecord> = Vec::new();
         let mut run_indexes: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
 
-        for line_res in reader.lines() {
-            let line = match line_res {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
+        for line in read_lines(&self.path)? {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -492,18 +492,11 @@ impl HistoryLog {
             return Ok(());
         }
 
-        let file = File::open(&self.path)?;
-        let reader = BufReader::new(file);
-
         let mut lines_with_run: Vec<(Option<String>, String)> = Vec::new();
         let mut run_order: VecDeque<String> = VecDeque::new();
         let mut seen_runs: HashSet<String> = HashSet::new();
 
-        for line_res in reader.lines() {
-            let line = match line_res {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
+        for line in read_lines(&self.path)? {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -1126,6 +1119,86 @@ another corrupted line!
             .expect("run A must be found");
         assert_eq!(run_a.items.len(), 1);
         assert!(run_a.completed);
+    }
+
+    /// Runs `call` on a thread so a read that never ends fails the test instead of hanging it.
+    fn within_timeout<T: Send + 'static>(call: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(call());
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the call did not return in 5 seconds")
+    }
+
+    #[test]
+    fn load_runs_of_a_folder_returns_an_error() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        fs::create_dir(&path).unwrap();
+        let log = HistoryLog::new(path);
+
+        let result = within_timeout(move || log.load_runs());
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::IsADirectory);
+    }
+
+    #[test]
+    fn prune_of_a_folder_returns_an_error_and_releases_the_lock() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        fs::create_dir(&path).unwrap();
+
+        let result = within_timeout({
+            let log = HistoryLog::new(path.clone());
+            move || log.prune()
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::IsADirectory);
+        assert!(path.is_dir());
+
+        fs::remove_dir(&path).unwrap();
+        let log = HistoryLog::new(path.clone());
+        let session = within_timeout(move || log.start_run("clean junk", "force", None));
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains(session.run_id())
+        );
+    }
+
+    fn two_runs_around_a_line_that_is_not_utf8() -> Vec<u8> {
+        let mut content = start_line("run1").into_bytes();
+        content.extend_from_slice(b"\xff\xfe\n");
+        content.extend_from_slice(start_line("run2").as_bytes());
+        content
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_skipped_and_later_runs_load() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl"));
+        fs::write(&log.path, two_runs_around_a_line_that_is_not_utf8()).unwrap();
+
+        let runs = within_timeout(move || log.load_runs()).unwrap();
+
+        let ids: Vec<&str> = runs.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(ids, ["run1", "run2"]);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_skipped_and_later_runs_survive_a_prune() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl")).with_max_runs(1);
+        fs::write(&log.path, two_runs_around_a_line_that_is_not_utf8()).unwrap();
+
+        let log = within_timeout(move || {
+            log.prune().unwrap();
+            log
+        });
+
+        let runs = log.load_runs().unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(ids, ["run2"]);
     }
 
     #[test]
