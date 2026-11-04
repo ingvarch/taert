@@ -5,12 +5,12 @@ expression: output
  taert › Optimize › Startup items                                       5 items
 ────────────────────────────────────────────────────────────────────────────────
    ╭─ Startup items (5) ─────────────────────────────────────────────────────╮
-   │ ▌ ● Docker                                     running (1.2% · 47.2 MB) │
-   │   · Spotify Web Helper (Spotify)                               disabled │
-   │   ✕ Old Broken Service                                           broken │
-   │   · Stuck Updater                              disabled · still running │
-   │   ○ Example Sync                                                enabled │
-   │                                                                         │
+   │     NAME                      STATE                      CPU   MEMORY   │
+   │ ▌ ● Docker                    running                   1.2%  47.2 MB   │
+   │   · Spotify Web Helper (S…fy) disabled                                  │
+   │   ✕ Old Broken Service        broken                                    │
+   │   · Stuck Updater             disabled · still running  0.0%   8.4 MB   │
+   │   ○ Example Sync              enabled                                   │
    │                                                                         │
    │                                                                         │
    │                                                                         │

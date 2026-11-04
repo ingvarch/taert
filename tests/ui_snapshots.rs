@@ -363,6 +363,8 @@ fn snapshot_startup_items() {
         let output = render_to_string(w, h, |f| render_startup(f, &state, &theme));
         assert_snapshot!(format!("startup_{label}"), output);
     }
+    let output = render_to_string(160, 32, |f| render_startup(f, &state, &theme));
+    assert_snapshot!("startup_columns_160x32", output);
 }
 
 #[test]

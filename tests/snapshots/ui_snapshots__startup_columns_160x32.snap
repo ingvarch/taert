@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Optimize › Startup items                                                                                                                       5 items
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Startup items (5) ────────────────────────────────────────────────────────────────────╮  ╭─ Service detail ────────────────────────────────────────────╮
+   │     NAME                    TYPE             STATE                      CPU   MEMORY   │  │ Name:    Docker                                             │
+   │ ▌ ● Docker                  user agent       running                   1.2%  47.2 MB   │  │ Label:   com.docker.helper                                  │
+   │   · Spotify Web Helper (…y) user agent       disabled                                  │  │ App:     Docker                                             │
+   │   ✕ Old Broken Service      user agent       broken                                    │  │ Bundle:  /Applications/Docker.app                           │
+   │   · Stuck Updater           daemon           disabled · still running  0.0%   8.4 MB   │  │ Kind:    user agent                                         │
+   │   ○ Example Sync            background item  enabled                                   │  │ State:   Running                                            │
+   │                                                                                        │  │ Program: /Applications/Docker.app/Contents/MacOS/Docker     │
+   │                                                                                        │  │ Plist:   /Users/user/Library/LaunchAgents/com.docker.helper.p
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │ PID:     1234  CPU: 1.2%  Memory: 47.2 MB                   │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   │                                                                                        │  │                                                             │
+   ╰────────────────────────────────────────────────────────────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────╯
+   Note: System Events login items unavailable: macOS Automation permission refused or not granted.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ␣  Toggle / Action    ↑↓  Navigate    ⎋  Back

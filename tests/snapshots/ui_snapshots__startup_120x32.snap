@@ -5,12 +5,12 @@ expression: output
  taert › Optimize › Startup items                                                                               5 items
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Startup items (5) ─────────────────────────────────────────────╮  ╭─ Service detail ───────────────────────────╮
-   │ ▌ ● Docker                             running (1.2% · 47.2 MB) │  │ Name:    Docker                            │
-   │   · Spotify Web Helper (Spotify)                       disabled │  │ Label:   com.docker.helper                 │
-   │   ✕ Old Broken Service                                   broken │  │ App:     Docker                            │
-   │   · Stuck Updater                      disabled · still running │  │ Bundle:  /Applications/Docker.app          │
-   │   ○ Example Sync                                        enabled │  │ Kind:    user agent                        │
-   │                                                                 │  │ State:   Running                           │
+   │     NAME                             STATE                      │  │ Name:    Docker                            │
+   │ ▌ ● Docker                           running                    │  │ Label:   com.docker.helper                 │
+   │   · Spotify Web Helper (Spotify)     disabled                   │  │ App:     Docker                            │
+   │   ✕ Old Broken Service               broken                     │  │ Bundle:  /Applications/Docker.app          │
+   │   · Stuck Updater                    disabled · still running   │  │ Kind:    user agent                        │
+   │   ○ Example Sync                     enabled                    │  │ State:   Running                           │
    │                                                                 │  │ Program: /Applications/Docker.app/Contents/M
    │                                                                 │  │ Plist:   /Users/user/Library/LaunchAgents/co
    │                                                                 │  │                                            │
