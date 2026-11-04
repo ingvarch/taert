@@ -261,6 +261,33 @@ pub fn generate_run_id(time: SystemTime) -> String {
     )
 }
 
+/// Moves the `NNNN` suffix of the id on from `start` until no id in `used` has it.
+fn free_run_id(second: &str, start: u32, used: &HashSet<String>) -> String {
+    (0..10_000)
+        .map(|step| format!("{second}{:04}", (start + step) % 10_000))
+        .find(|candidate| !used.contains(candidate))
+        .unwrap_or_else(|| format!("{second}{start:04}"))
+}
+
+/// Run ids in the history file that start with `prefix`.
+fn run_ids_in(path: &Path, prefix: &str) -> HashSet<String> {
+    let Ok(bytes) = fs::read(path) else {
+        return HashSet::new();
+    };
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter(|line| line.contains(prefix))
+        .filter_map(run_of)
+        .filter(|run| run.starts_with(prefix))
+        .collect()
+}
+
+/// The `run` field of a history line.
+fn run_of(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    value.get("run")?.as_str().map(String::from)
+}
+
 /// Checks whether recording history has been disabled via `TAERT_NO_HISTORY=1`.
 pub fn is_history_disabled() -> bool {
     std::env::var("TAERT_NO_HISTORY").as_deref() == Ok("1")
@@ -297,11 +324,21 @@ impl HistoryLog {
 
     /// Starts a new run session.
     pub fn start_run(&self, command: &str, mode: &str, total: Option<usize>) -> HistorySession {
+        self.start_run_at(SystemTime::now(), command, mode, total)
+    }
+
+    fn start_run_at(
+        &self,
+        time: SystemTime,
+        command: &str,
+        mode: &str,
+        total: Option<usize>,
+    ) -> HistorySession {
         let disabled = is_history_disabled();
-        let run_id = generate_run_id(SystemTime::now());
-        let session = HistorySession {
+        let id = generate_run_id(time);
+        let mut session = HistorySession {
             log_path: self.path.clone(),
-            run_id: run_id.clone(),
+            run_id: id.clone(),
             disabled,
             warned: AtomicBool::new(false),
             max_runs: self.max_runs,
@@ -311,18 +348,37 @@ impl HistoryLog {
             return session;
         }
 
-        let at = format_rfc3339(SystemTime::now());
+        let result = self.write_start_line(id, command, mode, total);
+        match result {
+            Ok(run_id) => session.run_id = run_id,
+            Err(e) => session.warn(&format!("could not write to history log: {e}")),
+        }
+        session
+    }
+
+    /// Picks a free run id and writes the start line under one lock.
+    fn write_start_line(
+        &self,
+        id: String,
+        command: &str,
+        mode: &str,
+        total: Option<usize>,
+    ) -> io::Result<String> {
+        let _lock = lock_history_folder(&self.path)?;
+        let (second, suffix) = id.split_at(id.len() - 4);
+        let used = run_ids_in(&self.path, second);
+        let run = free_run_id(second, suffix.parse().unwrap_or_default(), &used);
         let event = HistoryEvent::Start {
-            run: run_id,
-            at,
+            run: run.clone(),
+            at: format_rfc3339(SystemTime::now()),
             command: command.to_string(),
             mode: mode.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             total,
         };
-
-        session.append_line(&event);
-        session
+        let line = serde_json::to_string(&event).map_err(io::Error::other)?;
+        append_line(&self.path, &line)?;
+        Ok(run)
     }
 
     /// Reads all runs from the file in chronological order.
@@ -453,9 +509,7 @@ impl HistoryLog {
                 continue;
             }
 
-            let run_id = serde_json::from_str::<serde_json::Value>(trimmed)
-                .ok()
-                .and_then(|val| val.get("run").and_then(|r| r.as_str()).map(String::from));
+            let run_id = run_of(trimmed);
 
             if let Some(ref id) = run_id
                 && !seen_runs.contains(id)
@@ -613,6 +667,10 @@ fn lock_history_folder(path: &Path) -> io::Result<FolderLock> {
 
 fn append_line_locked(path: &Path, line: &str) -> io::Result<()> {
     let _lock = lock_history_folder(path)?;
+    append_line(path, line)
+}
+
+fn append_line(path: &Path, line: &str) -> io::Result<()> {
     let mut file = open_for_append(path)?;
     writeln!(file, "{line}")?;
     file.flush()?;
@@ -649,6 +707,7 @@ fn create_with_mode_0600(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[test]
@@ -775,6 +834,97 @@ another corrupted line!
         use std::os::unix::fs::MetadataExt;
         let meta = fs::metadata(&log_file).unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn run_ids_are_unique_within_one_second() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl"));
+        let time = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+
+        let ids: HashSet<String> = (0..1001)
+            .map(|_| {
+                log.start_run_at(time, "cmd", "force", None)
+                    .run_id()
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(ids.len(), 1001);
+        assert_eq!(log.load_runs().unwrap().len(), 1001);
+    }
+
+    /// `line(id)` for every id of the second of `time` except the one ending
+    /// in 4242, and that free id.
+    fn every_id_but_one(time: SystemTime, line: fn(&str) -> String) -> (String, String) {
+        let prefix = &generate_run_id(time)[..16];
+        let lines = (0..10_000)
+            .filter(|n| *n != 4242)
+            .map(|n| line(&format!("{prefix}{n:04}")))
+            .collect();
+        (lines, format!("{prefix}4242"))
+    }
+
+    fn start_event(id: &str) -> HistoryEvent {
+        HistoryEvent::Start {
+            run: id.to_string(),
+            at: "2026-11-01T10:00:00Z".to_string(),
+            command: "cmd".to_string(),
+            mode: "force".to_string(),
+            version: "0.6.0".to_string(),
+            total: None,
+        }
+    }
+
+    fn start_line(id: &str) -> String {
+        format!("{}\n", serde_json::to_string(&start_event(id)).unwrap())
+    }
+
+    fn start_line_with_spaces(id: &str) -> String {
+        format!(
+            "{{\"event\": \"start\", \"run\": \"{id}\", \"at\": \"2026-11-01T10:00:00Z\", \"command\": \"cmd\", \"mode\": \"force\", \"version\": \"0.6.0\"}}\n"
+        )
+    }
+
+    #[test]
+    fn a_run_id_already_in_the_file_is_not_given_again() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl"));
+        let time = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let (lines, free) = every_id_but_one(time, start_line);
+        fs::write(&log.path, lines).unwrap();
+
+        let session = log.start_run_at(time, "cmd", "force", None);
+
+        assert_eq!(session.run_id(), free);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_does_not_hide_later_run_ids() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl"));
+        let time = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let (lines, free) = every_id_but_one(time, start_line);
+        let mut content = b"\xff\xfe\n".to_vec();
+        content.extend_from_slice(lines.as_bytes());
+        fs::write(&log.path, content).unwrap();
+
+        let session = log.start_run_at(time, "cmd", "force", None);
+
+        assert_eq!(session.run_id(), free);
+    }
+
+    #[test]
+    fn a_run_id_written_with_spaces_is_not_given_again() {
+        let temp = tempdir().unwrap();
+        let log = HistoryLog::new(temp.path().join("history.jsonl"));
+        let time = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let (lines, free) = every_id_but_one(time, start_line_with_spaces);
+        fs::write(&log.path, lines).unwrap();
+
+        let session = log.start_run_at(time, "cmd", "force", None);
+
+        assert_eq!(session.run_id(), free);
     }
 
     #[test]
@@ -982,7 +1132,6 @@ another corrupted line!
     fn appends_wait_for_the_lock() {
         use std::os::unix::io::AsRawFd;
         use std::sync::mpsc;
-        use std::time::Duration;
 
         let temp = tempdir().unwrap();
         let log_file = temp.path().join("history.jsonl");
