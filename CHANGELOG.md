@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
+### Changed
+- **Homebrew loading card**: while taert reads Homebrew, the loading card names the step (`Reading Homebrew packages`, `Checking package versions`, `Measuring packages, 12 of 180`). While it measures, the progress bar fills with the share of packages measured and the counter grows (`Found 12 items · 340.2 MB`). The finished list, `taert brew`, `--plain`, and `--json` do not change.
+
+### Fixed
+- **Shell completions from Homebrew**: the cask runs `taert completion bash`, `zsh`, and `fish` to install the completions. In 0.6.0 and 0.7.0 it ran `taert completion --shell=bash`, which taert refuses, so `brew install` and `brew upgrade` printed a warning and installed no completions.
+- **Progress spinner**: the spinner in progress dialogs keeps turning while one long step runs, such as a Homebrew upgrade or the removal of a large folder. This covers the removal, uninstall, slim, compress, upgrade, and Explore delete dialogs. The spinners in these dialogs, in the Explore measuring dialog, and on the Explore loading screen take their frames from the glyph set, so `TAERT_ASCII` shows `- \ | /`. With `TAERT_REDUCE_MOTION` they keep one still glyph.
+
+## [0.7.0] - 2026-11-04
+
 ### Added
 - **Homebrew sorting**: `⇧S`, `⇧N`, and `⇧T` sort the Homebrew list by size, name, or install date, at the top level, inside open rows, and in search results. An `INSTALLED` column shows when each package was installed. The order is not saved.
 - **Homebrew updates**: the Homebrew list shows the new version of each outdated package in an `UPDATE` column as `↑ 1.4.4_1` in the accent style, and the status line adds `N updates`. `taert brew --plain` prints the new version in the `outdated` column, and `--json` has `latest_version` (`null` when up to date). taert reads it with `brew outdated --json=v2`.
@@ -15,15 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Homebrew list upgrade**: in the Homebrew list, `u` upgrades the focused package and `⇧U` upgrades every package with a new version that is not refused, in the tree and in search results. The question lists `bun 1.4.2 → 1.4.4_1` for each package and says Homebrew may also upgrade what they need. The result reads `Upgrade Complete` or `Nothing was upgraded`, with the reason and the terminal hint for a failed cask. Refusals are the same as in `taert brew upgrade`. While the list checks for updates, `u` and `⇧U` run nothing and say `Checking for updates. Try again when it ends.` While the list is read again after an upgrade, they run nothing and say `Updating the list. Try again when it ends.` When you close the result, taert reads Homebrew once and measures only the packages that are new or changed. Upgrades are not written to the history.
 
 ### Changed
-- **Homebrew loading card**: while taert reads Homebrew, the loading card names the step (`Reading Homebrew packages`, `Checking package versions`, `Measuring packages, 12 of 180`). While it measures, the progress bar fills with the share of packages measured and the counter grows (`Found 12 items · 340.2 MB`). The finished list, `taert brew`, `--plain`, and `--json` do not change.
 - **Homebrew list columns**: the Homebrew list shows `ORIGIN` (`on request` or `dependency`, empty for a cask) and `UPDATE` (`↑` and the new version) as columns between the name and `INSTALLED`. The name keeps its version, `used by N`, `pinned`, and the apps of a cask. The `SHARE` bar is at most 12 cells wide, so the name and the new columns get the room. Below 100 columns `ORIGIN` hides and `UPDATE` stays. `taert brew --plain` and `--json` do not change.
 - **Explore Storage**: a folder that changed since your last visit, or that was cached more than 15 minutes ago, opens at once with `Updating…` and is measured again in the background. Its rows change when the new sizes are in.
 - **Removal keys**: `d`, `D`, `Backspace`, and `Delete` start a removal on every screen that removes something: the cleanup lists, Purge, Docker, Large Files, Homebrew cleanup, the uninstall review, the Homebrew list, Explore Storage, broken Startup Items, and the path lists. In Uninstall Apps they open the review. `Enter` no longer starts a removal outside a question dialog. It still goes into a folder, a Homebrew row, or a menu row, and it still starts Slim and Compress and turns a working startup item on or off. On a broken startup item, `Space` and `Enter` do nothing.
 - **Date sort**: the date sort moved from `⇧D` to `⇧T` in Explore Storage, Docker, Large Files, and Uninstall Apps, because `D` now removes. The footers and the help sheets show `⇧S/N/T`, `d` for removal, and `d` as the main action of a removal list.
 
 ### Fixed
-- **Shell completions from Homebrew**: the cask runs `taert completion bash`, `zsh`, and `fish` to install the completions. In 0.6.0 and 0.7.0 it ran `taert completion --shell=bash`, which taert refuses, so `brew install` and `brew upgrade` printed a warning and installed no completions.
-- **Progress spinner**: the spinner in progress dialogs keeps turning while one long step runs, such as a Homebrew upgrade or the removal of a large folder. This covers the removal, uninstall, slim, compress, upgrade, and Explore delete dialogs. The spinners in these dialogs, in the Explore measuring dialog, and on the Explore loading screen take their frames from the glyph set, so `TAERT_ASCII` shows `- \ | /`. With `TAERT_REDUCE_MOTION` they keep one still glyph.
 - **History read errors**: when the history file cannot be read, for example when `history.jsonl` is a folder, `taert history` shows the error instead of hanging. The cleanup of old runs stops, leaves the file as it is, and frees the history lock. A line that is not UTF-8 or not JSON is still skipped.
 - **History run ids**: two runs no longer get the same id, in one process or in two processes that write the same history file. taert picks the id under the history lock and moves the last four digits on while the file already has that id. The id keeps its form, and old history files load as before.
 - **Explore Storage**: when the background update of a folder stops without a result, `Updating…` goes away and the rows keep their old sizes. Open the folder again from its parent, or press `R`, to measure it again.
