@@ -10,6 +10,7 @@ use ratatui::style::Color;
 use taert::core::apps;
 use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalReport};
+use taert::core::compress;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind};
@@ -1231,6 +1232,36 @@ fn snapshot_slim_outcome() {
         "{screen}"
     );
     assert_snapshot!("select_slim_outcome_120x32", screen);
+}
+
+#[test]
+fn snapshot_compress_outcome() {
+    let mut state = SelectState::new(CategoryScan {
+        notes: Vec::new(),
+        id: compress::SCAN_ID.to_string(),
+        title: "Compress".to_string(),
+        groups: Vec::new(),
+    });
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        removed_count: 12,
+        freed_bytes: 40_700_000,
+        trashed_bytes: 0,
+        failures: vec![RemovalFailure {
+            path: PathBuf::from("/Applications/Safari.app"),
+            error: "The app is running".to_string(),
+        }],
+        notes: Vec::new(),
+    });
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Compress Complete"), "{screen}");
+    assert!(
+        screen.contains("Saved 40.7 MB by compressing 12 files."),
+        "{screen}"
+    );
+    assert!(screen.contains("1 item failed to compress:"), "{screen}");
+    assert!(!screen.contains("permanently."), "{screen}");
+    assert_snapshot!("select_compress_outcome_120x32", screen);
 }
 
 #[test]

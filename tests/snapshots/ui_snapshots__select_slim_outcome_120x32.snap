@@ -13,7 +13,7 @@ expression: screen
    ╭─ ~/Applications ────────│                                                            │─────── 1 item · 35.0 MB ─╮
    │   ○ Sublime Text        │ Saved 220.7 MB of Intel code.                              │───────   4.1%    35.0 MB │
    ╰─────────────────────────│                                                            │──────────────────────────╯
-                             │ 1 item failed to remove:                                   │
+                             │ 1 item failed to slim:                                     │
                              │   ✕ /Applications/Brave Browser.app                        │
                              │                                                            │
                              │ Slimmed Viscosity, saved 40.7 MB. The old app is still     │
