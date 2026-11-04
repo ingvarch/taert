@@ -1839,16 +1839,7 @@ fn render_removing_dialog(
         }
     };
 
-    let spinner_char = if theme.env.reduce_motion {
-        "*"
-    } else {
-        match spinner_idx % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        }
-    };
+    let spinner_char = theme.spinner_frame(spinner_idx);
 
     let pretty_path = prettify_path(&progress.path);
     let path_line = Line::from(vec![

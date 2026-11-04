@@ -55,14 +55,7 @@ impl ProgressState {
     }
 
     pub fn spinner_char<'a>(&self, theme: &'a Theme) -> &'a str {
-        if theme.env.reduce_motion {
-            return "*";
-        }
-        let count = theme.g.spinner.len();
-        if count == 0 {
-            return "●";
-        }
-        theme.g.spinner[self.spinner_idx % count]
+        theme.spinner_frame(self.spinner_idx)
     }
 
     pub fn apply_purge(&mut self, event: PurgeScanEvent) {

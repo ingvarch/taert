@@ -542,7 +542,21 @@ impl App {
         let Some(rx) = &self.removal_rx else {
             return;
         };
-        self.removal_spinner = (self.removal_spinner + 1) % 4;
+        self.removal_spinner = self.removal_spinner.wrapping_add(1);
+        let tick = self.removal_spinner;
+        match &mut self.screen {
+            Screen::Select(select) => {
+                if let ModalOverlay::Removing { spinner_idx, .. } = &mut select.overlay {
+                    *spinner_idx = tick;
+                }
+            }
+            Screen::Analyze(analyze) => {
+                if let AnalyzeOverlay::Deleting { spinner_idx, .. } = &mut analyze.overlay {
+                    *spinner_idx = tick;
+                }
+            }
+            _ => {}
+        }
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 RemovalMessage::Progress(prog) => {
@@ -2797,6 +2811,46 @@ mod tests {
         app.handle_key(KeyCode::Char('q'));
 
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_explore_delete_spinner_turns_while_no_message_arrives() {
+        let dir = tempdir().unwrap();
+        let mut app = analyze_app(dir.path());
+        let (_tx, rx) = mpsc::channel();
+        app.removal_rx = Some(rx);
+        let Screen::Analyze(state) = &mut app.screen else {
+            panic!("expected the analyze screen");
+        };
+        state.overlay = AnalyzeOverlay::Deleting {
+            progress: RemovalProgress {
+                current_index: 1,
+                total_count: 1,
+                path: "/tmp/big".into(),
+            },
+            spinner_idx: 0,
+        };
+
+        app.theme = Theme::plain();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..3 {
+            app.poll_removal();
+            let row = screen_rows(&app, 100, 30)
+                .into_iter()
+                .find(|row| row.contains("/tmp/big"))
+                .expect("the delete dialog names the folder");
+            assert!(
+                app.theme
+                    .g
+                    .spinner
+                    .iter()
+                    .any(|frame| row.contains(&format!("{frame} /tmp/big"))),
+                "{row}"
+            );
+            seen.insert(row);
+        }
+
+        assert_eq!(seen.len(), 3, "{seen:?}");
     }
 
     #[test]
@@ -6927,6 +6981,107 @@ mod tests {
             assert!(text.contains("1 of 1"), "{text}");
             drop(release);
             run.wait_for_the_upgrades();
+        }
+
+        fn removing_spinner(app: &App) -> usize {
+            match &select(app).overlay {
+                ModalOverlay::Removing { spinner_idx, .. } => *spinner_idx,
+                _ => panic!("expected the removing dialog"),
+            }
+        }
+
+        /// The line of the progress dialog that holds the spinner and the package name.
+        fn path_row(app: &App) -> String {
+            let rows = screen_rows(app, 100, 30);
+            let count = rows
+                .iter()
+                .position(|row| row.contains("1 of 1"))
+                .expect("no progress dialog");
+            rows[count - 2].clone()
+        }
+
+        #[test]
+        fn the_upgrade_spinner_turns_while_no_message_arrives() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            run.app.theme = Theme::with_env(crate::ui::env::UiEnv::default());
+            let release = hold(&run.host, &run.upgrade_line("--formula bun"));
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+
+            let mut frames = std::collections::HashSet::new();
+            for _ in 0..3 {
+                run.app.poll_removal();
+                frames.insert(path_row(&run.app));
+            }
+            drop(release);
+            run.wait_for_the_upgrades();
+
+            assert_eq!(frames.len(), 3, "{frames:?}");
+        }
+
+        #[test]
+        fn the_upgrade_spinner_walks_every_frame_of_the_glyph_set() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            run.app.theme = Theme::with_env(crate::ui::env::UiEnv::default());
+            let release = hold(&run.host, &run.upgrade_line("--formula bun"));
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+
+            for _ in 0..5 {
+                run.app.poll_removal();
+            }
+            let row = path_row(&run.app);
+            drop(release);
+            run.wait_for_the_upgrades();
+
+            let frame = run.app.theme.g.spinner[5];
+            assert!(row.contains(&format!("{frame} bun")), "{row}");
+        }
+
+        #[test]
+        fn the_removing_dialog_takes_its_frames_from_the_glyph_set() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            run.app.theme = Theme::plain();
+            let release = hold(&run.host, &run.upgrade_line("--formula bun"));
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+
+            let frames = run.app.theme.g.spinner;
+            for _ in 0..frames.len() * 2 {
+                run.app.poll_removal();
+                let row = path_row(&run.app);
+                let shown = frames[removing_spinner(&run.app) % frames.len()];
+                assert!(row.contains(&format!("{shown} bun")), "{row}");
+            }
+            drop(release);
+            run.wait_for_the_upgrades();
+        }
+
+        #[test]
+        fn the_removing_dialog_keeps_one_glyph_with_reduce_motion() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            run.app.theme.env.reduce_motion = true;
+            let release = hold(&run.host, &run.upgrade_line("--formula bun"));
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+
+            let first = path_row(&run.app);
+            for _ in 0..3 {
+                run.app.poll_removal();
+                assert_eq!(path_row(&run.app), first);
+            }
+            drop(release);
+            run.wait_for_the_upgrades();
+
+            assert!(first.contains("* bun"), "{first}");
         }
 
         #[test]
