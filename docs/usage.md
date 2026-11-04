@@ -700,7 +700,7 @@ You can also switch on and adjust scheduled cleanup in the TUI workspace under *
 
 ### Shell Completion (`taert completion`)
 
-Print completion scripts for your shell. `brew install` sets completions up by itself once the cask supports it. In fish, commands and flags complete, but the category names of `taert clean` do not.
+Print completion scripts for your shell. `brew install` sets completions up by itself. Casks up to 0.7.0 installed none. With those, use the commands below. In fish, commands and flags complete, but the category names of `taert clean` do not.
 
 fish:
 
