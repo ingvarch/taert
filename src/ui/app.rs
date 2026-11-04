@@ -76,6 +76,7 @@ pub enum ScanMessage {
     PurgeProgress(PurgeScanEvent),
     Finished(CategoryScan),
     Homebrew(homebrew::Inventory),
+    BrewStep(homebrew::ScanStep),
     Failed {
         id: String,
         title: String,
@@ -698,6 +699,9 @@ impl App {
                         ));
                         self.plan = Some(plan);
                         break;
+                    }
+                    ScanMessage::BrewStep(step) => {
+                        progress.apply_brew(step);
                     }
                     ScanMessage::Homebrew(inventory) => {
                         let mut list =
@@ -1948,11 +1952,13 @@ impl App {
         let host = self.host.clone();
 
         thread::spawn(move || {
-            let inventory =
-                homebrew::scan(&layout, &*host).unwrap_or_else(|message| homebrew::Inventory {
-                    notes: vec![message],
-                    ..homebrew::Inventory::default()
-                });
+            let inventory = homebrew::scan_with(&layout, &*host, &mut |step| {
+                let _ = tx.send(ScanMessage::BrewStep(step));
+            })
+            .unwrap_or_else(|message| homebrew::Inventory {
+                notes: vec![message],
+                ..homebrew::Inventory::default()
+            });
             let _ = tx.send(ScanMessage::Homebrew(inventory));
         });
 
@@ -2477,6 +2483,16 @@ mod tests {
             let _ = held.lock().unwrap().recv();
         });
         release
+    }
+
+    fn deliver(app: &mut App, message: ScanMessage) {
+        let (tx, rx) = mpsc::channel();
+        tx.send(message).unwrap();
+        let Screen::Scanning(_, scan_rx, _) = &mut app.screen else {
+            panic!("expected the scanning screen");
+        };
+        *scan_rx = rx;
+        app.poll_scan();
     }
 
     fn press(app: &mut App, keys: &[KeyCode]) {
@@ -3330,16 +3346,6 @@ mod tests {
             host.simulate_trash();
             app.host = Arc::new(host);
             (temp, app)
-        }
-
-        fn deliver(app: &mut App, message: ScanMessage) {
-            let (tx, rx) = mpsc::channel();
-            tx.send(message).unwrap();
-            let Screen::Scanning(_, scan_rx, _) = &mut app.screen else {
-                panic!("expected the scanning screen");
-            };
-            *scan_rx = rx;
-            app.poll_scan();
         }
 
         fn installed(app: &App, name: &str, id: &str) -> InstalledApp {
@@ -5039,6 +5045,125 @@ mod tests {
             }
             assert_eq!(select(&app).scan.id, homebrew::SCAN_ID);
             assert_eq!(select(&app).scan.notes, ["Homebrew is not installed."]);
+        }
+
+        fn scanning_progress(app: &App) -> &ProgressState {
+            let Screen::Scanning(progress, _, _) = &app.screen else {
+                panic!("expected the scanning screen");
+            };
+            progress
+        }
+
+        #[test]
+        fn the_loading_card_names_the_step_and_counts_the_measured_packages() {
+            let (_temp, mut app, host, brew) = check_mac_with(
+                &info(&[formula("aa", "1", false), formula("bb", "1", false)], &[]),
+                NOTHING_NEW,
+                None,
+                None,
+            );
+            let prefix = app.layout.system("opt/homebrew");
+            for (name, bytes) in [("aa", 340_000), ("bb", 100_000)] {
+                let folder = prefix.join("Cellar").join(name).join("1");
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("data"), vec![1_u8; bytes]).unwrap();
+            }
+            let release = hold(
+                &host,
+                &format!("{BREW_START} {brew} info --json=v2 --installed"),
+            );
+
+            app.handle_key(KeyCode::Char('5'));
+            for _ in 0..400 {
+                app.poll_scan();
+                if screen_text(&app).contains("Reading Homebrew packages") {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(screen_text(&app).contains("Reading Homebrew packages"));
+
+            let (_, idle) = mpsc::channel();
+            let Screen::Scanning(_, scan_rx, _) = &mut app.screen else {
+                panic!("expected the scanning screen");
+            };
+            let real = std::mem::replace(scan_rx, idle);
+            drop(release);
+            loop {
+                let message = real
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the scan sent no first measured package");
+                let measured = matches!(
+                    message,
+                    ScanMessage::BrewStep(homebrew::ScanStep::Measured { .. })
+                );
+                deliver(&mut app, message);
+                if measured {
+                    break;
+                }
+            }
+
+            let first = DirSizer::size_of(&prefix.join("Cellar/aa"));
+            assert!(first > 0);
+            let text = screen_text(&app);
+            assert!(text.contains("Measuring packages, 1 of 2"), "{text}");
+            assert!(
+                text.contains(&format!(
+                    "Found 1 item · {}",
+                    crate::core::bytes::format_bytes(first)
+                )),
+                "{text}"
+            );
+            assert_eq!(scanning_progress(&app).category_index, Some(1));
+            assert_eq!(scanning_progress(&app).category_total, Some(2));
+        }
+
+        #[test]
+        fn the_loading_card_names_the_version_check_while_brew_outdated_runs() {
+            let (_temp, mut app, host, brew) = check_mac();
+            let release = hold(&host, &format!("{BREW_START} {brew} outdated --json=v2"));
+
+            app.handle_key(KeyCode::Char('5'));
+            for _ in 0..400 {
+                app.poll_scan();
+                if screen_text(&app).contains("Checking package versions") {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let text = screen_text(&app);
+            assert!(text.contains("Checking package versions"), "{text}");
+            drop(release);
+        }
+
+        /// The spinner frame in the title of the Homebrew loading card.
+        fn spinner_frame(app: &App) -> String {
+            let rows = screen_rows(app, 100, 30);
+            let (title, _) = rows
+                .iter()
+                .find_map(|row| row.split_once("Reading Homebrew"))
+                .expect("no Homebrew loading card");
+            title.split_whitespace().last().unwrap().to_string()
+        }
+
+        #[test]
+        fn the_spinner_turns_on_every_poll_of_the_loading_card() {
+            let (_temp, mut app, host, brew) = check_mac();
+            app.theme = Theme::plain();
+            let release = hold(
+                &host,
+                &format!("{BREW_START} {brew} info --json=v2 --installed"),
+            );
+            app.handle_key(KeyCode::Char('5'));
+
+            app.poll_scan();
+            let first = spinner_frame(&app);
+            app.poll_scan();
+            let second = spinner_frame(&app);
+
+            assert_ne!(first, second);
+            drop(release);
         }
 
         #[test]

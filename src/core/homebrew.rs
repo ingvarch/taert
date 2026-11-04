@@ -469,15 +469,33 @@ fn installed(host: &dyn Host, brew: &Path, prefix: &Path) -> Result<Vec<Package>
     parse_packages(&json, prefix)
 }
 
+/// A step of the Homebrew read, for the loading card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStep {
+    ReadingPackages,
+    CheckingVersions,
+    Measuring { total: usize },
+    Measured { bytes: u64 },
+}
+
 /// Lists what Homebrew has installed, with the size of each folder.
 pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
+    scan_with(layout, host, &mut |_| {})
+}
+
+/// Like `scan`, and tells `progress` which step runs.
+pub fn scan_with(
+    layout: &Layout,
+    host: &dyn Host,
+    progress: &mut dyn FnMut(ScanStep),
+) -> Result<Inventory, String> {
     let Some(brew) = find(layout) else {
         return Ok(Inventory {
             notes: vec![NOT_INSTALLED.to_string()],
             ..Inventory::default()
         });
     };
-    read_inventory(host, &brew, &[])
+    read_inventory(host, &brew, &[], progress)
 }
 
 /// Reads the list again after an upgrade. Only the packages that are new or changed their
@@ -488,7 +506,7 @@ pub fn refresh(host: &dyn Host, old: &Inventory) -> Result<Inventory, String> {
         prefix: prefix_of(path)?.to_path_buf(),
         path: path.to_path_buf(),
     };
-    read_inventory(host, &brew, &old.packages)
+    read_inventory(host, &brew, &old.packages, &mut |_| {})
 }
 
 /// The Homebrew prefix two folders above `<prefix>/bin/brew` or `<prefix>/Cellar/<name>`.
@@ -503,25 +521,46 @@ fn prefix_of(path: &Path) -> Result<&Path, String> {
 
 /// Reads the packages and their new versions. A package that `known` lists with the same
 /// version keeps its size.
-fn read_inventory(host: &dyn Host, brew: &Brew, known: &[Package]) -> Result<Inventory, String> {
+fn read_inventory(
+    host: &dyn Host,
+    brew: &Brew,
+    known: &[Package],
+    progress: &mut dyn FnMut(ScanStep),
+) -> Result<Inventory, String> {
+    progress(ScanStep::ReadingPackages);
     let mut packages = installed(host, &brew.path, &brew.prefix)?;
     let mut notes = Vec::new();
     let latest = if packages.is_empty() {
         Latest::default()
     } else {
+        progress(ScanStep::CheckingVersions);
         outdated(host, &brew.path).unwrap_or_else(|note| {
             notes.push(note);
             Latest::default()
         })
     };
-    for package in &mut packages {
-        package.size_bytes = known
-            .iter()
-            .find(|old| {
-                (old.kind, &old.name, &old.version)
-                    == (package.kind, &package.name, &package.version)
-            })
-            .map_or_else(|| DirSizer::size_of(&package.path), |old| old.size_bytes);
+    let sizes: Vec<Option<u64>> = packages
+        .iter()
+        .map(|package| {
+            known
+                .iter()
+                .find(|old| {
+                    (old.kind, &old.name, &old.version)
+                        == (package.kind, &package.name, &package.version)
+                })
+                .map(|old| old.size_bytes)
+        })
+        .collect();
+    let total = sizes.iter().filter(|size| size.is_none()).count();
+    if total > 0 {
+        progress(ScanStep::Measuring { total });
+    }
+    for (package, known_size) in packages.iter_mut().zip(sizes) {
+        package.size_bytes = known_size.unwrap_or_else(|| {
+            let bytes = DirSizer::size_of(&package.path);
+            progress(ScanStep::Measured { bytes });
+            bytes
+        });
         latest.apply(package);
     }
     packages.sort_by(|a, b| {
@@ -3410,6 +3449,98 @@ Would remove: /opt/homebrew/Cellar/go/1.0
                 .flat_map(|group| &group.items)
                 .all(|item| item.brew.is_none())
         );
+    }
+
+    #[test]
+    fn scan_reports_its_steps_in_order_then_each_measured_package() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(
+            &line(&layout, "info"),
+            &testing::info(
+                &[
+                    testing::formula("big", "1", false),
+                    testing::formula("small", "1", false),
+                ],
+                &[],
+            ),
+        );
+        host.reply(&line(&layout, "outdated --json=v2"), "{}");
+        let cellar = layout.system("opt/homebrew/Cellar");
+        fill(&cellar.join("big"), 30_000);
+        fill(&cellar.join("small"), 10_000);
+        let mut steps = Vec::new();
+
+        let inventory = scan_with(&layout, &host, &mut |step| steps.push(step)).unwrap();
+
+        let size = |name: &str| named(&inventory.packages, name).size_bytes;
+        assert_eq!(
+            steps,
+            [
+                ScanStep::ReadingPackages,
+                ScanStep::CheckingVersions,
+                ScanStep::Measuring { total: 2 },
+                ScanStep::Measured { bytes: size("big") },
+                ScanStep::Measured {
+                    bytes: size("small")
+                },
+            ]
+        );
+        assert!(size("big") > 0 && size("small") > 0);
+    }
+
+    #[test]
+    fn a_read_counts_and_reports_only_the_packages_it_measures() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(
+            &line(&layout, "info --json=v2 --installed"),
+            &testing::info(
+                &[
+                    testing::formula("same", "1", false),
+                    testing::formula("added", "1", false),
+                ],
+                &[],
+            ),
+        );
+        host.reply(&line(&layout, "outdated --json=v2"), "{}");
+        let cellar = layout.system("opt/homebrew/Cellar");
+        fill(&cellar.join("same"), 30_000);
+        fill(&cellar.join("added"), 10_000);
+        let known = [package(PackageKind::Formula, "same", "1", 111)];
+        let mut steps = Vec::new();
+
+        read_inventory(&host, &find(&layout).unwrap(), &known, &mut |step| {
+            steps.push(step);
+        })
+        .unwrap();
+
+        assert_eq!(
+            steps,
+            [
+                ScanStep::ReadingPackages,
+                ScanStep::CheckingVersions,
+                ScanStep::Measuring { total: 1 },
+                ScanStep::Measured {
+                    bytes: DirSizer::size_of(&cellar.join("added"))
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scan_with_no_packages_reports_only_the_read() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(
+            &line(&layout, "info --json=v2 --installed"),
+            &testing::info(&[], &[]),
+        );
+        let mut steps = Vec::new();
+
+        scan_with(&layout, &host, &mut |step| steps.push(step)).unwrap();
+
+        assert_eq!(steps, [ScanStep::ReadingPackages]);
     }
 
     #[test]
