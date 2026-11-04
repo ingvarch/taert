@@ -49,6 +49,8 @@ pub struct Package {
     pub size_bytes: u64,
     pub on_request: bool,
     pub outdated: bool,
+    /// The version `brew outdated` offers; `None` when it does not list the package.
+    pub latest_version: Option<String>,
     pub pinned: bool,
     /// Installed formulae that list this one as a dependency.
     pub used_by: Vec<String>,
@@ -124,6 +126,40 @@ struct RawFormula {
     outdated: bool,
     #[serde(default)]
     pinned: bool,
+}
+
+#[derive(Deserialize)]
+struct RawOutdated {
+    name: String,
+    current_version: String,
+}
+
+#[derive(Deserialize)]
+struct OutdatedList {
+    #[serde(default)]
+    formulae: Vec<RawOutdated>,
+    #[serde(default)]
+    casks: Vec<RawOutdated>,
+}
+
+/// The new version of each outdated package, by name, for formulae and casks apart.
+#[derive(Debug, Default)]
+pub struct Latest {
+    pub formulae: HashMap<String, String>,
+    pub casks: HashMap<String, String>,
+}
+
+impl Latest {
+    fn of(&self, package: &Package) -> Option<String> {
+        let versions = match package.kind {
+            PackageKind::Formula => &self.formulae,
+            PackageKind::Cask => &self.casks,
+        };
+        versions
+            .get(&package.name)
+            .or_else(|| versions.get(&package.full_name))
+            .cloned()
+    }
 }
 
 #[derive(Deserialize)]
@@ -255,6 +291,7 @@ fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
             .first()
             .is_some_and(|keg| keg.installed_on_request),
         outdated: raw.outdated,
+        latest_version: None,
         pinned: raw.pinned,
         used_by: Vec::new(),
         apps: Vec::new(),
@@ -278,6 +315,7 @@ fn cask_package(raw: &RawCask, prefix: &Path) -> Package {
         size_bytes: 0,
         on_request: true,
         outdated: raw.outdated,
+        latest_version: None,
         pinned: false,
         used_by: Vec::new(),
         apps: cask_apps(&raw.artifacts),
@@ -319,6 +357,33 @@ pub fn parse_packages(json: &str, prefix: &Path) -> Result<Vec<Package>, String>
     Ok(formulae.chain(casks).collect())
 }
 
+/// Reads the new versions from `brew outdated --json=v2`.
+pub fn parse_outdated(json: &str) -> Result<Latest, String> {
+    let list: OutdatedList = serde_json::from_str(json)
+        .map_err(|error| format!("Homebrew printed an outdated list taert cannot read: {error}"))?;
+    let versions = |raw: Vec<RawOutdated>| {
+        raw.into_iter()
+            .map(|package| (package.name, package.current_version))
+            .collect()
+    };
+    Ok(Latest {
+        formulae: versions(list.formulae),
+        casks: versions(list.casks),
+    })
+}
+
+/// Asks brew which packages have a newer version.
+fn outdated(host: &dyn Host, brew: &Path) -> Result<Latest, String> {
+    let json = read(
+        host,
+        brew,
+        &["outdated", "--json=v2"],
+        INFO_TIMEOUT,
+        "the outdated packages",
+    )?;
+    parse_outdated(&json)
+}
+
 /// Asks brew for the installed packages, without sizes.
 fn installed(host: &dyn Host, brew: &Path, prefix: &Path) -> Result<Vec<Package>, String> {
     let json = read(
@@ -341,15 +406,25 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     };
 
     let mut packages = installed(host, &brew.path, &brew.prefix)?;
+    let mut notes = Vec::new();
+    let latest = if packages.is_empty() {
+        Latest::default()
+    } else {
+        outdated(host, &brew.path).unwrap_or_else(|note| {
+            notes.push(note);
+            Latest::default()
+        })
+    };
     for package in &mut packages {
         package.size_bytes = DirSizer::size_of(&package.path);
+        package.latest_version = latest.of(package);
     }
     packages.sort_by(|a, b| {
         (a.kind, Reverse(a.size_bytes), &a.name).cmp(&(b.kind, Reverse(b.size_bytes), &b.name))
     });
     Ok(Inventory {
         packages,
-        notes: Vec::new(),
+        notes,
         brew: Some(brew.path),
     })
 }
@@ -382,7 +457,9 @@ pub fn label(package: &Package) -> String {
         }
         PackageKind::Cask => {}
     }
-    if package.outdated {
+    if let Some(latest) = &package.latest_version {
+        write!(label, " · update {latest}").unwrap();
+    } else if package.outdated {
         label.push_str(" · outdated");
     }
     if package.pinned {
@@ -922,6 +999,16 @@ struct Widths {
     name: usize,
     version: usize,
     size: usize,
+    outdated: usize,
+}
+
+/// What the `outdated` column says: the new version, `outdated` without one, or `-`.
+fn outdated_cell(package: &Package) -> &str {
+    match (&package.latest_version, package.outdated) {
+        (Some(latest), _) => latest,
+        (None, true) => "outdated",
+        (None, false) => "-",
+    }
 }
 
 fn plain_section(title: &str, packages: &[&Package], widths: &Widths) -> String {
@@ -932,11 +1019,11 @@ fn plain_section(title: &str, packages: &[&Package], widths: &Widths) -> String 
         } else {
             "dependency"
         };
-        let outdated = if package.outdated { "outdated" } else { "-" };
+        let outdated = outdated_cell(package);
         let pinned = if package.pinned { "pinned" } else { "-" };
         writeln!(
             text,
-            "  {:<name$}  {:<version$}  {:>size$}  {origin}  {outdated:<8}  {pinned:<6}  {}",
+            "  {:<name$}  {:<version$}  {:>size$}  {origin}  {outdated:<outdated_width$}  {pinned:<6}  {}",
             package.name,
             package.version,
             format_bytes(package.size_bytes),
@@ -944,6 +1031,7 @@ fn plain_section(title: &str, packages: &[&Package], widths: &Widths) -> String 
             name = widths.name,
             version = widths.version,
             size = widths.size,
+            outdated_width = widths.outdated,
         )
         .unwrap();
     }
@@ -971,6 +1059,11 @@ pub fn plain_text(inventory: &Inventory) -> String {
             .map(|p| format_bytes(p.size_bytes).len())
             .max()
             .unwrap_or(0),
+        outdated: inventory
+            .packages
+            .iter()
+            .map(|p| outdated_cell(p).len())
+            .fold("outdated".len(), usize::max),
     };
     let section = |title: &str, kind: PackageKind| {
         let packages: Vec<&Package> = inventory
@@ -1000,6 +1093,11 @@ pub mod testing {
 
     // From brew info --json=v2 --installed on a Mac with Homebrew 7.0.12, cut down to 10 formulae and 2 casks. "pinned" was set to true on fd by hand, because no formula there was pinned.
     pub const BREW_INFO: &str = include_str!("../../tests/fixtures/brew_info.json");
+    // Cut down from brew outdated --json=v2 in Homebrew 7.
+    pub const BREW_OUTDATED: &str = r#"{"formulae": [{"name": "bun", "installed_versions": ["1.4.2"], "current_version": "1.4.4_1", "pinned": false, "pinned_version": null}],
+ "casks": [{"name": "ghostty", "installed_versions": ["1.2.0"], "current_version": "1.2.3"}]}"#;
+    pub const BREW_OUTDATED_BUN: &str =
+        r#"{"formulae": [{"name": "bun", "current_version": "1.4.4_1"}], "casks": []}"#;
     // From brew cleanup --dry-run on a Mac with Homebrew 7.0.12, a few lines. brew prints the Warning line on stderr; it is kept here to check that the parser skips it.
     pub const CLEANUP_DRY_RUN: &str = include_str!("../../tests/fixtures/brew_cleanup_dry_run.txt");
     // Written in the format of Cleanup.autoremove in Library/Homebrew/cleanup.rb (Homebrew 7.0.12), because brew autoremove --dry-run printed nothing on that Mac.
@@ -1016,6 +1114,7 @@ pub mod testing {
             size_bytes: bytes,
             on_request: true,
             outdated: false,
+            latest_version: None,
             pinned: false,
             used_by: Vec::new(),
             apps: Vec::new(),
@@ -1037,7 +1136,10 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO, CLEANUP_DRY_RUN, package, with_brew};
+    use super::testing::{
+        AUTOREMOVE_DRY_RUN, BREW_INFO, BREW_OUTDATED, BREW_OUTDATED_BUN, CLEANUP_DRY_RUN, package,
+        with_brew,
+    };
     use super::*;
     use crate::core::apps::testing::sandbox;
     use crate::core::host::fake::FakeHost;
@@ -1262,20 +1364,220 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_makes_one_brew_info_call() {
+    fn parse_outdated_reads_the_new_versions_by_kind() {
+        let latest = parse_outdated(BREW_OUTDATED).unwrap();
+
+        assert_eq!(latest.formulae["bun"], "1.4.4_1");
+        assert_eq!(latest.casks["ghostty"], "1.2.3");
+        assert!(!latest.formulae.contains_key("ghostty"));
+        assert!(!latest.casks.contains_key("bun"));
+    }
+
+    #[test]
+    fn a_formula_and_a_cask_with_the_same_name_do_not_mix() {
+        let json = r#"{"formulae": [{"name": "same", "current_version": "1"}],
+ "casks": [{"name": "same", "current_version": "2"}]}"#;
+
+        let latest = parse_outdated(json).unwrap();
+
+        assert_eq!(latest.formulae["same"], "1");
+        assert_eq!(latest.casks["same"], "2");
+    }
+
+    #[test]
+    fn outdated_json_that_does_not_parse_is_an_error() {
+        let error = parse_outdated("Warning: something").unwrap_err();
+
+        assert!(error.starts_with("Homebrew printed an outdated list taert cannot read: "));
+    }
+
+    const OUTDATED_ARGS: &str = "outdated --json=v2";
+
+    #[test]
+    fn scan_reads_the_new_versions() {
         let (_temp, layout) = with_brew("opt/homebrew");
         let host = FakeHost::default();
-        host.reply(INFO_LINE_START, BREW_INFO);
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(&line(&layout, OUTDATED_ARGS), BREW_OUTDATED_BUN);
 
         let inventory = scan(&layout, &host).unwrap();
 
-        let brew = layout.system("opt/homebrew/bin/brew");
+        assert!(inventory.notes.is_empty());
+        for package in &inventory.packages {
+            let expected = (package.name == "bun").then(|| "1.4.4_1".to_string());
+            assert_eq!(package.latest_version, expected, "{}", package.name);
+        }
+        assert!(host.ran(&line(&layout, OUTDATED_ARGS)));
+    }
+
+    #[test]
+    fn a_cask_gets_its_new_version_by_its_own_kind() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(&line(&layout, OUTDATED_ARGS), BREW_OUTDATED);
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(
+            named(&inventory.packages, "ghostty")
+                .latest_version
+                .as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn a_tap_formula_gets_its_new_version_by_full_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(
+            &line(&layout, OUTDATED_ARGS),
+            r#"{"formulae": [{"name": "charmbracelet/tap/crush", "current_version": "0.9"}], "casks": []}"#,
+        );
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(
+            named(&inventory.packages, "crush")
+                .latest_version
+                .as_deref(),
+            Some("0.9")
+        );
+    }
+
+    #[test]
+    fn a_cask_in_the_outdated_list_does_not_touch_a_formula_of_the_same_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(
+            &line(&layout, OUTDATED_ARGS),
+            r#"{"formulae": [], "casks": [{"name": "fd", "current_version": "9"}]}"#,
+        );
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(named(&inventory.packages, "fd").latest_version, None);
+    }
+
+    #[test]
+    fn an_empty_install_list_does_not_ask_brew_for_outdated_packages() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), r#"{"formulae":[],"casks":[]}"#);
+        host.fail(&line(&layout, OUTDATED_ARGS), "Error: broken tap\n");
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert!(inventory.packages.is_empty());
+        assert!(inventory.notes.is_empty());
+        assert!(!host.ran(&line(&layout, OUTDATED_ARGS)));
+    }
+
+    #[test]
+    fn a_failed_outdated_read_keeps_the_list() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.fail(&line(&layout, OUTDATED_ARGS), "Error: broken tap\n");
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(inventory.packages.len(), 12);
+        assert!(
+            inventory
+                .packages
+                .iter()
+                .all(|p| p.latest_version.is_none())
+        );
+        assert_eq!(
+            inventory.notes,
+            ["Homebrew did not list the outdated packages: Error: broken tap"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_outdated_list_keeps_the_packages_and_adds_a_note() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(&line(&layout, OUTDATED_ARGS), "Warning: something");
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert_eq!(inventory.packages.len(), 12);
+        assert!(
+            inventory
+                .packages
+                .iter()
+                .all(|p| p.latest_version.is_none())
+        );
+        assert_eq!(inventory.notes.len(), 1);
+        assert!(
+            inventory.notes[0].starts_with("Homebrew printed an outdated list taert cannot read: ")
+        );
+    }
+
+    #[test]
+    fn plain_text_prints_the_new_version_in_the_outdated_column() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 60_000_000);
+        bun.outdated = true;
+        bun.latest_version = Some("1.4.4_1".to_string());
+        let mut fd = package(PackageKind::Formula, "fd", "10.5.0", 2_000_000);
+        fd.outdated = true;
+        let inventory = Inventory {
+            packages: vec![bun, fd],
+            ..Inventory::default()
+        };
+
+        let expected = "\
+Formulae
+  bun  1.4.2   60.0 MB  on request  1.4.4_1   -       0
+  fd   10.5.0   2.0 MB  on request  outdated  -       0
+";
+        assert_eq!(plain_text(&inventory), expected);
+    }
+
+    #[test]
+    fn the_outdated_column_widens_for_a_long_version() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 60_000_000);
+        bun.outdated = true;
+        bun.latest_version = Some("2026.11.04_1".to_string());
+        let mut fd = package(PackageKind::Formula, "fd", "10.5.0", 2_000_000);
+        fd.outdated = true;
+        let inventory = Inventory {
+            packages: vec![bun, fd],
+            ..Inventory::default()
+        };
+
+        let expected = "\
+Formulae
+  bun  1.4.2   60.0 MB  on request  2026.11.04_1  -       0
+  fd   10.5.0   2.0 MB  on request  outdated      -       0
+";
+        assert_eq!(plain_text(&inventory), expected);
+    }
+
+    #[test]
+    fn the_scan_makes_one_brew_info_call_and_one_brew_outdated_call() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info"), BREW_INFO);
+        host.reply(
+            &line(&layout, OUTDATED_ARGS),
+            r#"{"formulae": [], "casks": []}"#,
+        );
+
+        let inventory = scan(&layout, &host).unwrap();
+
         assert_eq!(
             *host.calls.lock().unwrap(),
-            [format!(
-                "{INFO_LINE_START} {} info --json=v2 --installed",
-                brew.display()
-            )]
+            [
+                line(&layout, "info --json=v2 --installed"),
+                line(&layout, OUTDATED_ARGS)
+            ]
         );
         assert_eq!(inventory.packages.len(), 12);
         assert!(inventory.notes.is_empty());
@@ -1285,11 +1587,14 @@ mod tests {
     fn usr_local_is_used_when_opt_homebrew_has_no_brew() {
         let (_temp, layout) = with_brew("usr/local");
         let host = FakeHost::default();
-        host.reply(INFO_LINE_START, BREW_INFO);
+        let brew = layout.system("usr/local/bin/brew");
+        host.reply(
+            &format!("{INFO_LINE_START} {} info", brew.display()),
+            BREW_INFO,
+        );
 
         let inventory = scan(&layout, &host).unwrap();
 
-        let brew = layout.system("usr/local/bin/brew");
         assert!(host.ran(&format!("{INFO_LINE_START} {}", brew.display())));
         assert_eq!(
             named(&inventory.packages, "go").path,
@@ -1327,7 +1632,7 @@ mod tests {
         fill(&prefix.join("Cellar/fd"), 100_000);
         fill(&prefix.join("Caskroom/ghostty"), 900_000);
         let host = FakeHost::default();
-        host.reply(INFO_LINE_START, BREW_INFO);
+        host.reply(&line(&layout, "info"), BREW_INFO);
 
         let inventory = scan(&layout, &host).unwrap();
 
@@ -1724,6 +2029,44 @@ mod tests {
                 .flat_map(|group| &group.items)
                 .all(|row| !row.selected)
         );
+    }
+
+    #[test]
+    fn list_scan_label_shows_the_new_version() {
+        let mut packages = packages();
+        packages
+            .iter_mut()
+            .find(|p| p.name == "bun")
+            .unwrap()
+            .latest_version = Some("1.4.4_1".to_string());
+        let scan = list_scan(&Inventory {
+            packages,
+            ..Inventory::default()
+        });
+
+        let rows = rows(&scan);
+        let bun = rows
+            .iter()
+            .find(|(label, _)| label.starts_with("bun "))
+            .unwrap();
+
+        assert_eq!(bun.0, "bun 1.4.2 · on request · update 1.4.4_1");
+    }
+
+    #[test]
+    fn the_label_shows_the_new_version_in_place_of_outdated() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 1);
+        bun.outdated = true;
+        assert_eq!(label(&bun), "bun 1.4.2 · on request · outdated");
+
+        bun.latest_version = Some("1.4.4_1".to_string());
+        bun.pinned = true;
+
+        assert_eq!(
+            label(&bun),
+            "bun 1.4.2 · on request · update 1.4.4_1 · pinned"
+        );
+        assert_eq!(label_name(&label(&bun)), "bun 1.4.2");
     }
 
     #[test]
@@ -2734,7 +3077,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
     fn the_scan_remembers_the_brew_it_used_but_the_json_does_not_show_it() {
         let (_temp, layout) = with_brew("opt/homebrew");
         let host = FakeHost::default();
-        host.reply(INFO_LINE_START, BREW_INFO);
+        host.reply(&line(&layout, "info"), BREW_INFO);
 
         let inventory = scan(&layout, &host).unwrap();
 
