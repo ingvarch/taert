@@ -51,6 +51,14 @@ impl Theme {
         })
     }
 
+    /// The spinner frame for a tick: one still glyph with reduced motion.
+    pub fn spinner_frame(&self, tick: usize) -> &str {
+        if self.env.reduce_motion {
+            return "*";
+        }
+        self.g.spinner[tick % self.g.spinner.len()]
+    }
+
     // Typography
     pub fn headline(&self) -> Style {
         Style::default()
@@ -215,6 +223,17 @@ mod tests {
             ascii_glyphs: false,
             reduce_motion: false,
         })
+    }
+
+    #[test]
+    fn spinner_frame_follows_the_glyph_set_and_reduced_motion() {
+        let mut theme = Theme::plain();
+        assert_eq!(theme.spinner_frame(0), "-");
+        assert_eq!(theme.spinner_frame(5), "\\");
+        theme.env.reduce_motion = true;
+        assert_eq!(theme.spinner_frame(5), "*");
+        let unicode = color_theme();
+        assert_eq!(unicode.spinner_frame(10), unicode.g.spinner[0]);
     }
 
     #[test]
