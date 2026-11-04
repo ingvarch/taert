@@ -20,6 +20,7 @@ pub const SCAN_ID: &str = "brew";
 pub const CLEANUP_ID: &str = "brew-cleanup";
 pub const UNINSTALL_ID: &str = "brew-uninstall";
 const INFO_TIMEOUT: Duration = Duration::from_secs(60);
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BREW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const GROUP_FORMULA: &str = "Formula";
@@ -91,6 +92,21 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    /// Sets the new version of each package from `latest`. Returns the old label of each row
+    /// whose label changed, with its new one.
+    pub fn apply_latest(&mut self, latest: &Latest) -> HashMap<PathBuf, PathBuf> {
+        let mut changed = HashMap::new();
+        for package in &mut self.packages {
+            let old = label(package);
+            package.latest_version = latest.of(package);
+            let new = label(package);
+            if new != old {
+                changed.insert(PathBuf::from(old), PathBuf::from(new));
+            }
+        }
+        changed
+    }
+
     /// Drops an uninstalled formula and its name from what the others list as used by it.
     pub fn forget(&mut self, name: &str) {
         self.packages
@@ -372,8 +388,28 @@ pub fn parse_outdated(json: &str) -> Result<Latest, String> {
     })
 }
 
+/// Runs `brew update` so the next `brew outdated` knows the newest versions. On failure the
+/// error is the last line brew printed on stderr.
+pub fn update(host: &dyn Host, brew: &Path) -> Result<(), String> {
+    let output = run_brew(host, brew, &["update"], UPDATE_TIMEOUT);
+    if output.ok {
+        return Ok(());
+    }
+    Err(last_line(&output.stderr)
+        .unwrap_or("brew update failed")
+        .to_string())
+}
+
+/// The last line of `text` that is not blank, trimmed.
+fn last_line(text: &str) -> Option<&str> {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 /// Asks brew which packages have a newer version.
-fn outdated(host: &dyn Host, brew: &Path) -> Result<Latest, String> {
+pub fn outdated(host: &dyn Host, brew: &Path) -> Result<Latest, String> {
     let json = read(
         host,
         brew,
@@ -1196,6 +1232,90 @@ mod tests {
         assert!(!ada.on_request);
         assert!(!named(&packages, "brotli").on_request);
         assert_eq!(named(&packages, "brotli").version, "1.2.1");
+    }
+
+    const BREW: &str = "/fake/bin/brew";
+
+    #[test]
+    fn update_runs_brew_update_in_the_usual_environment() {
+        let host = FakeHost::default();
+        host.reply(&format!("{INFO_LINE_START} {BREW} update"), "");
+
+        assert_eq!(update(&host, Path::new(BREW)), Ok(()));
+        assert!(host.ran(&format!("{INFO_LINE_START} {BREW} update")));
+    }
+
+    #[test]
+    fn a_failed_update_reports_the_last_line_of_stderr() {
+        let host = FakeHost::default();
+        host.fail(
+            &format!("{INFO_LINE_START} {BREW} update"),
+            "Warning: something\nError: Could not resolve host: github.com\n",
+        );
+
+        assert_eq!(
+            update(&host, Path::new(BREW)),
+            Err("Error: Could not resolve host: github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failed_update_without_stderr_still_says_what_failed() {
+        let host = FakeHost::default();
+        host.fail(&format!("{INFO_LINE_START} {BREW} update"), "");
+
+        assert_eq!(
+            update(&host, Path::new(BREW)),
+            Err("brew update failed".to_string())
+        );
+    }
+
+    #[test]
+    fn the_outdated_list_can_be_read_alone() {
+        let host = FakeHost::default();
+        host.reply(
+            &format!("{INFO_LINE_START} {BREW} outdated --json=v2"),
+            BREW_OUTDATED_BUN,
+        );
+
+        let latest = outdated(&host, Path::new(BREW)).unwrap();
+
+        assert_eq!(latest.formulae["bun"], "1.4.4_1");
+        assert_eq!(host.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_versions_change_the_inventory_and_name_the_labels_that_changed() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 10);
+        bun.latest_version = Some("1.4.3".to_string());
+        let mut inventory = Inventory {
+            packages: vec![
+                bun,
+                package(PackageKind::Formula, "fd", "10.0", 5),
+                package(PackageKind::Cask, "ghostty", "1.2.0", 7),
+            ],
+            ..Inventory::default()
+        };
+        let old_bun = PathBuf::from(label(&inventory.packages[0]));
+        let latest = parse_outdated(
+            r#"{"formulae": [{"name": "fd", "current_version": "10.1"}], "casks": []}"#,
+        )
+        .unwrap();
+
+        let changed = inventory.apply_latest(&latest);
+
+        let versions: Vec<_> = inventory
+            .packages
+            .iter()
+            .map(|package| package.latest_version.as_deref())
+            .collect();
+        assert_eq!(versions, [None, Some("10.1"), None]);
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[&old_bun], PathBuf::from("bun 1.4.2 · on request"));
+        assert_eq!(
+            changed[&PathBuf::from("fd 10.0 · on request")],
+            PathBuf::from("fd 10.0 · on request · update 10.1")
+        );
     }
 
     #[test]

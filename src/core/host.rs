@@ -186,9 +186,10 @@ pub mod fake {
     use super::*;
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     type Effect = Box<dyn Fn() + Send>;
+    type RunEffect = Arc<dyn Fn() + Send + Sync>;
 
     /// Answers commands by the start of their line and records what ran.
     #[derive(Default)]
@@ -199,7 +200,7 @@ pub mod fake {
         pub admin_result: Mutex<Option<String>>,
         pub admin_stdout: Mutex<String>,
         pub admin_effect: Mutex<Option<Effect>>,
-        pub run_effects: Mutex<Vec<(String, Effect)>>,
+        pub run_effects: Mutex<Vec<(String, RunEffect)>>,
         pub signals: Mutex<Vec<(u32, i32)>>,
         pub signal_error: Mutex<Option<String>>,
         pub trashed: Mutex<Vec<PathBuf>>,
@@ -262,11 +263,8 @@ pub mod fake {
         }
 
         /// Runs `effect` when a command starts, like the real tool would.
-        pub fn when(&self, command: &str, effect: impl Fn() + Send + 'static) {
-            let entry = (
-                command.to_string(),
-                Box::new(effect) as Box<dyn Fn() + Send>,
-            );
+        pub fn when(&self, command: &str, effect: impl Fn() + Send + Sync + 'static) {
+            let entry = (command.to_string(), Arc::new(effect) as RunEffect);
             self.run_effects.lock().unwrap().push(entry);
         }
 
@@ -314,10 +312,16 @@ pub mod fake {
                 .collect::<Vec<_>>()
                 .join(" ");
             self.calls.lock().unwrap().push(line.clone());
-            for (command, effect) in self.run_effects.lock().unwrap().iter() {
-                if line.starts_with(command.as_str()) {
-                    effect();
-                }
+            let effects: Vec<_> = self
+                .run_effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(command, _)| line.starts_with(command.as_str()))
+                .map(|(_, effect)| effect.clone())
+                .collect();
+            for effect in effects {
+                effect();
             }
             let mut replies = self.replies.lock().unwrap();
             let found = replies

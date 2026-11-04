@@ -140,6 +140,18 @@ pub struct App {
     pub plan: Option<UninstallPlan>,
     /// Delete permanently instead of moving to the Trash
     pub permanent: bool,
+    /// The background check for Homebrew updates, while it runs.
+    brew_check: Option<Receiver<BrewCheck>>,
+    /// Set when the check starts, so the list checks once per run.
+    brew_checked: bool,
+    /// The brew the list opened by `taert brew` checks once the run starts.
+    brew_pending: Option<std::path::PathBuf>,
+}
+
+/// What the background check for Homebrew updates found.
+struct BrewCheck {
+    update_error: Option<String>,
+    latest: Result<homebrew::Latest, String>,
 }
 
 impl App {
@@ -160,6 +172,9 @@ impl App {
             installed: Vec::new(),
             plan: None,
             permanent: false,
+            brew_check: None,
+            brew_checked: false,
+            brew_pending: None,
         }
     }
 
@@ -228,7 +243,10 @@ impl App {
         ignore: IgnoreStore,
         config: Config,
     ) -> Self {
-        Self::with_select_state(SelectState::homebrew_list(inventory), ignore, config)
+        let mut app =
+            Self::with_select_state(SelectState::homebrew_list(inventory), ignore, config);
+        app.brew_pending = inventory.brew.clone();
+        app
     }
 
     fn with_select_state(state: SelectState, ignore: IgnoreStore, config: Config) -> Self {
@@ -248,6 +266,9 @@ impl App {
             installed: Vec::new(),
             plan: None,
             permanent: false,
+            brew_check: None,
+            brew_checked: false,
+            brew_pending: None,
         }
     }
 
@@ -273,6 +294,9 @@ impl App {
             installed: Vec::new(),
             plan: None,
             permanent: false,
+            brew_check: None,
+            brew_checked: false,
+            brew_pending: None,
         }
     }
 
@@ -390,6 +414,7 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> io::Result<()> {
+        self.start_pending_brew_check();
         while !self.should_quit {
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -423,6 +448,7 @@ impl App {
             })?;
 
             self.poll_scan();
+            self.poll_brew_check();
 
             // Tick analyze measuring if active
             if let Screen::Analyze(ref mut analyze) = self.screen {
@@ -487,6 +513,7 @@ impl App {
     }
 
     fn go_back(&mut self) {
+        self.brew_check = None;
         self.screen = match self.back_stack.pop() {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
@@ -547,6 +574,54 @@ impl App {
         }
     }
 
+    fn start_pending_brew_check(&mut self) {
+        if let Some(brew) = self.brew_pending.take() {
+            self.start_brew_check(brew);
+        }
+    }
+
+    /// Starts the check for Homebrew updates on a thread, once per run.
+    fn start_brew_check(&mut self, brew: std::path::PathBuf) {
+        if self.brew_checked {
+            return;
+        }
+        self.brew_checked = true;
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        thread::spawn(move || {
+            let update_error = homebrew::update(&*host, &brew).err();
+            let latest = homebrew::outdated(&*host, &brew);
+            let _ = tx.send(BrewCheck {
+                update_error,
+                latest,
+            });
+        });
+        self.brew_check = Some(rx);
+        if let Screen::Select(select) = &mut self.screen {
+            select.checking_updates = true;
+        }
+    }
+
+    fn poll_brew_check(&mut self) {
+        let Some(rx) = &self.brew_check else {
+            return;
+        };
+        let check = match rx.try_recv() {
+            Ok(check) => Some(check),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.brew_check = None;
+        if let Screen::Select(select) = &mut self.screen
+            && select.scan.id == homebrew::SCAN_ID
+        {
+            match check {
+                Some(check) => select.finish_update_check(check.update_error, check.latest),
+                None => select.checking_updates = false,
+            }
+        }
+    }
+
     fn poll_scan(&mut self) {
         if let Screen::Scanning(ref mut progress, ref rx, _) = self.screen {
             progress.tick();
@@ -584,6 +659,9 @@ impl App {
                         self.screen = Screen::Select(Box::new(
                             SelectState::homebrew_list(&inventory).with_permanent(self.permanent),
                         ));
+                        if let Some(brew) = inventory.brew {
+                            self.start_brew_check(brew);
+                        }
                         break;
                     }
                     ScanMessage::Finished(scan) => {
@@ -2299,8 +2377,9 @@ mod tests {
     /// Makes `command` on `host` wait until the returned sender is dropped.
     fn hold(host: &crate::core::host::fake::FakeHost, command: &str) -> mpsc::Sender<()> {
         let (release, held) = mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(held);
         host.when(command, move || {
-            let _ = held.recv();
+            let _ = held.lock().unwrap().recv();
         });
         release
     }
@@ -4374,6 +4453,380 @@ mod tests {
             assert!(!text.contains("Nothing is removed."), "{text}");
         }
 
+        const CHECK_INFO: &str = r#"{"formulae": [
+            {"name": "bun", "installed": [{"version": "1.4.2", "installed_on_request": true}]},
+            {"name": "app", "dependencies": ["lib"],
+             "installed": [{"version": "1", "installed_on_request": true}]},
+            {"name": "lib", "installed": [{"version": "1"}]},
+            {"name": "zed", "installed": [{"version": "2", "installed_on_request": true}]}],
+            "casks": []}"#;
+        const NOTHING_NEW: &str = r#"{"formulae": [], "casks": []}"#;
+
+        /// A Mac whose brew knows four formulae. `outdated` first says nothing is new, then that
+        /// bun has 1.4.4_1. `update` succeeds.
+        fn check_mac() -> (tempfile::TempDir, App, Arc<FakeHost>, String) {
+            check_mac_with(
+                CHECK_INFO,
+                NOTHING_NEW,
+                Some(homebrew::testing::BREW_OUTDATED_BUN),
+                None,
+            )
+        }
+
+        /// A Mac whose brew answers `info` with `info`, and `outdated` with `first` and then with
+        /// `second`, when there is one. `update` succeeds, or fails with `update_error`.
+        fn check_mac_with(
+            info: &str,
+            first: &str,
+            second: Option<&str>,
+            update_error: Option<&str>,
+        ) -> (tempfile::TempDir, App, Arc<FakeHost>, String) {
+            let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let brew = layout.system("opt/homebrew/bin/brew").display().to_string();
+            let host = Arc::new(FakeHost::default());
+            host.reply(
+                &format!("{BREW_START} {brew} info --json=v2 --installed"),
+                info,
+            );
+            let outdated = format!("{BREW_START} {brew} outdated --json=v2");
+            host.reply(&outdated, first);
+            if let Some(second) = second {
+                host.reply(&outdated, second);
+            }
+            let update = format!("{BREW_START} {brew} update");
+            match update_error {
+                Some(error) => host.fail(&update, error),
+                None => host.reply(&update, ""),
+            }
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = host.clone();
+            (temp, app, host, brew)
+        }
+
+        fn open_the_list(app: &mut App) {
+            app.handle_key(KeyCode::Char('5'));
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn finish_the_check(app: &mut App) {
+            for _ in 0..400 {
+                app.poll_brew_check();
+                if !select(app).checking_updates {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            panic!("the check did not end");
+        }
+
+        fn ran_times(host: &FakeHost, brew: &str, command: &str) -> usize {
+            let line = format!("{BREW_START} {brew} {command}");
+            host.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with(&line))
+                .count()
+        }
+
+        fn row_labels(app: &App) -> Vec<String> {
+            select(app)
+                .scan
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .map(|item| item.path.to_string_lossy().into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn opening_the_homebrew_list_checks_for_updates() {
+            let (_temp, mut app, host, brew) = check_mac();
+
+            open_the_list(&mut app);
+            assert!(screen_text(&app).contains("Checking for updates…"));
+            assert!(row_labels(&app).contains(&"bun 1.4.2 · on request".to_string()));
+            finish_the_check(&mut app);
+
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            assert!(screen_text(&app).contains("1 update"));
+            assert!(!screen_text(&app).contains("Checking for updates"));
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            assert_eq!(ran_times(&host, &brew, "info"), 1);
+        }
+
+        #[test]
+        fn the_list_opened_by_taert_brew_checks_when_the_run_starts() {
+            let (_temp, app, host, brew) = check_mac();
+            let inventory = homebrew::scan(&app.layout, &*host).unwrap();
+            let layout = app.layout.clone();
+            let mut app =
+                App::with_brew_list(&inventory, IgnoreStore::default(), Config::default());
+            app.layout = layout;
+            app.host = host.clone();
+            assert_eq!(ran_times(&host, &brew, "update"), 0);
+
+            app.start_pending_brew_check();
+            assert!(select(&app).checking_updates);
+            finish_the_check(&mut app);
+
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            app.start_pending_brew_check();
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+        }
+
+        #[test]
+        fn the_check_runs_once_per_run() {
+            let (_temp, mut app, host, brew) = check_mac();
+
+            open_the_list(&mut app);
+            finish_the_check(&mut app);
+            app.handle_key(KeyCode::Esc);
+            open_the_list(&mut app);
+
+            assert!(!select(&app).checking_updates);
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+        }
+
+        #[test]
+        fn leaving_the_list_drops_the_result_and_a_later_opening_does_not_check_again() {
+            let (_temp, mut app, host, brew) = check_mac();
+            let release = hold(&host, &format!("{BREW_START} {brew} update"));
+
+            open_the_list(&mut app);
+            app.handle_key(KeyCode::Esc);
+            assert!(matches!(app.screen, Screen::Workspace(_)));
+            open_the_list(&mut app);
+            let reopened = row_labels(&app);
+            drop(release);
+            for _ in 0..400 {
+                if ran_times(&host, &brew, "outdated") > 2 {
+                    break;
+                }
+                app.poll_brew_check();
+                thread::sleep(Duration::from_millis(5));
+            }
+            app.poll_brew_check();
+
+            assert_eq!(ran_times(&host, &brew, "outdated"), 3);
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            assert!(!select(&app).checking_updates);
+            assert!(select(&app).toast.is_none());
+            assert_eq!(row_labels(&app), reopened);
+        }
+
+        #[test]
+        fn a_failed_update_says_so_and_keeps_the_list() {
+            let (_temp, mut app, host, brew) = check_mac_with(
+                CHECK_INFO,
+                homebrew::testing::BREW_OUTDATED_BUN,
+                None,
+                Some("Error: no network"),
+            );
+            open_the_list(&mut app);
+            let before = row_labels(&app);
+
+            finish_the_check(&mut app);
+
+            let toast = select(&app).toast.as_ref().expect("a toast");
+            assert_eq!(toast.text, "Could not check for updates: Error: no network");
+            assert_eq!(toast.kind, ToastKind::Error);
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            assert_eq!(row_labels(&app), before);
+            assert_eq!(ran_times(&host, &brew, "outdated"), 2);
+        }
+
+        #[test]
+        fn after_a_failed_update_the_list_shows_what_outdated_reports() {
+            let (_temp, mut app, _host, _brew) = check_mac_with(
+                CHECK_INFO,
+                NOTHING_NEW,
+                Some(homebrew::testing::BREW_OUTDATED_BUN),
+                Some("Error: no network"),
+            );
+            open_the_list(&mut app);
+            assert!(row_labels(&app).contains(&"bun 1.4.2 · on request".to_string()));
+
+            finish_the_check(&mut app);
+
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            assert_eq!(
+                select(&app).toast.as_ref().expect("a toast").text,
+                "Could not check for updates: Error: no network"
+            );
+        }
+
+        #[test]
+        fn the_check_keeps_the_focus_and_the_open_rows() {
+            let (_temp, mut app, _host, _brew) = check_mac();
+            open_the_list(&mut app);
+            focus_on(&mut app, "app");
+            app.handle_key(KeyCode::Right);
+            focus_on(&mut app, "bun");
+            let focused = select(&app).focused_index;
+            let rows_before = select(&app).flattened_rows().len();
+
+            finish_the_check(&mut app);
+
+            let state = select(&app);
+            assert_eq!(state.focused_index, focused);
+            let row = &state.flattened_rows()[focused];
+            assert!(row.display_path.starts_with("bun "), "{}", row.display_path);
+            assert!(row.display_path.contains("update 1.4.4_1"));
+            assert!(state.expanded.contains(&vec!["app".to_string()]));
+            assert_eq!(state.flattened_rows().len(), rows_before);
+        }
+
+        const SEARCH_INFO: &str = r#"{"formulae": [
+            {"name": "aaa", "installed": [{"version": "1", "installed_on_request": true}]},
+            {"name": "bbb", "installed": [{"version": "1", "installed_on_request": true}]}],
+            "casks": []}"#;
+        const AAA_OUTDATED: &str =
+            r#"{"formulae": [{"name": "aaa", "current_version": "2"}], "casks": []}"#;
+        const AAA_BBB_OUTDATED: &str = r#"{"formulae": [
+            {"name": "aaa", "current_version": "2"},
+            {"name": "bbb", "current_version": "3"}], "casks": []}"#;
+
+        #[test]
+        fn the_check_keeps_the_focus_on_its_package_while_a_search_is_active() {
+            let (_temp, mut app, _host, _brew) =
+                check_mac_with(SEARCH_INFO, AAA_OUTDATED, Some(AAA_BBB_OUTDATED), None);
+            for (name, bytes) in [("aaa", 100_000), ("bbb", 300_000)] {
+                let keg = app.layout.system(&format!("opt/homebrew/Cellar/{name}"));
+                std::fs::create_dir_all(&keg).unwrap();
+                std::fs::write(keg.join("file"), vec![0; bytes]).unwrap();
+            }
+            open_the_list(&mut app);
+            press(
+                &mut app,
+                &[
+                    KeyCode::Char('/'),
+                    KeyCode::Char('u'),
+                    KeyCode::Char('p'),
+                    KeyCode::Char('d'),
+                    KeyCode::Char('a'),
+                    KeyCode::Char('t'),
+                    KeyCode::Char('e'),
+                    KeyCode::Enter,
+                ],
+            );
+            focus_on(&mut app, "aaa");
+
+            finish_the_check(&mut app);
+
+            let state = select(&app);
+            let row = &state.flattened_rows()[state.focused_index];
+            assert!(row.display_path.starts_with("aaa "), "{}", row.display_path);
+            assert!(row.display_path.contains("update 2"));
+        }
+
+        #[test]
+        fn a_pinned_formula_keeps_its_refusal_after_the_check_gives_it_a_version() {
+            let info = r#"{"formulae": [
+                {"name": "pin", "pinned": true,
+                 "installed": [{"version": "1", "installed_on_request": true}]}],
+                "casks": []}"#;
+            let outdated =
+                r#"{"formulae": [{"name": "pin", "current_version": "2"}], "casks": []}"#;
+            let (_temp, mut app, _host, _brew) =
+                check_mac_with(info, NOTHING_NEW, Some(outdated), None);
+            open_the_list(&mut app);
+            finish_the_check(&mut app);
+            assert!(row_labels(&app)[0].contains("update 2"));
+            focus_on(&mut app, "pin");
+
+            app.handle_key(KeyCode::Char('d'));
+
+            let state = select(&app);
+            assert_eq!(
+                state.toast.as_ref().expect("a toast").text,
+                "pin is pinned. Run brew unpin pin first."
+            );
+            assert_eq!(selected(&app), 0);
+            assert!(matches!(state.overlay, ModalOverlay::None));
+        }
+
+        #[test]
+        fn a_failed_outdated_after_the_update_says_so_and_keeps_the_versions() {
+            let (_temp, mut app, host, brew) =
+                check_mac_with(CHECK_INFO, homebrew::testing::BREW_OUTDATED_BUN, None, None);
+            host.fail(
+                &format!("{BREW_START} {brew} outdated --json=v2"),
+                "Error: outdated broke",
+            );
+            open_the_list(&mut app);
+            let before = row_labels(&app);
+
+            finish_the_check(&mut app);
+
+            let toast = select(&app).toast.as_ref().expect("a toast");
+            assert_eq!(
+                toast.text,
+                "Could not check for updates: Homebrew did not list the outdated packages: Error: outdated broke"
+            );
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            assert_eq!(row_labels(&app), before);
+        }
+
+        #[test]
+        fn a_check_that_dies_stops_checking() {
+            let (_temp, mut app, host, brew) = check_mac();
+            host.when(&format!("{BREW_START} {brew} update"), || {
+                panic!("the check thread dies")
+            });
+            open_the_list(&mut app);
+
+            finish_the_check(&mut app);
+
+            assert!(select(&app).toast.is_none());
+            assert!(!screen_text(&app).contains("Checking for updates"));
+        }
+
+        #[test]
+        fn the_check_keeps_a_row_selected_for_removal() {
+            let (_temp, mut app, _host, _brew) = check_mac();
+            open_the_list(&mut app);
+            focus_on(&mut app, "bun");
+            app.handle_key(KeyCode::Char('d'));
+            assert_eq!(selected(&app), 1);
+
+            finish_the_check(&mut app);
+
+            assert_eq!(selected(&app), 1);
+            assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
+        }
+
+        #[test]
+        fn a_removal_during_the_check_keeps_the_status_line() {
+            let (_temp, mut app, _host, _brew) = check_mac();
+            open_the_list(&mut app);
+            focus_on(&mut app, "bun");
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            state.uninstall_focused();
+            state.overlay = ModalOverlay::Outcome(RemovalReport::default());
+
+            state.close_homebrew_outcome();
+
+            assert!(state.checking_updates);
+        }
+
         #[test]
         fn the_homebrew_row_reads_brew_and_shows_the_list() {
             let (_temp, layout) = sandbox();
@@ -5014,6 +5467,7 @@ mod tests {
             let mut app = new_app();
             app.layout = layout;
             app.host = host.clone();
+            app.brew_checked = true;
 
             app.handle_key(KeyCode::Char('5'));
             while matches!(app.screen, Screen::Scanning(..)) {

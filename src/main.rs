@@ -2514,6 +2514,22 @@ mod tests {
     }
 
     #[test]
+    fn brew_json_and_plain_never_run_brew_update() {
+        for flag in ["--json", "--plain"] {
+            let (_temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let host = FakeHost::default();
+            host.reply(&brew_read(&layout, "info"), BREW_INFO);
+            host.reply(&brew_read(&layout, "outdated"), BREW_OUTDATED_BUN);
+
+            let ran = brew(&["brew", flag], &host, &layout);
+
+            assert!(ran.ok);
+            assert!(!host.ran(&brew_read(&layout, "update")), "{flag}");
+            assert_eq!(host.calls.lock().unwrap().len(), 2, "{flag}");
+        }
+    }
+
+    #[test]
     fn brew_plain_says_when_homebrew_is_missing() {
         let (_temp, layout) = sandbox();
         let host = FakeHost::default();
