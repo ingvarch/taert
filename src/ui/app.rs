@@ -2289,6 +2289,22 @@ mod tests {
         assert!(!selected(&app));
     }
 
+    fn wait_for_removal(app: &mut App) {
+        while app.removal_rx.is_some() {
+            app.poll_removal();
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Makes `command` on `host` wait until the returned sender is dropped.
+    fn hold(host: &crate::core::host::fake::FakeHost, command: &str) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel::<()>();
+        host.when(command, move || {
+            let _ = held.recv();
+        });
+        release
+    }
+
     fn press(app: &mut App, keys: &[KeyCode]) {
         for key in keys {
             app.handle_key(*key);
@@ -3353,13 +3369,6 @@ mod tests {
             assert!(text.contains("Uninstall 1 app?"), "{text}");
         }
 
-        fn wait_for_removal(app: &mut App) {
-            while app.removal_rx.is_some() {
-                app.poll_removal();
-                thread::sleep(Duration::from_millis(5));
-            }
-        }
-
         #[test]
         fn confirming_removes_the_app_and_leads_back_to_a_fresh_list() {
             let (_temp, mut app) = app_in_sandbox();
@@ -3618,20 +3627,7 @@ mod tests {
 
         /// Slims the apps at `bundles` from the slim list and returns the finished app.
         fn run_slim(layout: Layout, bundles: &[&Path], host: FakeHost) -> App {
-            let items = bundles
-                .iter()
-                .map(|bundle| ScanItem::new(bundle.to_path_buf(), 11, true, false))
-                .collect();
-            let scan = CategoryScan {
-                id: slim::SCAN_ID.to_string(),
-                title: "Slim Universal Apps".to_string(),
-                notes: Vec::new(),
-                groups: vec![ToolGroup {
-                    tool: "Applications".to_string(),
-                    items,
-                }],
-            };
-            let mut app = select_app(scan);
+            let mut app = select_app(slim_scan(bundles));
             app.layout = layout;
             app.host = Arc::new(host);
 
@@ -3669,6 +3665,57 @@ mod tests {
             host.reply("codesign", "");
             host.reply("spctl", "");
             host
+        }
+
+        fn slim_scan(bundles: &[&Path]) -> CategoryScan {
+            CategoryScan {
+                id: slim::SCAN_ID.to_string(),
+                title: "Slim Universal Apps".to_string(),
+                notes: Vec::new(),
+                groups: vec![ToolGroup {
+                    tool: "Applications".to_string(),
+                    items: bundles
+                        .iter()
+                        .map(|bundle| ScanItem::new(bundle.to_path_buf(), 11, true, false))
+                        .collect(),
+                }],
+            }
+        }
+
+        #[test]
+        fn the_slim_question_says_the_old_app_goes_to_the_trash() {
+            let mut app = select_app(slim_scan(&[Path::new("/Applications/X.app")]));
+
+            press(&mut app, &[KeyCode::Enter]);
+
+            let screen = screen_text(&app);
+            assert!(screen.contains("Slim 1 app?"), "{screen}");
+            assert!(screen.contains("of Intel code"), "{screen}");
+            assert!(screen.contains("goes to the Trash"), "{screen}");
+            assert!(!screen.contains("permanently"), "{screen}");
+            assert!(!screen.contains("cannot be undone"), "{screen}");
+        }
+
+        #[test]
+        fn the_progress_title_names_the_run() {
+            let (_temp, layout) = sandbox();
+            let first = layout.user("Applications/A.app");
+            let second = layout.user("Applications/B.app");
+            write_test_app(&first, "com.vendor.a");
+            write_test_app(&second, "com.vendor.b");
+            let host = ready_host(&first);
+            let release = hold(&host, "ditto");
+            let mut app = select_app(slim_scan(&[&first, &second]));
+            app.layout = layout;
+            app.host = Arc::new(host);
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            let screen = screen_text(&app);
+            drop(release);
+            wait_for_removal(&mut app);
+
+            assert!(screen.contains("Slimming 2 apps…"), "{screen}");
+            assert!(!screen.contains("Removing"), "{screen}");
         }
 
         #[test]
@@ -3967,23 +4014,55 @@ mod tests {
             let host = FakeHost::default();
             host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
             host.reply("/usr/sbin/lsof", "");
-            let (release, held) = std::sync::mpsc::channel::<()>();
-            let held = std::sync::Mutex::new(held);
-            host.when("/usr/sbin/lsof", move || {
-                let _ = held.lock().unwrap().recv();
-            });
+            let release = hold(&host, "/usr/sbin/lsof");
             app.host = Arc::new(host);
 
             press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
             app.handle_key(KeyCode::Esc);
             drop(release);
-            while app.removal_rx.is_some() {
-                app.poll_removal();
-                thread::sleep(Duration::from_millis(5));
-            }
+            wait_for_removal(&mut app);
 
             assert!(!is_compressed(&made[1].1));
             assert!(outcome(&app).notes.iter().any(|n| n.contains("Cancelled")));
+        }
+
+        #[test]
+        fn the_compress_question_says_files_stay() {
+            let (_temp, mut app, _made) = prepare(&["Idle"], &[]);
+
+            press(&mut app, &[KeyCode::Enter]);
+
+            let screen = screen_text(&app);
+            assert!(screen.contains("Compress 1 item?"), "{screen}");
+            assert!(screen.contains("with APFS compression"), "{screen}");
+            assert!(screen.contains("stay where they are."), "{screen}");
+            assert!(screen.contains("Cancel    Compress"), "{screen}");
+            assert!(!screen.contains("permanently"), "{screen}");
+            assert!(!screen.contains("cannot be undone"), "{screen}");
+            assert!(!screen.contains("Trash"), "{screen}");
+            assert!(!screen.contains("Remove"), "{screen}");
+        }
+
+        #[test]
+        fn the_progress_title_names_the_run() {
+            let (_temp, mut app, _made) = prepare(&["First", "Second"], &[]);
+            let host = FakeHost::default();
+            host.reply("/bin/ps", "    1     0 /sbin/launchd\n");
+            host.reply("/usr/sbin/lsof", "");
+            let release = hold(&host, "/usr/sbin/lsof");
+            app.host = Arc::new(host);
+
+            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            let screen = screen_text(&app);
+            drop(release);
+            wait_for_removal(&mut app);
+
+            assert!(screen.contains("Compressing 2 items…"), "{screen}");
+            assert!(
+                screen.contains("Esc stops after the current file."),
+                "{screen}"
+            );
+            assert!(!screen.contains("Removing"), "{screen}");
         }
 
         #[test]

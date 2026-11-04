@@ -1083,7 +1083,14 @@ fn render_overlay(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             spinner_idx,
             cancel,
         } => {
-            render_removing_dialog(frame, progress, *spinner_idx, cancel.is_some(), theme);
+            render_removing_dialog(
+                frame,
+                progress,
+                *spinner_idx,
+                cancel.is_some(),
+                RunKind::of(state),
+                theme,
+            );
         }
         ModalOverlay::Outcome(report) => {
             render_outcome_dialog(frame, report, RunKind::of(state), theme);
@@ -1293,52 +1300,27 @@ fn render_confirmation_dialog(
     theme: &Theme,
 ) {
     let count = state.scan.selected_items().len();
-    let noun = if count == 1 { "item" } else { "items" };
     let bundles = state
         .scan
         .selected_items()
         .iter()
         .filter(|item| item.role == Some(UninstallRole::Bundle))
         .count();
-    let formula = homebrew_formula(state);
-    let title = if let Some(name) = formula {
-        format!("Uninstall {name}?")
-    } else if state.scan.id == slim::SCAN_ID {
-        format!("Slim {}?", plural(count, "app", "apps"))
-    } else if bundles > 0 {
-        format!("Uninstall {}?", plural(bundles, "app", "apps"))
-    } else {
-        format!("Remove {count} {noun}?")
-    };
-
-    let total_bytes = state.scan.total_selected_bytes();
-    let selected = state.scan.selected_items();
-    let trashed_count = selected
-        .iter()
-        .filter(|item| state.removal_mode(item) == RemovalMode::Trash)
-        .count();
-    let perm_count = selected.len().saturating_sub(trashed_count);
-
-    let msg = if let Some(name) = formula {
-        format!(
-            "Homebrew will remove {name} ({}). This cannot be undone.",
-            format_bytes(total_bytes)
-        )
-    } else if trashed_count > 0 && perm_count == 0 {
-        format!(
-            "{} will be moved to the Trash. Empty it to get the space back.",
-            format_bytes(total_bytes)
-        )
-    } else if trashed_count > 0 && perm_count > 0 {
-        format!(
-            "Personal files and apps ({}) will be moved to the Trash. System files will be permanently deleted.",
-            format_bytes(total_bytes)
-        )
-    } else {
-        format!(
-            "{} will be permanently deleted. This cannot be undone.",
-            format_bytes(total_bytes)
-        )
+    let total = format_bytes(state.scan.total_selected_bytes());
+    let (title, msg, action) = match RunKind::of(state) {
+        RunKind::Slim => (
+            format!("Slim {}?", plural(count, "app", "apps")),
+            format!(
+                "Saves about {total} of Intel code. The old copy of each app goes to the Trash. Empty it to get the space back."
+            ),
+            "Slim",
+        ),
+        RunKind::Compress => (
+            format!("Compress {}?", plural(count, "item", "items")),
+            format!("Saves about {total} with APFS compression. The files stay where they are."),
+            "Compress",
+        ),
+        RunKind::Remove | RunKind::Uninstall => removal_question(state, count, bundles, &total),
     };
 
     let mut message = vec![Line::from(msg)];
@@ -1390,16 +1372,53 @@ fn render_confirmation_dialog(
         .message(message)
         .buttons(vec![
             Button::new("Cancel").focused(cancel_focused),
-            Button::destructive(if state.scan.id == slim::SCAN_ID {
-                "Slim"
-            } else if bundles > 0 || formula.is_some() {
-                "Uninstall"
-            } else {
-                "Remove"
-            })
-            .focused(remove_focused),
+            Button::destructive(action).focused(remove_focused),
         ])
         .render(frame, frame.area(), theme);
+}
+
+/// The title, the first line and the button of the question before a removal or an uninstall.
+fn removal_question(
+    state: &SelectState,
+    count: usize,
+    bundles: usize,
+    total: &str,
+) -> (String, String, &'static str) {
+    if let Some(name) = homebrew_formula(state) {
+        return (
+            format!("Uninstall {name}?"),
+            format!("Homebrew will remove {name} ({total}). This cannot be undone."),
+            "Uninstall",
+        );
+    }
+    let selected = state.scan.selected_items();
+    let trashed_count = selected
+        .iter()
+        .filter(|item| state.removal_mode(item) == RemovalMode::Trash)
+        .count();
+    let perm_count = selected.len().saturating_sub(trashed_count);
+    let msg = if trashed_count > 0 && perm_count == 0 {
+        format!("{total} will be moved to the Trash. Empty it to get the space back.")
+    } else if trashed_count > 0 && perm_count > 0 {
+        format!(
+            "Personal files and apps ({total}) will be moved to the Trash. System files will be permanently deleted."
+        )
+    } else {
+        format!("{total} will be permanently deleted. This cannot be undone.")
+    };
+    if bundles > 0 {
+        (
+            format!("Uninstall {}?", plural(bundles, "app", "apps")),
+            msg,
+            "Uninstall",
+        )
+    } else {
+        (
+            format!("Remove {}?", plural(count, "item", "items")),
+            msg,
+            "Remove",
+        )
+    }
 }
 
 fn render_removing_dialog(
@@ -1407,11 +1426,17 @@ fn render_removing_dialog(
     progress: &RemovalProgress,
     spinner_idx: usize,
     cancellable: bool,
+    kind: RunKind,
     theme: &Theme,
 ) {
     let count = progress.total_count;
-    let noun = if count == 1 { "item" } else { "items" };
-    let title = format!("Removing {count} {noun}…");
+    let title = match kind {
+        RunKind::Slim => format!("Slimming {}…", plural(count, "app", "apps")),
+        RunKind::Compress => format!("Compressing {}…", plural(count, "item", "items")),
+        RunKind::Remove | RunKind::Uninstall => {
+            format!("Removing {}…", plural(count, "item", "items"))
+        }
+    };
 
     let spinner_char = if theme.env.reduce_motion {
         "*"
