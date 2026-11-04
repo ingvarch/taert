@@ -1430,6 +1430,53 @@ fn snapshot_select_brew_update() {
     assert_snapshot!("select_brew_update_120x32", select_screen(&state));
 }
 
+/// Three packages with an update, a pinned one, and one that is up to date.
+fn brew_upgrades() -> SelectState {
+    let mut bun = brew_package(PackageKind::Formula, "bun", "1.4.2", 60_000_000);
+    bun.latest_version = Some("1.4.4_1".to_string());
+    bun.installed_at = days_ago(1);
+    let mut go = brew_package(PackageKind::Formula, "go", "1.27.3", 250_100_000);
+    go.latest_version = Some("1.27.4".to_string());
+    go.installed_at = days_ago(40);
+    let mut fd = brew_package(PackageKind::Formula, "fd", "10.5.0", 2_000_000);
+    fd.latest_version = Some("10.6.0".to_string());
+    fd.pinned = true;
+    let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.2.0", 50_000_000);
+    ghostty.apps = vec!["Ghostty.app".to_string()];
+    ghostty.latest_version = Some("1.2.3".to_string());
+    let rg = brew_package(PackageKind::Formula, "ripgrep", "15.1.0", 5_000_000);
+    SelectState::homebrew_list(&Inventory {
+        packages: vec![go, bun, fd, rg, ghostty],
+        brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+        ..Inventory::default()
+    })
+}
+
+#[test]
+fn snapshot_select_brew_upgrade_confirm() {
+    let mut state = brew_upgrades();
+
+    state.upgrade_all();
+
+    assert_snapshot!("select_brew_upgrade_confirm_120x32", select_screen(&state));
+}
+
+#[test]
+fn snapshot_select_brew_upgrade_outcome() {
+    let mut state = brew_upgrades();
+    state.upgrade_all();
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        removed_count: 2,
+        failures: vec![RemovalFailure {
+            path: PathBuf::from("ghostty"),
+            error: "Error: sudo needed If it needs your password, run brew upgrade --cask ghostty in a terminal.".to_string(),
+        }],
+        ..RemovalReport::default()
+    });
+
+    assert_snapshot!("select_brew_upgrade_outcome_120x32", select_screen(&state));
+}
+
 /// `golangci-lint` open two levels deep: its `go`, and the `gmp` that `go` needs.
 fn brew_tree() -> SelectState {
     let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);

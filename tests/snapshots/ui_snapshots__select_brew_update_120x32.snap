@@ -33,4 +33,4 @@ expression: select_screen(&state)
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  /  Search    ↑↓  Move    d  Uninstall    ⇧S/N/T  Sort: Size    ⎋  Back    ?  More                          Expand  ↵
+  /  Search    ↑↓  Move    d  Uninstall    u  Upgrade    ⇧S/N/T  Sort: Size    ⎋  Back    ?  More            Expand  ↵

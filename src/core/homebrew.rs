@@ -475,7 +475,33 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
             ..Inventory::default()
         });
     };
+    read_inventory(host, &brew, &[])
+}
 
+/// Reads the list again after an upgrade. Only the packages that are new or changed their
+/// version are measured; every other package keeps the size it has in `old`.
+pub fn refresh(host: &dyn Host, old: &Inventory) -> Result<Inventory, String> {
+    let path = old.brew.as_deref().ok_or(NOT_INSTALLED)?;
+    let brew = Brew {
+        prefix: prefix_of(path)?.to_path_buf(),
+        path: path.to_path_buf(),
+    };
+    read_inventory(host, &brew, &old.packages)
+}
+
+/// The Homebrew prefix two folders above `<prefix>/bin/brew` or `<prefix>/Cellar/<name>`.
+fn prefix_of(path: &Path) -> Result<&Path, String> {
+    path.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "taert cannot find the Homebrew prefix of {}.",
+            path.display()
+        )
+    })
+}
+
+/// Reads the packages and their new versions. A package that `known` lists with the same
+/// version keeps its size.
+fn read_inventory(host: &dyn Host, brew: &Brew, known: &[Package]) -> Result<Inventory, String> {
     let mut packages = installed(host, &brew.path, &brew.prefix)?;
     let mut notes = Vec::new();
     let latest = if packages.is_empty() {
@@ -487,7 +513,13 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
         })
     };
     for package in &mut packages {
-        package.size_bytes = DirSizer::size_of(&package.path);
+        package.size_bytes = known
+            .iter()
+            .find(|old| {
+                (old.kind, &old.name, &old.version)
+                    == (package.kind, &package.name, &package.version)
+            })
+            .map_or_else(|| DirSizer::size_of(&package.path), |old| old.size_bytes);
         latest.apply(package);
     }
     packages.sort_by(|a, b| {
@@ -496,7 +528,7 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     Ok(Inventory {
         packages,
         notes,
-        brew: Some(brew.path),
+        brew: Some(brew.path.clone()),
     })
 }
 
@@ -815,7 +847,7 @@ pub fn upgrade_refusal(name: &str, package: Option<&Package>) -> Option<String> 
 }
 
 /// The packages to upgrade, and the brew that upgrades them.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UpgradePlan {
     pub brew: PathBuf,
     pub packages: Vec<Package>,
@@ -844,15 +876,27 @@ pub fn upgrade_plan(
             }
             package.cloned().into_iter().collect()
         }
-        None => packages
-            .into_iter()
-            .filter(|package| upgrade_refusal(&package.name, Some(package)).is_none())
-            .collect(),
+        None => upgradable(&packages),
     };
     Ok(UpgradePlan {
         brew: brew.path,
         packages,
     })
+}
+
+/// Every outdated package that `upgrade_refusal` lets through.
+pub fn upgradable(packages: &[Package]) -> Vec<Package> {
+    packages
+        .iter()
+        .filter(|package| upgrade_refusal(&package.name, Some(package)).is_none())
+        .cloned()
+        .collect()
+}
+
+/// The line that names an upgrade, like `bun 1.4.2 → 1.4.4_1`.
+pub fn upgrade_change(package: &Package) -> String {
+    let new = package.latest_version.as_deref().unwrap_or_default();
+    format!("{} {} → {new}", package.name, package.version)
 }
 
 /// Upgrades one package with its own `brew upgrade` call. On failure the error is the last
@@ -1088,13 +1132,7 @@ fn versions(cellar: &Path) -> Vec<String> {
 /// Uninstalls every version of the formula, only if the packages brew lists now still show
 /// nothing using it.
 fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<(), String> {
-    let prefix = cellar.parent().and_then(Path::parent).ok_or_else(|| {
-        format!(
-            "taert cannot find the Homebrew prefix of {}.",
-            cellar.display()
-        )
-    })?;
-    let packages = installed(host, brew, prefix)?;
+    let packages = installed(host, brew, prefix_of(cellar)?)?;
     let Some(package) = packages
         .iter()
         .find(|package| package.kind == PackageKind::Formula && package.name == name)
@@ -1290,6 +1328,37 @@ pub mod testing {
         std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
         std::fs::write(brew, "").unwrap();
         (temp, layout)
+    }
+
+    /// A formula installed on request, as `brew info --json=v2` lists it.
+    pub fn formula(name: &str, version: &str, pinned: bool) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "pinned": pinned,
+            "installed": [{"version": version, "installed_on_request": true}],
+        })
+    }
+
+    /// The output of `brew info --json=v2 --installed`, with casks as `(token, version)`.
+    pub fn info(formulae: &[serde_json::Value], casks: &[(&str, &str)]) -> String {
+        let casks: Vec<_> = casks
+            .iter()
+            .map(|(token, version)| serde_json::json!({"token": token, "installed": version}))
+            .collect();
+        serde_json::json!({"formulae": formulae, "casks": casks}).to_string()
+    }
+
+    /// The output of `brew outdated --json=v2`, with packages as `(name, new version)`.
+    pub fn outdated(formulae: &[(&str, &str)], casks: &[(&str, &str)]) -> String {
+        let list = |pairs: &[(&str, &str)]| -> Vec<_> {
+            pairs
+                .iter()
+                .map(
+                    |(name, version)| serde_json::json!({"name": name, "current_version": version}),
+                )
+                .collect()
+        };
+        serde_json::json!({"formulae": list(formulae), "casks": list(casks)}).to_string()
     }
 }
 
@@ -3629,5 +3698,74 @@ Would remove: /opt/homebrew/Cellar/go/1.0
             result,
             Err("Error: sudo needed If it needs your password, run brew upgrade --cask ghostty in a terminal.".to_string())
         );
+    }
+
+    #[test]
+    fn a_refresh_measures_only_new_and_changed_packages() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        let formula = |name, version| testing::formula(name, version, false);
+        host.reply(
+            &line(&layout, "info --json=v2 --installed"),
+            &testing::info(
+                &[
+                    formula("same", "1"),
+                    formula("moved", "2"),
+                    formula("added", "1"),
+                ],
+                &[],
+            ),
+        );
+        host.reply(
+            &line(&layout, "outdated --json=v2"),
+            &testing::outdated(&[("same", "9")], &[]),
+        );
+        let cellar = layout.system("opt/homebrew/Cellar");
+        fill(&cellar.join("same"), 30_000);
+        fill(&cellar.join("moved"), 20_000);
+        fill(&cellar.join("added"), 10_000);
+        let mut before = package(PackageKind::Formula, "same", "1", 111);
+        before.path = cellar.join("same");
+        let mut moved = package(PackageKind::Formula, "moved", "1", 222);
+        moved.path = cellar.join("moved");
+        let gone = package(PackageKind::Formula, "gone", "1", 333);
+        let old = Inventory {
+            packages: vec![before, moved, gone],
+            brew: Some(brew_of(&layout)),
+            ..Inventory::default()
+        };
+
+        let fresh = refresh(&host, &old).unwrap();
+
+        let size = |name: &str| named(&fresh.packages, name).size_bytes;
+        assert_eq!(fresh.packages.len(), 3);
+        assert_eq!(size("same"), 111);
+        assert_eq!(size("moved"), DirSizer::size_of(&cellar.join("moved")));
+        assert_eq!(size("added"), DirSizer::size_of(&cellar.join("added")));
+        assert_eq!(
+            named(&fresh.packages, "same").latest_version.as_deref(),
+            Some("9")
+        );
+        assert_eq!(fresh.brew, Some(brew_of(&layout)));
+        let reads = brew_args(&host, &layout);
+        assert_eq!(reads, ["info --json=v2 --installed", "outdated --json=v2"]);
+    }
+
+    #[test]
+    fn a_refresh_of_a_list_without_brew_is_an_error_and_runs_nothing() {
+        let host = FakeHost::default();
+
+        let error = refresh(&host, &Inventory::default()).unwrap_err();
+
+        assert_eq!(error, NOT_INSTALLED);
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_upgrade_change_names_the_package_and_both_versions() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 1);
+        bun.latest_version = Some("1.4.4_1".to_string());
+
+        assert_eq!(upgrade_change(&bun), "bun 1.4.2 → 1.4.4_1");
     }
 }
