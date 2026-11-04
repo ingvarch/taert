@@ -5,12 +5,12 @@ expression: output
  Startup items                            5 items
 ──────────────────────────────────────────────────
    ╭─ Startup items (5) ───────────────────────╮
-   │ ▌ ● Docker       running (1.2% · 47.2 MB) │
-   │   · Spotify Web Helper (Spotify) disabled │
-   │   ✕ Old Broken Service             broken │
-   │   · Stuck…pdater disabled · still running │
-   │   ○ Example Sync                  enabled │
-   │                                           │
+   │     NAME       STATE                      │
+   │ ▌ ● Docker     running                    │
+   │   · Spot…elper disabled                   │
+   │   ✕ Old …rvice broken                     │
+   │   · Stuc…dater disabled · still running   │
+   │   ○ Exam… Sync enabled                    │
    │                                           │
    │                                           │
    │                                           │

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Startup Items columns and colors**: the list has a titles row and the columns `NAME`, `TYPE`, `STATE`, `CPU`, and `MEMORY`, each with one width for every row, so the values line up. The state no longer holds the CPU and memory. `enabled` is drawn in the accent color instead of gray. The symbol of each row has the color of its state. `TYPE` is dim gray, and `CPU` and `MEMORY` use the body color instead of green. In a narrow window `TYPE` hides first, then `CPU` and `MEMORY`. `NAME` and `STATE` always show. The detail panel, `taert startup --plain`, and `--json` do not change.
+
 ## [0.8.0] - 2026-11-04
 
 ### Changed

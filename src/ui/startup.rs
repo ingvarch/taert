@@ -3,16 +3,17 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use super::components::button::Button;
 use super::components::chrome::AppChrome;
 use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
-use super::components::list::ListRow;
+use super::components::list::{Column, ListRow};
 use super::components::modal::{Modal, dim_backdrop};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
@@ -273,74 +274,35 @@ fn render_item_list(frame: &mut Frame, area: Rect, state: &StartupScreenState, t
     let frame_rows = (area.height as usize).saturating_sub(FRAME_ROWS);
     let color = theme.p.orange;
 
-    let mut lines = Vec::new();
+    let columns = StartupColumns::of(&state.items);
+    let item_rows = frame_rows.saturating_sub(1);
+    let mut lines = vec![titles_line(&columns, row_width, theme)];
 
-    let scroll_offset = if state.items.len() > frame_rows && frame_rows > 0 {
-        let half = frame_rows / 2;
-        let max_offset = state.items.len().saturating_sub(frame_rows);
+    let scroll_offset = if state.items.len() > item_rows && item_rows > 0 {
+        let half = item_rows / 2;
+        let max_offset = state.items.len().saturating_sub(item_rows);
         state.selected_index.saturating_sub(half).min(max_offset)
     } else {
         0
     };
 
-    for (idx, item) in state
-        .items
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(frame_rows)
-    {
-        let is_selected = idx == state.selected_index;
-
-        let (leading_symbol, leading_style) = match item.state {
-            StartupState::Running => (theme.g.bullet, theme.success()),
-            StartupState::Enabled => (theme.g.check_off, theme.callout()),
-            StartupState::Disabled => (theme.g.file, theme.footnote()),
-            StartupState::Broken => (theme.g.error, theme.danger()),
-        };
-
-        let mut title_spans = vec![Span::styled(item.name.clone(), theme.body())];
-        if let Some(ref app) = item.app_name
-            && app != &item.name
-        {
-            title_spans.push(Span::raw(" "));
-            title_spans.push(Span::styled(format!("({app})"), theme.footnote()));
-        }
-
-        let detail_str = match item.state {
-            StartupState::Running => {
-                if let (Some(cpu), Some(mem)) = (item.cpu_percent, item.memory_bytes) {
-                    format!("running ({cpu:.1}% · {})", format_bytes(mem))
-                } else {
-                    "running".to_string()
-                }
-            }
-            StartupState::Enabled => "enabled".to_string(),
-            StartupState::Disabled if item.is_disabled_but_running() => {
-                "disabled · still running".to_string()
-            }
-            StartupState::Disabled => "disabled".to_string(),
-            StartupState::Broken => "broken".to_string(),
-        };
-
-        let detail_style = match item.state {
-            StartupState::Running => theme.success(),
-            StartupState::Enabled => theme.callout(),
-            StartupState::Disabled if item.is_disabled_but_running() => theme.warning(),
-            StartupState::Disabled => theme.footnote(),
-            StartupState::Broken => theme.danger(),
-        };
-
-        let meta_str = item.kind.as_str();
-
-        let row = ListRow::new(title_spans)
-            .leading(Span::styled(leading_symbol, leading_style))
-            .meta(Span::styled(meta_str, theme.footnote()))
-            .detail(Span::styled(detail_str, detail_style))
-            .selected(is_selected);
-
-        lines.push(row.render_line(row_width, theme));
-    }
+    lines.extend(
+        state
+            .items
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(item_rows)
+            .map(|(idx, item)| {
+                item_line(
+                    item,
+                    &columns,
+                    idx == state.selected_index,
+                    row_width,
+                    theme,
+                )
+            }),
+    );
 
     let card_title = format!("Startup items ({})", state.items.len());
     let card_widget = card(
@@ -353,6 +315,148 @@ fn render_item_list(frame: &mut Frame, area: Rect, state: &StartupScreenState, t
         theme,
     );
     frame.render_widget(Paragraph::new(card_widget), area);
+}
+
+/// The least width of the name, in cells, before a column hides.
+const NAME_MIN_W: usize = 20;
+/// Selection bar, symbol, and the gap before the columns.
+const ROW_MARGIN_W: usize = 5;
+const COLUMN_GAP_W: usize = 2;
+const TYPE_TITLE: &str = "TYPE";
+const STATE_TITLE: &str = "STATE";
+const CPU_TITLE: &str = "CPU";
+const MEMORY_TITLE: &str = "MEMORY";
+
+fn state_label(item: &StartupItem) -> &'static str {
+    match item.state {
+        StartupState::Disabled if item.is_disabled_but_running() => "disabled · still running",
+        state => state.as_str(),
+    }
+}
+
+fn state_style(item: &StartupItem, theme: &Theme) -> Style {
+    match item.state {
+        StartupState::Running => theme.success(),
+        StartupState::Enabled => theme.accent_text(),
+        StartupState::Disabled if item.is_disabled_but_running() => theme.warning(),
+        StartupState::Disabled => theme.footnote(),
+        StartupState::Broken => theme.danger(),
+    }
+}
+
+fn cpu_text(item: &StartupItem) -> String {
+    item.cpu_percent
+        .map_or_else(String::new, |cpu| format!("{cpu:.1}%"))
+}
+
+fn memory_text(item: &StartupItem) -> String {
+    item.memory_bytes.map_or_else(String::new, format_bytes)
+}
+
+/// The TYPE, STATE, CPU, and MEMORY columns, one width for every row.
+struct StartupColumns {
+    type_w: usize,
+    state_w: usize,
+    cpu_w: usize,
+    memory_w: usize,
+}
+
+impl StartupColumns {
+    fn of(items: &[StartupItem]) -> Self {
+        let widest = |title: &str, cell: &dyn Fn(&StartupItem) -> usize| {
+            items.iter().map(cell).fold(title.width(), usize::max)
+        };
+        Self {
+            type_w: widest(TYPE_TITLE, &|item| item.kind.as_str().width()),
+            state_w: widest(STATE_TITLE, &|item| state_label(item).width()),
+            cpu_w: widest(CPU_TITLE, &|item| cpu_text(item).width()),
+            memory_w: widest(MEMORY_TITLE, &|item| memory_text(item).width()),
+        }
+    }
+
+    fn numbers_min_row_width(&self) -> usize {
+        ROW_MARGIN_W
+            + NAME_MIN_W
+            + [self.state_w, self.cpu_w, self.memory_w]
+                .iter()
+                .map(|w| w + COLUMN_GAP_W)
+                .sum::<usize>()
+    }
+
+    fn type_min_row_width(&self) -> usize {
+        self.numbers_min_row_width() + self.type_w + COLUMN_GAP_W
+    }
+
+    fn columns(&self, cells: [Span<'static>; 4]) -> Vec<Column<'static>> {
+        let [kind, state, cpu, memory] = cells;
+        let numbers = self.numbers_min_row_width();
+        vec![
+            Column::new(kind, self.type_w, self.type_min_row_width()),
+            Column::new(state, self.state_w, 0),
+            Column::new(right_aligned(cpu, self.cpu_w), self.cpu_w, numbers),
+            Column::new(right_aligned(memory, self.memory_w), self.memory_w, numbers),
+        ]
+    }
+
+    fn titles(&self, theme: &Theme) -> Vec<Column<'static>> {
+        let title = |text| Span::styled(text, theme.footnote());
+        self.columns([
+            title(TYPE_TITLE),
+            title(STATE_TITLE),
+            title(CPU_TITLE),
+            title(MEMORY_TITLE),
+        ])
+    }
+
+    fn cells(&self, item: &StartupItem, theme: &Theme) -> Vec<Column<'static>> {
+        self.columns([
+            Span::styled(item.kind.as_str(), theme.footnote()),
+            Span::styled(state_label(item), state_style(item, theme)),
+            Span::styled(cpu_text(item), theme.body()),
+            Span::styled(memory_text(item), theme.body()),
+        ])
+    }
+}
+
+fn right_aligned(span: Span<'static>, width: usize) -> Span<'static> {
+    let text = format!("{:>width$}", span.content);
+    Span::styled(text, span.style)
+}
+
+fn titles_line(columns: &StartupColumns, width: usize, theme: &Theme) -> Line<'static> {
+    ListRow::new(vec![Span::styled("NAME", theme.footnote())])
+        .leading(Span::raw(" "))
+        .columns(columns.titles(theme))
+        .render_line(width, theme)
+}
+
+fn item_line(
+    item: &StartupItem,
+    columns: &StartupColumns,
+    selected: bool,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let symbol = match item.state {
+        StartupState::Running => theme.g.bullet,
+        StartupState::Enabled => theme.g.check_off,
+        StartupState::Disabled => theme.g.file,
+        StartupState::Broken => theme.g.error,
+    };
+
+    let mut title = vec![Span::styled(item.name.clone(), theme.body())];
+    if let Some(app) = &item.app_name
+        && app != &item.name
+    {
+        title.push(Span::raw(" "));
+        title.push(Span::styled(format!("({app})"), theme.footnote()));
+    }
+
+    ListRow::new(title)
+        .leading(Span::styled(symbol, state_style(item, theme)))
+        .columns(columns.cells(item, theme))
+        .selected(selected)
+        .render_line(width, theme)
 }
 
 fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState, theme: &Theme) {
@@ -669,6 +773,7 @@ fn render_confirm_modal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::env::UiEnv;
 
     fn item(kind: StartupKind, state: StartupState, pid: Option<u32>) -> StartupItem {
         StartupItem {
@@ -687,6 +792,236 @@ mod tests {
             is_security: false,
             is_ignored: false,
         }
+    }
+
+    fn named(name: &str, kind: StartupKind, state: StartupState) -> StartupItem {
+        let mut it = item(kind, state, None);
+        it.name = name.to_string();
+        it
+    }
+
+    fn running(name: &str) -> StartupItem {
+        let mut it = named(name, StartupKind::UserAgent, StartupState::Running);
+        it.pid = Some(7);
+        it.cpu_percent = Some(1.04);
+        it.memory_bytes = Some(48_660_000);
+        it
+    }
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn cell_of(line: &Line, needle: &str) -> usize {
+        let t = text(line);
+        t[..t.find(needle).unwrap()].chars().count()
+    }
+
+    fn style_of(line: &Line, needle: &str) -> ratatui::style::Style {
+        line.spans
+            .iter()
+            .find(|s| s.content.trim() == needle)
+            .unwrap_or_else(|| panic!("no span {needle:?} in {line:?}"))
+            .style
+    }
+
+    fn line_of(it: &StartupItem, width: usize) -> Line<'static> {
+        let theme = Theme::with_env(UiEnv::default());
+        let columns = StartupColumns::of(std::slice::from_ref(it));
+        item_line(it, &columns, false, width, &theme)
+    }
+
+    #[test]
+    fn each_state_draws_its_text_and_color_in_the_state_column() {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut stuck = named("Stuck", StartupKind::Daemon, StartupState::Disabled);
+        stuck.pid = Some(3);
+        let cases = [
+            (running("A"), "running", theme.success()),
+            (
+                named("B", StartupKind::UserAgent, StartupState::Enabled),
+                "enabled",
+                theme.accent_text(),
+            ),
+            (
+                named("C", StartupKind::UserAgent, StartupState::Disabled),
+                "disabled",
+                theme.footnote(),
+            ),
+            (stuck, "disabled · still running", theme.warning()),
+            (
+                named("D", StartupKind::UserAgent, StartupState::Broken),
+                "broken",
+                theme.danger(),
+            ),
+        ];
+        for (it, label, style) in cases {
+            let line = line_of(&it, 120);
+            assert!(text(&line).contains(label), "{label}");
+            assert_eq!(style_of(&line, label), style, "{label}");
+            assert_eq!(line.spans[1].style, style, "symbol of {label}");
+        }
+    }
+
+    #[test]
+    fn an_enabled_row_is_accent_not_callout() {
+        let theme = Theme::with_env(UiEnv::default());
+        let it = named("B", StartupKind::UserAgent, StartupState::Enabled);
+
+        let line = line_of(&it, 120);
+
+        assert_eq!(style_of(&line, "enabled"), theme.accent_text());
+        assert_eq!(line.spans[1].style, theme.accent_text());
+        assert_ne!(theme.accent_text(), theme.callout());
+    }
+
+    #[test]
+    fn a_running_row_shows_cpu_and_memory_in_their_own_columns() {
+        let theme = Theme::with_env(UiEnv::default());
+        let line = line_of(&running("A"), 120);
+
+        assert_eq!(style_of(&line, "1.0%"), theme.body());
+        assert_eq!(style_of(&line, "48.7 MB"), theme.body());
+        assert_eq!(style_of(&line, "user agent"), theme.footnote());
+        assert!(!text(&line).contains("running ("), "{}", text(&line));
+    }
+
+    #[test]
+    fn a_running_row_without_numbers_has_empty_cpu_and_memory() {
+        let mut it = running("A");
+        it.cpu_percent = None;
+        it.memory_bytes = None;
+
+        let line = line_of(&it, 120);
+
+        assert_eq!(cpu_text(&it), "");
+        assert_eq!(memory_text(&it), "");
+        assert!(!text(&line).contains('%'));
+        assert!(!text(&line).contains(" MB"));
+        assert_eq!(line.width(), 120);
+    }
+
+    #[test]
+    fn type_and_state_start_in_the_same_cell_on_every_row() {
+        let theme = Theme::with_env(UiEnv::default());
+        let a = running("Docker");
+        let b = named(
+            "A much longer name",
+            StartupKind::UserAgent,
+            StartupState::Enabled,
+        );
+        let columns = StartupColumns::of(&[a.clone(), b.clone()]);
+
+        let first = item_line(&a, &columns, false, 120, &theme);
+        let second = item_line(&b, &columns, false, 120, &theme);
+        let titles = titles_line(&columns, 120, &theme);
+
+        assert_eq!(
+            cell_of(&first, "user agent"),
+            cell_of(&second, "user agent")
+        );
+        assert_eq!(cell_of(&first, "running"), cell_of(&titles, "STATE"));
+        assert_eq!(cell_of(&second, "enabled"), cell_of(&titles, "STATE"));
+        assert_eq!(cell_of(&first, "user agent"), cell_of(&titles, "TYPE"));
+        let end = |l: &Line, t: &str| cell_of(l, t) + t.chars().count();
+        assert_eq!(end(&first, "1.0%"), end(&titles, "CPU"));
+        assert_eq!(end(&first, "48.7 MB"), end(&titles, "MEMORY"));
+        assert_eq!(first.width(), second.width());
+    }
+
+    #[test]
+    fn narrow_rows_hide_type_first_then_cpu_and_memory() {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut long = running(&"N".repeat(40));
+        long.kind = StartupKind::SystemAgent;
+        let columns = StartupColumns::of(std::slice::from_ref(&long));
+        let shown = |width: usize| {
+            let row = text(&item_line(&long, &columns, false, width, &theme));
+            let head = text(&titles_line(&columns, width, &theme));
+            let row = (
+                row.contains("system agent"),
+                row.contains("1.0%") && row.contains("MB"),
+                row.contains("running"),
+            );
+            let head = (
+                head.contains("TYPE"),
+                head.contains("CPU") && head.contains("MEMORY"),
+                head.contains("STATE") && head.contains("NAME"),
+            );
+            assert_eq!(row, head, "{width}");
+            row
+        };
+
+        assert_eq!(shown(200), (true, true, true));
+        let widest = (20..200).find(|w| shown(*w).0).unwrap();
+        assert_eq!(shown(widest - 1), (false, true, true));
+        let with_numbers = (20..widest).find(|w| shown(*w).1).unwrap();
+        assert_eq!(shown(with_numbers - 1), (false, false, true));
+        assert_eq!(shown(20), (false, false, true));
+        for width in [widest, with_numbers] {
+            let line = item_line(&long, &columns, false, width, &theme);
+            let name_cells = text(&line)
+                .chars()
+                .filter(|c| matches!(c, 'N' | '…'))
+                .count();
+            assert_eq!(name_cells, 20, "{width}: {}", text(&line));
+        }
+    }
+
+    #[test]
+    fn rows_and_titles_fill_their_width() {
+        let theme = Theme::with_env(UiEnv::default());
+        let it = running("A");
+        let columns = StartupColumns::of(std::slice::from_ref(&it));
+        for width in [20, 40, 60, 80, 120, 200] {
+            assert_eq!(item_line(&it, &columns, true, width, &theme).width(), width);
+            assert_eq!(titles_line(&columns, width, &theme).width(), width);
+        }
+    }
+
+    #[test]
+    fn the_focused_enabled_row_keeps_the_accent_on_the_selection_color() {
+        let theme = Theme::with_env(UiEnv::default());
+        let it = named("B", StartupKind::UserAgent, StartupState::Enabled);
+        let columns = StartupColumns::of(std::slice::from_ref(&it));
+
+        let line = item_line(&it, &columns, true, 120, &theme);
+
+        let style = style_of(&line, "enabled");
+        assert_eq!(style.fg, theme.accent_text().fg);
+        assert_eq!(style.bg, Some(theme.p.selection));
+    }
+
+    #[test]
+    fn a_long_list_keeps_the_titles_the_focused_row_and_the_bottom_border_in_view() {
+        let items: Vec<_> = (0..30)
+            .map(|i| {
+                named(
+                    &format!("Item{i:02}"),
+                    StartupKind::UserAgent,
+                    StartupState::Enabled,
+                )
+            })
+            .collect();
+        let mut state = StartupScreenState::new(items, false);
+        state.selected_index = 10;
+        let theme = Theme::with_env(UiEnv::default());
+        let area = Rect::new(0, 0, 80, 12);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+
+        terminal
+            .draw(|f| render_item_list(f, area, &state, &theme))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..12)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows[1].contains("NAME"), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("Item10")), "{rows:#?}");
+        let last = rows.last().unwrap();
+        assert!(last.contains('╰'), "{rows:#?}");
     }
 
     #[test]
