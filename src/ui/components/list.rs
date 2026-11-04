@@ -22,14 +22,38 @@ fn bar_width(row_width: usize) -> usize {
     BAR_MIN_WIDTH + extra - extra / 4
 }
 
+/// A column between the title and the date. It hides in a row narrower than `min_row_width`.
+#[derive(Debug, Clone)]
+pub struct Column<'a> {
+    pub text: Span<'a>,
+    pub width: usize,
+    pub min_row_width: usize,
+}
+
+impl<'a> Column<'a> {
+    pub fn new(text: Span<'a>, width: usize, min_row_width: usize) -> Self {
+        Self {
+            text,
+            width,
+            min_row_width,
+        }
+    }
+
+    fn shown_in(&self, row_width: usize) -> bool {
+        row_width >= self.min_row_width
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ListRow<'a> {
     pub leading: Option<Span<'a>>,
     pub title: Vec<Span<'a>>,
     pub meta: Option<Span<'a>>,
+    pub columns: Vec<Column<'a>>,
     pub detail: Option<Span<'a>>,
     pub bar: Option<f64>,
     pub bar_heading: Option<&'a str>,
+    pub bar_cap: Option<usize>,
     pub chevron: bool,
     pub reserve_chevron: bool,
     pub selected: bool,
@@ -41,9 +65,11 @@ impl<'a> ListRow<'a> {
             leading: None,
             title,
             meta: None,
+            columns: Vec::new(),
             detail: None,
             bar: None,
             bar_heading: None,
+            bar_cap: None,
             chevron: false,
             reserve_chevron: false,
             selected: false,
@@ -57,6 +83,17 @@ impl<'a> ListRow<'a> {
 
     pub fn meta(mut self, meta: Span<'a>) -> Self {
         self.meta = Some(meta);
+        self
+    }
+
+    pub fn columns(mut self, columns: Vec<Column<'a>>) -> Self {
+        self.columns = columns;
+        self
+    }
+
+    /// Keeps the bar at `cap` cells or fewer, however wide the row is.
+    pub fn bar_cap(mut self, cap: usize) -> Self {
+        self.bar_cap = Some(cap);
         self
     }
 
@@ -125,7 +162,9 @@ impl<'a> ListRow<'a> {
 
         let show_bar_graphic = self.bar.is_some() && width >= BAR_MIN_ROW_WIDTH;
         let show_percentage = self.bar.is_some() && width >= 95;
-        let bar_w = bar_width(width);
+        let bar_w = self
+            .bar_cap
+            .map_or(bar_width(width), |cap| bar_width(width).min(cap));
         let bar_total_width = if show_bar_graphic {
             bar_w + 1 + 6 + 2 // bar + space(1) + pct(6) + pad(2)
         } else if show_percentage {
@@ -144,7 +183,15 @@ impl<'a> ListRow<'a> {
             0
         };
 
-        let right_total = chevron_width + detail_width + bar_total_width + meta_width;
+        let columns: Vec<&Column> = self
+            .columns
+            .iter()
+            .filter(|column| column.shown_in(width))
+            .collect();
+        let columns_width: usize = columns.iter().map(|column| column.width + 2).sum();
+
+        let right_total =
+            chevron_width + detail_width + bar_total_width + meta_width + columns_width;
 
         let leading_width = self.leading.as_ref().map_or(3, |l| l.content.width() + 1);
         let left_fixed = 2 + leading_width;
@@ -175,7 +222,13 @@ impl<'a> ListRow<'a> {
             spans.push(Span::raw(" ".repeat(pad)));
         }
 
-        // 5. Meta (Date)
+        // 5. Columns, then meta (Date)
+        for column in columns {
+            let text = middle_truncate(&column.text.content, column.width);
+            let text = format!("{text:<w$}", w = column.width);
+            spans.push(Span::styled(text, column.text.style));
+            spans.push(Span::raw("  "));
+        }
         if show_meta && let Some(meta) = &self.meta {
             spans.push(Span::styled(meta.content.to_string(), meta.style));
             spans.push(Span::raw("  "));
@@ -261,6 +314,8 @@ pub struct ColumnTitles<'a> {
     pub order: SortOrder,
     pub share: bool,
     pub chevron: bool,
+    pub columns: Vec<Column<'a>>,
+    pub bar_cap: Option<usize>,
 }
 
 impl ColumnTitles<'_> {
@@ -290,8 +345,16 @@ impl ColumnTitles<'_> {
                 style,
             ))
             .reserve_chevron(self.chevron);
+        let columns = self.columns.iter().map(|column| {
+            let text = Span::styled(column.text.content.clone(), style);
+            Column::new(text, column.width, column.min_row_width)
+        });
+        row = row.columns(columns.collect());
         if self.share {
             row = row.bar(0.0).bar_heading("SHARE");
+        }
+        if let Some(cap) = self.bar_cap {
+            row = row.bar_cap(cap);
         }
         row.render_line(width, theme)
     }
@@ -493,6 +556,98 @@ mod tests {
                 assert_eq!(line.width(), width, "{fraction} at {width}");
             }
         }
+    }
+
+    fn columns() -> Vec<Column<'static>> {
+        vec![
+            Column::new(Span::raw("ORIGIN"), 10, 100),
+            Column::new(Span::raw("UPDATE"), 12, 0),
+        ]
+    }
+
+    fn titles(columns: Vec<Column<'static>>) -> ColumnTitles<'static> {
+        ColumnTitles {
+            date: "INSTALLED",
+            date_width: 17,
+            order: SortOrder::Size,
+            share: true,
+            chevron: false,
+            columns,
+            bar_cap: Some(12),
+        }
+    }
+
+    #[test]
+    fn the_titles_show_a_column_from_its_width_and_hide_it_below() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        for (width, origin) in [(100, true), (140, true), (99, false), (80, false)] {
+            let text = rendered(&titles(columns()).render(width, &theme));
+            assert_eq!(text.contains("ORIGIN"), origin, "{width}");
+            assert!(text.contains("UPDATE"), "{width}");
+            assert_eq!(text.chars().count(), width, "{width}");
+        }
+    }
+
+    #[test]
+    fn a_column_lines_up_with_its_title() {
+        let theme = Theme::with_env(UiEnv::default());
+        for width in [90, 100, 120, 200] {
+            let row = ListRow::new(vec![Span::raw("bun 1.4.2")])
+                .leading(Span::raw("●"))
+                .meta(Span::raw(format!("{:<17}", "5 months ago")))
+                .detail(Span::raw("   1.0 GB"))
+                .columns(vec![
+                    Column::new(Span::raw("on request"), 10, 100),
+                    Column::new(Span::raw("↑ 1.4.4_1"), 12, 0),
+                ])
+                .bar(0.5)
+                .bar_cap(12)
+                .render_line(width, &theme);
+            let heading = titles(columns()).render(width, &theme);
+
+            let (row, heading) = (rendered(&row), rendered(&heading));
+            let at = |line: &str, text: &str| line[..line.find(text).unwrap()].chars().count();
+            assert_eq!(at(&heading, "UPDATE"), at(&row, "↑ 1.4.4_1"), "{width}");
+            if width >= 100 {
+                assert_eq!(at(&heading, "ORIGIN"), at(&row, "on request"), "{width}");
+            } else {
+                assert!(!row.contains("on request"), "{width}");
+            }
+            assert_eq!(at(&heading, "INSTALLED"), at(&row, "5 months"), "{width}");
+            assert_eq!(row.chars().count(), width);
+        }
+    }
+
+    #[test]
+    fn a_capped_bar_stays_narrow_in_a_wide_row() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        for width in [100, 120, 200] {
+            let line = bar_row("a", 0.5).bar_cap(12).render_line(width, &theme);
+            assert!(bar_cells(&line) <= 12, "{width}");
+            assert_eq!(line.width(), width);
+        }
+        assert_eq!(
+            bar_cells(&bar_row("a", 0.5).bar_cap(12).render_line(200, &theme)),
+            12
+        );
+        assert_eq!(bar_cells(&bar_row("a", 0.5).render_line(200, &theme)), 83);
+    }
+
+    #[test]
+    fn the_title_of_a_capped_bar_is_as_wide_as_the_bar() {
+        let theme = Theme::with_env(UiEnv::default());
+
+        let row = bar_row("a", 1.0).bar_cap(12).render_line(200, &theme);
+        let heading = bar_row("a", 0.0)
+            .bar_heading("SHARE")
+            .bar_cap(12)
+            .render_line(200, &theme);
+
+        let bar_at = rendered(&row).chars().position(|c| c == '━').unwrap();
+        let (byte_at, _) = rendered(&heading).match_indices("SHARE").next().unwrap();
+        assert_eq!(rendered(&heading)[..byte_at].chars().count(), bar_at);
     }
 
     #[test]

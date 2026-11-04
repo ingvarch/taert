@@ -1015,6 +1015,8 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         order: state.sort_order,
         share: true,
         chevron: true,
+        columns: Vec::new(),
+        bar_cap: None,
     };
     let mut list_lines = vec![titles.render(row_width, theme)];
 

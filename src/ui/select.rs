@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
@@ -21,7 +22,7 @@ use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_SIDES, frame_bottom, frame_top, framed};
 use super::components::gauge::bar;
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::{ColumnTitles, ListRow, SIZE_W, row_path_spans};
+use super::components::list::{Column, ColumnTitles, ListRow, SIZE_W, row_path_spans};
 use super::components::modal::Modal;
 use super::components::text::plural;
 use super::components::toast::Toast;
@@ -75,8 +76,8 @@ pub struct SelectState {
     permanent: bool,
     /// Worked out once per uninstall plan, because a bundle check reads the disk.
     routes: HashMap<PathBuf, Route>,
-    /// Why the Homebrew list leaves a row alone, by the label of the row.
-    pub refusals: HashMap<PathBuf, String>,
+    /// Why the Homebrew list leaves a row alone, by the kind and label of the row.
+    pub refusals: HashMap<(homebrew::PackageKind, PathBuf), String>,
     /// What the Homebrew list was built from, so a removal can update it without reading brew.
     pub homebrew: Option<homebrew::Inventory>,
     /// The rows of the Homebrew tree that are open, by their path of names.
@@ -95,6 +96,11 @@ const MAX_LISTED_FAILURES: usize = 3;
 const MAX_LISTED_NOTES: usize = 3;
 // Fits "About an hour ago", the longest age that lasts more than a few seconds.
 const AGE_W: usize = 17;
+// Fits "on request" and "dependency".
+const ORIGIN_W: usize = 10;
+const UPDATE_TITLE: &str = "UPDATE";
+const UPDATE_MAX_W: usize = 14;
+const BREW_BAR_CAP: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -258,19 +264,20 @@ impl SelectState {
             return;
         };
         let changed = inventory.apply_latest(&latest);
-        for item in self
-            .scan
-            .groups
-            .iter_mut()
-            .flat_map(|group| &mut group.items)
-        {
-            if let Some(label) = changed.get(&item.path) {
+        for (kind, item) in self.scan.groups.iter_mut().flat_map(|group| {
+            let kind = homebrew::group_kind(&group.tool);
+            group.items.iter_mut().map(move |item| (kind, item))
+        }) {
+            if let Some(label) = changed.get(&(kind, item.path.clone())) {
                 item.path = label.clone();
             }
         }
         self.refusals = std::mem::take(&mut self.refusals)
             .into_iter()
-            .map(|(label, reason)| (changed.get(&label).cloned().unwrap_or(label), reason))
+            .map(|(key, reason)| match changed.get(&key) {
+                Some(label) => ((key.0, label.clone()), reason),
+                None => (key, reason),
+            })
             .collect();
         if let Some(focused) = focused {
             self.refocus_renamed(&focused, &changed);
@@ -278,11 +285,16 @@ impl SelectState {
     }
 
     /// Puts the focus back on the row that was focused before its label changed.
-    fn refocus_renamed(&mut self, focused: &FlattenedRow, changed: &HashMap<PathBuf, PathBuf>) {
+    fn refocus_renamed(
+        &mut self,
+        focused: &FlattenedRow,
+        changed: &HashMap<(homebrew::PackageKind, PathBuf), PathBuf>,
+    ) {
+        let kind = homebrew::group_kind(&self.scan.groups[focused.group_index].tool);
         let wanted = focused
             .full_path
             .as_ref()
-            .map(|old| changed.get(old).unwrap_or(old));
+            .map(|old| changed.get(&(kind, old.clone())).unwrap_or(old));
         if !self.focus_same_item(focused, wanted) {
             self.focus_item_at_or_before(self.focused_index);
         }
@@ -478,7 +490,10 @@ impl SelectState {
         let mut places = HashMap::new();
         for (g_idx, group) in self.scan.groups.iter().enumerate() {
             for (i_idx, item) in group.items.iter().enumerate() {
-                places.insert(item.path.clone(), (g_idx, i_idx));
+                places.insert(
+                    (homebrew::group_kind(&group.tool), item.path.clone()),
+                    (g_idx, i_idx),
+                );
             }
         }
         let order = self.sort_order.unwrap_or_default();
@@ -489,8 +504,11 @@ impl SelectState {
                 let entries = rows
                     .into_iter()
                     .filter_map(|row| {
-                        let (group, item) =
-                            *places.get(Path::new(&homebrew::label(row.package)))?;
+                        let key = (
+                            row.package.kind,
+                            PathBuf::from(homebrew::label(row.package)),
+                        );
+                        let (group, item) = *places.get(&key)?;
                         let tree = TreeRow {
                             path: row.path,
                             expandable: row.expandable,
@@ -660,10 +678,21 @@ impl SelectState {
         }
     }
 
+    /// Why the focused row of the Homebrew list cannot be uninstalled, if it cannot.
+    fn refusal_of_focused(&self) -> Option<&String> {
+        let (group, item) = self.focused_position()?;
+        let group = self.scan.groups.get(group)?;
+        let key = (
+            homebrew::group_kind(&group.tool),
+            group.items.get(item)?.path.clone(),
+        );
+        self.refusals.get(&key)
+    }
+
     /// The formula D uninstalls on the Homebrew list, if the focused row allows it.
     fn removable(&self) -> Option<&str> {
         let item = self.focused_item()?;
-        if self.refusals.contains_key(&item.path) {
+        if self.refusal_of_focused().is_some() {
             return None;
         }
         uninstall_name(item)
@@ -683,7 +712,7 @@ impl SelectState {
         let Some((group, item)) = self.focused_position() else {
             return;
         };
-        if let Some(text) = self.refusals.get(&self.scan.groups[group].items[item].path) {
+        if let Some(text) = self.refusal_of_focused() {
             self.toast = Some(Toast::error(text.clone()));
         } else if self.removable().is_some() {
             self.scan.groups[group].items[item].selected = true;
@@ -691,15 +720,18 @@ impl SelectState {
         }
     }
 
-    /// The package of the focused row of the Homebrew list.
+    /// The package of the focused row of the Homebrew list. A formula and a cask can share a
+    /// label, so the group says which kind it is.
     fn focused_package(&self) -> Option<&homebrew::Package> {
-        let item = self.focused_item()?;
-        let label = item.path.to_string_lossy();
+        let (group, item) = self.focused_position()?;
+        let group = self.scan.groups.get(group)?;
+        let label = group.items.get(item)?.path.to_string_lossy();
+        let kind = homebrew::group_kind(&group.tool);
         self.homebrew
             .as_ref()?
             .packages
             .iter()
-            .find(|package| homebrew::label(package) == label)
+            .find(|package| package.kind == kind && homebrew::label(package) == label)
     }
 
     /// Whether the focused row of the Homebrew list has a newer version.
@@ -1139,6 +1171,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
     let width = list_rect.width as usize;
     let row_width = width.saturating_sub(FRAME_SIDES);
     let now = SystemTime::now();
+    let brew = BrewColumns::of(state, theme);
     let mut list_lines = Vec::new();
     for (idx, row) in rows
         .iter()
@@ -1160,6 +1193,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 order,
                 share: row_width >= BAR_MIN_WIDTH,
                 chevron: false,
+                columns: brew.as_ref().map_or_else(Vec::new, BrewColumns::titles),
+                bar_cap: brew.is_some().then_some(BREW_BAR_CAP),
             };
             let titles = titles.render(row_width, theme);
             list_lines.push(framed(titles, row_width, color, theme));
@@ -1261,6 +1296,12 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
             {
                 let dest = state.removal_mode(item).label();
                 list_row = list_row.meta(Span::styled(dest, theme.footnote()));
+            }
+
+            if let Some(brew) = &brew {
+                list_row = list_row
+                    .columns(brew.cells(row, theme))
+                    .bar_cap(BREW_BAR_CAP);
             }
 
             if let Some(f) = frac
@@ -1404,22 +1445,85 @@ fn section_frame_top(
     }
 }
 
-/// A label row: what it names first, then its details in a quieter style. An `update …` detail
-/// gets the accent style.
+/// A label row: what it names first, then its details in a quieter style.
 fn label_spans(label: &str, theme: &Theme) -> Vec<Span<'static>> {
     let Some((name, details)) = label.split_once(" · ") else {
         return vec![Span::styled(label.to_string(), theme.body())];
     };
     let mut spans = vec![Span::styled(name.to_string(), theme.body())];
     for detail in details.split(" · ") {
-        let style = if detail.starts_with("update ") {
-            theme.accent_text()
-        } else {
-            theme.footnote()
-        };
-        spans.push(Span::styled(format!(" · {detail}"), style));
+        spans.push(Span::styled(format!(" · {detail}"), theme.footnote()));
     }
     spans
+}
+
+/// What the UPDATE column says: the new version after an arrow, the arrow alone for a package
+/// brew marks outdated without one, or nothing.
+fn update_text(package: &homebrew::Package, theme: &Theme) -> String {
+    let arrow = theme.g.update;
+    match (&package.latest_version, package.outdated) {
+        (Some(latest), _) => format!("{arrow} {latest}"),
+        (None, true) => arrow.to_string(),
+        (None, false) => String::new(),
+    }
+}
+
+/// The ORIGIN and UPDATE columns of the Homebrew list, worked out once per frame.
+struct BrewColumns<'a> {
+    packages: HashMap<(homebrew::PackageKind, PathBuf), &'a homebrew::Package>,
+    update_w: usize,
+}
+
+impl<'a> BrewColumns<'a> {
+    /// The columns of `state`, when it is the Homebrew list.
+    fn of(state: &'a SelectState, theme: &Theme) -> Option<Self> {
+        if state.scan.id != homebrew::SCAN_ID {
+            return None;
+        }
+        let packages: Vec<&homebrew::Package> = state
+            .homebrew
+            .iter()
+            .flat_map(|inventory| &inventory.packages)
+            .collect();
+        let update_w = packages
+            .iter()
+            .map(|package| update_text(package, theme).width())
+            .fold(UPDATE_TITLE.len(), usize::max)
+            .min(UPDATE_MAX_W);
+        let packages = packages
+            .into_iter()
+            .map(|package| {
+                let label = PathBuf::from(homebrew::label(package));
+                ((package.kind, label), package)
+            })
+            .collect();
+        Some(Self { packages, update_w })
+    }
+
+    fn titles(&self) -> Vec<Column<'static>> {
+        vec![
+            Column::new(Span::raw("ORIGIN"), ORIGIN_W, BAR_MIN_WIDTH),
+            Column::new(Span::raw(UPDATE_TITLE), self.update_w, 0),
+        ]
+    }
+
+    fn cells(&self, row: &FlattenedRow, theme: &Theme) -> Vec<Column<'static>> {
+        let kind = homebrew::group_kind(&row.group_name);
+        let package = row
+            .full_path
+            .as_ref()
+            .and_then(|label| self.packages.get(&(kind, label.clone())));
+        let origin = package.map_or("", |package| homebrew::origin(package));
+        let update = package.map_or_else(String::new, |package| update_text(package, theme));
+        vec![
+            Column::new(
+                Span::styled(origin, theme.footnote()),
+                ORIGIN_W,
+                BAR_MIN_WIDTH,
+            ),
+            Column::new(Span::styled(update, theme.accent_text()), self.update_w, 0),
+        ]
+    }
 }
 
 fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
@@ -1930,10 +2034,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn label_spans_show_the_update_part_in_the_accent_style() {
+    fn label_spans_show_every_detail_in_the_footnote_style() {
         let theme = Theme::with_env(UiEnv::default());
 
-        let spans = label_spans("bun 1.4.2 · on request · update 1.4.4_1 · pinned", &theme);
+        let spans = label_spans("bun 1.4.2 · used by 2 · pinned", &theme);
 
         let text: Vec<(&str, Style)> = spans
             .iter()
@@ -1943,21 +2047,359 @@ mod tests {
             text,
             [
                 ("bun 1.4.2", theme.body()),
-                (" · on request", theme.footnote()),
-                (" · update 1.4.4_1", theme.accent_text()),
+                (" · used by 2", theme.footnote()),
                 (" · pinned", theme.footnote()),
             ]
         );
     }
 
+    fn brew_state(packages: Vec<homebrew::Package>) -> SelectState {
+        SelectState::homebrew_list(&homebrew::Inventory {
+            packages,
+            brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+            ..homebrew::Inventory::default()
+        })
+    }
+
+    fn formula(name: &str, bytes: u64) -> homebrew::Package {
+        homebrew::testing::package(homebrew::PackageKind::Formula, name, "1.4.2", bytes)
+    }
+
+    /// The text of each row of the screen, with the cells' styles.
+    fn drawn(
+        state: &SelectState,
+        theme: &Theme,
+        width: u16,
+        height: u16,
+    ) -> Vec<Vec<(String, Style)>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_select(frame, state, theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| (buffer[(x, y)].symbol().to_string(), buffer[(x, y)].style()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn text_of(row: &[(String, Style)]) -> String {
+        row.iter().map(|(symbol, _)| symbol.as_str()).collect()
+    }
+
+    fn row_of<'a>(rows: &'a [Vec<(String, Style)>], needle: &str) -> &'a [(String, Style)] {
+        rows.iter()
+            .find(|row| text_of(row).contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}"))
+    }
+
+    /// The style of the cell where `needle` starts in the row.
+    fn style_at(row: &[(String, Style)], needle: &str) -> Style {
+        let text = text_of(row);
+        let at = text[..text.find(needle).unwrap()].chars().count();
+        assert!(needle.starts_with(row[at].0.as_str()), "{text}");
+        row[at].1
+    }
+
     #[test]
-    fn label_spans_without_an_update_show_every_detail_in_the_footnote_style() {
+    fn the_homebrew_list_shows_origin_and_the_new_version_in_columns() {
         let theme = Theme::with_env(UiEnv::default());
+        let mut bun = formula("bun", 1000);
+        bun.latest_version = Some("1.4.4_1".to_string());
+        let mut ada = formula("ada-url", 900);
+        ada.on_request = false;
+        let mut outdated = formula("outdated", 800);
+        outdated.outdated = true;
+        let mut ghostty =
+            homebrew::testing::package(homebrew::PackageKind::Cask, "ghostty", "1.3.1", 700);
+        ghostty.apps = vec!["Ghostty.app".to_string()];
+        let state = brew_state(vec![formula("go", 2000), bun, ada, outdated, ghostty]);
 
-        let spans = label_spans("bun 1.4.2 · on request · outdated", &theme);
+        let rows = drawn(&state, &theme, 120, 32);
 
-        assert_eq!(spans[0].style, theme.body());
-        assert!(spans[1..].iter().all(|s| s.style == theme.footnote()));
+        let titles = text_of(row_of(&rows, "ORIGIN"));
+        assert!(titles.contains("UPDATE"), "{titles}");
+        let bun = row_of(&rows, "bun 1.4.2");
+        let text = text_of(bun);
+        assert!(text.contains("on request"), "{text}");
+        assert!(!text.contains(" · "), "{text}");
+        assert!(text.contains("↑ 1.4.4_1"), "{text}");
+        assert_eq!(style_at(bun, "↑ 1.4.4_1").fg, theme.accent_text().fg);
+        assert!(text_of(row_of(&rows, "ada-url")).contains("dependency"));
+        let up = text_of(row_of(&rows, "outdated 1.4.2"));
+        assert!(up.contains("↑ "), "{up}");
+        assert!(!up.contains("↑ 1"), "{up}");
+        let cask = text_of(row_of(&rows, "ghostty 1.3.1 · Ghostty.app"));
+        assert!(!cask.contains("on request") && !cask.contains("dependency"));
+        assert!(!cask.contains('↑'), "{cask}");
+        let plain = text_of(row_of(&rows, "go 1.4.2"));
+        assert!(!plain.contains('↑'), "{plain}");
+    }
+
+    #[test]
+    fn the_new_version_shows_an_ascii_arrow_in_an_ascii_theme() {
+        let theme = Theme::with_env(UiEnv {
+            ascii_glyphs: true,
+            ..UiEnv::default()
+        });
+        let mut bun = formula("bun", 1000);
+        bun.latest_version = Some("1.4.4_1".to_string());
+        let state = brew_state(vec![formula("go", 2000), bun]);
+
+        let rows = drawn(&state, &theme, 120, 32);
+
+        let text = text_of(row_of(&rows, "bun 1.4.2"));
+        assert!(text.contains("^ 1.4.4_1"), "{text}");
+        assert!(!text.contains('↑'), "{text}");
+    }
+
+    #[test]
+    fn below_100_columns_the_update_stays_and_the_origin_goes() {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut bun = formula("bun", 1000);
+        bun.latest_version = Some("1.4.4_1".to_string());
+        let state = brew_state(vec![formula("go", 2000), bun]);
+
+        let narrow = drawn(&state, &theme, 99, 32);
+        let text = text_of(row_of(&narrow, "bun 1.4.2"));
+        assert!(text.contains("↑ 1.4.4_1"), "{text}");
+        assert!(!text.contains("on request"), "{text}");
+        let titles = text_of(row_of(&narrow, "UPDATE"));
+        assert!(!titles.contains("ORIGIN"), "{titles}");
+
+        let wide = drawn(&state, &theme, 110, 32);
+        assert!(text_of(row_of(&wide, "bun 1.4.2")).contains("on request"));
+    }
+
+    #[test]
+    fn a_long_new_version_leaves_the_names_whole_at_80_columns() {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut python = homebrew::testing::package(
+            homebrew::PackageKind::Formula,
+            "python@3.14",
+            "3.14.8_1",
+            2000,
+        );
+        python.used_by = vec!["azure-cli".to_string()];
+        python.pinned = true;
+        python.latest_version = Some("3.14.9".to_string());
+        let mut editor = homebrew::testing::package(
+            homebrew::PackageKind::Cask,
+            "editor",
+            "2025.2.3,252.26830.99",
+            1000,
+        );
+        editor.latest_version = Some("2025.2.4,252.27397.103".to_string());
+        let state = brew_state(vec![python, editor]);
+
+        let rows = drawn(&state, &theme, 80, 24);
+
+        let python = text_of(row_of(&rows, "python@3.14"));
+        assert!(
+            python.contains("python@3.14 3.14.8_1 · used by 1 · pinned"),
+            "{python}"
+        );
+        let editor = text_of(row_of(&rows, "editor 2025"));
+        let update = editor[editor.find('↑').unwrap()..]
+            .split("  ")
+            .next()
+            .unwrap();
+        assert!(update.chars().count() <= 14, "{update}");
+    }
+
+    #[test]
+    fn the_origin_shows_at_the_width_where_the_share_bar_shows() {
+        let theme = Theme::with_env(UiEnv::default());
+        let state = brew_state(vec![formula("go", 2000), formula("bun", 1000)]);
+
+        let titles = |width| text_of(row_of(&drawn(&state, &theme, width, 32), "UPDATE"));
+
+        let narrow = titles(108);
+        assert!(!narrow.contains("ORIGIN"), "{narrow}");
+        assert!(!narrow.contains("SHARE"), "{narrow}");
+        let wide = titles(109);
+        assert!(wide.contains("ORIGIN"), "{wide}");
+        assert!(wide.contains("SHARE"), "{wide}");
+    }
+
+    #[test]
+    fn a_pin_found_by_the_check_renames_the_row_and_keeps_the_focus() {
+        let cask = |name, bytes| {
+            homebrew::testing::package(homebrew::PackageKind::Cask, name, "1.2.0", bytes)
+        };
+        let mut state = brew_state(vec![
+            formula("go", 3000),
+            cask("ghostty", 2000),
+            cask("zed", 1000),
+        ]);
+        let focused = |state: &SelectState| {
+            let rows = state.flattened_rows();
+            rows[state.focused_index].display_path.clone()
+        };
+        state.focused_index = state
+            .flattened_rows()
+            .iter()
+            .position(|row| row.display_path.starts_with("ghostty"))
+            .unwrap();
+        let latest = homebrew::parse_outdated(
+            r#"{"formulae": [], "casks": [{"name": "ghostty", "current_version": "1.3", "pinned": true}]}"#,
+        )
+        .unwrap();
+
+        state.finish_update_check(None, Ok(latest));
+
+        assert_eq!(focused(&state), "ghostty 1.2.0 · pinned");
+    }
+
+    fn same_label_pair() -> SelectState {
+        let mut formula_codex =
+            homebrew::testing::package(homebrew::PackageKind::Formula, "codex", "0.166.0", 3000);
+        formula_codex.latest_version = Some("0.170.0".to_string());
+        let mut cask_codex =
+            homebrew::testing::package(homebrew::PackageKind::Cask, "codex", "0.166.0", 2000);
+        cask_codex.latest_version = Some("0.171.0".to_string());
+        brew_state(vec![formula_codex, cask_codex, formula("zed", 1000)])
+    }
+
+    fn focus_kind(state: &mut SelectState, kind: homebrew::PackageKind) {
+        state.focused_index = state
+            .flattened_rows()
+            .iter()
+            .position(|row| {
+                row.display_path.starts_with("codex")
+                    && row.item_index.is_some()
+                    && homebrew::group_kind(&state.scan.groups[row.group_index].tool) == kind
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_formula_and_a_cask_with_the_same_label_keep_their_own_rows() {
+        let theme = Theme::with_env(UiEnv::default());
+        let mut state = same_label_pair();
+
+        focus_kind(&mut state, homebrew::PackageKind::Formula);
+        state.uninstall_focused();
+        assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
+        assert!(state.toast.is_none());
+        state.close_overlay();
+
+        focus_kind(&mut state, homebrew::PackageKind::Cask);
+        state.uninstall_focused();
+        assert!(!matches!(state.overlay, ModalOverlay::Confirm(_)));
+
+        let rows = drawn(&state, &theme, 120, 32);
+        let codex: Vec<String> = rows
+            .iter()
+            .map(|row| text_of(row))
+            .filter(|text| text.contains("codex 0.166.0"))
+            .collect();
+        assert_eq!(codex.len(), 2, "{codex:?}");
+        assert!(codex[0].contains("on request") && codex[0].contains("↑ 0.170.0"));
+        assert!(!codex[1].contains("on request") && codex[1].contains("↑ 0.171.0"));
+
+        state.upgrade_focused();
+        let plan = state.upgrade.as_ref().unwrap();
+        assert_eq!(plan.packages[0].kind, homebrew::PackageKind::Cask);
+        assert_eq!(plan.packages[0].latest_version.as_deref(), Some("0.171.0"));
+        state.close_overlay();
+        focus_kind(&mut state, homebrew::PackageKind::Formula);
+        state.upgrade_focused();
+        let plan = state.upgrade.as_ref().unwrap();
+        assert_eq!(plan.packages[0].kind, homebrew::PackageKind::Formula);
+        assert_eq!(plan.packages[0].latest_version.as_deref(), Some("0.170.0"));
+    }
+
+    #[test]
+    fn a_check_that_pins_the_cask_leaves_the_formula_with_the_same_label_in_the_list() {
+        let mut state = same_label_pair();
+        let latest = homebrew::parse_outdated(
+            r#"{"formulae": [], "casks": [{"name": "codex", "current_version": "0.171.0", "pinned": true}]}"#,
+        )
+        .unwrap();
+
+        state.finish_update_check(None, Ok(latest));
+
+        let theme = Theme::with_env(UiEnv::default());
+        let rows = drawn(&state, &theme, 120, 32);
+        let codex = rows
+            .iter()
+            .map(|row| text_of(row))
+            .filter(|text| text.contains("codex 0.166.0"))
+            .count();
+        assert_eq!(codex, 2);
+        focus_kind(&mut state, homebrew::PackageKind::Formula);
+        state.uninstall_focused();
+        assert!(matches!(state.overlay, ModalOverlay::Confirm(_)));
+    }
+
+    #[test]
+    fn a_pin_that_moves_rows_above_the_focus_keeps_the_focus_on_its_package() {
+        let cask = |name, bytes| {
+            homebrew::testing::package(homebrew::PackageKind::Cask, name, "1.2.0", bytes)
+        };
+        let mut small = cask("small", 1000);
+        small.pinned = true;
+        let mut state = brew_state(vec![cask("big", 3000), small]);
+        state.search_query = "pinned".to_string();
+        let focused = |state: &SelectState| {
+            let rows = state.flattened_rows();
+            rows[state.focused_index].display_path.clone()
+        };
+        state.focused_index = state
+            .flattened_rows()
+            .iter()
+            .position(|row| row.display_path.starts_with("small"))
+            .unwrap();
+        let latest = homebrew::parse_outdated(
+            r#"{"formulae": [], "casks": [{"name": "big", "current_version": "1.3", "pinned": true}]}"#,
+        )
+        .unwrap();
+
+        state.finish_update_check(None, Ok(latest));
+
+        assert_eq!(focused(&state), "small 1.2.0 · pinned");
+    }
+
+    #[test]
+    fn the_share_bar_of_the_homebrew_list_has_at_most_12_cells() {
+        let theme = Theme::with_env(UiEnv::default());
+        let state = brew_state(vec![formula("go", 2000), formula("bun", 1000)]);
+
+        for width in [120, 200] {
+            let rows = drawn(&state, &theme, width, 32);
+            let text = text_of(row_of(&rows, "bun 1.4.2"));
+            let cells = text.matches(['━', '─']).count();
+            assert!((1..=12).contains(&cells), "{width}: {cells}");
+            assert!(text.contains('%'), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_share_bar_of_large_files_stays_wider_than_12_cells() {
+        let theme = Theme::with_env(UiEnv::default());
+        let file = |path: &str, bytes| ScanItem::new(PathBuf::from(path), bytes, false, false);
+        let state = SelectState::new(CategoryScan {
+            id: large_files::SCAN_ID.to_string(),
+            title: "Large Files".to_string(),
+            notes: Vec::new(),
+            groups: vec![ToolGroup {
+                tool: "Downloads".to_string(),
+                items: vec![
+                    file("/Users/test/Downloads/big.iso", 2000),
+                    file("/Users/test/Downloads/small.zip", 1000),
+                ],
+            }],
+        });
+
+        let rows = drawn(&state, &theme, 200, 32);
+
+        let text = text_of(row_of(&rows, "small.zip"));
+        let cells = text.matches(['━', '─']).count();
+        assert!(cells > 12, "{cells}: {text}");
     }
 
     fn plan_with_app(app: &Path) -> CategoryScan {

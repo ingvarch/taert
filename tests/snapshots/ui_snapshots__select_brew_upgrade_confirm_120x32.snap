@@ -5,11 +5,11 @@ expression: select_screen(&state)
  taert › Homebrew                                                                 5 packages  ·  367.1 MB  ·  4 updates
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Formulae ───────────────────────────────────────────────────────────────────────────────── 4 items · 317.1 MB ─╮
-   │     NAME                                                 INSTALLED          SHARE                        SIZE ↓ │
-   │ ▌   go 1.27.3 · on request · update 1.27.4               5 weeks ago        ━━━━━━━━━━━━─────  68.1%   250.1 MB │
-   │     bun 1.4.2 · on request · update 1.4.4_1              24 hours ago       ━━━──────────────  16.3%    60.0 MB │
-   │     ripgrep 15.1.0 · on request                          —                  ─────────────────   1.4%     5.0 MB │
-   │     fd 10.5.0 · on request · update 10.6.0 · pinned      —                  ─────────────────   0.5%     2.0 MB │
+   │     NAME                               ORIGIN      UPDATE     INSTALLED          SHARE                   SIZE ↓ │
+   │ ▌   go 1.27.3                          on request  ↑ 1.27.4   5 weeks ago        ━━━━━━━━────  68.1%   250.1 MB │
+   │     bun 1.4.2                          on request  ↑ 1.4.4_1  24 hours ago       ━━──────────  16.3%    60.0 MB │
+   │     ripgrep 15.1.0                     on request             —                  ────────────   1.4%     5.0 MB │
+   │     fd 10.5.0 · pinned                 on request  ↑ 10.6.0   —                  ────────────   0.5%     2.0 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
                              ╭────────────────────────────────────────────────────────────╮
    ╭─ Casks · Remove with tae│ Upgrade 3 packages?                                        │─────── 1 item · 50.0 MB ─╮

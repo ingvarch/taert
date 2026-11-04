@@ -1477,6 +1477,47 @@ fn snapshot_select_brew_upgrade_outcome() {
     assert_snapshot!("select_brew_upgrade_outcome_120x32", select_screen(&state));
 }
 
+/// Rows of every kind for the columns: an update, an outdated package with no version, a
+/// dependency, a pin, a long name, and a cask.
+fn brew_columns() -> SelectState {
+    let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);
+    let mut wrangler = formula("cloudflare-wrangler", "4.156.1", 480_000_000);
+    wrangler.latest_version = Some("4.156.2".to_string());
+    wrangler.installed_at = days_ago(2);
+    let mut go = formula("go", "1.27.3", 250_100_000);
+    go.used_by = vec!["golangci-lint".to_string(), "gosec".to_string()];
+    go.installed_at = days_ago(40);
+    let mut bun = formula("bun", "1.4.2", 60_000_000);
+    bun.outdated = true;
+    bun.installed_at = days_ago(1);
+    let mut fd = formula("fd", "10.5.0", 2_000_000);
+    fd.pinned = true;
+    fd.latest_version = Some("10.6.0".to_string());
+    let mut ada = formula("ada-url", "4.0.0_1", 3_100_000);
+    ada.on_request = false;
+    ada.installed_at = days_ago(3);
+    let mut ghostty = brew_package(PackageKind::Cask, "ghostty", "1.3.1", 50_000_000);
+    ghostty.apps = vec!["Ghostty.app".to_string()];
+    ghostty.latest_version = Some("1.3.2".to_string());
+    ghostty.installed_at = days_ago(12);
+    SelectState::homebrew_list(&Inventory {
+        packages: vec![wrangler, go, bun, fd, ada, ghostty],
+        brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+        ..Inventory::default()
+    })
+}
+
+#[test]
+fn snapshot_select_brew_columns() {
+    let state = brew_columns();
+    let theme = snapshot_theme();
+
+    let wide = render_to_string(200, 32, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_brew_columns_200x32", wide);
+    let narrow = render_to_string(80, 24, |f| render_select(f, &state, &theme));
+    assert_snapshot!("select_brew_columns_80x24", narrow);
+}
+
 /// `golangci-lint` open two levels deep: its `go`, and the `gmp` that `go` needs.
 fn brew_tree() -> SelectState {
     let formula = |name, version, bytes| brew_package(PackageKind::Formula, name, version, bytes);

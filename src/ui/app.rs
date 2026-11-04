@@ -2808,6 +2808,16 @@ mod tests {
         format!("{:?}", terminal.backend().buffer())
     }
 
+    /// The lines of a `width` by `height` screen.
+    fn screen_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.render_screen(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
     #[test]
     fn protected_paths_name_preferences_only_when_opened_there() {
         let mut app = new_app();
@@ -3045,13 +3055,7 @@ mod tests {
     }
 
     fn footer(app: &App) -> String {
-        let (width, height) = (160, 30);
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| app.render_screen(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..width)
-            .map(|x| buffer[(x, height - 1)].symbol())
-            .collect()
+        screen_rows(app, 160, 30).pop().unwrap_or_default()
     }
 
     #[track_caller]
@@ -3456,13 +3460,7 @@ mod tests {
         }
 
         fn text_rows(app: &App) -> Vec<String> {
-            let (width, height) = (100, 30);
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| app.render_screen(frame)).unwrap();
-            let buffer = terminal.backend().buffer();
-            (0..height)
-                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
-                .collect()
+            screen_rows(app, 100, 30)
         }
 
         #[test]
@@ -4693,6 +4691,14 @@ mod tests {
                 .count()
         }
 
+        /// The line of the Homebrew list on a 140-column screen that holds `needle`.
+        fn row_on_screen(app: &App, needle: &str) -> String {
+            screen_rows(app, 140, 30)
+                .into_iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no row with {needle}"))
+        }
+
         fn row_labels(app: &App) -> Vec<String> {
             select(app)
                 .scan
@@ -4709,12 +4715,12 @@ mod tests {
 
             open_the_list(&mut app);
             assert!(screen_text(&app).contains("Checking for updates…"));
-            assert!(row_labels(&app).contains(&"bun 1.4.2 · on request".to_string()));
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(!row_on_screen(&app, "bun 1.4.2").contains('↑'));
             finish_the_check(&mut app);
 
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert!(screen_text(&app).contains("1 update"));
             assert!(!screen_text(&app).contains("Checking for updates"));
             assert_eq!(ran_times(&host, &brew, "update"), 1);
@@ -4737,9 +4743,8 @@ mod tests {
             finish_the_check(&mut app);
 
             assert_eq!(ran_times(&host, &brew, "update"), 1);
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             app.start_pending_brew_check();
             assert_eq!(ran_times(&host, &brew, "update"), 1);
         }
@@ -4786,9 +4791,8 @@ mod tests {
             drop(release);
             finish_the_check(&mut app);
 
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert_eq!(ran_times(&host, &brew, "update"), 1);
             app.handle_key(KeyCode::Char('u'));
             assert!(screen_text(&app).contains("Upgrade bun?"));
@@ -4836,9 +4840,8 @@ mod tests {
             let toast = select(&app).toast.as_ref().expect("a toast");
             assert_eq!(toast.text, "Could not check for updates: Error: no network");
             assert_eq!(toast.kind, ToastKind::Error);
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert_eq!(row_labels(&app), before);
             assert_eq!(ran_times(&host, &brew, "outdated"), 2);
         }
@@ -4852,13 +4855,13 @@ mod tests {
                 Some("Error: no network"),
             );
             open_the_list(&mut app);
-            assert!(row_labels(&app).contains(&"bun 1.4.2 · on request".to_string()));
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(!row_on_screen(&app, "bun 1.4.2").contains('↑'));
 
             finish_the_check(&mut app);
 
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert_eq!(
                 select(&app).toast.as_ref().expect("a toast").text,
                 "Could not check for updates: Error: no network"
@@ -4881,52 +4884,51 @@ mod tests {
             assert_eq!(state.focused_index, focused);
             let row = &state.flattened_rows()[focused];
             assert!(row.display_path.starts_with("bun "), "{}", row.display_path);
-            assert!(row.display_path.contains("update 1.4.4_1"));
+            assert_eq!(row.display_path, "bun 1.4.2");
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert!(state.expanded.contains(&vec!["app".to_string()]));
             assert_eq!(state.flattened_rows().len(), rows_before);
         }
 
-        const SEARCH_INFO: &str = r#"{"formulae": [
-            {"name": "aaa", "installed": [{"version": "1", "installed_on_request": true}]},
-            {"name": "bbb", "installed": [{"version": "1", "installed_on_request": true}]}],
-            "casks": []}"#;
-        const AAA_OUTDATED: &str =
-            r#"{"formulae": [{"name": "aaa", "current_version": "2"}], "casks": []}"#;
-        const AAA_BBB_OUTDATED: &str = r#"{"formulae": [
-            {"name": "aaa", "current_version": "2"},
-            {"name": "bbb", "current_version": "3"}], "casks": []}"#;
+        const SEARCH_INFO: &str = r#"{"formulae": [], "casks": [
+            {"token": "aaa", "installed": "1"},
+            {"token": "bbb", "installed": "1"}]}"#;
+        const AAA_PINNED: &str = r#"{"formulae": [], "casks": [
+            {"name": "aaa", "current_version": "2", "pinned": true}]}"#;
+        const AAA_BBB_PINNED: &str = r#"{"formulae": [], "casks": [
+            {"name": "aaa", "current_version": "2", "pinned": true},
+            {"name": "bbb", "current_version": "3", "pinned": true}]}"#;
 
         #[test]
         fn the_check_keeps_the_focus_on_its_package_while_a_search_is_active() {
             let (_temp, mut app, _host, _brew) =
-                check_mac_with(SEARCH_INFO, AAA_OUTDATED, Some(AAA_BBB_OUTDATED), None);
+                check_mac_with(SEARCH_INFO, AAA_PINNED, Some(AAA_BBB_PINNED), None);
             for (name, bytes) in [("aaa", 100_000), ("bbb", 300_000)] {
-                let keg = app.layout.system(&format!("opt/homebrew/Cellar/{name}"));
-                std::fs::create_dir_all(&keg).unwrap();
-                std::fs::write(keg.join("file"), vec![0; bytes]).unwrap();
+                let room = app.layout.system(&format!("opt/homebrew/Caskroom/{name}"));
+                std::fs::create_dir_all(&room).unwrap();
+                std::fs::write(room.join("file"), vec![0; bytes]).unwrap();
             }
             open_the_list(&mut app);
-            press(
-                &mut app,
-                &[
-                    KeyCode::Char('/'),
-                    KeyCode::Char('u'),
-                    KeyCode::Char('p'),
-                    KeyCode::Char('d'),
-                    KeyCode::Char('a'),
-                    KeyCode::Char('t'),
-                    KeyCode::Char('e'),
-                    KeyCode::Enter,
-                ],
-            );
+            let mut keys = vec![KeyCode::Char('/')];
+            keys.extend("pinned".chars().map(KeyCode::Char));
+            keys.push(KeyCode::Enter);
+            press(&mut app, &keys);
             focus_on(&mut app, "aaa");
+            let before = select(&app).focused_index;
 
             finish_the_check(&mut app);
 
             let state = select(&app);
+            let labels: Vec<String> = state
+                .flattened_rows()
+                .iter()
+                .filter(|row| row.is_item())
+                .map(|row| row.display_path.clone())
+                .collect();
+            assert_eq!(labels, ["bbb 1 · pinned", "aaa 1 · pinned"]);
+            assert_ne!(state.focused_index, before);
             let row = &state.flattened_rows()[state.focused_index];
-            assert!(row.display_path.starts_with("aaa "), "{}", row.display_path);
-            assert!(row.display_path.contains("update 2"));
+            assert_eq!(row.display_path, "aaa 1 · pinned");
         }
 
         #[test]
@@ -4941,7 +4943,7 @@ mod tests {
                 check_mac_with(info, NOTHING_NEW, Some(outdated), None);
             open_the_list(&mut app);
             finish_the_check(&mut app);
-            assert!(row_labels(&app)[0].contains("update 2"));
+            assert!(row_on_screen(&app, "pin 1").contains("↑ 2"));
             focus_on(&mut app, "pin");
 
             app.handle_key(KeyCode::Char('d'));
@@ -4973,9 +4975,8 @@ mod tests {
                 toast.text,
                 "Could not check for updates: Homebrew did not list the outdated packages: Error: outdated broke"
             );
-            assert!(
-                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
             assert_eq!(row_labels(&app), before);
         }
 
@@ -5388,21 +5389,24 @@ mod tests {
                 180_000_000,
             );
             python.on_request = false;
-            python.outdated = true;
+            python.latest_version = Some("3.14.9".to_string());
+            python.pinned = true;
             python.used_by = vec!["azure-cli".to_string()];
             let app = brew_list_app(&Inventory {
                 packages: vec![python],
                 ..Inventory::default()
             });
 
-            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            terminal.draw(|frame| app.render_screen(frame)).unwrap();
-            let text = format!("{:?}", terminal.backend().buffer());
+            let line = screen_rows(&app, 80, 24)
+                .into_iter()
+                .find(|line| line.contains("python@3.14"))
+                .unwrap();
 
             assert!(
-                text.contains("python@3.14 3.14.8_1 · dependency · used by 1 · outdated"),
-                "{text}"
+                line.contains("python@3.14 3.14.8_1 · used by 1 · pinned"),
+                "{line}"
             );
+            assert!(line.contains("↑ 3.14.9"), "{line}");
         }
 
         #[test]
@@ -6460,7 +6464,7 @@ mod tests {
 
             let state = select(&run.app);
             assert_eq!(state.search_query, "");
-            assert_eq!(labels(&run.app), ["keep 1 · on request"]);
+            assert_eq!(labels(&run.app), ["keep 1"]);
             let rows = state.flattened_rows();
             assert!(rows[state.focused_index].display_path.starts_with("keep "));
         }
@@ -6770,22 +6774,14 @@ mod tests {
             assert_eq!(run.upgrades_run(), [run.upgrade_line("--formula bun")]);
             let history = HistoryLog::new(run.app.layout.history_path());
             assert!(history.load_runs().unwrap().is_empty());
-            assert!(
-                row_labels(&run.app)
-                    .contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
-            );
+            assert!(row_labels(&run.app).contains(&"bun 1.4.2".to_string()));
+            assert!(row_on_screen(&run.app, "bun 1.4.2").contains("↑ 1.4.4_1"));
 
             run.close_outcome();
 
             let labels = row_labels(&run.app);
-            assert!(
-                labels.contains(&"bun 1.4.4_1 · on request".to_string()),
-                "{labels:?}"
-            );
-            assert!(
-                !labels.iter().any(|label| label.contains("update")),
-                "{labels:?}"
-            );
+            assert!(labels.contains(&"bun 1.4.4_1".to_string()), "{labels:?}");
+            assert!(!row_on_screen(&run.app, "bun 1.4.4_1").contains('↑'));
             assert!(!screen_text(&run.app).contains("1 update"));
             assert_eq!(run.calls_of("update"), 1);
             assert_eq!(run.calls_of("info"), 2);

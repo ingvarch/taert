@@ -31,6 +31,8 @@ const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
 const GROUP_UNUSED: &str = "Unused dependencies";
 const GROUP_OLD: &str = "Old versions";
 const NOT_INSTALLED: &str = "Homebrew is not installed.";
+const ORIGIN_REQUESTED: &str = "on request";
+const ORIGIN_DEPENDENCY: &str = "dependency";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,15 +95,15 @@ pub struct Inventory {
 
 impl Inventory {
     /// Sets the new version of each package from `latest`. Returns the old label of each row
-    /// whose label changed, with its new one.
-    pub fn apply_latest(&mut self, latest: &Latest) -> HashMap<PathBuf, PathBuf> {
+    /// whose label changed, with its new one, by kind of package.
+    pub fn apply_latest(&mut self, latest: &Latest) -> HashMap<(PackageKind, PathBuf), PathBuf> {
         let mut changed = HashMap::new();
         for package in &mut self.packages {
             let old = label(package);
             latest.apply(package);
             let new = label(package);
             if new != old {
-                changed.insert(PathBuf::from(old), PathBuf::from(new));
+                changed.insert((package.kind, PathBuf::from(old)), PathBuf::from(new));
             }
         }
         changed
@@ -541,29 +543,34 @@ pub fn label_name(label: &str) -> &str {
     label.split_once(" · ").map_or(label, |(name, _)| name)
 }
 
+/// The kind of package the rows of the list group `tool` hold.
+pub fn group_kind(tool: &str) -> PackageKind {
+    if tool == GROUP_CASKS {
+        PackageKind::Cask
+    } else {
+        PackageKind::Formula
+    }
+}
+
+/// Whether a formula was installed on request or as a dependency. Empty for a cask.
+pub fn origin(package: &Package) -> &'static str {
+    match (package.kind, package.on_request) {
+        (PackageKind::Cask, _) => "",
+        (PackageKind::Formula, true) => ORIGIN_REQUESTED,
+        (PackageKind::Formula, false) => ORIGIN_DEPENDENCY,
+    }
+}
+
 pub fn label(package: &Package) -> String {
     let mut label = name_version(package);
     match package.kind {
-        PackageKind::Formula => {
-            let origin = if package.on_request {
-                "on request"
-            } else {
-                "dependency"
-            };
-            write!(label, " · {origin}").unwrap();
-            if !package.used_by.is_empty() {
-                write!(label, " · used by {}", package.used_by.len()).unwrap();
-            }
+        PackageKind::Formula if !package.used_by.is_empty() => {
+            write!(label, " · used by {}", package.used_by.len()).unwrap();
         }
         PackageKind::Cask if !package.apps.is_empty() => {
             write!(label, " · {}", package.apps.join(", ")).unwrap();
         }
-        PackageKind::Cask => {}
-    }
-    if let Some(latest) = &package.latest_version {
-        write!(label, " · update {latest}").unwrap();
-    } else if package.outdated {
-        label.push_str(" · outdated");
+        PackageKind::Formula | PackageKind::Cask => {}
     }
     if package.pinned {
         label.push_str(" · pinned");
@@ -795,12 +802,17 @@ pub fn refusal(package: &Package) -> Option<String> {
     }
 }
 
-/// The refusal of each row of the list that has one, by the label of the row.
-pub fn list_refusals(inventory: &Inventory) -> HashMap<PathBuf, String> {
+/// The refusal of each row of the list that has one, by the kind and label of the row.
+pub fn list_refusals(inventory: &Inventory) -> HashMap<(PackageKind, PathBuf), String> {
     inventory
         .packages
         .iter()
-        .filter_map(|package| Some((PathBuf::from(label(package)), refusal(package)?)))
+        .filter_map(|package| {
+            Some((
+                (package.kind, PathBuf::from(label(package))),
+                refusal(package)?,
+            ))
+        })
         .collect()
 }
 
@@ -1212,9 +1224,9 @@ fn plain_section(title: &str, packages: &[&Package], widths: &Widths) -> String 
     let mut text = format!("{title}\n");
     for package in packages {
         let origin = if package.on_request {
-            "on request"
+            ORIGIN_REQUESTED
         } else {
-            "dependency"
+            ORIGIN_DEPENDENCY
         };
         let outdated = outdated_cell(package);
         let pinned = if package.pinned { "pinned" } else { "-" };
@@ -1477,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn new_versions_change_the_inventory_and_name_the_labels_that_changed() {
+    fn new_versions_change_the_inventory_and_leave_the_labels() {
         let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 10);
         bun.latest_version = Some("1.4.3".to_string());
         let mut inventory = Inventory {
@@ -1488,7 +1500,6 @@ mod tests {
             ],
             ..Inventory::default()
         };
-        let old_bun = PathBuf::from(label(&inventory.packages[0]));
         let latest = parse_outdated(
             r#"{"formulae": [{"name": "fd", "current_version": "10.1"}], "casks": []}"#,
         )
@@ -1502,12 +1513,27 @@ mod tests {
             .map(|package| package.latest_version.as_deref())
             .collect();
         assert_eq!(versions, [None, Some("10.1"), None]);
-        assert_eq!(changed.len(), 2);
-        assert_eq!(changed[&old_bun], PathBuf::from("bun 1.4.2 · on request"));
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+
+    #[test]
+    fn a_pin_found_by_the_update_check_changes_the_label() {
+        let mut inventory = Inventory {
+            packages: vec![package(PackageKind::Cask, "ghostty", "1.2.0", 7)],
+            ..Inventory::default()
+        };
+        let latest = parse_outdated(
+            r#"{"formulae": [], "casks": [{"name": "ghostty", "current_version": "1.3", "pinned": true}]}"#,
+        )
+        .unwrap();
+
+        let changed = inventory.apply_latest(&latest);
+
         assert_eq!(
-            changed[&PathBuf::from("fd 10.0 · on request")],
-            PathBuf::from("fd 10.0 · on request · update 10.1")
+            changed[&(PackageKind::Cask, PathBuf::from("ghostty 1.2.0"))],
+            PathBuf::from("ghostty 1.2.0 · pinned")
         );
+        assert_eq!(changed.len(), 1);
     }
 
     #[test]
@@ -2026,10 +2052,7 @@ Formulae
 
         let tools: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
         assert_eq!(tools, ["Formulae", "Needed by what you installed"]);
-        assert_eq!(
-            scan.groups[1].items[0].path,
-            Path::new("lib 1 · dependency")
-        );
+        assert_eq!(scan.groups[1].items[0].path, Path::new("lib 1"));
     }
 
     #[test]
@@ -2326,13 +2349,10 @@ Formulae
                 .unwrap()
         };
 
-        assert_eq!(
-            label("go"),
-            &("go 1.27.3 · on request · used by 2".to_string(), 5_000)
-        );
-        assert_eq!(label("bun").0, "bun 1.4.2 · on request · outdated");
-        assert_eq!(label("fd").0, "fd 10.5.0 · on request · pinned");
-        assert_eq!(label("ada-url").0, "ada-url 4.0.0_1 · dependency");
+        assert_eq!(label("go"), &("go 1.27.3 · used by 2".to_string(), 5_000));
+        assert_eq!(label("bun").0, "bun 1.4.2");
+        assert_eq!(label("fd").0, "fd 10.5.0 · pinned");
+        assert_eq!(label("ada-url").0, "ada-url 4.0.0_1");
         assert_eq!(label("ghostty").0, "ghostty 1.3.1 · Ghostty.app");
         assert_eq!(label("codex").0, "codex 0.166.0");
         assert!(
@@ -2344,7 +2364,7 @@ Formulae
     }
 
     #[test]
-    fn list_scan_label_shows_the_new_version() {
+    fn list_scan_label_ignores_the_new_version() {
         let mut packages = packages();
         packages
             .iter_mut()
@@ -2362,22 +2382,29 @@ Formulae
             .find(|(label, _)| label.starts_with("bun "))
             .unwrap();
 
-        assert_eq!(bun.0, "bun 1.4.2 · on request · update 1.4.4_1");
+        assert_eq!(bun.0, "bun 1.4.2");
     }
 
     #[test]
-    fn the_label_shows_the_new_version_in_place_of_outdated() {
+    fn a_formula_has_an_origin_and_a_cask_has_none() {
+        let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 1);
+        assert_eq!(origin(&bun), "on request");
+        bun.on_request = false;
+        assert_eq!(origin(&bun), "dependency");
+        let ghostty = package(PackageKind::Cask, "ghostty", "1.3.1", 1);
+        assert_eq!(origin(&ghostty), "");
+    }
+
+    #[test]
+    fn the_label_has_no_origin_and_no_new_version() {
         let mut bun = package(PackageKind::Formula, "bun", "1.4.2", 1);
         bun.outdated = true;
-        assert_eq!(label(&bun), "bun 1.4.2 · on request · outdated");
+        assert_eq!(label(&bun), "bun 1.4.2");
 
         bun.latest_version = Some("1.4.4_1".to_string());
         bun.pinned = true;
 
-        assert_eq!(
-            label(&bun),
-            "bun 1.4.2 · on request · update 1.4.4_1 · pinned"
-        );
+        assert_eq!(label(&bun), "bun 1.4.2 · pinned");
         assert_eq!(label_name(&label(&bun)), "bun 1.4.2");
     }
 
@@ -3410,20 +3437,25 @@ Would remove: /opt/homebrew/Cellar/go/1.0
 
         let refusals = list_refusals(&inventory);
 
-        let text = |label: &str| refusals.get(Path::new(label)).map(String::as_str);
+        let text = |label: &str| {
+            refusals
+                .iter()
+                .find(|((_, path), _)| path == Path::new(label))
+                .map(|(_, text)| text.as_str())
+        };
         assert_eq!(
             text("ghostty 1"),
             Some("ghostty is a cask. Remove it with taert uninstall.")
         );
         assert_eq!(
-            text("fd 1 · on request · pinned"),
+            text("fd 1 · pinned"),
             Some("fd is pinned. Run brew unpin fd first.")
         );
         assert_eq!(
-            text("lib 1 · dependency · used by 2"),
+            text("lib 1 · used by 2"),
             Some("lib stays: app, tool use it.")
         );
-        assert_eq!(text("plain 1 · on request"), None);
+        assert_eq!(text("plain 1"), None);
         assert_eq!(refusals.len(), 3);
     }
 

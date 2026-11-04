@@ -1,0 +1,28 @@
+---
+source: tests/ui_snapshots.rs
+expression: narrow
+---
+ taert › Homebrew                         6 packages  ·  845.2 MB  ·  3 updates
+────────────────────────────────────────────────────────────────────────────────
+   ╭─ Formulae ───────────────────────────────────────── 4 items · 792.1 MB ─╮
+   │     NAME                                           UPDATE        SIZE ↓ │
+   │ ▌   cloudflare-wrangler 4.156.1                    ↑ 4.156.2   480.0 MB │
+   │     go 1.27.3 · used by 2                                      250.1 MB │
+   │     bun 1.4.2                                      ↑            60.0 MB │
+   │     fd 10.5.0 · pinned                             ↑ 10.6.0      2.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Not needed by anything you installed ──────────────── 1 item · 3.1 MB ─╮
+   │     NAME                                           UPDATE        SIZE ↓ │
+   │     ada-url 4.0.0_1                                              3.1 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ Casks · Remove with taert uninstall ──────────────── 1 item · 50.0 MB ─╮
+   │     NAME                                           UPDATE        SIZE ↓ │
+   │     ghostty 1.3.1 · Ghostty.app                    ↑ 1.3.2      50.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────╯
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  /  Search    ↑↓  Move    d  Uninstall    u  Upgrade    ?  More     Expand  ↵
