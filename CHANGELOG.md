@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Homebrew list**: `⇧D` now sorts by install date. `d`, `Backspace`, and `Delete` uninstall the focused formula.
 
 ### Fixed
+- **Explore Storage**: when the background update of a folder stops without a result, `Updating…` goes away and the rows keep their old sizes. Open the folder again from its parent, or press `R`, to measure it again.
 - **Slim apps**: on a Mac that is not Apple Silicon, the interface leaves the scanning screen and shows why under the name `Slim Universal Apps`.
 - **Uninstall**: an uninstall plan with no apps shows the crumbs `taert › Uninstall apps › Review`, the `Uninstall` button, and the right help for Enter.
 - **Search**: the count in the search line reads `1 result` instead of `1 results`.
