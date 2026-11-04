@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Date sort**: the date sort moved from `⇧D` to `⇧T` in Explore Storage, Docker, Large Files, and Uninstall Apps, because `D` now removes. The footers and the help sheets show `⇧S/N/T`, `d` for removal, and `d` as the main action of a removal list.
 
 ### Fixed
+- **History read errors**: when the history file cannot be read, for example when `history.jsonl` is a folder, `taert history` shows the error instead of hanging. The cleanup of old runs stops, leaves the file as it is, and frees the history lock. A line that is not UTF-8 or not JSON is still skipped.
 - **History run ids**: two runs no longer get the same id, in one process or in two processes that write the same history file. taert picks the id under the history lock and moves the last four digits on while the file already has that id. The id keeps its form, and old history files load as before.
 - **Explore Storage**: when the background update of a folder stops without a result, `Updating…` goes away and the rows keep their old sizes. Open the folder again from its parent, or press `R`, to measure it again.
 - **Slim apps**: on a Mac that is not Apple Silicon, the interface leaves the scanning screen and shows why under the name `Slim Universal Apps`.
