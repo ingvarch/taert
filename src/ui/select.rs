@@ -82,6 +82,8 @@ pub struct SelectState {
     /// The rows of the Homebrew tree that are open, by their path of names.
     pub expanded: HashSet<Vec<String>>,
     pub toast: Option<Toast>,
+    /// The Homebrew list is waiting for `brew update` and `brew outdated`.
+    pub checking_updates: bool,
 }
 
 const BAR_MIN_WIDTH: usize = 100;
@@ -188,6 +190,7 @@ impl SelectState {
             homebrew: None,
             expanded: HashSet::new(),
             toast: None,
+            checking_updates: false,
         };
         state.move_to_start();
         state
@@ -216,6 +219,58 @@ impl SelectState {
         state.set_sort(SortOrder::default());
         state.move_to_start();
         state
+    }
+
+    /// Takes the result of the check for updates: the rows show the new versions, and a failure
+    /// shows as a toast. Selection, sort, search, open rows, and the focused package stay as they are.
+    pub fn finish_update_check(
+        &mut self,
+        update_error: Option<String>,
+        latest: Result<homebrew::Latest, String>,
+    ) {
+        self.checking_updates = false;
+        let failure = update_error.or_else(|| latest.as_ref().err().cloned());
+        if let Some(failure) = failure {
+            self.toast = Some(Toast::error(format!(
+                "Could not check for updates: {failure}"
+            )));
+        }
+        let Ok(latest) = latest else {
+            return;
+        };
+        let focused = self.flattened_rows().get(self.focused_index).cloned();
+        let Some(inventory) = self.homebrew.as_mut() else {
+            return;
+        };
+        let changed = inventory.apply_latest(&latest);
+        for item in self
+            .scan
+            .groups
+            .iter_mut()
+            .flat_map(|group| &mut group.items)
+        {
+            if let Some(label) = changed.get(&item.path) {
+                item.path = label.clone();
+            }
+        }
+        self.refusals = std::mem::take(&mut self.refusals)
+            .into_iter()
+            .map(|(label, reason)| (changed.get(&label).cloned().unwrap_or(label), reason))
+            .collect();
+        if let Some(focused) = focused {
+            self.refocus_renamed(&focused, &changed);
+        }
+    }
+
+    /// Puts the focus back on the row that was focused before its label changed.
+    fn refocus_renamed(&mut self, focused: &FlattenedRow, changed: &HashMap<PathBuf, PathBuf>) {
+        let wanted = focused
+            .full_path
+            .as_ref()
+            .map(|old| changed.get(old).unwrap_or(old));
+        if !self.focus_same_item(focused, wanted) {
+            self.focus_item_at_or_before(self.focused_index);
+        }
     }
 
     /// Closes the outcome of a removal on the Homebrew list. The formulae that went leave the
@@ -255,6 +310,7 @@ impl SelectState {
         if let Some(order) = self.sort_order {
             fresh.set_sort(order);
         }
+        fresh.checking_updates = self.checking_updates;
         fresh.search_query = std::mem::take(&mut self.search_query);
         fresh.expanded = std::mem::take(&mut self.expanded);
         if fresh.flattened_rows().is_empty() {
@@ -296,18 +352,24 @@ impl SelectState {
         }
         self.sort_order = Some(sort_order);
 
-        let Some(focused) = focused else { return };
-        let rows = self.flattened_rows();
+        if let Some(focused) = focused {
+            self.focus_same_item(&focused, focused.full_path.as_ref());
+        }
+    }
+
+    /// Moves the focus to the item in `focused`'s group and tree position whose path is `path`.
+    fn focus_same_item(&mut self, focused: &FlattenedRow, path: Option<&PathBuf>) -> bool {
         let tree_path = |row: &FlattenedRow| row.tree.as_ref().map(|tree| tree.path.clone());
-        let same_item = |row: &FlattenedRow| {
+        let index = self.flattened_rows().iter().position(|row| {
             row.is_item()
                 && row.group_index == focused.group_index
-                && row.full_path == focused.full_path
-                && tree_path(row) == tree_path(&focused)
-        };
-        if let Some(index) = rows.iter().position(same_item) {
+                && row.full_path.as_ref() == path
+                && tree_path(row) == tree_path(focused)
+        });
+        if let Some(index) = index {
             self.focused_index = index;
         }
+        index.is_some()
     }
 
     /// The groups with the items the search keeps.
@@ -789,6 +851,10 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
                 plural(updates, "update", "updates"),
                 theme.accent_text(),
             ));
+        }
+        if state.checking_updates {
+            spans.push(Span::styled("  ·  ", theme.callout()));
+            spans.push(Span::styled("Checking for updates…", theme.callout()));
         }
         Line::from(spans)
     } else {
