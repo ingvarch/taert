@@ -156,7 +156,7 @@ mod tests {
                     Hint::new("←", "Up one level"),
                     Hint::new("R", "Refresh folder"),
                     Hint::new("O", "Reveal in Finder"),
-                    Hint::new("D / ⌫", "Delete selected"),
+                    Hint::new("d", "Delete selected"),
                 ],
             ),
             HelpSection::new(
@@ -164,7 +164,7 @@ mod tests {
                 vec![
                     Hint::new("⇧S", "Size"),
                     Hint::new("⇧N", "Name"),
-                    Hint::new("⇧D", "Date created"),
+                    Hint::new("⇧T", "Date created"),
                 ],
             ),
             HelpSection::new(

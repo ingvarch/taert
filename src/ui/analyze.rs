@@ -940,7 +940,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
     };
 
     let primary_action = if selected_count > 0 {
-        PrimaryAction::destructive(format!("Delete {selected_count} items"), "D")
+        PrimaryAction::destructive(format!("Delete {selected_count} items"), "d")
     } else if can_open {
         PrimaryAction::new("Open", "↵")
     } else {
@@ -958,10 +958,10 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
             Hint::new("␣", "Select"),
             Hint::new("A", "All"),
             Hint::new("N", "None"),
-            Hint::new("⇧S/N/D", state.sort_order.hint_label()),
+            Hint::new("⇧S/N/T", state.sort_order.hint_label()),
         ]);
         if selected_count == 0 {
-            hints.push(Hint::new("D", "Delete"));
+            hints.push(Hint::new("d", "Delete"));
         } else if can_open {
             hints.push(Hint::new("↵", "Open"));
         }

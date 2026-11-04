@@ -208,7 +208,7 @@ fn sample_help_sheet() -> HelpSheet<'static> {
                 Hint::new("␣", "Toggle select"),
                 Hint::new("A / N", "Select all / none"),
                 Hint::new("↵ / →", "Enter folder"),
-                Hint::new("D / ⌫", "Delete selected"),
+                Hint::new("d", "Delete selected"),
             ],
         ),
         HelpSection::new(
