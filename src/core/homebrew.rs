@@ -32,7 +32,7 @@ const GROUP_UNUSED: &str = "Unused dependencies";
 const GROUP_OLD: &str = "Old versions";
 const NOT_INSTALLED: &str = "Homebrew is not installed.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackageKind {
     Formula,
@@ -98,7 +98,7 @@ impl Inventory {
         let mut changed = HashMap::new();
         for package in &mut self.packages {
             let old = label(package);
-            package.latest_version = latest.of(package);
+            latest.apply(package);
             let new = label(package);
             if new != old {
                 changed.insert(PathBuf::from(old), PathBuf::from(new));
@@ -148,6 +148,8 @@ struct RawFormula {
 struct RawOutdated {
     name: String,
     current_version: String,
+    #[serde(default)]
+    pinned: bool,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +165,10 @@ struct OutdatedList {
 pub struct Latest {
     pub formulae: HashMap<String, String>,
     pub casks: HashMap<String, String>,
+    /// The outdated formulae `brew outdated` marks as pinned.
+    pinned_formulae: HashSet<String>,
+    /// The outdated casks `brew outdated` marks as pinned.
+    pinned_casks: HashSet<String>,
 }
 
 impl Latest {
@@ -171,11 +177,29 @@ impl Latest {
             PackageKind::Formula => &self.formulae,
             PackageKind::Cask => &self.casks,
         };
-        versions
-            .get(&package.name)
-            .or_else(|| versions.get(&package.full_name))
+        names(package)
+            .into_iter()
+            .find_map(|name| versions.get(name))
             .cloned()
     }
+
+    fn is_pinned(&self, package: &Package) -> bool {
+        let pins = match package.kind {
+            PackageKind::Formula => &self.pinned_formulae,
+            PackageKind::Cask => &self.pinned_casks,
+        };
+        names(package).into_iter().any(|name| pins.contains(name))
+    }
+
+    /// Sets the new version of `package`, and its pin when `brew outdated` reports one.
+    fn apply(&self, package: &mut Package) {
+        package.latest_version = self.of(package);
+        package.pinned |= self.is_pinned(package);
+    }
+}
+
+fn names(package: &Package) -> [&String; 2] {
+    [&package.name, &package.full_name]
 }
 
 #[derive(Deserialize)]
@@ -242,8 +266,8 @@ fn read(
     }
 }
 
-/// Runs a brew command that removes something. brew removes only what was named, not every unused
-/// formula too.
+/// Runs a brew command that removes or upgrades something, without Homebrew's autoremove of
+/// every unused formula after it.
 pub(crate) fn run_removing(host: &dyn Host, brew: &Path, args: &[&str]) -> Output {
     run_brew_with(
         host,
@@ -377,12 +401,20 @@ pub fn parse_packages(json: &str, prefix: &Path) -> Result<Vec<Package>, String>
 pub fn parse_outdated(json: &str) -> Result<Latest, String> {
     let list: OutdatedList = serde_json::from_str(json)
         .map_err(|error| format!("Homebrew printed an outdated list taert cannot read: {error}"))?;
+    let pins = |raw: &[RawOutdated]| {
+        raw.iter()
+            .filter(|package| package.pinned)
+            .map(|package| package.name.clone())
+            .collect()
+    };
     let versions = |raw: Vec<RawOutdated>| {
         raw.into_iter()
             .map(|package| (package.name, package.current_version))
             .collect()
     };
     Ok(Latest {
+        pinned_formulae: pins(&list.formulae),
+        pinned_casks: pins(&list.casks),
         formulae: versions(list.formulae),
         casks: versions(list.casks),
     })
@@ -395,9 +427,12 @@ pub fn update(host: &dyn Host, brew: &Path) -> Result<(), String> {
     if output.ok {
         return Ok(());
     }
-    Err(last_line(&output.stderr)
-        .unwrap_or("brew update failed")
-        .to_string())
+    Err(failure_line(&output, "brew update failed"))
+}
+
+/// The last line brew printed on stderr, or `fallback` when it printed none.
+fn failure_line(output: &Output, fallback: &str) -> String {
+    last_line(&output.stderr).unwrap_or(fallback).to_string()
 }
 
 /// The last line of `text` that is not blank, trimmed.
@@ -453,7 +488,7 @@ pub fn scan(layout: &Layout, host: &dyn Host) -> Result<Inventory, String> {
     };
     for package in &mut packages {
         package.size_bytes = DirSizer::size_of(&package.path);
-        package.latest_version = latest.of(package);
+        latest.apply(package);
     }
     packages.sort_by(|a, b| {
         (a.kind, Reverse(a.size_bytes), &a.name).cmp(&(b.kind, Reverse(b.size_bytes), &b.name))
@@ -706,13 +741,21 @@ fn in_use(name: &str, used_by: &[String]) -> String {
     format!("{name} stays: {} use it.", used_by.join(", "))
 }
 
+fn pinned(name: &str) -> String {
+    format!("{name} is pinned. Run brew unpin {name} first.")
+}
+
+fn not_installed(name: &str) -> String {
+    format!("{name} is not installed.")
+}
+
 /// Why taert will not uninstall this package, if it will not.
 pub fn refusal(package: &Package) -> Option<String> {
     let name = &package.name;
     if package.kind == PackageKind::Cask {
         Some(format!("{name} is a cask. Remove it with taert uninstall."))
     } else if package.pinned {
-        Some(format!("{name} is pinned. Run brew unpin {name} first."))
+        Some(pinned(name))
     } else if !package.used_by.is_empty() {
         Some(in_use(name, &package.used_by))
     } else {
@@ -737,14 +780,7 @@ pub fn uninstall_plan(
 ) -> Result<CategoryScan, String> {
     let brew = find(layout).ok_or(NOT_INSTALLED)?;
     let packages = installed(host, &brew.path, &brew.prefix)?;
-    let package = [PackageKind::Formula, PackageKind::Cask]
-        .into_iter()
-        .find_map(|kind| {
-            packages
-                .iter()
-                .find(|package| package.kind == kind && is_named(package, name))
-        })
-        .ok_or_else(|| format!("{name} is not installed."))?;
+    let package = find_named(&packages, name).ok_or_else(|| not_installed(name))?;
     if let Some(text) = refusal(package) {
         return Err(text);
     }
@@ -760,6 +796,82 @@ pub fn uninstall_plan(
             items: vec![row],
         }],
         notes: Vec::new(),
+    })
+}
+
+/// Why taert will not upgrade this package, if it will not. `package` is `None` when the name
+/// is not installed.
+pub fn upgrade_refusal(name: &str, package: Option<&Package>) -> Option<String> {
+    let Some(package) = package else {
+        return Some(not_installed(name));
+    };
+    if package.latest_version.is_none() {
+        Some(format!("{name} is up to date."))
+    } else if package.pinned {
+        Some(pinned(name))
+    } else {
+        None
+    }
+}
+
+/// The packages to upgrade, and the brew that upgrades them.
+#[derive(Debug)]
+pub struct UpgradePlan {
+    pub brew: PathBuf,
+    pub packages: Vec<Package>,
+}
+
+/// The packages `upgrade` should run for: the one called `name`, or every outdated package
+/// that is not refused.
+pub fn upgrade_plan(
+    layout: &Layout,
+    host: &dyn Host,
+    name: Option<&str>,
+) -> Result<UpgradePlan, String> {
+    let brew = find(layout).ok_or(NOT_INSTALLED)?;
+    let mut packages = installed(host, &brew.path, &brew.prefix)?;
+    if !packages.is_empty() {
+        let latest = outdated(host, &brew.path)?;
+        packages
+            .iter_mut()
+            .for_each(|package| latest.apply(package));
+    }
+    let packages = match name {
+        Some(name) => {
+            let package = find_named(&packages, name);
+            if let Some(text) = upgrade_refusal(name, package) {
+                return Err(text);
+            }
+            package.cloned().into_iter().collect()
+        }
+        None => packages
+            .into_iter()
+            .filter(|package| upgrade_refusal(&package.name, Some(package)).is_none())
+            .collect(),
+    };
+    Ok(UpgradePlan {
+        brew: brew.path,
+        packages,
+    })
+}
+
+/// Upgrades one package with its own `brew upgrade` call. On failure the error is the last
+/// line brew printed on stderr; for a cask it also says how to upgrade it in a terminal.
+pub fn upgrade(host: &dyn Host, brew: &Path, kind: PackageKind, name: &str) -> Result<(), String> {
+    let flag = match kind {
+        PackageKind::Formula => "--formula",
+        PackageKind::Cask => "--cask",
+    };
+    let output = run_removing(host, brew, &["upgrade", flag, name]);
+    if output.ok {
+        return Ok(());
+    }
+    let error = failure_line(&output, "brew upgrade failed");
+    Err(match kind {
+        PackageKind::Formula => error,
+        PackageKind::Cask => format!(
+            "{error} If it needs your password, run brew upgrade --cask {name} in a terminal."
+        ),
     })
 }
 
@@ -809,6 +921,17 @@ fn empty_cleanup(notes: Vec<String>) -> CategoryScan {
         groups: Vec::new(),
         notes,
     }
+}
+
+/// The formula called `name`, or else the cask.
+fn find_named<'a>(packages: &'a [Package], name: &str) -> Option<&'a Package> {
+    [PackageKind::Formula, PackageKind::Cask]
+        .into_iter()
+        .find_map(|kind| {
+            packages
+                .iter()
+                .find(|package| package.kind == kind && is_named(package, name))
+        })
 }
 
 fn is_named(package: &Package, name: &str) -> bool {
@@ -3233,5 +3356,278 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         );
         assert_eq!(text("plain 1 · on request"), None);
         assert_eq!(refusals.len(), 3);
+    }
+
+    fn outdated_package(kind: PackageKind, name: &str, latest: &str) -> Package {
+        let mut package = package(kind, name, "1.0", 10);
+        package.latest_version = Some(latest.to_string());
+        package
+    }
+
+    #[test]
+    fn upgrade_refusal_says_why_a_package_stays() {
+        let up_to_date = package(PackageKind::Formula, "bun", "1.0", 10);
+        let mut pinned = outdated_package(PackageKind::Formula, "fd", "2.0");
+        pinned.pinned = true;
+        let mut pinned_cask = outdated_package(PackageKind::Cask, "ghostty", "2.0");
+        pinned_cask.pinned = true;
+        let fine = outdated_package(PackageKind::Cask, "codex", "2.0");
+
+        assert_eq!(
+            upgrade_refusal("nope", None),
+            Some("nope is not installed.".to_string())
+        );
+        assert_eq!(
+            upgrade_refusal("bun", Some(&up_to_date)),
+            Some("bun is up to date.".to_string())
+        );
+        assert_eq!(
+            upgrade_refusal("fd", Some(&pinned)),
+            Some("fd is pinned. Run brew unpin fd first.".to_string())
+        );
+        assert_eq!(
+            upgrade_refusal("ghostty", Some(&pinned_cask)),
+            Some("ghostty is pinned. Run brew unpin ghostty first.".to_string())
+        );
+        assert_eq!(upgrade_refusal("codex", Some(&fine)), None);
+    }
+
+    #[test]
+    fn a_package_that_is_up_to_date_and_pinned_is_up_to_date() {
+        let mut both = package(PackageKind::Formula, "fd", "1.0", 10);
+        both.pinned = true;
+
+        assert_eq!(
+            upgrade_refusal("fd", Some(&both)),
+            Some("fd is up to date.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_pinned_cask_in_the_outdated_list_is_pinned_in_the_inventory() {
+        let json = r#"{"formulae": [], "casks": [
+ {"name": "ghostty", "current_version": "1.3.2", "pinned": true},
+ {"name": "codex", "current_version": "0.170.0"}]}"#;
+        let latest = parse_outdated(json).unwrap();
+        let mut inventory = Inventory {
+            packages: packages(),
+            ..Inventory::default()
+        };
+
+        inventory.apply_latest(&latest);
+
+        assert!(named(&inventory.packages, "ghostty").pinned);
+        assert!(!named(&inventory.packages, "codex").pinned);
+    }
+
+    const PINNED_CASK_OUTDATED: &str = r#"{"formulae": [], "casks": [
+ {"name": "ghostty", "current_version": "1.3.2", "pinned": true}]}"#;
+
+    #[test]
+    fn a_scan_and_the_plain_list_show_a_pinned_outdated_cask_as_pinned() {
+        let (_temp, layout, host) = upgrade_mac(PINNED_CASK_OUTDATED);
+
+        let inventory = scan(&layout, &host).unwrap();
+
+        assert!(named(&inventory.packages, "ghostty").pinned);
+        let line = plain_text(&inventory)
+            .lines()
+            .find(|line| line.contains("ghostty"))
+            .unwrap()
+            .to_string();
+        assert!(line.contains("pinned"), "{line}");
+    }
+
+    fn upgrade_mac(outdated: &str) -> (tempfile::TempDir, Layout, FakeHost) {
+        upgrade_mac_with(Ok(outdated))
+    }
+
+    /// A Mac where `brew outdated` gives the result (an error is stderr).
+    fn upgrade_mac_with(outdated: Result<&str, &str>) -> (tempfile::TempDir, Layout, FakeHost) {
+        let (temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info --json=v2 --installed"), BREW_INFO);
+        match outdated {
+            Ok(stdout) => host.reply(&line(&layout, "outdated --json=v2"), stdout),
+            Err(stderr) => host.fail(&line(&layout, "outdated --json=v2"), stderr),
+        }
+        (temp, layout, host)
+    }
+
+    fn brew_args(host: &FakeHost, layout: &Layout) -> Vec<String> {
+        let start = line(layout, "");
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.strip_prefix(&start).unwrap_or(call).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_upgrade_plan_reads_the_installed_and_the_outdated_packages() {
+        let (_temp, layout, host) = upgrade_mac(BREW_OUTDATED);
+
+        let plan = upgrade_plan(&layout, &host, Some("bun")).unwrap();
+
+        assert_eq!(
+            brew_args(&host, &layout),
+            ["info --json=v2 --installed", "outdated --json=v2"]
+        );
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.packages[0].name, "bun");
+        assert_eq!(plan.packages[0].latest_version.as_deref(), Some("1.4.4_1"));
+        assert_eq!(plan.brew, layout.system("opt/homebrew/bin/brew"));
+    }
+
+    #[test]
+    fn the_upgrade_plan_without_a_name_leaves_out_pinned_and_up_to_date_packages() {
+        let json = r#"{"formulae": [
+ {"name": "bun", "current_version": "1.4.4_1"},
+ {"name": "fd", "current_version": "10.6.0", "pinned": true}],
+ "casks": [{"name": "codex", "current_version": "0.170.0"},
+ {"name": "ghostty", "current_version": "1.3.2", "pinned": true}]}"#;
+        let (_temp, layout, host) = upgrade_mac(json);
+
+        let plan = upgrade_plan(&layout, &host, None).unwrap();
+
+        let mut got: Vec<_> = plan
+            .packages
+            .iter()
+            .map(|package| (package.kind, package.name.as_str()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [(PackageKind::Formula, "bun"), (PackageKind::Cask, "codex")]
+        );
+    }
+
+    #[test]
+    fn the_upgrade_plan_for_a_name_refuses_what_upgrade_refusal_refuses() {
+        let (_temp, layout, host) = upgrade_mac(PINNED_CASK_OUTDATED);
+
+        let error = |name| upgrade_plan(&layout, &host, Some(name)).unwrap_err();
+
+        assert_eq!(error("nope"), "nope is not installed.");
+        assert_eq!(error("go"), "go is up to date.");
+        assert_eq!(
+            error("ghostty"),
+            "ghostty is pinned. Run brew unpin ghostty first."
+        );
+    }
+
+    #[test]
+    fn a_formula_wins_over_a_cask_of_the_same_name() {
+        let info = r#"{"formulae": [{"name": "same", "full_name": "same", "installed": [{"version": "1"}]}],
+ "casks": [{"token": "same", "installed": "2"}]}"#;
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, "info --json=v2 --installed"), info);
+        host.reply(
+            &line(&layout, "outdated --json=v2"),
+            r#"{"formulae": [{"name": "same", "current_version": "3"}],
+ "casks": [{"name": "same", "current_version": "4"}]}"#,
+        );
+
+        let plan = upgrade_plan(&layout, &host, Some("same")).unwrap();
+
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.packages[0].kind, PackageKind::Formula);
+        assert_eq!(plan.packages[0].latest_version.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn the_upgrade_plan_with_nothing_installed_asks_for_no_outdated_list() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(
+            &line(&layout, "info --json=v2 --installed"),
+            r#"{"formulae": [], "casks": []}"#,
+        );
+
+        let plan = upgrade_plan(&layout, &host, None).unwrap();
+        let error = upgrade_plan(&layout, &host, Some("bun")).unwrap_err();
+
+        assert!(plan.packages.is_empty());
+        assert_eq!(error, "bun is not installed.");
+        assert_eq!(
+            brew_args(&host, &layout),
+            ["info --json=v2 --installed", "info --json=v2 --installed"]
+        );
+    }
+
+    #[test]
+    fn the_upgrade_plan_needs_homebrew_and_a_readable_outdated_list() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        assert_eq!(
+            upgrade_plan(&layout, &host, None).unwrap_err(),
+            "Homebrew is not installed."
+        );
+
+        let (_temp, layout, host) = upgrade_mac_with(Err("Error: broken tap\n"));
+        assert_eq!(
+            upgrade_plan(&layout, &host, None).unwrap_err(),
+            "Homebrew did not list the outdated packages: Error: broken tap"
+        );
+    }
+
+    #[test]
+    fn a_failed_upgrade_without_stderr_still_says_what_failed() {
+        let host = FakeHost::default();
+        host.fail(
+            &format!("{REMOVING_LINE_START} {BREW} upgrade --formula bun"),
+            "",
+        );
+
+        assert_eq!(
+            upgrade(&host, Path::new(BREW), PackageKind::Formula, "bun"),
+            Err("brew upgrade failed".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrade_runs_one_package_with_its_kind_and_no_autoremove() {
+        for (kind, flag) in [
+            (PackageKind::Formula, "--formula"),
+            (PackageKind::Cask, "--cask"),
+        ] {
+            let host = FakeHost::default();
+            let line = format!("{REMOVING_LINE_START} {BREW} upgrade {flag} bun");
+            host.reply(&line, "");
+
+            let result = upgrade(&host, Path::new(BREW), kind, "bun");
+
+            assert_eq!(result, Ok(()));
+            assert_eq!(*host.calls.lock().unwrap(), [line]);
+        }
+    }
+
+    #[test]
+    fn a_failed_upgrade_reports_the_last_line_of_stderr() {
+        let host = FakeHost::default();
+        host.fail(
+            &format!("{REMOVING_LINE_START} {BREW} upgrade --formula bun"),
+            "Warning: x\nError: broken\n\n",
+        );
+        let result = upgrade(&host, Path::new(BREW), PackageKind::Formula, "bun");
+
+        assert_eq!(result, Err("Error: broken".to_string()));
+    }
+
+    #[test]
+    fn a_failed_cask_upgrade_says_how_to_run_it_in_a_terminal() {
+        let host = FakeHost::default();
+        host.fail(
+            &format!("{REMOVING_LINE_START} {BREW} upgrade --cask ghostty"),
+            "Warning: x\nError: sudo needed\n\n",
+        );
+        let result = upgrade(&host, Path::new(BREW), PackageKind::Cask, "ghostty");
+
+        assert_eq!(
+            result,
+            Err("Error: sudo needed If it needs your password, run brew upgrade --cask ghostty in a terminal.".to_string())
+        );
     }
 }

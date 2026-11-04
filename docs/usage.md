@@ -216,7 +216,7 @@ taert brew --json
 
 taert lists every installed formula and cask with the space it takes: the allocated size of `<prefix>/Cellar/<name>` for a formula and `<prefix>/Caskroom/<token>` for a cask. A cask's app in `/Applications` is not counted. Formulae come first, then casks, each largest first.
 
-The plain output has one row per package in two sections. The columns are the name, the version, the size, `on request` or `dependency`, the new version (`outdated` when Homebrew offers no version, `-` when the package is up to date), `pinned` or `-`, and the number of installed formulae that use the package:
+The plain output has one row per package in two sections. The columns are the name, the version, the size, `on request` or `dependency`, the new version (`outdated` when Homebrew offers no version, `-` when the package is up to date), `pinned` or `-` (a cask counts as pinned when `brew outdated` says so), and the number of installed formulae that use the package:
 
 ```
 Formulae
@@ -280,6 +280,40 @@ Without `--force`, taert prints `Remove <name> <version> (<size>) with brew unin
 Removal goes through the same path as `taert brew cleanup`. Before it removes anything, taert reads the installed packages again. If another formula uses the formula by then, taert reports it and the command fails. `brew uninstall <name>` removes one version at a time without `--force`, so taert repeats it until no version folder is left, with `HOMEBREW_NO_AUTOREMOVE=1`, so Homebrew does not also remove other unused formulae. taert never passes `--force`, `--zap`, or `--ignore-dependencies`.
 
 The history gets one `removed` item under the command `brew uninstall`, with the bytes freed, measured on the Cellar folder before and after.
+
+#### Upgrade packages (`taert brew upgrade`)
+
+```bash
+# Upgrade every outdated package, after asking
+taert brew upgrade
+
+# Upgrade one formula or cask
+taert brew upgrade bun
+
+# Only show what would be upgraded
+taert brew upgrade --dry-run
+
+# Upgrade without asking
+taert brew upgrade --force
+
+# The plan as JSON, nothing is upgraded
+taert brew upgrade --json
+```
+
+Before it reads anything, taert runs `brew update`, so the new versions are current. `--dry-run` and `--json` skip it. If `brew update` fails, taert prints `Could not check for updates: ` and the last line Homebrew printed on stderr, and goes on with what Homebrew knows. Then it makes one `brew info --json=v2 --installed` call and, when something is installed, one `brew outdated --json=v2` call.
+
+With a name, taert upgrades that package. A formula wins when a formula and a cask have the same name. Without a name, it upgrades every package that has a new version, except the ones it refuses. taert refuses, prints `Error: ...`, exits with a failure, and runs no upgrade when you name a package and:
+
+- Homebrew is not installed: `Homebrew is not installed.`
+- it is not installed: `<name> is not installed.`
+- it is up to date: `<name> is up to date.`
+- it is pinned: `<name> is pinned. Run brew unpin <name> first.` A cask counts as pinned when `brew outdated` says so.
+
+`--force` does not skip a refusal. It only skips the question. Without a name, taert leaves the refused packages out. If nothing is left, it prints `Everything is up to date.` and succeeds.
+
+Without `--force`, taert lists each package as `bun 1.4.2 → 1.4.4_1`, then prints `Upgrade 1 package? [y/N] ` and reads one line. `y` or `yes`, in any case, goes on. Anything else prints `Operation cancelled.` and upgrades nothing. `--dry-run` prints `Would upgrade bun 1.4.2 → 1.4.4_1.` for each package. `--json` prints a list of the packages with `name`, `kind`, `version`, and `latest_version`.
+
+Each package gets its own call: `brew upgrade --formula <name>` or `brew upgrade --cask <name>`, with `HOMEBREW_NO_AUTOREMOVE=1`, so Homebrew does not also remove unused formulae. taert prints `Upgraded bun to 1.4.4_1.` for each package that worked, and `Could not upgrade bun: ` and the last line Homebrew printed on stderr for each that failed. A failed cask adds `If it needs your password, run brew upgrade --cask <name> in a terminal.` The exit code is a failure when any upgrade failed. The other packages are still upgraded. Like `brew upgrade`, Homebrew removes the old version of what it upgraded; taert turns off only autoremove. taert does not write upgrades to the history.
 
 #### Cleanup (`taert brew cleanup`)
 

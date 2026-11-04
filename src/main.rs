@@ -107,6 +107,9 @@ fn main() -> ExitCode {
             Some(BrewAction::Uninstall { ref name }) => {
                 handle_brew_uninstall(name, &cli, &ignore, &context, console)
             }
+            Some(BrewAction::Upgrade { ref name }) => {
+                handle_brew_upgrade(name.as_deref(), &cli, &context, console)
+            }
             None => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
         },
 
@@ -331,12 +334,7 @@ fn handle_brew_uninstall(
     let mode = if cli.force {
         "force"
     } else {
-        let _ = write!(console.out, "Remove {what}? [y/N] ");
-        let _ = console.out.flush();
-        let mut answer = String::new();
-        let _ = console.input.read_line(&mut answer);
-        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
-            let _ = writeln!(console.out, "Operation cancelled.");
+        if !confirmed(console, &format!("Remove {what}?")) {
             return ExitCode::SUCCESS;
         }
         "interactive"
@@ -348,6 +346,117 @@ fn handle_brew_uninstall(
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Asks `question [y/N]`; anything but y or yes prints `Operation cancelled.` and is false.
+fn confirmed(console: &mut Console, question: &str) -> bool {
+    let _ = write!(console.out, "{question} [y/N] ");
+    let _ = console.out.flush();
+    let mut answer = String::new();
+    let _ = console.input.read_line(&mut answer);
+    let yes = matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
+    if !yes {
+        let _ = writeln!(console.out, "Operation cancelled.");
+    }
+    yes
+}
+
+fn new_version(package: &homebrew::Package) -> &str {
+    package.latest_version.as_deref().unwrap_or_default()
+}
+
+fn handle_brew_upgrade(
+    name: Option<&str>,
+    cli: &Cli,
+    context: &ScanContext,
+    console: &mut Console,
+) -> ExitCode {
+    if !(cli.dry_run || cli.json)
+        && let Some(brew) = homebrew::find(context.layout)
+        && let Err(error) = homebrew::update(context.host, &brew.path)
+    {
+        let _ = writeln!(console.err, "Could not check for updates: {error}");
+    }
+    let plan = match homebrew::upgrade_plan(context.layout, context.host, name) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let _ = writeln!(console.err, "Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if cli.json {
+        let rows: Vec<_> = plan
+            .packages
+            .iter()
+            .map(|package| {
+                serde_json::json!({
+                    "name": package.name,
+                    "kind": package.kind,
+                    "version": package.version,
+                    "latest_version": package.latest_version,
+                })
+            })
+            .collect();
+        return match serde_json::to_string_pretty(&rows) {
+            Ok(json) => {
+                let _ = writeln!(console.out, "{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                let _ = writeln!(console.err, "Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if plan.packages.is_empty() {
+        let _ = writeln!(console.out, "Everything is up to date.");
+        return ExitCode::SUCCESS;
+    }
+    let change = |package: &homebrew::Package| {
+        format!(
+            "{} {} → {}",
+            package.name,
+            package.version,
+            new_version(package)
+        )
+    };
+    if cli.dry_run {
+        for package in &plan.packages {
+            let _ = writeln!(console.out, "Would upgrade {}.", change(package));
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    if !cli.force {
+        for package in &plan.packages {
+            let _ = writeln!(console.out, "{}", change(package));
+        }
+        let count = ui::components::text::plural(plan.packages.len(), "package", "packages");
+        if !confirmed(console, &format!("Upgrade {count}?")) {
+            return ExitCode::SUCCESS;
+        }
+    }
+
+    let mut failed = false;
+    for package in &plan.packages {
+        let name = &package.name;
+        match homebrew::upgrade(context.host, &plan.brew, package.kind, name) {
+            Ok(()) => {
+                let _ = writeln!(console.out, "Upgraded {name} to {}.", new_version(package));
+            }
+            Err(error) => {
+                failed = true;
+                let _ = writeln!(console.err, "Could not upgrade {name}: {error}");
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -2436,6 +2545,351 @@ mod tests {
         );
         assert!(!mentions_uninstall(&host));
         assert!(!layout.history_path().exists());
+    }
+
+    const UPGRADE_OUTDATED: &str = r#"{"formulae": [
+ {"name": "bun", "current_version": "1.4.4_1"},
+ {"name": "fd", "current_version": "10.6.0", "pinned": true}],
+ "casks": [{"name": "ghostty", "current_version": "1.3.2"}]}"#;
+
+    /// A Mac whose `brew update`, `brew info`, `brew outdated`, and upgrades answer.
+    fn brew_upgrade_mac(outdated: &str) -> (tempfile::TempDir, Layout, FakeHost) {
+        brew_upgrade_mac_failing(outdated, &[])
+    }
+
+    /// Like `brew_upgrade_mac`, but each `(arguments, stderr)` of `failing` fails.
+    fn brew_upgrade_mac_failing(
+        outdated: &str,
+        failing: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Layout, FakeHost) {
+        let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        let removing = format!("{ENV_START} HOMEBREW_NO_AUTOREMOVE=1");
+        let brew = layout.system("opt/homebrew/bin/brew");
+        for (args, stderr) in failing {
+            let line = if args.starts_with("upgrade") {
+                format!("{removing} {} {args}", brew.display())
+            } else {
+                brew_read(&layout, args)
+            };
+            host.fail(&line, stderr);
+        }
+        host.reply(&brew_read(&layout, "update"), "");
+        host.reply(&brew_read(&layout, "info --json=v2 --installed"), BREW_INFO);
+        host.reply(&brew_read(&layout, "outdated --json=v2"), outdated);
+        for kind in ["formula", "cask"] {
+            host.reply(
+                &format!("{removing} {} upgrade --{kind}", brew.display()),
+                "",
+            );
+        }
+        (temp, layout, host)
+    }
+
+    fn brew_upgrade(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
+        let cli = parse(args);
+        let Some(Command::Brew(crate::cli::BrewArgs {
+            action: Some(BrewAction::Upgrade { ref name }),
+        })) = cli.command
+        else {
+            panic!("not a brew upgrade command");
+        };
+        let context = ScanContext { layout, host };
+        run(typed, |console| {
+            handle_brew_upgrade(name.as_deref(), &cli, &context, console)
+        })
+    }
+
+    /// What brew was asked to do, without the environment and the path of brew.
+    fn brew_commands(host: &FakeHost) -> Vec<String> {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.rsplit_once("bin/brew ").unwrap().1.to_string())
+            .collect()
+    }
+
+    fn upgrades(host: &FakeHost) -> Vec<String> {
+        brew_commands(host)
+            .into_iter()
+            .filter(|command| command.starts_with("upgrade "))
+            .collect()
+    }
+
+    const READS: [&str; 2] = ["info --json=v2 --installed", "outdated --json=v2"];
+
+    #[test]
+    fn brew_upgrade_force_upgrades_one_formula() {
+        let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+        let ran = brew_upgrade(&["brew", "upgrade", "bun", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(ran.out, "Upgraded bun to 1.4.4_1.\n");
+        assert!(ran.err.is_empty());
+        assert_eq!(
+            brew_commands(&host),
+            ["update", READS[0], READS[1], "upgrade --formula bun"]
+        );
+        let brew = layout.system("opt/homebrew/bin/brew");
+        assert_eq!(
+            host.calls.lock().unwrap()[3],
+            format!(
+                "{ENV_START} HOMEBREW_NO_AUTOREMOVE=1 {} upgrade --formula bun",
+                brew.display()
+            )
+        );
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn brew_upgrade_without_a_name_upgrades_every_outdated_package_but_a_pinned_one() {
+        let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+        let ran = brew_upgrade(&["brew", "upgrade", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(
+            ran.out,
+            "Upgraded bun to 1.4.4_1.\nUpgraded ghostty to 1.3.2.\n"
+        );
+        assert_eq!(
+            brew_commands(&host),
+            [
+                "update",
+                READS[0],
+                READS[1],
+                "upgrade --formula bun",
+                "upgrade --cask ghostty"
+            ]
+        );
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn brew_upgrade_without_a_name_and_nothing_to_upgrade_says_so() {
+        let (_temp, layout, host) = brew_upgrade_mac(r#"{"formulae": [], "casks": []}"#);
+
+        let ran = brew_upgrade(&["brew", "upgrade"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(ran.out, "Everything is up to date.\n");
+        assert!(upgrades(&host).is_empty());
+    }
+
+    #[test]
+    fn brew_upgrade_refuses_a_missing_an_up_to_date_and_a_pinned_package_even_with_force() {
+        let json = r#"{"formulae": [{"name": "fd", "current_version": "10.6.0", "pinned": true}],
+ "casks": [{"name": "ghostty", "current_version": "1.3.2", "pinned": true}]}"#;
+        let refusals = [
+            ("nope", "Error: nope is not installed.\n"),
+            ("go", "Error: go is up to date.\n"),
+            ("fd", "Error: fd is pinned. Run brew unpin fd first.\n"),
+            (
+                "ghostty",
+                "Error: ghostty is pinned. Run brew unpin ghostty first.\n",
+            ),
+        ];
+
+        for (name, text) in refusals {
+            let (_temp, layout, host) = brew_upgrade_mac(json);
+
+            let ran = brew_upgrade(&["brew", "upgrade", name, "--force"], "", &host, &layout);
+
+            assert!(!ran.ok, "{name}");
+            assert_eq!(ran.err, text);
+            assert!(ran.out.is_empty(), "{}", ran.out);
+            assert!(upgrades(&host).is_empty(), "{name}");
+            assert!(!layout.history_path().exists());
+        }
+    }
+
+    #[test]
+    fn brew_upgrade_without_homebrew_is_an_error() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = brew_upgrade(&["brew", "upgrade", "bun", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(ran.err, "Error: Homebrew is not installed.\n");
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn brew_upgrade_asks_first_and_only_a_yes_upgrades() {
+        for (typed, upgrades_it) in [
+            ("y\n", true),
+            (" Yes \n", true),
+            ("YES\n", true),
+            ("n\n", false),
+            ("\n", false),
+            ("yep\n", false),
+            ("", false),
+        ] {
+            let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+            let ran = brew_upgrade(&["brew", "upgrade"], typed, &host, &layout);
+
+            assert!(ran.ok, "{typed:?}: {}{}", ran.out, ran.err);
+            assert!(
+                ran.out.starts_with(
+                    "bun 1.4.2 → 1.4.4_1\nghostty 1.3.1 → 1.3.2\nUpgrade 2 packages? [y/N] "
+                ),
+                "{typed:?}: {}",
+                ran.out
+            );
+            assert_eq!(upgrades(&host).len(), if upgrades_it { 2 } else { 0 });
+            if !upgrades_it {
+                assert!(ran.out.ends_with("Operation cancelled.\n"), "{typed:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn brew_upgrade_of_one_package_asks_with_a_singular() {
+        let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+        let ran = brew_upgrade(&["brew", "upgrade", "bun"], "n\n", &host, &layout);
+
+        assert!(
+            ran.out
+                .starts_with("bun 1.4.2 → 1.4.4_1\nUpgrade 1 package? [y/N] "),
+            "{}",
+            ran.out
+        );
+    }
+
+    #[test]
+    fn brew_upgrade_dry_run_runs_no_update_and_no_upgrade() {
+        let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+        let ran = brew_upgrade(&["brew", "upgrade", "--dry-run"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(
+            ran.out,
+            "Would upgrade bun 1.4.2 → 1.4.4_1.\nWould upgrade ghostty 1.3.1 → 1.3.2.\n"
+        );
+        assert_eq!(brew_commands(&host), READS);
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn brew_upgrade_json_prints_the_plan_and_runs_no_update_and_no_upgrade() {
+        let (_temp, layout, host) = brew_upgrade_mac(UPGRADE_OUTDATED);
+
+        let ran = brew_upgrade(&["brew", "upgrade", "--json"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"name": "bun", "kind": "formula", "version": "1.4.2", "latest_version": "1.4.4_1"},
+                {"name": "ghostty", "kind": "cask", "version": "1.3.1", "latest_version": "1.3.2"},
+            ])
+        );
+        assert_eq!(brew_commands(&host), READS);
+    }
+
+    #[test]
+    fn a_failed_update_is_reported_and_the_upgrade_goes_on() {
+        let (_temp, layout, host) = brew_upgrade_mac_failing(
+            UPGRADE_OUTDATED,
+            &[("update", "Warning: x\nError: Could not resolve host\n")],
+        );
+
+        let ran = brew_upgrade(&["brew", "upgrade", "bun", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(
+            ran.err,
+            "Could not check for updates: Error: Could not resolve host\n"
+        );
+        assert_eq!(ran.out, "Upgraded bun to 1.4.4_1.\n");
+        assert_eq!(
+            brew_commands(&host),
+            ["update", READS[0], READS[1], "upgrade --formula bun"]
+        );
+    }
+
+    #[test]
+    fn a_failed_update_is_reported_before_a_refusal() {
+        let (_temp, layout, host) = brew_upgrade_mac_failing(
+            UPGRADE_OUTDATED,
+            &[("update", "Error: Could not resolve host\n")],
+        );
+
+        let ran = brew_upgrade(&["brew", "upgrade", "nope", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(
+            ran.err,
+            "Could not check for updates: Error: Could not resolve host\nError: nope is not installed.\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_upgrade_does_not_stop_the_next_one() {
+        let (_temp, layout, host) = brew_upgrade_mac_failing(
+            UPGRADE_OUTDATED,
+            &[("upgrade --formula bun", "Error: broken\n")],
+        );
+
+        let ran = brew_upgrade(&["brew", "upgrade", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(ran.out, "Upgraded ghostty to 1.3.2.\n");
+        assert_eq!(ran.err, "Could not upgrade bun: Error: broken\n");
+        assert_eq!(
+            upgrades(&host),
+            ["upgrade --formula bun", "upgrade --cask ghostty"]
+        );
+    }
+
+    #[test]
+    fn a_failed_cask_upgrade_says_how_to_run_it_in_a_terminal() {
+        let (_temp, layout, host) = brew_upgrade_mac_failing(
+            UPGRADE_OUTDATED,
+            &[(
+                "upgrade --cask ghostty",
+                "Error: sudo: a password is required\n",
+            )],
+        );
+
+        let ran = brew_upgrade(&["brew", "upgrade", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(ran.out, "Upgraded bun to 1.4.4_1.\n");
+        assert_eq!(
+            ran.err,
+            "Could not upgrade ghostty: Error: sudo: a password is required If it needs your password, run brew upgrade --cask ghostty in a terminal.\n"
+        );
+        assert_eq!(
+            brew_commands(&host),
+            [
+                "update",
+                READS[0],
+                READS[1],
+                "upgrade --formula bun",
+                "upgrade --cask ghostty"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_formula_upgrade_has_no_terminal_hint() {
+        let (_temp, layout, host) = brew_upgrade_mac_failing(
+            UPGRADE_OUTDATED,
+            &[("upgrade --formula bun", "Error: broken\n")],
+        );
+
+        let ran = brew_upgrade(&["brew", "upgrade", "bun", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert_eq!(ran.err, "Could not upgrade bun: Error: broken\n");
     }
 
     #[test]

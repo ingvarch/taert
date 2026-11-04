@@ -157,6 +157,11 @@ pub enum BrewAction {
         /// Name of the formula
         name: String,
     },
+    /// Upgrade one outdated formula or cask, or all of them, through Homebrew
+    Upgrade {
+        /// Name of the formula or cask (upgrades every outdated package if omitted)
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
