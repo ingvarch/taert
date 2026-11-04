@@ -57,7 +57,8 @@ homebrew_casks:
     generate_completions_from_executable:
       args:
         - completion
-      shell_parameter_format: arg
+      # No shell_parameter_format: taert takes the shell as a plain argument,
+      # and Homebrew's `arg` format passes `--shell=bash`.
       shells:
         - bash
         - zsh
