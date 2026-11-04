@@ -792,7 +792,7 @@ impl AnalyzeState {
     }
 
     pub fn tick(&mut self) {
-        self.spinner_idx = (self.spinner_idx + 1) % 4;
+        self.spinner_idx = self.spinner_idx.wrapping_add(1);
 
         if let Some(ref rx) = self.measuring_rx {
             while let Ok(msg) = rx.try_recv() {
@@ -841,16 +841,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         let content_rect = chrome.render(frame, theme);
 
         if let Some(ref prog) = state.current_progress {
-            let spin_char = if theme.env.reduce_motion {
-                "*"
-            } else {
-                match state.spinner_idx % 4 {
-                    0 => "⠋",
-                    1 => "⠙",
-                    2 => "⠹",
-                    _ => "⠸",
-                }
-            };
+            let spin_char = theme.spinner_frame(state.spinner_idx);
             let headline = format!("Exploring {title_path}");
             let step = if prog.total > 0 {
                 format!(
@@ -1169,16 +1160,7 @@ fn render_measuring_modal(
     let pretty_folder = prettify_path(&prog.folder_path);
     let title = format!("Measuring {pretty_folder}…");
 
-    let spinner_char = if theme.env.reduce_motion {
-        "*"
-    } else {
-        match spinner_idx % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        }
-    };
+    let spinner_char = theme.spinner_frame(spinner_idx);
 
     let fraction = if prog.total > 0 {
         prog.position as f64 / prog.total as f64
@@ -1329,16 +1311,7 @@ fn render_analyze_deleting_dialog(
     let noun = if count == 1 { "item" } else { "items" };
     let title = format!("Deleting {count} {noun}…");
 
-    let spinner_char = if theme.env.reduce_motion {
-        "*"
-    } else {
-        match spinner_idx % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        }
-    };
+    let spinner_char = theme.spinner_frame(spinner_idx);
 
     let pretty_path = prettify_path(&progress.path);
     let path_line = Line::from(vec![
@@ -1633,11 +1606,10 @@ mod tests {
         assert!(rendered.contains("Delete Permanently"));
     }
 
-    fn screen(state: &AnalyzeState, width: u16, height: u16) -> String {
-        let theme = Theme::with_env(crate::ui::env::UiEnv::default());
+    fn rows(state: &AnalyzeState, theme: &Theme, width: u16, height: u16) -> Vec<String> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| render_analyze(f, state, &theme)).unwrap();
+        terminal.draw(|f| render_analyze(f, state, theme)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
             .map(|y| {
@@ -1645,8 +1617,12 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
+    }
+
+    fn screen(state: &AnalyzeState, width: u16, height: u16) -> String {
+        let theme = Theme::with_env(crate::ui::env::UiEnv::default());
+        rows(state, &theme, width, height).join("\n")
     }
 
     // Holds a folder `sub` with `nested.bin`, and a file `other.bin` that is smaller.
@@ -1964,6 +1940,91 @@ mod tests {
 
         state.started_at = Instant::now() - (MEASURING_DIALOG_DELAY + Duration::from_millis(50));
         assert!(screen(&state, 100, 30).contains("Measuring"));
+    }
+
+    fn measuring_row(state: &AnalyzeState, theme: &Theme) -> String {
+        rows(state, theme, 100, 30)
+            .into_iter()
+            .find(|row| row.contains(" Work"))
+            .expect("the measuring dialog shows its current item")
+    }
+
+    fn measuring_dialog_state() -> (tempfile::TempDir, AnalyzeState) {
+        let (temp, mut state) = explore_fixture();
+        state.current_progress = Some(MeasuringProgress {
+            folder_path: state.root.join("sub"),
+            position: 1,
+            total: 4,
+            current_name: "Work".into(),
+            current_subpath: None,
+            scanned_files: 1,
+            scanned_bytes: 1,
+        });
+        state.started_at = Instant::now() - (MEASURING_DIALOG_DELAY + Duration::from_millis(50));
+        (temp, state)
+    }
+
+    #[test]
+    fn the_measuring_spinner_walks_every_frame_of_the_glyph_set() {
+        let (_temp, mut state) = measuring_dialog_state();
+        let unicode = Theme::with_env(crate::ui::env::UiEnv {
+            ascii_glyphs: false,
+            ..Default::default()
+        });
+        for _ in 0..5 {
+            state.tick();
+        }
+
+        let row = measuring_row(&state, &unicode);
+
+        assert!(row.contains(unicode.g.spinner[5]), "{row}");
+    }
+
+    #[test]
+    fn the_measuring_spinner_uses_ascii_frames_with_the_ascii_glyph_set() {
+        let (_temp, mut state) = measuring_dialog_state();
+        let plain = Theme::plain();
+        state.tick();
+
+        let row = measuring_row(&state, &plain);
+
+        assert!(
+            plain
+                .g
+                .spinner
+                .iter()
+                .any(|frame| row.contains(&format!("{frame} Work"))),
+            "{row}"
+        );
+        assert!(!row.contains('⠋') && !row.contains('⠙'), "{row}");
+    }
+
+    #[test]
+    fn the_loading_headline_uses_ascii_frames_with_the_ascii_glyph_set() {
+        let (_temp, mut state) = measuring_dialog_state();
+        state.levels.clear();
+        state.spinner_idx = 1;
+        let plain = Theme::plain();
+
+        let headline = rows(&state, &plain, 100, 30)
+            .into_iter()
+            .find(|row| row.contains("Exploring"))
+            .expect("the loading screen shows its headline");
+
+        assert!(
+            plain
+                .g
+                .spinner
+                .iter()
+                .any(|frame| headline.contains(&format!("{frame}  Exploring"))),
+            "{headline}"
+        );
+        assert!(
+            !headline
+                .chars()
+                .any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)),
+            "{headline}"
+        );
     }
 
     #[test]
