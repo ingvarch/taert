@@ -537,6 +537,7 @@ fn sample_analyze() -> AnalyzeState {
             selected: 0,
             offset: 0,
             stale: false,
+            update_failed: false,
         }],
         ignore: IgnoreStore::default(),
         measuring_rx: None,

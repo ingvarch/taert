@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -77,6 +77,15 @@ pub struct BrowserLevel {
     pub selected: usize,
     pub offset: usize,
     pub stale: bool,
+    /// The background update of this stale level ended without new sizes.
+    pub update_failed: bool,
+}
+
+impl BrowserLevel {
+    /// Stale, and its background update has not failed.
+    fn wants_update(&self) -> bool {
+        self.stale && !self.update_failed
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +275,7 @@ impl AnalyzeState {
             selected: 0,
             offset: 0,
             stale: false,
+            update_failed: false,
         };
 
         Self {
@@ -666,6 +676,7 @@ impl AnalyzeState {
                 selected: 0,
                 offset: 0,
                 stale,
+                update_failed: false,
             });
             if !stale {
                 self.measuring_rx = None;
@@ -705,7 +716,7 @@ impl AnalyzeState {
     }
 
     fn start_update_if_stale(&mut self) {
-        let Some(level) = self.levels.last().filter(|level| level.stale) else {
+        let Some(level) = self.levels.last().filter(|level| level.wants_update()) else {
             return;
         };
         if self.update.is_none()
@@ -720,8 +731,19 @@ impl AnalyzeState {
         if !matches!(self.overlay, AnalyzeOverlay::None) {
             return;
         }
-        let Some(mut snapshot) = self.update.as_ref().and_then(|job| job.rx.try_recv().ok()) else {
+        let Some(job) = &self.update else {
             return;
+        };
+        let mut snapshot = match job.rx.try_recv() {
+            Ok(snapshot) => snapshot,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.update = None;
+                if let Some(level) = self.levels.last_mut() {
+                    level.update_failed = true;
+                }
+                return;
+            }
         };
         self.sort_order.sort_children(&mut snapshot.children);
         if let Some(level) = self.levels.last_mut() {
@@ -785,6 +807,7 @@ impl AnalyzeState {
                             selected: 0,
                             offset: 0,
                             stale: false,
+                            update_failed: false,
                         });
                         self.measuring_rx = None;
                         self.current_progress = None;
@@ -1063,7 +1086,7 @@ pub fn render_analyze(frame: &mut Frame, state: &AnalyzeState, theme: &Theme) {
         || level.snapshot.path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let updating = if level.stale {
+    let updating = if level.wants_update() {
         vec![Span::styled("Updating…", theme.footnote())]
     } else {
         Vec::new()
@@ -1478,6 +1501,7 @@ mod tests {
                 selected: 0,
                 offset: 0,
                 stale: false,
+                update_failed: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -1549,6 +1573,7 @@ mod tests {
                 selected: 0,
                 offset: 0,
                 stale: false,
+                update_failed: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -1848,6 +1873,7 @@ mod tests {
                 selected: 0,
                 offset: 0,
                 stale: false,
+                update_failed: false,
             }],
             ignore: IgnoreStore::default(),
             measuring_rx: None,
@@ -2131,6 +2157,66 @@ mod tests {
     fn updating_sub() -> (tempfile::TempDir, AnalyzeState, PathBuf) {
         let rows = [("inner", 500, true), ("old.bin", 1, false)];
         stale_sub(&[("old.bin", 1)], &rows)
+    }
+
+    // Puts a hand-made update of `sub` in place of the running one and returns its sender.
+    fn fake_update(state: &mut AnalyzeState, sub: &Path) -> mpsc::Sender<FolderSnapshot> {
+        let (tx, rx) = mpsc::channel();
+        state.update = Some(Job {
+            path: sub.to_path_buf(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx,
+        });
+        tx
+    }
+
+    #[test]
+    fn an_update_that_has_not_sent_keeps_running() {
+        let (_t, mut state, sub) = updating_sub();
+        let _tx = fake_update(&mut state, &sub);
+
+        state.tick();
+
+        assert!(state.update.is_some());
+        assert!(screen(&state, 100, 30).contains("Updating…"));
+    }
+
+    #[test]
+    fn an_update_that_dies_keeps_the_old_sizes() {
+        let (_t, mut state, sub) = updating_sub();
+        drop(fake_update(&mut state, &sub));
+        state.next();
+        state.toggle_current();
+        let before = state.current_level().unwrap().snapshot.children.clone();
+        let selected = state.current_level().unwrap().selected;
+        assert!(screen(&state, 100, 30).contains("Updating…"));
+
+        state.tick();
+
+        assert!(state.update.is_none());
+        assert!(state.current_level().unwrap().stale);
+        assert!(!screen(&state, 100, 30).contains("Updating…"));
+        assert_eq!(state.current_level().unwrap().snapshot.children, before);
+        assert_eq!(state.current_level().unwrap().selected, selected);
+
+        state.tick();
+
+        assert!(state.update.is_none());
+    }
+
+    #[test]
+    fn a_removal_after_a_dead_update_does_not_cache_the_old_sizes() {
+        let (_t, mut state, sub) = updating_sub();
+        drop(fake_update(&mut state, &sub));
+        state.tick();
+        fs::remove_file(sub.join("old.bin")).unwrap();
+
+        state.handle_removal_finished(&RemovalReport {
+            removed_count: 1,
+            ..Default::default()
+        });
+
+        assert!(state.cache.read().unwrap().lookup_snapshot(&sub).is_none());
     }
 
     #[test]
