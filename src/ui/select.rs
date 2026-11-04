@@ -156,6 +156,15 @@ impl SelectState {
         Self::with_preserved_selection(scan)
     }
 
+    /// Slim and Compress start with Enter; the other lists start with a removal key.
+    pub fn starts_with_enter(&self) -> bool {
+        matches!(self.scan.id.as_str(), slim::SCAN_ID | compress::SCAN_ID)
+    }
+
+    pub fn action_key<'a>(&self, enter: &'a str) -> &'a str {
+        if self.starts_with_enter() { enter } else { "d" }
+    }
+
     /// A scan that could not run, with the reason to show instead of a list.
     pub fn unavailable(id: &str, title: &str, problem: String) -> Self {
         let mut state = Self::new(CategoryScan {
@@ -870,29 +879,30 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 
     let enter = theme.g.key_enter;
     let id = state.scan.id.as_str();
+    let action_key = state.action_key(enter);
     let primary_action = if state.is_searching {
         PrimaryAction::new("Apply", enter)
     } else if id == homebrew::SCAN_ID {
         homebrew_primary(state, enter)
     } else if id == uninstaller::PLAN_ID && selected_count > 0 {
         let items = plural(selected_count, "item", "items");
-        PrimaryAction::new(format!("Uninstall {items}"), enter)
+        PrimaryAction::new(format!("Uninstall {items}"), action_key)
     } else if id == uninstaller::PLAN_ID {
-        PrimaryAction::disabled("Uninstall", enter)
+        PrimaryAction::disabled("Uninstall", action_key)
     } else if id == apps::LIST_ID && selected_count > 0 {
         let chosen = plural(selected_count, "app", "apps");
-        PrimaryAction::new(format!("Review {chosen}"), enter)
+        PrimaryAction::new(format!("Review {chosen}"), action_key)
     } else if id == apps::LIST_ID && total_count > 0 {
-        PrimaryAction::new("Review app", enter)
+        PrimaryAction::new("Review app", action_key)
     } else if id == slim::SCAN_ID && selected_count > 0 {
         let chosen = plural(selected_count, "app", "apps");
         PrimaryAction::new(format!("Slim {chosen}"), enter)
     } else if id == slim::SCAN_ID && total_count > 0 {
         PrimaryAction::new("Slim app", enter)
     } else if selected_count > 0 {
-        PrimaryAction::new(format!("Review {selected_count} items"), enter)
+        PrimaryAction::new(format!("Review {selected_count} items"), action_key)
     } else {
-        PrimaryAction::disabled("Review items", enter)
+        PrimaryAction::disabled("Review items", action_key)
     };
 
     let title = state.scan.title.as_str();
@@ -1277,10 +1287,10 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
         hints.extend([
             Hint::new("/", "Search"),
             Hint::new("↑↓", "Move"),
-            Hint::new("D", "Uninstall"),
+            Hint::new("d", "Uninstall"),
         ]);
         if let Some(order) = state.sort_order {
-            hints.push(Hint::new("⇧S/N/D", order.hint_label()));
+            hints.push(Hint::new("⇧S/N/T", order.hint_label()));
         }
     } else if has_items {
         hints.extend([
@@ -1289,7 +1299,7 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             Hint::new("N", "None"),
         ]);
         if let Some(order) = state.sort_order {
-            hints.push(Hint::new("⇧S/N/D", order.hint_label()));
+            hints.push(Hint::new("⇧S/N/T", order.hint_label()));
         }
         hints.push(Hint::new("/", "Search"));
         let all_brew = state

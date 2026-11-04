@@ -20,6 +20,7 @@ use super::analyze::{
     AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, SortOrder, render_analyze,
 };
 use super::doctor::{DoctorActionConfirm, DoctorScreenState, render_doctor};
+use super::keys::is_removal_key;
 use super::path_list_editor::{
     PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
 };
@@ -857,10 +858,14 @@ impl App {
                     KeyCode::Left if state.scan.id == homebrew::SCAN_ID => {
                         state.collapse_focused();
                     }
-                    KeyCode::Char('d') | KeyCode::Backspace | KeyCode::Delete
-                        if state.scan.id == homebrew::SCAN_ID =>
-                    {
+                    code if is_removal_key(code) && state.scan.id == homebrew::SCAN_ID => {
                         state.uninstall_focused();
+                    }
+                    code if is_removal_key(code) && state.scan.id == apps::LIST_ID => {
+                        self.start_review();
+                    }
+                    code if is_removal_key(code) && !state.starts_with_enter() => {
+                        state.open_confirmation();
                     }
                     KeyCode::Up | KeyCode::Char('k') => state.previous_selectable(),
                     KeyCode::Down | KeyCode::Char('j') => state.next_selectable(),
@@ -878,7 +883,7 @@ impl App {
                     KeyCode::Char('N') if state.sort_order.is_some() => {
                         state.set_sort(SortOrder::Name);
                     }
-                    KeyCode::Char('D') if state.sort_order.is_some() => {
+                    KeyCode::Char('T') if state.sort_order.is_some() => {
                         state.set_sort(SortOrder::Date);
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') => state.select_none(),
@@ -894,8 +899,7 @@ impl App {
                         state.is_searching = true;
                         state.search_query.clear();
                     }
-                    KeyCode::Enter if state.scan.id == apps::LIST_ID => self.start_review(),
-                    KeyCode::Enter => {
+                    KeyCode::Enter if state.starts_with_enter() => {
                         if state.scan.id == slim::SCAN_ID && state.scan.selected_items().is_empty()
                         {
                             state.toggle_current();
@@ -912,7 +916,7 @@ impl App {
             Screen::Analyze(state) => {
                 if state.measuring_rx.is_some() {
                     match code {
-                        KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => {
+                        KeyCode::Esc | KeyCode::Left => {
                             state.cancel_measuring();
                             if state.levels.is_empty() {
                                 self.go_back();
@@ -1002,8 +1006,8 @@ impl App {
                     KeyCode::Char('n') => state.select_none(),
                     KeyCode::Char('S') => state.set_sort(SortOrder::Size),
                     KeyCode::Char('N') => state.set_sort(SortOrder::Name),
-                    KeyCode::Char('D') => state.set_sort(SortOrder::Date),
-                    KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
+                    KeyCode::Char('T') => state.set_sort(SortOrder::Date),
+                    code if is_removal_key(code) => {
                         state.open_delete_confirmation(self.permanent);
                     }
                     KeyCode::Enter | KeyCode::Right => {
@@ -1132,6 +1136,7 @@ impl App {
                         KeyCode::Home | KeyCode::Char('g') => state.move_to_start(),
                         KeyCode::End | KeyCode::Char('G') => state.move_to_end(),
                         KeyCode::Char(' ') | KeyCode::Enter => state.request_toggle(),
+                        code if is_removal_key(code) => state.request_remove(),
                         KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
                         _ => {}
                     }
@@ -1289,9 +1294,7 @@ impl App {
                     KeyCode::Home => state.move_to_start(),
                     KeyCode::End => state.move_to_end(),
                     KeyCode::Char('a') | KeyCode::Char('A') => state.start_adding(),
-                    KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Backspace => {
-                        state.prompt_remove()
-                    }
+                    code if is_removal_key(code) => state.prompt_remove(),
                     KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
                     _ => {}
                 },
@@ -1316,7 +1319,7 @@ impl App {
                 vec![
                     Hint::new("⇧S", "Size"),
                     Hint::new("⇧N", "Name"),
-                    Hint::new("⇧D", date),
+                    Hint::new("⇧T", date),
                 ],
             )
         };
@@ -1356,7 +1359,7 @@ impl App {
                     hints.extend([
                         Hint::new("↵ / →", "Expand"),
                         Hint::new("↵ / ←", "Collapse"),
-                        Hint::new("D / ⌫", "Uninstall"),
+                        Hint::new("d", "Uninstall"),
                     ]);
                 }
                 let mut sections = vec![HelpSection::new("Homebrew", hints)];
@@ -1381,7 +1384,7 @@ impl App {
                 if state.scan.id == large_files::SCAN_ID {
                     hints.push(Hint::new("O", "Reveal in Finder"));
                 }
-                hints.push(Hint::new("↵", enter));
+                hints.push(Hint::new(state.action_key("↵"), enter));
                 let mut sections = vec![HelpSection::new("Select items", hints)];
                 if state.sort_order.is_some() {
                     sections.push(sort_section("Date created"));
@@ -1399,7 +1402,7 @@ impl App {
                         Hint::new("⎋ / ←", "Up one level"),
                         Hint::new("R", "Refresh folder"),
                         Hint::new("O", "Reveal in Finder"),
-                        Hint::new("D / ⌫", "Delete selected"),
+                        Hint::new("d", "Delete selected"),
                     ],
                 ),
                 sort_section("Date created"),
@@ -1415,7 +1418,12 @@ impl App {
             }
             Screen::Startup(_) => vec![HelpSection::new(
                 "Startup items",
-                vec![Hint::new("␣", "Toggle service"), navigate, back],
+                vec![
+                    Hint::new("␣", "Toggle service"),
+                    Hint::new("d", "Remove broken item"),
+                    navigate,
+                    back,
+                ],
             )],
             Screen::Doctor(_) => vec![HelpSection::new(
                 "Doctor",
@@ -1439,10 +1447,7 @@ impl App {
             Screen::PathListEditor(_) => vec![
                 HelpSection::new(
                     "Path list",
-                    vec![
-                        Hint::new("A", "Add path"),
-                        Hint::new("D / ⌫", "Remove path"),
-                    ],
+                    vec![Hint::new("A", "Add path"), Hint::new("d", "Remove path")],
                 ),
                 general(vec![navigate, back]),
             ],
@@ -2236,7 +2241,7 @@ mod tests {
     fn shift_letters_sort_a_docker_table() {
         let mut app = select_app(scan_with_id(docker::SCAN_ID));
 
-        app.handle_key(KeyCode::Char('D'));
+        app.handle_key(KeyCode::Char('T'));
         assert_eq!(select(&app).sort_order, Some(SortOrder::Date));
         app.handle_key(KeyCode::Char('N'));
         assert_eq!(select(&app).sort_order, Some(SortOrder::Name));
@@ -2259,7 +2264,7 @@ mod tests {
     fn other_lists_keep_their_keys() {
         let mut app = select_app(scan_with_id("dev"));
 
-        app.handle_key(KeyCode::Char('D'));
+        app.handle_key(KeyCode::Char('T'));
         assert_eq!(select(&app).sort_order, None);
 
         app.handle_key(KeyCode::Char('N'));
@@ -2273,7 +2278,7 @@ mod tests {
 
         let table = select_app(scan_with_id(docker::SCAN_ID));
         assert_eq!(titles(&table), ["Select items", "Sort by", "General"]);
-        assert_eq!(help_row(&table, "Date created"), Some("⇧D"));
+        assert_eq!(help_row(&table, "Date created"), Some("⇧T"));
 
         let list = select_app(scan_with_id("dev"));
         assert_eq!(titles(&list), ["Select items", "General"]);
@@ -2289,8 +2294,8 @@ mod tests {
         assert_eq!(titles, ["Explore", "Sort by", "General"]);
 
         let keys: Vec<_> = sections[1].shortcuts.iter().map(|h| h.key).collect();
-        assert_eq!(keys, ["⇧S", "⇧N", "⇧D"]);
-        assert_eq!(help_row(&app, "Date created"), Some("⇧D"));
+        assert_eq!(keys, ["⇧S", "⇧N", "⇧T"]);
+        assert_eq!(help_row(&app, "Date created"), Some("⇧T"));
     }
 
     #[test]
@@ -2300,7 +2305,7 @@ mod tests {
 
         app.handle_key(KeyCode::Char('N'));
         assert_eq!(analyze(&app).sort_order, SortOrder::Name);
-        app.handle_key(KeyCode::Char('D'));
+        app.handle_key(KeyCode::Char('T'));
         assert_eq!(analyze(&app).sort_order, SortOrder::Date);
         app.handle_key(KeyCode::Char('S'));
         assert_eq!(analyze(&app).sort_order, SortOrder::Size);
@@ -2313,23 +2318,6 @@ mod tests {
 
         app.handle_key(KeyCode::Char('s'));
         assert_eq!(analyze(&app).sort_order, SortOrder::Size);
-    }
-
-    #[test]
-    fn shift_d_never_opens_the_delete_confirmation() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
-        let mut app = analyze_app(dir.path());
-
-        app.handle_key(KeyCode::Char(' '));
-        app.handle_key(KeyCode::Char('D'));
-        assert!(matches!(analyze(&app).overlay, AnalyzeOverlay::None));
-
-        app.handle_key(KeyCode::Char('d'));
-        assert!(matches!(
-            analyze(&app).overlay,
-            AnalyzeOverlay::ConfirmDelete { .. }
-        ));
     }
 
     #[test]
@@ -2585,6 +2573,22 @@ mod tests {
         let state = analyze(&app);
         assert!(state.measuring_rx.is_none());
         assert!(state.cancel_flag.load(Ordering::Relaxed));
+        assert_eq!(state.levels.len(), 1);
+    }
+
+    #[test]
+    fn backspace_does_not_cancel_the_measuring() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = analyze_app(dir.path());
+        analyze(&app).cache.write().unwrap().clear();
+
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Backspace);
+
+        let state = analyze(&app);
+        assert!(state.measuring_rx.is_some());
+        assert!(!state.cancel_flag.load(Ordering::Relaxed));
         assert_eq!(state.levels.len(), 1);
     }
 
@@ -2969,7 +2973,7 @@ mod tests {
         let app = select_app(scan_with_id(docker::SCAN_ID));
 
         assert_footer(&app, &LIST_HINTS, &[]);
-        assert_footer(&app, &["⇧S/N/D  Sort: Size", "⎋  Back", "?  More"], &[]);
+        assert_footer(&app, &["⇧S/N/T  Sort: Size", "⎋  Back", "?  More"], &[]);
     }
 
     #[test]
@@ -3090,8 +3094,8 @@ mod tests {
                 "␣  Select",
                 "A  All",
                 "N  None",
-                "⇧S/N/D  Sort: Size",
-                "D  Delete",
+                "⇧S/N/T  Sort: Size",
+                "d  Delete",
                 "↑↓  Move",
                 "⎋  Back",
                 "?  More",
@@ -3101,7 +3105,7 @@ mod tests {
 
         app.handle_key(KeyCode::Char(' '));
 
-        assert_footer(&app, &["↵  Open"], &["D  Delete"]);
+        assert_footer(&app, &["↵  Open"], &["d  Delete"]);
     }
 
     #[test]
@@ -3172,7 +3176,7 @@ mod tests {
         assert_footer(&app, &[], &toolbar);
 
         let mut app = select_app(scan_with_id("dev"));
-        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('d'));
         assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
         assert_footer(&app, &[], &toolbar);
 
@@ -3332,10 +3336,10 @@ mod tests {
             let foo = installed(&app, "Foo", "com.acme.foo");
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             deliver(&mut app, ScanMessage::Planned(plan));
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
 
             let rows = text_rows(&app);
             assert!(
@@ -3355,16 +3359,63 @@ mod tests {
         }
 
         #[test]
-        fn enter_reviews_the_focused_app_when_nothing_is_selected() {
+        fn the_apps_list_opens_the_review_with_d_and_not_enter() {
             let (_temp, mut app) = app_in_sandbox();
             let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
 
-            assert_footer(&app, &["Review app"], &[]);
+            assert_footer(&app, &["Review app  d"], &["↵"]);
             app.handle_key(KeyCode::Enter);
+            assert!(matches!(app.screen, Screen::Select(_)));
 
-            assert!(matches!(app.screen, Screen::Scanning(..)));
-            assert!(screen_text(&app).contains("Foo"));
+            for key in [
+                KeyCode::Char('d'),
+                KeyCode::Char('D'),
+                KeyCode::Backspace,
+                KeyCode::Delete,
+            ] {
+                let (_temp, mut app) = app_in_sandbox();
+                let foo = installed(&app, "Foo", "com.acme.foo");
+                app_list(&mut app, vec![foo]);
+                app.handle_key(key);
+                assert!(matches!(app.screen, Screen::Scanning(..)), "{key:?}");
+                assert!(screen_text(&app).contains("Foo"), "{key:?}");
+            }
+
+            app.handle_key(KeyCode::Char('d'));
+            deliver(&mut app, ScanMessage::Planned(plan));
+            assert_footer(&app, &["Uninstall 2 items  d"], &["↵"]);
+
+            app.handle_key(KeyCode::Enter);
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+        }
+
+        #[test]
+        fn the_review_opens_the_removal_question_with_every_removal_key() {
+            for key in [
+                KeyCode::Char('d'),
+                KeyCode::Char('D'),
+                KeyCode::Backspace,
+                KeyCode::Delete,
+            ] {
+                let (_temp, mut app) = app_in_sandbox();
+                let foo = installed(&app, "Foo", "com.acme.foo");
+                let plan = plan_for(&foo, &app);
+                app_list(&mut app, vec![foo]);
+                app.handle_key(KeyCode::Char('d'));
+                deliver(&mut app, ScanMessage::Planned(plan));
+
+                app.handle_key(key);
+
+                assert!(
+                    matches!(
+                        select(&app).overlay,
+                        ModalOverlay::Confirm(ConfirmButton::Cancel)
+                    ),
+                    "{key:?}"
+                );
+            }
         }
 
         #[test]
@@ -3376,7 +3427,7 @@ mod tests {
             app.handle_key(KeyCode::Char(' '));
             assert_footer(&app, &["Review 1 app"], &[]);
 
-            press(&mut app, &[KeyCode::Enter, KeyCode::Esc]);
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Esc]);
 
             assert_eq!(select(&app).scan.id, apps::LIST_ID);
             assert_eq!(select(&app).scan.selected_items().len(), 1);
@@ -3388,7 +3439,7 @@ mod tests {
             let foo = installed(&app, "Foo", "com.acme.foo");
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
 
             deliver(&mut app, ScanMessage::Planned(plan));
 
@@ -3414,7 +3465,7 @@ mod tests {
             plan.notes
                 .push("Foo needs the uninstaller from Acme".to_string());
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
 
             deliver(&mut app, ScanMessage::Planned(plan));
 
@@ -3435,10 +3486,10 @@ mod tests {
             let foo = installed(&app, "Foo", "com.acme.foo");
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             deliver(&mut app, ScanMessage::Planned(plan));
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
 
             assert!(matches!(
                 select(&app).overlay,
@@ -3456,10 +3507,10 @@ mod tests {
             let bundle = foo.path.clone();
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             deliver(&mut app, ScanMessage::Planned(plan));
 
-            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
             wait_for_removal(&mut app);
 
             assert!(!bundle.exists());
@@ -3480,10 +3531,10 @@ mod tests {
             let foo = installed(&app, "Foo", "com.acme.foo");
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             deliver(&mut app, ScanMessage::Planned(plan));
 
-            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
             wait_for_removal(&mut app);
 
             let runs = HistoryLog::new(app.layout.history_path())
@@ -3508,7 +3559,7 @@ mod tests {
             app.layout = layout;
             app.host = host;
 
-            press(&mut app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
             wait_for_removal(&mut app);
 
             assert!(!bundle.exists());
@@ -3567,18 +3618,18 @@ mod tests {
         }
 
         #[test]
-        fn help_names_what_enter_does_on_each_list() {
+        fn help_names_what_d_does_on_each_list() {
             let (_temp, mut app) = app_in_sandbox();
             let foo = installed(&app, "Foo", "com.acme.foo");
             let plan = plan_for(&foo, &app);
             app_list(&mut app, vec![foo]);
 
-            assert_eq!(help_row(&app, "Review"), Some("↵"));
+            assert_eq!(help_row(&app, "Review"), Some("d"));
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             deliver(&mut app, ScanMessage::Planned(plan));
 
-            assert_eq!(help_row(&app, "Uninstall"), Some("↵"));
+            assert_eq!(help_row(&app, "Uninstall"), Some("d"));
         }
     }
 
@@ -4910,7 +4961,7 @@ mod tests {
                 shown(&app),
                 ["  act", "  bun", "  zed", "  acask", "  zcask"]
             );
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('T'));
             assert_eq!(
                 shown(&app),
                 ["  bun", "  zed", "  act", "  zcask", "  acask"]
@@ -4923,19 +4974,53 @@ mod tests {
         }
 
         #[test]
-        fn shift_d_sorts_and_d_uninstalls() {
+        fn homebrew_shift_d_uninstalls_and_shift_t_sorts_by_date() {
             let mut app = refusal_app();
             focus_on(&mut app, "fd");
 
-            app.handle_key(KeyCode::Char('D'));
+            app.handle_key(KeyCode::Char('T'));
 
             let state = select(&app);
             assert!(matches!(state.overlay, ModalOverlay::None));
             assert!(state.toast.is_none());
             assert_eq!(selected(&app), 0);
             assert_eq!(state.sort_order, Some(SortOrder::Date));
-            app.handle_key(KeyCode::Char('d'));
+
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+            app.handle_key(KeyCode::Char('D'));
             assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
+            assert_eq!(selected(&app), 1);
+            assert_eq!(select(&app).sort_order, Some(SortOrder::Size));
+        }
+
+        #[test]
+        fn searching_the_homebrew_list_types_d_and_shift_d() {
+            let mut app = refusal_app();
+            focus_on(&mut app, "fd");
+
+            press(
+                &mut app,
+                &[KeyCode::Char('/'), KeyCode::Char('d'), KeyCode::Char('D')],
+            );
+
+            let state = select(&app);
+            assert_eq!(state.search_query, "dD");
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert_eq!(selected(&app), 0);
+        }
+
+        #[test]
+        fn the_homebrew_list_names_d_and_shift_t() {
+            let app = refusal_app();
+
+            assert_footer(
+                &app,
+                &["d  Uninstall", "⇧S/N/T  Sort: Size"],
+                &["D  Uninstall"],
+            );
+            assert_eq!(help_row(&app, "Uninstall"), Some("d"));
+            assert_eq!(help_row(&app, "Date installed"), Some("⇧T"));
         }
 
         #[test]
@@ -5100,7 +5185,7 @@ mod tests {
                 &[],
                 &["Select", "All", "None", "Review", "Remove", "Reveal"],
             );
-            assert_footer(&app, &["⇧S/N/D  Sort: Size"], &[]);
+            assert_footer(&app, &["⇧S/N/T  Sort: Size"], &[]);
         }
 
         #[test]
@@ -5109,7 +5194,7 @@ mod tests {
 
             app.handle_key(KeyCode::Char('N'));
 
-            assert_footer(&app, &["⇧S/N/D  Sort: Name"], &[]);
+            assert_footer(&app, &["⇧S/N/T  Sort: Name"], &[]);
         }
 
         #[test]
@@ -5118,7 +5203,7 @@ mod tests {
 
             assert_eq!(help_row(&app, "Size"), Some("⇧S"));
             assert_eq!(help_row(&app, "Name"), Some("⇧N"));
-            assert_eq!(help_row(&app, "Date installed"), Some("⇧D"));
+            assert_eq!(help_row(&app, "Date installed"), Some("⇧T"));
         }
 
         #[test]
@@ -5324,7 +5409,7 @@ mod tests {
             app.layout = layout;
             app.host = Arc::new(host);
 
-            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Char('d'));
             let confirm = screen_text(&app);
             assert!(confirm.contains("permanently deleted"), "{confirm}");
             assert!(!confirm.contains("Trash"), "{confirm}");
@@ -5953,13 +6038,13 @@ mod tests {
         fn the_footer_and_the_primary_action_name_expand_collapse_and_uninstall() {
             let mut app = tree_app();
 
-            assert_footer(&app, &["↵", "Expand", "D  Uninstall"], &["Collapse"]);
+            assert_footer(&app, &["↵", "Expand", "d  Uninstall"], &["Collapse"]);
             let action = crate::ui::select::homebrew_primary(select(&app), "↵");
             assert!(action.enabled);
             assert_eq!(action.label, "Expand");
 
             app.handle_key(KeyCode::Enter);
-            assert_footer(&app, &["Collapse", "D  Uninstall"], &["Expand"]);
+            assert_footer(&app, &["Collapse", "d  Uninstall"], &["Expand"]);
             let action = crate::ui::select::homebrew_primary(select(&app), "↵");
             assert!(action.enabled);
             assert_eq!(action.label, "Collapse");
@@ -5967,7 +6052,7 @@ mod tests {
             focus_on(&mut app, "fd");
             let action = crate::ui::select::homebrew_primary(select(&app), "↵");
             assert!(!action.enabled);
-            assert_footer(&app, &["D  Uninstall"], &[]);
+            assert_footer(&app, &["d  Uninstall"], &[]);
         }
 
         #[test]
@@ -5976,7 +6061,7 @@ mod tests {
 
             assert_eq!(help_row(&app, "Expand"), Some("↵ / →"));
             assert_eq!(help_row(&app, "Collapse"), Some("↵ / ←"));
-            assert_eq!(help_row(&app, "Uninstall"), Some("D / ⌫"));
+            assert_eq!(help_row(&app, "Uninstall"), Some("d"));
         }
 
         #[test]
@@ -6334,6 +6419,296 @@ mod tests {
             let rows = state.flattened_rows();
             assert!(rows[state.focused_index].is_item());
             assert!(rows[state.focused_index].display_path.starts_with("fd1 "));
+        }
+    }
+
+    mod removal_keys {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::startup::{StartupItem, StartupKind, StartupState};
+
+        const REMOVAL_KEYS: [KeyCode; 4] = [
+            KeyCode::Char('d'),
+            KeyCode::Char('D'),
+            KeyCode::Backspace,
+            KeyCode::Delete,
+        ];
+
+        const REMOVING_LISTS: [&str; 6] = [
+            "dev",
+            docker::SCAN_ID,
+            large_files::SCAN_ID,
+            purger::SCAN_ID,
+            crate::core::homebrew::CLEANUP_ID,
+            crate::core::orphans::SCAN_ID,
+        ];
+
+        #[test]
+        fn enter_does_not_open_the_removal_question() {
+            for id in REMOVING_LISTS {
+                let mut app = select_app(scan_with_id(id));
+                app.handle_key(KeyCode::Enter);
+                assert!(matches!(select(&app).overlay, ModalOverlay::None), "{id}");
+
+                for key in REMOVAL_KEYS {
+                    let mut app = select_app(scan_with_id(id));
+                    app.handle_key(key);
+                    assert!(
+                        matches!(select(&app).overlay, ModalOverlay::Confirm(_)),
+                        "{id} {key:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn d_and_shift_d_are_typed_into_a_search_and_backspace_deletes_a_letter() {
+            let mut app = select_app(scan_with_id(docker::SCAN_ID));
+
+            press(
+                &mut app,
+                &[KeyCode::Char('/'), KeyCode::Char('d'), KeyCode::Char('D')],
+            );
+            assert_eq!(select(&app).search_query, "dD");
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+
+            app.handle_key(KeyCode::Backspace);
+            assert_eq!(select(&app).search_query, "d");
+            assert!(matches!(select(&app).overlay, ModalOverlay::None));
+        }
+
+        #[test]
+        fn slim_and_compress_start_with_enter_and_ignore_d() {
+            for id in [slim::SCAN_ID, crate::core::compress::SCAN_ID] {
+                let mut app = select_app(scan_with_id(id));
+                app.handle_key(KeyCode::Enter);
+                assert!(
+                    matches!(select(&app).overlay, ModalOverlay::Confirm(_)),
+                    "{id}"
+                );
+
+                for key in REMOVAL_KEYS {
+                    let mut app = select_app(scan_with_id(id));
+                    app.handle_key(key);
+                    assert!(
+                        matches!(select(&app).overlay, ModalOverlay::None),
+                        "{id} {key:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn slim_and_compress_keep_enter_in_the_footer_and_help() {
+            let app = select_app(scan_with_id(slim::SCAN_ID));
+            assert_footer(&app, &["Slim 1 app  ↵"], &[]);
+
+            assert_eq!(help_row(&app, "Review & clean"), Some("↵"));
+
+            let app = select_app(scan_with_id(crate::core::compress::SCAN_ID));
+            assert_footer(&app, &["Review 1 items  ↵"], &["items  d"]);
+            assert_eq!(help_row(&app, "Review & clean"), Some("↵"));
+        }
+
+        #[test]
+        fn a_removing_list_names_d_in_its_footer_and_help() {
+            let app = select_app(scan_with_id("dev"));
+
+            assert_footer(&app, &["Review 1 items  d"], &["↵"]);
+            assert_eq!(help_row(&app, "Review & clean"), Some("d"));
+        }
+
+        #[test]
+        fn the_date_sort_is_shift_t_in_the_footer_and_help() {
+            let app = select_app(scan_with_id(docker::SCAN_ID));
+            assert_footer(&app, &["⇧S/N/T  Sort: Size"], &["⇧S/N/D"]);
+            assert_eq!(help_row(&app, "Date created"), Some("⇧T"));
+        }
+
+        #[test]
+        fn explore_shift_d_deletes_and_shift_t_sorts_by_date() {
+            let dir = tempdir().unwrap();
+            std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+
+            for key in REMOVAL_KEYS {
+                let mut app = analyze_app(dir.path());
+                app.handle_key(KeyCode::Char(' '));
+                app.handle_key(key);
+                assert!(
+                    matches!(analyze(&app).overlay, AnalyzeOverlay::ConfirmDelete { .. }),
+                    "{key:?}"
+                );
+                assert_eq!(analyze(&app).sort_order, SortOrder::Size, "{key:?}");
+            }
+
+            let mut app = analyze_app(dir.path());
+            app.handle_key(KeyCode::Char('T'));
+            assert_eq!(analyze(&app).sort_order, SortOrder::Date);
+            assert!(matches!(analyze(&app).overlay, AnalyzeOverlay::None));
+        }
+
+        #[test]
+        fn explore_names_d_in_its_footer_and_help() {
+            let dir = tempdir().unwrap();
+            std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+            let mut app = analyze_app(dir.path());
+
+            assert_footer(&app, &["d  Delete", "⇧S/N/T  Sort: Size"], &["D  Delete"]);
+            assert_eq!(help_row(&app, "Delete selected"), Some("d"));
+            assert_eq!(help_row(&app, "Date created"), Some("⇧T"));
+
+            app.handle_key(KeyCode::Char(' '));
+            assert_footer(&app, &["Delete 1 items  d"], &[]);
+        }
+
+        fn startup_item(state: StartupState) -> StartupItem {
+            StartupItem {
+                label: "com.example.item".to_string(),
+                name: "Item".to_string(),
+                app_name: None,
+                app_bundle: None,
+                kind: StartupKind::UserAgent,
+                state,
+                program: None,
+                plist_path: Some("/nowhere/com.example.item.plist".into()),
+                pid: None,
+                cpu_percent: None,
+                memory_bytes: None,
+                is_apple: false,
+                is_security: false,
+                is_ignored: false,
+            }
+        }
+
+        fn startup_app(state: StartupState) -> App {
+            let mut app = new_app();
+            app.screen = Screen::Startup(StartupScreenState::new(vec![startup_item(state)], false));
+            app
+        }
+
+        fn startup(app: &App) -> &StartupScreenState {
+            match &app.screen {
+                Screen::Startup(state) => state,
+                _ => panic!("expected the startup screen"),
+            }
+        }
+
+        #[test]
+        fn a_broken_startup_item_is_removed_with_d_not_enter() {
+            for key in REMOVAL_KEYS {
+                let mut app = startup_app(StartupState::Broken);
+                app.handle_key(key);
+                assert_eq!(
+                    startup(&app).confirm,
+                    Some(StartupConfirm::RemoveBroken { index: 0 }),
+                    "{key:?}"
+                );
+            }
+
+            for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+                let mut app = startup_app(StartupState::Broken);
+                app.handle_key(key);
+                assert_eq!(startup(&app).confirm, None, "{key:?}");
+                assert_eq!(startup(&app).message, None, "{key:?}");
+            }
+        }
+
+        #[test]
+        fn d_on_a_broken_item_taert_cannot_remove_says_why_and_asks_nothing() {
+            let daemon = StartupItem {
+                kind: StartupKind::Daemon,
+                ..startup_item(StartupState::Broken)
+            };
+            let apple = StartupItem {
+                is_apple: true,
+                ..startup_item(StartupState::Broken)
+            };
+            for (item, reason) in [
+                (
+                    daemon,
+                    "System-level broken plists cannot be removed without root privileges",
+                ),
+                (apple, "Apple system services cannot be modified"),
+            ] {
+                let mut app = new_app();
+                app.screen = Screen::Startup(StartupScreenState::new(vec![item], false));
+                app.handle_key(KeyCode::Char('d'));
+                assert_eq!(startup(&app).confirm, None, "{reason}");
+                assert_eq!(
+                    startup(&app).message,
+                    Some((reason.to_string(), true)),
+                    "{reason}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_working_startup_item_still_toggles_with_enter_and_space_and_ignores_d() {
+            for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+                let mut app = startup_app(StartupState::Enabled);
+                app.handle_key(key);
+                assert_eq!(
+                    startup(&app).confirm,
+                    Some(StartupConfirm::Toggle {
+                        index: 0,
+                        enable: false
+                    }),
+                    "{key:?}"
+                );
+            }
+
+            for key in REMOVAL_KEYS {
+                let mut app = startup_app(StartupState::Enabled);
+                app.handle_key(key);
+                assert_eq!(startup(&app).confirm, None, "{key:?}");
+                assert_eq!(startup(&app).message, None, "{key:?}");
+            }
+        }
+
+        #[test]
+        fn startup_help_names_d_for_a_broken_item() {
+            let app = startup_app(StartupState::Broken);
+
+            assert_eq!(help_row(&app, "Remove broken item"), Some("d"));
+            assert_footer(&app, &["d  Remove broken item"], &["Toggle"]);
+            let app = startup_app(StartupState::Enabled);
+            assert_footer(&app, &["Toggle"], &["Remove"]);
+        }
+
+        fn path_list_app() -> (tempfile::TempDir, App) {
+            let (temp, layout) = sandbox();
+            let mut app = new_app();
+            app.layout = layout;
+            app.ignore.roots.push("/nowhere/protected".to_string());
+            app.screen = Screen::PathListEditor(PathListEditorState::new(
+                PathListKind::ProtectedPaths,
+                &app.ignore,
+                &app.layout,
+            ));
+            (temp, app)
+        }
+
+        #[test]
+        fn the_path_list_removes_with_delete_too() {
+            for key in REMOVAL_KEYS {
+                let (_temp, mut app) = path_list_app();
+                app.handle_key(key);
+                let Screen::PathListEditor(state) = &app.screen else {
+                    panic!("expected the path list");
+                };
+                assert!(
+                    matches!(state.mode, PathListMode::ConfirmRemove(0)),
+                    "{key:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_path_list_names_d_in_its_footer_and_help() {
+            let (_temp, app) = path_list_app();
+
+            assert_footer(&app, &["d  Remove"], &["D  Remove"]);
+            assert_eq!(help_row(&app, "Remove path"), Some("d"));
         }
     }
 }

@@ -121,48 +121,54 @@ impl StartupScreenState {
             return;
         };
 
+        let enable = match item.state {
+            StartupState::Broken => return,
+            StartupState::Disabled => true,
+            StartupState::Running | StartupState::Enabled => false,
+        };
+
         if let Some(reason) = item.read_only_reason() {
             self.message = Some((reason.to_string(), true));
             return;
         }
 
-        if item.is_disabled_but_running() {
-            self.confirm = Some(StartupConfirm::Stop {
+        self.confirm = Some(if item.is_disabled_but_running() {
+            StartupConfirm::Stop {
                 index: self.selected_index,
-            });
-            self.confirm_button = 0;
+            }
+        } else {
+            StartupConfirm::Toggle {
+                index: self.selected_index,
+                enable,
+            }
+        });
+        self.confirm_button = 0;
+    }
+
+    /// Asks to remove the plist of the selected item when it is broken. Other items stay.
+    pub fn request_remove(&mut self) {
+        if self.confirm.is_some() {
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if item.state != StartupState::Broken {
             return;
         }
 
-        match item.state {
-            StartupState::Running | StartupState::Enabled => {
-                self.confirm = Some(StartupConfirm::Toggle {
-                    index: self.selected_index,
-                    enable: false,
-                });
-                self.confirm_button = 0;
-            }
-            StartupState::Disabled => {
-                self.confirm = Some(StartupConfirm::Toggle {
-                    index: self.selected_index,
-                    enable: true,
-                });
-                self.confirm_button = 0;
-            }
-            StartupState::Broken => {
-                if item.kind == StartupKind::UserAgent && item.plist_path.is_some() {
-                    self.confirm = Some(StartupConfirm::RemoveBroken {
-                        index: self.selected_index,
-                    });
-                    self.confirm_button = 0;
-                } else {
-                    self.message = Some((
-                        "System-level broken plists cannot be removed without root privileges"
-                            .to_string(),
-                        true,
-                    ));
-                }
-            }
+        if let Some(reason) = item.read_only_reason() {
+            self.message = Some((reason.to_string(), true));
+        } else if item.kind == StartupKind::UserAgent && item.plist_path.is_some() {
+            self.confirm = Some(StartupConfirm::RemoveBroken {
+                index: self.selected_index,
+            });
+            self.confirm_button = 0;
+        } else {
+            self.message = Some((
+                "System-level broken plists cannot be removed without root privileges".to_string(),
+                true,
+            ));
         }
     }
 }
@@ -180,11 +186,18 @@ pub fn render_startup(frame: &mut Frame, state: &StartupScreenState, theme: &The
             Hint::new(theme.g.key_esc, "Cancel"),
         ]
     } else {
-        vec![
-            Hint::new(theme.g.key_space, "Toggle / Action"),
-            Hint::new(theme.g.key_up_down, "Navigate"),
-            Hint::new(theme.g.key_esc, "Back"),
-        ]
+        let mut hints = Vec::new();
+        if state
+            .selected_item()
+            .is_some_and(|item| item.state == StartupState::Broken)
+        {
+            hints.push(Hint::new("d", "Remove broken item"));
+        } else {
+            hints.push(Hint::new(theme.g.key_space, "Toggle / Action"));
+        }
+        hints.push(Hint::new(theme.g.key_up_down, "Navigate"));
+        hints.push(Hint::new(theme.g.key_esc, "Back"));
+        hints
     };
 
     let chrome = AppChrome::new(crumbs)

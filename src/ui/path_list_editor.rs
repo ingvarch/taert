@@ -194,7 +194,7 @@ pub fn render_path_list_editor(frame: &mut Frame, state: &PathListEditorState, t
         PathListMode::Normal => {
             let mut hints = vec![Hint::new("A", "Add")];
             if !state.items.is_empty() {
-                hints.push(Hint::new("D", "Remove"));
+                hints.push(Hint::new("d", "Remove"));
                 hints.push(Hint::new(theme.g.key_up_down, "Move"));
             }
             hints.push(Hint::new(theme.g.key_esc, "Back"));

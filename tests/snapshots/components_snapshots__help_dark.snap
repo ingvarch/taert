@@ -11,7 +11,7 @@ expression: output
     │  ␣       Toggle select         ⇧S        Size              │
     │  A / N   Select all / none     ⇧N        Name              │
     │  ↵ / →   Enter folder                                      │
-    │  D / ⌫   Delete selected      GENERAL                      │
+    │  d       Delete selected      GENERAL                      │
     │                                ↑↓ / jk   Navigate          │
     │                                ?         Toggle help       │
     │                                                            │
