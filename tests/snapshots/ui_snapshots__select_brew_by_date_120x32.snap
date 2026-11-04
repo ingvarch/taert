@@ -5,20 +5,20 @@ expression: select_screen(&state)
  taert › Homebrew                                                                               5 packages  ·  365.2 MB
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Formulae ───────────────────────────────────────────────────────────────────────────────── 3 items · 312.1 MB ─╮
-   │     NAME                                                 INSTALLED ↓        SHARE                          SIZE │
-   │     bun 1.4.2 · on request · outdated                    24 hours ago       ━━━──────────────  16.4%    60.0 MB │
-   │ ▌   go 1.27.3 · on request · used by 2                   5 weeks ago        ━━━━━━━━━━━━─────  68.5%   250.1 MB │
-   │     fd 10.5.0 · on request · pinned                      —                  ─────────────────   0.5%     2.0 MB │
+   │     NAME                                  ORIGIN      UPDATE  INSTALLED ↓        SHARE                     SIZE │
+   │     bun 1.4.2                             on request  ↑       24 hours ago       ━━──────────  16.4%    60.0 MB │
+   │ ▌   go 1.27.3 · used by 2                 on request          5 weeks ago        ━━━━━━━━────  68.5%   250.1 MB │
+   │     fd 10.5.0 · pinned                    on request          —                  ────────────   0.5%     2.0 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
    ╭─ Not needed by anything you installed ──────────────────────────────────────────────────────── 1 item · 3.1 MB ─╮
-   │     NAME                                                 INSTALLED ↓        SHARE                          SIZE │
-   │     ada-url 4.0.0_1 · dependency                         3 days ago         ─────────────────   0.8%     3.1 MB │
+   │     NAME                                  ORIGIN      UPDATE  INSTALLED ↓        SHARE                     SIZE │
+   │     ada-url 4.0.0_1                       dependency          3 days ago         ────────────   0.8%     3.1 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
    ╭─ Casks · Remove with taert uninstall ──────────────────────────────────────────────────────── 1 item · 50.0 MB ─╮
-   │     NAME                                                 INSTALLED ↓        SHARE                          SIZE │
-   │     ghostty 1.3.1 · Ghostty.app                          12 days ago        ━━───────────────  13.7%    50.0 MB │
+   │     NAME                                  ORIGIN      UPDATE  INSTALLED ↓        SHARE                     SIZE │
+   │     ghostty 1.3.1 · Ghostty.app                               12 days ago        ━━──────────  13.7%    50.0 MB │
    ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
