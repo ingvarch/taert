@@ -9,6 +9,7 @@ use super::components::hints::Hint;
 use super::components::progress::ProgressView;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
+use crate::core::homebrew::ScanStep;
 use crate::core::purger::PurgeScanEvent;
 use crate::core::scanner::ScanProgressEvent;
 
@@ -71,6 +72,28 @@ impl ProgressState {
                 self.found_bytes += bytes;
             }
         }
+    }
+
+    pub fn apply_brew(&mut self, step: ScanStep) {
+        match step {
+            ScanStep::ReadingPackages => self.headline = "Reading Homebrew packages".to_string(),
+            ScanStep::CheckingVersions => self.headline = "Checking package versions".to_string(),
+            ScanStep::Measuring { total } => {
+                self.category_total = Some(total);
+                self.show_measured();
+            }
+            ScanStep::Measured { bytes } => {
+                self.found_count += 1;
+                self.found_bytes += bytes;
+                self.show_measured();
+            }
+        }
+    }
+
+    fn show_measured(&mut self) {
+        let total = self.category_total.unwrap_or_default();
+        self.category_index = Some(self.found_count);
+        self.headline = format!("Measuring packages, {} of {total}", self.found_count);
     }
 
     pub fn apply_category(&mut self, event: ScanProgressEvent) {

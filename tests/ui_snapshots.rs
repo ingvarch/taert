@@ -13,7 +13,7 @@ use taert::core::cleaner::{RemovalFailure, RemovalProgress, RemovalReport};
 use taert::core::compress;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
-use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind};
+use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, ScanStep};
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
@@ -626,6 +626,18 @@ fn snapshot_progress() {
         let output = render_to_string(w, h, |f| render_progress(f, &state, &theme));
         assert_snapshot!(format!("progress_{label}"), output);
     }
+}
+
+#[test]
+fn snapshot_homebrew_loading_card_while_measuring() {
+    let theme = snapshot_theme();
+    let mut state = ProgressState::new("Reading Homebrew").top_level();
+    state.apply_brew(ScanStep::Measuring { total: 180 });
+    for _ in 0..12 {
+        state.apply_brew(ScanStep::Measured { bytes: 28_350_000 });
+    }
+    let output = render_to_string(80, 24, |f| render_progress(f, &state, &theme));
+    assert_snapshot!("homebrew_loading_80x24", output);
 }
 
 #[test]
