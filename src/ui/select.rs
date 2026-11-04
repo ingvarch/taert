@@ -84,6 +84,10 @@ pub struct SelectState {
     pub toast: Option<Toast>,
     /// The Homebrew list is waiting for `brew update` and `brew outdated`.
     pub checking_updates: bool,
+    /// The Homebrew list is reading brew again after an upgrade.
+    pub refreshing: bool,
+    /// The upgrade the question asks about or the run is doing, until its outcome closes.
+    pub upgrade: Option<homebrew::UpgradePlan>,
 }
 
 const BAR_MIN_WIDTH: usize = 100;
@@ -200,6 +204,8 @@ impl SelectState {
             expanded: HashSet::new(),
             toast: None,
             checking_updates: false,
+            refreshing: false,
+            upgrade: None,
         };
         state.move_to_start();
         state
@@ -315,19 +321,75 @@ impl SelectState {
         for name in removed {
             inventory.forget(name);
         }
-        let mut fresh = Self::homebrew_list(&inventory).with_permanent(self.permanent);
+        let mut fresh = self.rebuilt(&inventory);
+        fresh.focus_item_at_or_before(self.focused_index);
+        *self = fresh;
+    }
+
+    /// A new Homebrew list for `inventory` that keeps the sort, the search, the open rows, and
+    /// the toast.
+    fn rebuilt(&mut self, inventory: &homebrew::Inventory) -> Self {
+        let mut fresh = Self::homebrew_list(inventory).with_permanent(self.permanent);
         if let Some(order) = self.sort_order {
             fresh.set_sort(order);
         }
         fresh.checking_updates = self.checking_updates;
+        fresh.refreshing = self.refreshing;
+        fresh.is_searching = self.is_searching;
         fresh.search_query = std::mem::take(&mut self.search_query);
         fresh.expanded = std::mem::take(&mut self.expanded);
-        if fresh.flattened_rows().is_empty() {
+        fresh.toast = self.toast.take();
+        if !fresh.is_searching && fresh.flattened_rows().is_empty() {
             // A search that matched only what went would show nothing.
             fresh.search_query.clear();
         }
-        fresh.focus_item_at_or_before(self.focused_index);
+        fresh
+    }
+
+    /// Closes the outcome of an upgrade. Returns the list to read again.
+    pub fn close_upgrade_outcome(&mut self) -> Option<homebrew::Inventory> {
+        self.overlay = ModalOverlay::None;
+        self.upgrade.take()?;
+        let request = self.refresh_request();
+        self.refreshing = request.is_some();
+        request
+    }
+
+    /// The list to read again, when it has a brew to read it with.
+    pub fn refresh_request(&self) -> Option<homebrew::Inventory> {
+        self.homebrew
+            .clone()
+            .filter(|inventory| inventory.brew.is_some())
+    }
+
+    /// Shows the list read again after an upgrade, with the focus on the same package.
+    pub fn finish_refresh(&mut self, inventory: &homebrew::Inventory) {
+        self.refreshing = false;
+        let focused = self.flattened_rows().get(self.focused_index).cloned();
+        let package = self
+            .focused_package()
+            .and_then(|old| {
+                inventory
+                    .packages
+                    .iter()
+                    .find(|new| (new.kind, &new.name) == (old.kind, &old.name))
+            })
+            .map(homebrew::label);
+        let mut fresh = self.rebuilt(inventory);
+        let index = self.focused_index;
+        let found = focused.zip(package).is_some_and(|(focused, label)| {
+            fresh.focus_same_item(&focused, Some(&PathBuf::from(label)))
+        });
+        if !found {
+            fresh.focus_item_at_or_before(index);
+        }
         *self = fresh;
+    }
+
+    /// Keeps the rows when the list could not be read again after an upgrade.
+    pub fn fail_refresh(&mut self, error: &str) {
+        self.refreshing = false;
+        self.toast = Some(Toast::error(format!("Could not update the list: {error}")));
     }
 
     fn focus_item_at_or_before(&mut self, index: usize) {
@@ -371,7 +433,7 @@ impl SelectState {
         let tree_path = |row: &FlattenedRow| row.tree.as_ref().map(|tree| tree.path.clone());
         let index = self.flattened_rows().iter().position(|row| {
             row.is_item()
-                && row.group_index == focused.group_index
+                && row.group_name == focused.group_name
                 && row.full_path.as_ref() == path
                 && tree_path(row) == tree_path(focused)
         });
@@ -629,6 +691,80 @@ impl SelectState {
         }
     }
 
+    /// The package of the focused row of the Homebrew list.
+    fn focused_package(&self) -> Option<&homebrew::Package> {
+        let item = self.focused_item()?;
+        let label = item.path.to_string_lossy();
+        self.homebrew
+            .as_ref()?
+            .packages
+            .iter()
+            .find(|package| homebrew::label(package) == label)
+    }
+
+    /// Whether the focused row of the Homebrew list has a newer version.
+    fn has_update(&self) -> bool {
+        self.focused_package()
+            .is_some_and(|package| package.latest_version.is_some())
+    }
+
+    /// Says that an upgrade waits while the update check runs, so it never runs beside
+    /// `brew update`, and while the list is read again after an upgrade.
+    fn upgrade_waits(&mut self) -> bool {
+        let text = if self.checking_updates {
+            "Checking for updates. Try again when it ends."
+        } else if self.refreshing {
+            "Updating the list. Try again when it ends."
+        } else {
+            return false;
+        };
+        self.toast = Some(Toast::info(text));
+        true
+    }
+
+    /// u on the Homebrew list: says why the focused row stays, or asks to upgrade only it.
+    pub fn upgrade_focused(&mut self) {
+        self.toast = None;
+        if self.upgrade_waits() {
+            return;
+        }
+        let Some(package) = self.focused_package() else {
+            return;
+        };
+        if let Some(text) = homebrew::upgrade_refusal(&package.name, Some(package)) {
+            self.toast = Some(Toast::error(text));
+            return;
+        }
+        let packages = vec![package.clone()];
+        self.ask_to_upgrade(packages);
+    }
+
+    /// Shift-U on the Homebrew list: asks to upgrade every package that is not refused.
+    pub fn upgrade_all(&mut self) {
+        self.toast = None;
+        if self.upgrade_waits() {
+            return;
+        }
+        let packages = self
+            .homebrew
+            .as_ref()
+            .map(|inventory| homebrew::upgradable(&inventory.packages))
+            .unwrap_or_default();
+        if packages.is_empty() {
+            self.toast = Some(Toast::info("Everything is up to date."));
+            return;
+        }
+        self.ask_to_upgrade(packages);
+    }
+
+    fn ask_to_upgrade(&mut self, packages: Vec<homebrew::Package>) {
+        let Some(brew) = self.homebrew.as_ref().and_then(|list| list.brew.clone()) else {
+            return;
+        };
+        self.upgrade = Some(homebrew::UpgradePlan { brew, packages });
+        self.overlay = ModalOverlay::Confirm(ConfirmButton::Cancel);
+    }
+
     pub fn toggle_current(&mut self) {
         if self.is_single_row_list() {
             return;
@@ -801,6 +937,7 @@ impl SelectState {
 
     pub fn close_overlay(&mut self) {
         self.overlay = ModalOverlay::None;
+        self.upgrade = None;
     }
 
     pub fn toggle_confirmation_button(&mut self) {
@@ -864,6 +1001,10 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         if state.checking_updates {
             spans.push(Span::styled("  ·  ", theme.callout()));
             spans.push(Span::styled("Checking for updates…", theme.callout()));
+        }
+        if state.refreshing {
+            spans.push(Span::styled("  ·  ", theme.callout()));
+            spans.push(Span::styled("Updating the list…", theme.callout()));
         }
         Line::from(spans)
     } else {
@@ -1195,12 +1336,15 @@ enum RunKind {
     Uninstall,
     Slim,
     Compress,
+    Upgrade,
 }
 
 impl RunKind {
     fn of(state: &SelectState) -> Self {
         let id = state.scan.id.as_str();
-        if is_plan(state) || id == homebrew::SCAN_ID {
+        if state.upgrade.is_some() {
+            Self::Upgrade
+        } else if is_plan(state) || id == homebrew::SCAN_ID {
             Self::Uninstall
         } else if id == slim::SCAN_ID {
             Self::Slim
@@ -1215,6 +1359,7 @@ impl RunKind {
         match self {
             Self::Slim => "slim",
             Self::Compress => "compress",
+            Self::Upgrade => "upgrade",
             Self::Remove | Self::Uninstall => "remove",
         }
     }
@@ -1289,6 +1434,9 @@ fn toolbar_hints(state: &SelectState, has_items: bool) -> Vec<Hint<'static>> {
             Hint::new("↑↓", "Move"),
             Hint::new("d", "Uninstall"),
         ]);
+        if state.has_update() {
+            hints.push(Hint::new("u", "Upgrade"));
+        }
         if let Some(order) = state.sort_order {
             hints.push(Hint::new("⇧S/N/T", order.hint_label()));
         }
@@ -1406,6 +1554,7 @@ fn render_confirmation_dialog(
         .count();
     let total = format_bytes(state.scan.total_selected_bytes());
     let (title, msg, action) = match RunKind::of(state) {
+        RunKind::Upgrade => return render_upgrade_dialog(frame, state, focus_btn, theme),
         RunKind::Slim => (
             format!("Slim {}?", plural(count, "app", "apps")),
             format!(
@@ -1475,6 +1624,55 @@ fn render_confirmation_dialog(
         .render(frame, frame.area(), theme);
 }
 
+/// The question before an upgrade: one line per package, as many as the dialog holds.
+fn render_upgrade_dialog(
+    frame: &mut Frame,
+    state: &SelectState,
+    focus_btn: ConfirmButton,
+    theme: &Theme,
+) {
+    let Some(plan) = &state.upgrade else {
+        return;
+    };
+    let title = match plan.packages.as_slice() {
+        [only] => format!("Upgrade {}?", only.name),
+        many => format!("Upgrade {}?", plural(many.len(), "package", "packages")),
+    };
+    let (width, height) = Modal::message_size(frame.area());
+    // The blank line below the list and the note, which can wrap to two lines.
+    let room = height.saturating_sub(3).max(1);
+    let shown = if plan.packages.len() > room {
+        room - 1
+    } else {
+        plan.packages.len()
+    };
+    let mut message: Vec<Line> = plan
+        .packages
+        .iter()
+        .take(shown)
+        .map(|package| Line::from(middle_truncate(&homebrew::upgrade_change(package), width)))
+        .collect();
+    if shown < plan.packages.len() {
+        message.push(Line::from(format!(
+            "and {} more",
+            plan.packages.len() - shown
+        )));
+    }
+    message.push(Line::from(""));
+    message.push(Line::from(Span::styled(
+        "Homebrew may also upgrade what these need or what needs them.",
+        theme.callout(),
+    )));
+
+    Modal::new(&title)
+        .message(message)
+        .buttons(vec![
+            Button::new("Cancel").focused(focus_btn == ConfirmButton::Cancel),
+            Button::primary("Upgrade").focused(focus_btn == ConfirmButton::Remove),
+        ])
+        .render(frame, frame.area(), theme);
+}
+
 /// The title, the first line and the button of the question before a removal or an uninstall.
 fn removal_question(
     state: &SelectState,
@@ -1531,6 +1729,7 @@ fn render_removing_dialog(
     let title = match kind {
         RunKind::Slim => format!("Slimming {}…", plural(count, "app", "apps")),
         RunKind::Compress => format!("Compressing {}…", plural(count, "item", "items")),
+        RunKind::Upgrade => format!("Upgrading {}…", plural(count, "package", "packages")),
         RunKind::Remove | RunKind::Uninstall => {
             format!("Removing {}…", plural(count, "item", "items"))
         }
@@ -1619,28 +1818,41 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
         (RunKind::Slim, false) => "Nothing was slimmed",
         (RunKind::Compress, true) => "Compress Complete",
         (RunKind::Compress, false) => "Nothing was compressed",
+        (RunKind::Upgrade, true) => "Upgrade Complete",
+        (RunKind::Upgrade, false) => "Nothing was upgraded",
         (RunKind::Uninstall, true) => "Uninstall Complete",
         (RunKind::Remove, true) => "Clean Complete",
         (RunKind::Uninstall | RunKind::Remove, false) => "Nothing was removed",
     };
 
     let mut message = Vec::new();
-    let saved = match kind {
-        RunKind::Slim => Some(" of Intel code.".to_string()),
-        RunKind::Compress => Some(format!(
-            " by compressing {}.",
-            plural(report.removed_count, "file", "files")
-        )),
-        RunKind::Remove | RunKind::Uninstall => None,
-    };
-    match saved {
-        Some(tail) if done => message.push(Line::from(vec![
-            Span::styled("Saved ", theme.body()),
-            Span::styled(format_bytes(report.freed_bytes), theme.success()),
-            Span::styled(tail, theme.body()),
-        ])),
-        Some(_) => {}
-        None => push_totals(&mut message, report, theme),
+    match kind {
+        RunKind::Slim | RunKind::Compress => {
+            let saved = if kind == RunKind::Slim {
+                " of Intel code.".to_string()
+            } else {
+                format!(
+                    " by compressing {}.",
+                    plural(report.removed_count, "file", "files")
+                )
+            };
+            if done {
+                message.push(Line::from(vec![
+                    Span::styled("Saved ", theme.body()),
+                    Span::styled(format_bytes(report.freed_bytes), theme.success()),
+                    Span::styled(saved, theme.body()),
+                ]));
+            }
+        }
+        RunKind::Upgrade => {
+            if done {
+                message.push(Line::from(format!(
+                    "Upgraded {}.",
+                    plural(report.removed_count, "package", "packages")
+                )));
+            }
+        }
+        RunKind::Remove | RunKind::Uninstall => push_totals(&mut message, report, theme),
     }
 
     if !report.failures.is_empty() {
@@ -1658,6 +1870,12 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
                 format!("  ✕ {}", prettify_path(&fail.path)),
                 theme.callout(),
             )));
+            if kind == RunKind::Upgrade {
+                message.push(Line::from(Span::styled(
+                    fail.error.clone(),
+                    theme.callout(),
+                )));
+            }
         }
         if kind == RunKind::Uninstall {
             let reason = report.failures[0].error.clone();
@@ -1676,6 +1894,28 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
         .message(message)
         .buttons(vec![Button::primary("Done").focused(true)])
         .render(frame, frame.area(), theme);
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use ratatui::backend::TestBackend;
+    use ratatui::{Frame, Terminal};
+
+    /// The words `draw` puts on a `width` by `height` screen, so a line a dialog wraps reads
+    /// as one.
+    pub fn screen_words(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(draw).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        rows.join(" ")
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 #[cfg(test)]
@@ -1745,6 +1985,61 @@ mod tests {
             .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
             .map(|position| buffer[position].symbol())
             .collect()
+    }
+
+    #[test]
+    fn the_upgrade_question_keeps_its_note_and_buttons_in_a_narrow_window() {
+        let packages = (0..20)
+            .map(|i| {
+                let name = format!("microsoft-auto-update-{i:02}");
+                let mut package = homebrew::testing::package(
+                    homebrew::PackageKind::Cask,
+                    &name,
+                    "4.79.24120731",
+                    1,
+                );
+                package.latest_version = Some("4.80.25010832".to_string());
+                package
+            })
+            .collect();
+        let mut state = SelectState::homebrew_list(&homebrew::Inventory {
+            packages,
+            brew: Some(PathBuf::from("/opt/homebrew/bin/brew")),
+            ..homebrew::Inventory::default()
+        });
+        state.upgrade_all();
+        let theme = Theme::with_env(UiEnv::default());
+
+        let text = testing::screen_words(40, 20, |frame| render_select(frame, &state, &theme));
+
+        assert!(text.contains("Upgrade 20 packages?"), "{text}");
+        assert!(text.contains("and 14 more"), "{text}");
+        assert!(
+            text.contains("Homebrew may also upgrade what these need or what needs them."),
+            "{text}"
+        );
+        assert!(text.contains("Cancel Upgrade"), "{text}");
+    }
+
+    #[test]
+    fn closing_an_upgrade_outcome_with_no_brew_to_read_does_not_say_updating() {
+        let mut bun = homebrew::testing::package(homebrew::PackageKind::Formula, "bun", "1", 1);
+        bun.latest_version = Some("2".to_string());
+        let mut state = SelectState::homebrew_list(&homebrew::Inventory {
+            packages: vec![bun.clone()],
+            ..homebrew::Inventory::default()
+        });
+        state.upgrade = Some(homebrew::UpgradePlan {
+            brew: PathBuf::from("/opt/homebrew/bin/brew"),
+            packages: vec![bun],
+        });
+        state.overlay = ModalOverlay::Outcome(RemovalReport::default());
+
+        let request = state.close_upgrade_outcome();
+
+        assert!(request.is_none());
+        assert!(!state.refreshing);
+        assert!(matches!(state.overlay, ModalOverlay::None));
     }
 
     #[test]

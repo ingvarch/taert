@@ -415,24 +415,17 @@ fn handle_brew_upgrade(
         let _ = writeln!(console.out, "Everything is up to date.");
         return ExitCode::SUCCESS;
     }
-    let change = |package: &homebrew::Package| {
-        format!(
-            "{} {} → {}",
-            package.name,
-            package.version,
-            new_version(package)
-        )
-    };
     if cli.dry_run {
         for package in &plan.packages {
-            let _ = writeln!(console.out, "Would upgrade {}.", change(package));
+            let change = homebrew::upgrade_change(package);
+            let _ = writeln!(console.out, "Would upgrade {change}.");
         }
         return ExitCode::SUCCESS;
     }
 
     if !cli.force {
         for package in &plan.packages {
-            let _ = writeln!(console.out, "{}", change(package));
+            let _ = writeln!(console.out, "{}", homebrew::upgrade_change(package));
         }
         let count = ui::components::text::plural(plan.packages.len(), "package", "packages");
         if !confirmed(console, &format!("Upgrade {count}?")) {

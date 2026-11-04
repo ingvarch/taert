@@ -37,7 +37,9 @@ use super::workspace::{
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
 use crate::core::catalog::Category;
-use crate::core::cleaner::{Cleaner, RemovalMode, RemovalProgress, RemovalReport, remove_selected};
+use crate::core::cleaner::{
+    Cleaner, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport, remove_selected,
+};
 use crate::core::compress::{self, Compressor};
 use crate::core::docker;
 use crate::core::doctor;
@@ -141,8 +143,10 @@ pub struct App {
     pub plan: Option<UninstallPlan>,
     /// Delete permanently instead of moving to the Trash
     pub permanent: bool,
-    /// The background check for Homebrew updates, while it runs.
+    /// The background check for Homebrew updates, while it runs, also off the list.
     brew_check: Option<Receiver<BrewCheck>>,
+    /// The list being read again after an upgrade, while it runs.
+    brew_refresh: Option<Receiver<Result<homebrew::Inventory, String>>>,
     /// Set when the check starts, so the list checks once per run.
     brew_checked: bool,
     /// The brew the list opened by `taert brew` checks once the run starts.
@@ -174,6 +178,7 @@ impl App {
             plan: None,
             permanent: false,
             brew_check: None,
+            brew_refresh: None,
             brew_checked: false,
             brew_pending: None,
         }
@@ -268,6 +273,7 @@ impl App {
             plan: None,
             permanent: false,
             brew_check: None,
+            brew_refresh: None,
             brew_checked: false,
             brew_pending: None,
         }
@@ -296,6 +302,7 @@ impl App {
             plan: None,
             permanent: false,
             brew_check: None,
+            brew_refresh: None,
             brew_checked: false,
             brew_pending: None,
         }
@@ -450,6 +457,7 @@ impl App {
 
             self.poll_scan();
             self.poll_brew_check();
+            self.poll_brew_refresh();
 
             // Tick analyze measuring if active
             if let Screen::Analyze(ref mut analyze) = self.screen {
@@ -514,7 +522,7 @@ impl App {
     }
 
     fn go_back(&mut self) {
-        self.brew_check = None;
+        self.brew_refresh = None;
         self.screen = match self.back_stack.pop() {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
@@ -623,6 +631,41 @@ impl App {
         }
     }
 
+    /// Reads the list again on a thread after an upgrade.
+    fn start_brew_refresh(&mut self, inventory: homebrew::Inventory) {
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        thread::spawn(move || {
+            let _ = tx.send(homebrew::refresh(&*host, &inventory));
+        });
+        self.brew_refresh = Some(rx);
+    }
+
+    fn poll_brew_refresh(&mut self) {
+        let Some(rx) = &self.brew_refresh else {
+            return;
+        };
+        if let Screen::Select(select) = &self.screen
+            && !matches!(select.overlay, ModalOverlay::None)
+        {
+            return;
+        }
+        let read = match rx.try_recv() {
+            Ok(read) => read,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the read stopped".to_string()),
+        };
+        self.brew_refresh = None;
+        if let Screen::Select(select) = &mut self.screen
+            && select.scan.id == homebrew::SCAN_ID
+        {
+            match read {
+                Ok(inventory) => select.finish_refresh(&inventory),
+                Err(error) => select.fail_refresh(&error),
+            }
+        }
+    }
+
     fn poll_scan(&mut self) {
         if let Screen::Scanning(ref mut progress, ref rx, _) = self.screen {
             progress.tick();
@@ -657,9 +700,10 @@ impl App {
                         break;
                     }
                     ScanMessage::Homebrew(inventory) => {
-                        self.screen = Screen::Select(Box::new(
-                            SelectState::homebrew_list(&inventory).with_permanent(self.permanent),
-                        ));
+                        let mut list =
+                            SelectState::homebrew_list(&inventory).with_permanent(self.permanent);
+                        list.checking_updates = self.brew_check.is_some();
+                        self.screen = Screen::Select(Box::new(list));
                         if let Some(brew) = inventory.brew {
                             self.start_brew_check(brew);
                         }
@@ -812,13 +856,22 @@ impl App {
                     }
                     ModalOverlay::Outcome(_) => {
                         if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
-                            if state.scan.id == homebrew::SCAN_ID {
+                            let mut refresh = None;
+                            if state.upgrade.is_some() {
+                                refresh = state.close_upgrade_outcome();
+                            } else if state.scan.id == homebrew::SCAN_ID {
                                 state.close_homebrew_outcome();
+                                if state.refreshing {
+                                    refresh = state.refresh_request();
+                                }
                             } else {
                                 state.close_overlay();
                             }
                             if state.scan.id == uninstaller::PLAN_ID {
                                 self.show_fresh_app_list();
+                            }
+                            if let Some(inventory) = refresh {
+                                self.start_brew_refresh(inventory);
                             }
                         }
                         return;
@@ -860,6 +913,12 @@ impl App {
                     }
                     code if is_removal_key(code) && state.scan.id == homebrew::SCAN_ID => {
                         state.uninstall_focused();
+                    }
+                    KeyCode::Char('u') if state.scan.id == homebrew::SCAN_ID => {
+                        state.upgrade_focused();
+                    }
+                    KeyCode::Char('U') if state.scan.id == homebrew::SCAN_ID => {
+                        state.upgrade_all();
                     }
                     code if is_removal_key(code) && state.scan.id == apps::LIST_ID => {
                         self.start_review();
@@ -1360,6 +1419,8 @@ impl App {
                         Hint::new("↵ / →", "Expand"),
                         Hint::new("↵ / ←", "Collapse"),
                         Hint::new("d", "Uninstall"),
+                        Hint::new("u", "Upgrade"),
+                        Hint::new("⇧U", "Upgrade all"),
                     ]);
                 }
                 let mut sections = vec![HelpSection::new("Homebrew", hints)];
@@ -1455,6 +1516,9 @@ impl App {
     }
 
     fn start_removal(&mut self) {
+        if matches!(&self.screen, Screen::Select(select) if select.upgrade.is_some()) {
+            return self.start_upgrade();
+        }
         if let Screen::Select(ref mut select) = self.screen {
             let mut selected_items: Vec<_> =
                 select.scan.selected_items().into_iter().cloned().collect();
@@ -1672,6 +1736,49 @@ impl App {
 
             self.removal_rx = Some(rx);
         }
+    }
+
+    /// Runs the upgrade the question asked about, one `brew upgrade` per package. Upgrades are
+    /// not written to the history.
+    fn start_upgrade(&mut self) {
+        let Screen::Select(select) = &mut self.screen else {
+            return;
+        };
+        let Some(plan) = select.upgrade.clone() else {
+            return;
+        };
+        let total_count = plan.packages.len();
+        let first = plan.packages.first().map(|package| package.name.clone());
+        select.overlay = ModalOverlay::Removing {
+            progress: RemovalProgress {
+                current_index: 1,
+                total_count,
+                path: first.unwrap_or_default().into(),
+            },
+            spinner_idx: 0,
+            cancel: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        thread::spawn(move || {
+            let mut report = RemovalReport::default();
+            for (index, package) in plan.packages.iter().enumerate() {
+                let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
+                    current_index: index + 1,
+                    total_count,
+                    path: package.name.clone().into(),
+                }));
+                match homebrew::upgrade(&*host, &plan.brew, package.kind, &package.name) {
+                    Ok(()) => report.removed_count += 1,
+                    Err(error) => report.failures.push(RemovalFailure {
+                        path: package.name.clone().into(),
+                        error,
+                    }),
+                }
+            }
+            let _ = tx.send(RemovalMessage::Finished(report));
+        });
+        self.removal_rx = Some(rx);
     }
 
     fn start_analyze_removal(&mut self, mut mode: RemovalMode) {
@@ -4422,11 +4529,13 @@ mod tests {
     mod brew {
         use super::*;
         use crate::core::apps::testing::sandbox;
+        use crate::core::homebrew::testing::{formula, info, outdated};
         use crate::core::homebrew::{self, Inventory, Package, PackageKind};
         use crate::core::host::fake::FakeHost;
         use crate::core::sizer::DirSizer;
         use crate::ui::components::toast::ToastKind;
         use crate::ui::select::RowKind;
+        use crate::ui::select::testing::screen_words;
         use std::time::SystemTime;
 
         const BREW_START: &str =
@@ -4649,30 +4758,66 @@ mod tests {
         }
 
         #[test]
-        fn leaving_the_list_drops_the_result_and_a_later_opening_does_not_check_again() {
-            let (_temp, mut app, host, brew) = check_mac();
+        fn a_list_opened_again_while_the_check_runs_waits_for_it_and_takes_its_result() {
+            let (_temp, mut app, host, brew) =
+                check_mac_with(CHECK_INFO, NOTHING_NEW, Some(NOTHING_NEW), None);
+            host.reply(
+                &format!("{BREW_START} {brew} outdated --json=v2"),
+                BUN_OUTDATED,
+            );
             let release = hold(&host, &format!("{BREW_START} {brew} update"));
-
             open_the_list(&mut app);
             app.handle_key(KeyCode::Esc);
             assert!(matches!(app.screen, Screen::Workspace(_)));
+
             open_the_list(&mut app);
-            let reopened = row_labels(&app);
+            focus_on(&mut app, "bun");
+            for key in ['u', 'U'] {
+                app.handle_key(KeyCode::Char(key));
+
+                let state = select(&app);
+                let toast = state.toast.as_ref().expect("a toast");
+                assert_eq!(toast.text, "Checking for updates. Try again when it ends.");
+                assert!(matches!(state.overlay, ModalOverlay::None), "{key}");
+            }
+            assert!(screen_text(&app).contains("Checking for updates…"));
+            let calls = host.calls.lock().unwrap().clone();
+            assert!(!calls.iter().any(|call| call.contains(" upgrade ")));
+            drop(release);
+            finish_the_check(&mut app);
+
+            assert!(
+                row_labels(&app).contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            app.handle_key(KeyCode::Char('u'));
+            assert!(screen_text(&app).contains("Upgrade bun?"));
+        }
+
+        #[test]
+        fn a_check_that_ends_off_the_list_is_dropped_and_the_next_opening_reads_its_own() {
+            let (_temp, mut app, host, brew) = check_mac();
+            let release = hold(&host, &format!("{BREW_START} {brew} update"));
+            open_the_list(&mut app);
+            app.handle_key(KeyCode::Esc);
+            assert!(app.brew_check.is_some());
             drop(release);
             for _ in 0..400 {
-                if ran_times(&host, &brew, "outdated") > 2 {
+                app.poll_brew_check();
+                if app.brew_check.is_none() {
                     break;
                 }
-                app.poll_brew_check();
                 thread::sleep(Duration::from_millis(5));
             }
-            app.poll_brew_check();
+            assert!(app.brew_check.is_none());
+            assert!(matches!(app.screen, Screen::Workspace(_)));
 
-            assert_eq!(ran_times(&host, &brew, "outdated"), 3);
-            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            open_the_list(&mut app);
+
             assert!(!select(&app).checking_updates);
             assert!(select(&app).toast.is_none());
-            assert_eq!(row_labels(&app), reopened);
+            assert_eq!(ran_times(&host, &brew, "update"), 1);
+            assert_eq!(ran_times(&host, &brew, "outdated"), 3);
         }
 
         #[test]
@@ -6419,6 +6564,985 @@ mod tests {
             let rows = state.flattened_rows();
             assert!(rows[state.focused_index].is_item());
             assert!(rows[state.focused_index].display_path.starts_with("fd1 "));
+        }
+
+        const BUN_OUTDATED: &str = homebrew::testing::BREW_OUTDATED_BUN;
+
+        /// The Homebrew list on a Mac whose brew lists `before`, and `after` once an upgrade ran.
+        /// `brew outdated` says `says[0]` for the list, `says[1]` for the check, and `says[2]`
+        /// afterwards.
+        struct Upgrades {
+            _temp: tempfile::TempDir,
+            app: App,
+            host: Arc<FakeHost>,
+            brew: String,
+        }
+
+        impl Upgrades {
+            fn open(before: &str, after: &str, says: [&str; 3]) -> Self {
+                Self::open_failing(before, after, says, &[])
+            }
+
+            /// Like `open`, and `brew upgrade` fails for the packages in `failing`.
+            fn open_failing(
+                before: &str,
+                after: &str,
+                says: [&str; 3],
+                failing: &[(&str, &str)],
+            ) -> Self {
+                let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+                let brew = layout.system("opt/homebrew/bin/brew").display().to_string();
+                let host = Arc::new(FakeHost::default());
+                let read = |args: &str| format!("{BREW_START} {brew} {args}");
+                host.reply(&read("info --json=v2 --installed"), before);
+                host.reply(&read("info --json=v2 --installed"), after);
+                for said in says {
+                    host.reply(&read("outdated --json=v2"), said);
+                }
+                host.reply(&read("update"), "");
+                let listed: serde_json::Value = serde_json::from_str(before).unwrap();
+                for (flag, key, field) in
+                    [("formula", "formulae", "name"), ("cask", "casks", "token")]
+                {
+                    for name in listed[key]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|p| p[field].as_str())
+                    {
+                        let line = format!(
+                            "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {brew} upgrade --{flag} {name}"
+                        );
+                        match failing.iter().find(|(failing, _)| *failing == name) {
+                            Some((_, error)) => host.fail(&line, error),
+                            None => host.reply(&line, ""),
+                        }
+                    }
+                }
+                for text in [before, after] {
+                    let listed: serde_json::Value = serde_json::from_str(text).unwrap();
+                    let names = listed["formulae"].as_array().unwrap().iter();
+                    for name in names.filter_map(|f| f["name"].as_str()) {
+                        let keg = layout.system(&format!("opt/homebrew/Cellar/{name}"));
+                        std::fs::create_dir_all(&keg).unwrap();
+                        std::fs::write(keg.join("data"), vec![1_u8; 20_000]).unwrap();
+                    }
+                }
+                let mut app = new_app();
+                app.layout = layout;
+                app.host = host.clone();
+                open_the_list(&mut app);
+                finish_the_check(&mut app);
+                Self {
+                    _temp: temp,
+                    app,
+                    host,
+                    brew,
+                }
+            }
+
+            fn upgrade_line(&self, args: &str) -> String {
+                format!(
+                    "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} upgrade {args}",
+                    self.brew
+                )
+            }
+
+            fn upgrades_run(&self) -> Vec<String> {
+                let mut lines: Vec<String> = self
+                    .host
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|call| call.contains(" upgrade "))
+                    .cloned()
+                    .collect();
+                lines.sort();
+                lines
+            }
+
+            fn wait_for_the_upgrades(&mut self) {
+                wait_for_removal(&mut self.app);
+            }
+
+            fn wait_for_the_list(&mut self) {
+                for _ in 0..400 {
+                    self.app.poll_brew_refresh();
+                    if self.app.brew_refresh.is_none() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                panic!("the list was not read again");
+            }
+
+            /// `y` on the question, then waits for the outcome.
+            fn confirm(&mut self) {
+                self.app.handle_key(KeyCode::Char('y'));
+                self.wait_for_the_upgrades();
+            }
+
+            fn close_outcome(&mut self) {
+                self.app.handle_key(KeyCode::Enter);
+                self.wait_for_the_list();
+            }
+
+            fn calls_of(&self, command: &str) -> usize {
+                ran_times(&self.host, &self.brew, command)
+            }
+
+            /// Waits until brew `command` has started `times` times.
+            fn wait_for_calls(&self, command: &str, times: usize) {
+                for _ in 0..400 {
+                    if self.calls_of(command) >= times {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                panic!("brew {command} did not start {times} times");
+            }
+
+            fn info_line(&self) -> String {
+                format!("{BREW_START} {} info --json=v2 --installed", self.brew)
+            }
+
+            fn uninstalls_run(&self) -> usize {
+                let calls = self.host.calls.lock().unwrap();
+                calls
+                    .iter()
+                    .filter(|call| call.contains(" uninstall "))
+                    .count()
+            }
+
+            /// Upgrades bun and closes the outcome, while the read after it waits for the
+            /// returned sender to be dropped.
+            fn upgrade_bun_and_hold_the_read(&mut self) -> mpsc::Sender<()> {
+                let release = hold(&self.host, &self.info_line());
+                focus_on(&mut self.app, "bun");
+                self.app.handle_key(KeyCode::Char('u'));
+                self.confirm();
+                self.app.handle_key(KeyCode::Enter);
+                release
+            }
+        }
+
+        fn bun_and_zed() -> (String, String) {
+            (
+                info(
+                    &[formula("bun", "1.4.2", false), formula("zed", "2", false)],
+                    &[],
+                ),
+                info(
+                    &[formula("bun", "1.4.4_1", false), formula("zed", "2", false)],
+                    &[],
+                ),
+            )
+        }
+
+        #[test]
+        fn u_on_an_outdated_formula_asks_and_upgrades_it() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            focus_on(&mut run.app, "bun");
+
+            run.app.handle_key(KeyCode::Char('u'));
+
+            assert!(matches!(select(&run.app).overlay, ModalOverlay::Confirm(_)));
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade bun?"), "{text}");
+            assert!(text.contains("bun 1.4.2 → 1.4.4_1"), "{text}");
+            let words = screen_words(100, 30, |frame| run.app.render_screen(frame));
+            assert!(
+                words.contains("Homebrew may also upgrade what these need or what needs them."),
+                "{words}"
+            );
+            assert!(!text.contains("Trash"), "{text}");
+            assert!(!text.contains("delete"), "{text}");
+            assert!(run.upgrades_run().is_empty());
+
+            run.confirm();
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade Complete"), "{text}");
+            assert!(text.contains("Upgraded 1 package."), "{text}");
+            assert_eq!(run.upgrades_run(), [run.upgrade_line("--formula bun")]);
+            let history = HistoryLog::new(run.app.layout.history_path());
+            assert!(history.load_runs().unwrap().is_empty());
+            assert!(
+                row_labels(&run.app)
+                    .contains(&"bun 1.4.2 · on request · update 1.4.4_1".to_string())
+            );
+
+            run.close_outcome();
+
+            let labels = row_labels(&run.app);
+            assert!(
+                labels.contains(&"bun 1.4.4_1 · on request".to_string()),
+                "{labels:?}"
+            );
+            assert!(
+                !labels.iter().any(|label| label.contains("update")),
+                "{labels:?}"
+            );
+            assert!(!screen_text(&run.app).contains("1 update"));
+            assert_eq!(run.calls_of("update"), 1);
+            assert_eq!(run.calls_of("info"), 2);
+            assert_eq!(run.calls_of("outdated"), 3);
+        }
+
+        #[test]
+        fn the_upgrade_shows_its_progress() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let release = hold(&run.host, &run.upgrade_line("--formula bun"));
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrading 1 package…"), "{text}");
+            assert!(text.contains("1 of 1"), "{text}");
+            drop(release);
+            run.wait_for_the_upgrades();
+        }
+
+        #[test]
+        fn a_cancelled_upgrade_does_not_change_the_next_question() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Esc]);
+            assert!(matches!(select(&run.app).overlay, ModalOverlay::None));
+
+            focus_on(&mut run.app, "zed");
+            run.app.handle_key(KeyCode::Char('d'));
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Uninstall zed?"), "{text}");
+            assert!(!text.contains("Upgrade"), "{text}");
+            assert!(run.upgrades_run().is_empty());
+        }
+
+        #[test]
+        fn u_on_an_up_to_date_or_pinned_row_shows_why_and_runs_nothing() {
+            let mut pinned = package(PackageKind::Formula, "pin", 3_000);
+            pinned.pinned = true;
+            pinned.latest_version = Some("2".to_string());
+            let mut cask = package(PackageKind::Cask, "ghostty", 9_000);
+            cask.pinned = true;
+            cask.latest_version = Some("2".to_string());
+            let mut app = brew_list_app(&Inventory {
+                packages: vec![package(PackageKind::Formula, "fd", 5_000), pinned, cask],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            });
+            let host = Arc::new(FakeHost::default());
+            app.host = host.clone();
+
+            for (name, text) in [
+                ("fd", "fd is up to date."),
+                ("pin", "pin is pinned. Run brew unpin pin first."),
+                (
+                    "ghostty",
+                    "ghostty is pinned. Run brew unpin ghostty first.",
+                ),
+            ] {
+                focus_on(&mut app, name);
+
+                app.handle_key(KeyCode::Char('u'));
+
+                let state = select(&app);
+                let toast = state.toast.as_ref().expect(name);
+                assert_eq!(toast.text, text);
+                assert_eq!(toast.kind, ToastKind::Error);
+                assert!(matches!(state.overlay, ModalOverlay::None), "{name}");
+                assert!(screen_text(&app).contains(text), "{name}");
+            }
+            assert!(host.calls.lock().unwrap().is_empty());
+            assert!(app.removal_rx.is_none());
+        }
+
+        fn mixed_mac() -> Upgrades {
+            let before = info(
+                &[
+                    formula("bun", "1.4.2", false),
+                    formula("zed", "2", false),
+                    formula("pin", "1", true),
+                    formula("lib", "1", false),
+                ],
+                &[("ghostty", "1.0")],
+            );
+            let after = info(
+                &[
+                    formula("bun", "1.4.4_1", false),
+                    formula("zed", "3", false),
+                    formula("pin", "1", true),
+                    formula("lib", "1", false),
+                ],
+                &[("ghostty", "1.1")],
+            );
+            let said = outdated(
+                &[("bun", "1.4.4_1"), ("zed", "3"), ("pin", "2")],
+                &[("ghostty", "1.1")],
+            );
+            Upgrades::open(&before, &after, [&said, &said, NOTHING_NEW])
+        }
+
+        #[test]
+        fn shift_u_upgrades_every_outdated_package_but_a_pinned_one() {
+            let mut run = mixed_mac();
+
+            run.app.handle_key(KeyCode::Char('U'));
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade 3 packages?"), "{text}");
+            for line in ["bun 1.4.2 → 1.4.4_1", "zed 2 → 3", "ghostty 1.0 → 1.1"] {
+                assert!(text.contains(line), "{line} {text}");
+            }
+            assert!(!text.contains("pin 1 → 2"), "{text}");
+            assert!(run.upgrades_run().is_empty());
+
+            run.confirm();
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgraded 3 packages."), "{text}");
+            assert_eq!(
+                run.upgrades_run(),
+                [
+                    run.upgrade_line("--cask ghostty"),
+                    run.upgrade_line("--formula bun"),
+                    run.upgrade_line("--formula zed"),
+                ]
+            );
+        }
+
+        #[test]
+        fn shift_u_with_nothing_to_upgrade_says_so() {
+            let (before, _) = bun_and_zed();
+            let mut run = Upgrades::open(&before, &before, [NOTHING_NEW; 3]);
+
+            run.app.handle_key(KeyCode::Char('U'));
+
+            let state = select(&run.app);
+            let toast = state.toast.as_ref().expect("a toast");
+            assert_eq!(toast.text, "Everything is up to date.");
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert!(run.upgrades_run().is_empty());
+        }
+
+        #[test]
+        fn u_and_shift_u_work_on_search_results_and_are_text_while_typing() {
+            let mut run = mixed_mac();
+            press(
+                &mut run.app,
+                &[KeyCode::Char('/'), KeyCode::Char('u'), KeyCode::Char('U')],
+            );
+            let state = select(&run.app);
+            assert_eq!(state.search_query, "uU");
+            assert!(matches!(state.overlay, ModalOverlay::None));
+
+            press(
+                &mut run.app,
+                &[
+                    KeyCode::Esc,
+                    KeyCode::Char('/'),
+                    KeyCode::Char('z'),
+                    KeyCode::Enter,
+                ],
+            );
+            assert_eq!(select(&run.app).search_query, "z");
+            focus_on(&mut run.app, "zed");
+            run.app.handle_key(KeyCode::Char('u'));
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade zed?"), "{text}");
+            assert!(text.contains("zed 2 → 3"), "{text}");
+            run.app.handle_key(KeyCode::Esc);
+
+            run.app.handle_key(KeyCode::Char('U'));
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade 3 packages?"), "{text}");
+        }
+
+        #[test]
+        fn a_long_question_lists_what_fits_and_counts_the_rest() {
+            let names: Vec<String> = (0..30).map(|i| format!("pkg{i:02}")).collect();
+            let formulae: Vec<_> = names.iter().map(|name| formula(name, "1", false)).collect();
+            let said: Vec<_> = names.iter().map(|name| (name.as_str(), "2")).collect();
+            let said = outdated(&said, &[]);
+            let before = info(&formulae, &[]);
+            let mut run = Upgrades::open(&before, &before, [&said, &said, NOTHING_NEW]);
+
+            run.app.handle_key(KeyCode::Char('U'));
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade 30 packages?"), "{text}");
+            assert!(text.contains("and 14 more"), "{text}");
+            assert!(text.contains("Homebrew may also upgrade"), "{text}");
+        }
+
+        #[test]
+        fn after_an_upgrade_only_changed_packages_are_measured_again() {
+            let before = info(
+                &[
+                    formula("bun", "1.4.2", false),
+                    formula("zed", "2", false),
+                    formula("old", "1", false),
+                ],
+                &[],
+            );
+            let after = info(
+                &[
+                    formula("bun", "1.4.4_1", false),
+                    formula("zed", "2", false),
+                    formula("fresh", "1", false),
+                ],
+                &[],
+            );
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let cellar = run.app.layout.system("opt/homebrew/Cellar");
+            let zed_before = size_of(&run.app, "zed");
+            let bun_before = size_of(&run.app, "bun");
+            let grow = |name: &str| {
+                let folder = cellar.join(name);
+                move || std::fs::write(folder.join("more"), vec![1_u8; 80_000]).unwrap()
+            };
+            run.host
+                .when(&run.upgrade_line("--formula bun"), grow("bun"));
+            run.host
+                .when(&run.upgrade_line("--formula bun"), grow("zed"));
+            run.host.when(&run.upgrade_line("--formula bun"), {
+                let folder = cellar.join("fresh");
+                move || {
+                    std::fs::create_dir_all(&folder).unwrap();
+                    std::fs::write(folder.join("data"), vec![1_u8; 40_000]).unwrap();
+                }
+            });
+            focus_on(&mut run.app, "bun");
+            run.app.handle_key(KeyCode::Char('u'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let labels = labels(&run.app);
+            assert_eq!(labels.len(), 3, "{labels:?}");
+            assert!(!labels.iter().any(|label| label.starts_with("old ")));
+            assert_eq!(size_of(&run.app, "zed"), zed_before);
+            let bun_now = size_of(&run.app, "bun");
+            assert_eq!(bun_now, DirSizer::size_of(&cellar.join("bun")));
+            assert!(bun_now > bun_before);
+            assert_eq!(
+                size_of(&run.app, "fresh"),
+                DirSizer::size_of(&cellar.join("fresh"))
+            );
+            assert!(size_of(&run.app, "fresh") >= 40_000);
+            assert_eq!(run.calls_of("info"), 2);
+        }
+
+        #[test]
+        fn the_list_keeps_its_sort_search_and_focus_after_an_upgrade() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            press(&mut run.app, &[KeyCode::Char('N')]);
+            press(
+                &mut run.app,
+                &[KeyCode::Char('/'), KeyCode::Char('u'), KeyCode::Enter],
+            );
+            focus_on(&mut run.app, "bun");
+            run.app.handle_key(KeyCode::Char('u'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let state = select(&run.app);
+            assert_eq!(state.sort_order, Some(SortOrder::Name));
+            assert_eq!(state.search_query, "u");
+            let row = &state.flattened_rows()[state.focused_index];
+            assert!(
+                row.display_path.starts_with("bun 1.4.4_1"),
+                "{}",
+                row.display_path
+            );
+            assert!(!state.refreshing);
+        }
+
+        fn needing(mut formula: serde_json::Value, dependencies: &[&str]) -> serde_json::Value {
+            formula["dependencies"] = serde_json::json!(dependencies);
+            formula
+        }
+
+        #[test]
+        fn u_on_a_nested_row_asks_to_upgrade_that_package() {
+            let before = info(
+                &[
+                    needing(formula("app", "1", false), &["lib"]),
+                    formula("lib", "1", false),
+                ],
+                &[],
+            );
+            let said = outdated(&[("lib", "2")], &[]);
+            let mut run = Upgrades::open(&before, &before, [&said, &said, &said]);
+            focus_on(&mut run.app, "app");
+            run.app.handle_key(KeyCode::Enter);
+            focus_path(&mut run.app, &["app", "lib"]);
+
+            run.app.handle_key(KeyCode::Char('u'));
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Upgrade lib?"), "{text}");
+            assert!(text.contains("lib 1 → 2"), "{text}");
+            run.confirm();
+            assert_eq!(run.upgrades_run(), [run.upgrade_line("--formula lib")]);
+        }
+
+        #[test]
+        fn the_focus_and_the_open_rows_follow_the_package_after_an_upgrade() {
+            let before = info(
+                &[
+                    formula("aaa", "1", false),
+                    needing(formula("app", "1", false), &["lib"]),
+                    formula("bun", "1.4.2", false),
+                    formula("lib", "1", false),
+                    formula("zed", "2", false),
+                ],
+                &[],
+            );
+            let after = info(
+                &[
+                    needing(formula("app", "1", false), &["lib"]),
+                    formula("bun", "1.4.4_1", false),
+                    formula("lib", "1", false),
+                    formula("zed", "2", false),
+                ],
+                &[],
+            );
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            press(&mut run.app, &[KeyCode::Char('N')]);
+            focus_on(&mut run.app, "app");
+            run.app.handle_key(KeyCode::Enter);
+            focus_on(&mut run.app, "bun");
+            let before_index = select(&run.app).focused_index;
+            run.app.handle_key(KeyCode::Char('u'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let state = select(&run.app);
+            assert!(state.focused_index < before_index);
+            let rows = state.flattened_rows();
+            assert!(
+                rows[state.focused_index]
+                    .display_path
+                    .starts_with("bun 1.4.4_1")
+            );
+            assert!(
+                state
+                    .expanded
+                    .iter()
+                    .any(|path| path == &["app".to_string()])
+            );
+            let app_lib = ["app".to_string(), "lib".to_string()];
+            assert!(
+                rows.iter()
+                    .any(|row| { row.tree.as_ref().is_some_and(|tree| tree.path == app_lib) })
+            );
+        }
+
+        #[test]
+        fn the_focus_stays_on_the_cask_when_a_formula_has_its_name() {
+            let before = info(&[formula("docker", "1.0", false)], &[("docker", "1.0")]);
+            // The new formula moves the cask row, so its old index points at a formula.
+            let after = info(
+                &[formula("docker", "1.0", false), formula("bat", "1", false)],
+                &[("docker", "1.1")],
+            );
+            let said = outdated(&[], &[("docker", "1.1")]);
+            let mut run = Upgrades::open(&before, &after, [&said, &said, NOTHING_NEW]);
+            let cask_row = |app: &App| {
+                let state = select(app);
+                state
+                    .flattened_rows()
+                    .iter()
+                    .position(|row| row.is_item() && row.group_name.starts_with("Casks"))
+                    .expect("a cask row")
+            };
+            let at = cask_row(&run.app);
+            let Screen::Select(state) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            state.focused_index = at;
+            run.app.handle_key(KeyCode::Char('u'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let state = select(&run.app);
+            assert_eq!(state.focused_index, cask_row(&run.app));
+            let row = &state.flattened_rows()[state.focused_index];
+            assert!(
+                row.display_path.starts_with("docker 1.1"),
+                "{}",
+                row.display_path
+            );
+        }
+
+        #[test]
+        fn the_focus_stays_on_the_cask_when_the_upgrade_adds_a_group_above_it() {
+            let dependency =
+                |name: &str| serde_json::json!({"name": name, "installed": [{"version": "1"}]});
+            let before = info(
+                &[
+                    needing(formula("app", "1", false), &["lib", "zlib"]),
+                    dependency("lib"),
+                    dependency("zlib"),
+                ],
+                &[("ghostty", "1.0")],
+            );
+            // The upgraded app no longer needs lib, so lib gets a group above the casks.
+            let after = info(
+                &[
+                    needing(formula("app", "2", false), &["zlib"]),
+                    dependency("lib"),
+                    dependency("zlib"),
+                ],
+                &[("ghostty", "1.1")],
+            );
+            let said = outdated(&[("app", "2")], &[("ghostty", "1.1")]);
+            let mut run = Upgrades::open(&before, &after, [&said, &said, NOTHING_NEW]);
+            focus_on(&mut run.app, "ghostty");
+            run.app.handle_key(KeyCode::Char('U'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let state = select(&run.app);
+            let groups: Vec<&str> = state.scan.groups.iter().map(|g| g.tool.as_str()).collect();
+            assert_eq!(
+                groups,
+                [
+                    "Formulae",
+                    "Not needed by anything you installed",
+                    "Needed by what you installed",
+                    "Casks · Remove with taert uninstall"
+                ]
+            );
+            let row = &state.flattened_rows()[state.focused_index];
+            assert!(
+                row.display_path.starts_with("ghostty 1.1"),
+                "{}",
+                row.display_path
+            );
+        }
+
+        #[test]
+        fn the_list_says_it_is_updating_while_brew_is_read_again() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let info_line = run.info_line();
+            let release = hold(&run.host, &info_line);
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+            run.wait_for_the_upgrades();
+
+            run.app.handle_key(KeyCode::Enter);
+
+            assert!(screen_text(&run.app).contains("Updating the list…"));
+            assert!(select(&run.app).refreshing);
+            drop(release);
+            run.wait_for_the_list();
+            assert!(!screen_text(&run.app).contains("Updating the list…"));
+        }
+
+        #[test]
+        fn a_failed_refresh_shows_the_error_and_keeps_the_rows() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let info_line = run.info_line();
+            run.host
+                .replies
+                .lock()
+                .unwrap()
+                .retain(|(command, _)| command != &info_line);
+            run.host.fail(&info_line, "Error: boom");
+            focus_on(&mut run.app, "bun");
+            run.app.handle_key(KeyCode::Char('u'));
+            run.confirm();
+
+            run.close_outcome();
+
+            let state = select(&run.app);
+            let toast = state.toast.as_ref().expect("a toast");
+            assert!(
+                toast.text.starts_with("Could not update the list:"),
+                "{}",
+                toast.text
+            );
+            assert_eq!(toast.kind, ToastKind::Error);
+            assert!(!state.refreshing);
+            assert!(
+                row_labels(&run.app)
+                    .iter()
+                    .any(|label| label.starts_with("bun 1.4.2"))
+            );
+            focus_on(&mut run.app, "bun");
+            run.app.handle_key(KeyCode::Char('u'));
+            assert!(screen_text(&run.app).contains("Upgrade bun?"));
+        }
+
+        #[test]
+        fn a_read_that_stops_without_an_answer_says_so() {
+            let mut app = brew_app();
+            let (tx, rx) = mpsc::channel();
+            drop(tx);
+            app.brew_refresh = Some(rx);
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            state.refreshing = true;
+
+            app.poll_brew_refresh();
+
+            let state = select(&app);
+            let toast = state.toast.as_ref().expect("a toast");
+            assert_eq!(toast.text, "Could not update the list: the read stopped");
+            assert_eq!(toast.kind, ToastKind::Error);
+            assert!(!state.refreshing);
+            assert!(app.brew_refresh.is_none());
+        }
+
+        #[test]
+        fn a_refresh_waits_while_a_question_is_open() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let old = select(&run.app).homebrew.clone().expect("the list");
+            let read = homebrew::refresh(&*run.host, &old);
+            let (tx, rx) = mpsc::channel();
+            tx.send(read).unwrap();
+            run.app.brew_refresh = Some(rx);
+            let Screen::Select(state) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            state.refreshing = true;
+            focus_on(&mut run.app, "zed");
+            run.app.handle_key(KeyCode::Char('d'));
+
+            run.app.poll_brew_refresh();
+
+            assert!(matches!(select(&run.app).overlay, ModalOverlay::Confirm(_)));
+            assert!(run.app.brew_refresh.is_some());
+            assert!(select(&run.app).refreshing);
+            run.app.handle_key(KeyCode::Esc);
+            run.app.poll_brew_refresh();
+            assert!(run.app.brew_refresh.is_none());
+            assert!(!select(&run.app).refreshing);
+            let labels = row_labels(&run.app);
+            assert!(
+                labels.iter().any(|label| label.starts_with("bun 1.4.4_1")),
+                "{labels:?}"
+            );
+        }
+
+        #[test]
+        fn an_uninstall_during_the_refresh_is_not_undone_by_it() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            // The uninstall checks that brew still lists zed; the read after it does not.
+            run.host.reply(&run.info_line(), &after);
+            run.host.reply(
+                &run.info_line(),
+                &info(&[formula("bun", "1.4.4_1", false)], &[]),
+            );
+            let keg = run.app.layout.system("opt/homebrew/Cellar/zed/2");
+            std::fs::create_dir_all(&keg).unwrap();
+            let uninstall = format!(
+                "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall zed",
+                run.brew
+            );
+            run.host.reply(&uninstall, "");
+            run.host
+                .when(&uninstall, move || std::fs::remove_dir_all(&keg).unwrap());
+            let outdated_line = format!("{BREW_START} {} outdated --json=v2", run.brew);
+            let release = hold(&run.host, &outdated_line);
+            focus_on(&mut run.app, "bun");
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('y')]);
+            run.wait_for_the_upgrades();
+            run.app.handle_key(KeyCode::Enter);
+            // The refresh has read brew info and waits on brew outdated.
+            run.wait_for_calls("outdated", 3);
+            focus_on(&mut run.app, "zed");
+            press(&mut run.app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
+            wait_for_removal(&mut run.app);
+            assert!(run.host.ran(&uninstall));
+            let text = screen_text(&run.app);
+            assert!(text.contains("Uninstall Complete"), "{text}");
+            drop(release);
+
+            run.app.handle_key(KeyCode::Enter);
+            run.wait_for_the_list();
+
+            let labels = row_labels(&run.app);
+            assert!(
+                !labels.iter().any(|label| label.starts_with("zed ")),
+                "{labels:?}"
+            );
+            assert!(select(&run.app).homebrew.as_ref().is_some_and(|list| {
+                !list.packages.iter().any(|package| package.name == "zed")
+            }));
+        }
+
+        #[test]
+        fn a_search_being_typed_goes_on_when_the_list_is_read_again() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let release = run.upgrade_bun_and_hold_the_read();
+            press(&mut run.app, &[KeyCode::Char('/'), KeyCode::Char('z')]);
+            drop(release);
+            run.wait_for_the_list();
+
+            press(&mut run.app, &[KeyCode::Char('u'), KeyCode::Char('d')]);
+
+            let state = select(&run.app);
+            assert_eq!(state.search_query, "zud");
+            assert!(matches!(state.overlay, ModalOverlay::None));
+            assert_eq!(run.upgrades_run(), [run.upgrade_line("--formula bun")]);
+            assert_eq!(run.uninstalls_run(), 0);
+        }
+
+        #[test]
+        fn a_search_being_typed_keeps_its_text_when_the_list_loses_what_it_matched() {
+            let (before, _) = bun_and_zed();
+            let after = info(&[formula("bun", "1.4.4_1", false)], &[]);
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let release = run.upgrade_bun_and_hold_the_read();
+            press(&mut run.app, &[KeyCode::Char('/'), KeyCode::Char('z')]);
+            drop(release);
+
+            run.wait_for_the_list();
+
+            let state = select(&run.app);
+            assert!(state.is_searching);
+            assert_eq!(state.search_query, "z");
+        }
+
+        #[test]
+        fn a_toast_stays_when_the_list_is_read_again() {
+            let before = info(
+                &[formula("bun", "1.4.2", false), formula("pin", "1", true)],
+                &[],
+            );
+            let after = info(
+                &[formula("bun", "1.4.4_1", false), formula("pin", "1", true)],
+                &[],
+            );
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let release = run.upgrade_bun_and_hold_the_read();
+            focus_on(&mut run.app, "pin");
+            run.app.handle_key(KeyCode::Char('d'));
+            drop(release);
+
+            run.wait_for_the_list();
+
+            let state = select(&run.app);
+            assert!(!state.refreshing);
+            let toast = state.toast.as_ref().expect("a toast");
+            assert_eq!(toast.text, "pin is pinned. Run brew unpin pin first.");
+        }
+
+        #[test]
+        fn u_and_shift_u_wait_while_the_list_is_read_again() {
+            let (before, after) = bun_and_zed();
+            let mut run =
+                Upgrades::open(&before, &after, [BUN_OUTDATED, BUN_OUTDATED, NOTHING_NEW]);
+            let release = run.upgrade_bun_and_hold_the_read();
+            focus_on(&mut run.app, "bun");
+
+            for key in ['u', 'U'] {
+                run.app.handle_key(KeyCode::Char(key));
+
+                let state = select(&run.app);
+                let toast = state.toast.as_ref().expect("a toast");
+                assert_eq!(toast.text, "Updating the list. Try again when it ends.");
+                assert_eq!(toast.kind, ToastKind::Info);
+                assert!(matches!(state.overlay, ModalOverlay::None), "{key}");
+            }
+            assert_eq!(run.upgrades_run(), [run.upgrade_line("--formula bun")]);
+            drop(release);
+            run.wait_for_the_list();
+        }
+
+        #[test]
+        fn u_and_shift_u_wait_for_the_update_check() {
+            let (_temp, mut app, host, _brew) =
+                check_mac_with(CHECK_INFO, BUN_OUTDATED, Some(BUN_OUTDATED), None);
+            open_the_list(&mut app);
+            assert!(select(&app).checking_updates);
+            focus_on(&mut app, "bun");
+
+            for key in ['u', 'U'] {
+                app.handle_key(KeyCode::Char(key));
+
+                let state = select(&app);
+                let toast = state.toast.as_ref().expect("a toast");
+                assert_eq!(toast.text, "Checking for updates. Try again when it ends.");
+                assert_eq!(toast.kind, ToastKind::Info);
+                assert!(matches!(state.overlay, ModalOverlay::None), "{key}");
+            }
+            let calls = host.calls.lock().unwrap().clone();
+            assert!(!calls.iter().any(|call| call.contains(" upgrade ")));
+
+            finish_the_check(&mut app);
+            app.handle_key(KeyCode::Char('u'));
+            assert!(screen_text(&app).contains("Upgrade bun?"));
+        }
+
+        #[test]
+        fn a_failed_cask_upgrade_shows_the_terminal_hint() {
+            let before = info(&[], &[("ghostty", "1.0")]);
+            let said = outdated(&[], &[("ghostty", "1.1")]);
+            let mut run = Upgrades::open_failing(
+                &before,
+                &before,
+                [&said, &said, &said],
+                &[("ghostty", "Error: sudo needed")],
+            );
+            focus_on(&mut run.app, "ghostty");
+            run.app.handle_key(KeyCode::Char('u'));
+
+            run.confirm();
+
+            let text = screen_text(&run.app);
+            assert!(text.contains("Nothing was upgraded"), "{text}");
+            assert!(text.contains("1 item failed to upgrade:"), "{text}");
+            assert!(text.contains("ghostty"), "{text}");
+            assert!(text.contains("Error: sudo needed"), "{text}");
+            let words = screen_words(100, 30, |frame| run.app.render_screen(frame));
+            assert!(
+                words.contains("run brew upgrade --cask ghostty in a terminal."),
+                "{words}"
+            );
+        }
+
+        #[test]
+        fn the_homebrew_list_names_u_and_shift_u() {
+            let mut run = mixed_mac();
+            focus_on(&mut run.app, "bun");
+            assert_footer(&run.app, &["u  Upgrade", "d  Uninstall"], &[]);
+            focus_on(&mut run.app, "lib");
+            assert_footer(&run.app, &["d  Uninstall"], &["u  Upgrade"]);
+            assert_eq!(help_row(&run.app, "Upgrade"), Some("u"));
+            assert_eq!(help_row(&run.app, "Upgrade all"), Some("⇧U"));
         }
     }
 
