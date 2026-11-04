@@ -9,7 +9,7 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use taert::core::apps;
 use taert::core::cache::StorageCache;
-use taert::core::cleaner::{RemovalFailure, RemovalReport};
+use taert::core::cleaner::{RemovalFailure, RemovalProgress, RemovalReport};
 use taert::core::compress;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
@@ -1200,6 +1200,85 @@ fn snapshot_uninstall_confirmation() {
     state.open_confirmation();
 
     assert_snapshot!("select_uninstall_confirm_120x32", select_screen(&state));
+}
+
+#[test]
+fn snapshot_slim_confirmation() {
+    let mut scan = slim_apps_list();
+    for item in scan.groups.iter_mut().flat_map(|group| &mut group.items) {
+        item.selected = true;
+    }
+    let mut state = SelectState::with_preserved_selection(scan);
+    state.open_confirmation();
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Slim 4 apps?"), "{screen}");
+    assert!(screen.contains("of Intel code."), "{screen}");
+    assert!(screen.contains("goes to the Trash."), "{screen}");
+    assert!(!screen.contains("permanently"), "{screen}");
+    assert!(!screen.contains("cannot be undone"), "{screen}");
+    assert_snapshot!("select_slim_confirm_120x32", screen);
+}
+
+#[test]
+fn snapshot_compress_confirmation() {
+    let mut state = SelectState::with_preserved_selection(CategoryScan {
+        notes: Vec::new(),
+        id: compress::SCAN_ID.to_string(),
+        title: "Compress".to_string(),
+        groups: vec![ToolGroup {
+            tool: "/Applications".to_string(),
+            items: vec![
+                ScanItem::new(
+                    PathBuf::from("/Applications/Viscosity.app"),
+                    40_700_000,
+                    true,
+                    false,
+                ),
+                ScanItem::new(
+                    PathBuf::from("/Applications/Slack.app"),
+                    180_000_000,
+                    true,
+                    false,
+                ),
+            ],
+        }],
+    });
+    state.open_confirmation();
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Compress 2 items?"), "{screen}");
+    assert!(screen.contains("with APFS compression."), "{screen}");
+    assert!(!screen.contains("permanently"), "{screen}");
+    assert!(!screen.contains("Trash"), "{screen}");
+    assert_snapshot!("select_compress_confirm_120x32", screen);
+}
+
+fn removing(state: &mut SelectState) {
+    state.overlay = ModalOverlay::Removing {
+        progress: RemovalProgress {
+            current_index: 1,
+            total_count: 2,
+            path: PathBuf::from("/Users/test/.cargo/git/db"),
+        },
+        spinner_idx: 0,
+        cancel: None,
+    };
+}
+
+#[test]
+fn snapshot_cleanup_removing() {
+    let mut uninstall = reviewed(uninstall_plan());
+    removing(&mut uninstall);
+    let screen = select_screen(&uninstall);
+    assert!(screen.contains("Removing 2 items…"), "{screen}");
+
+    let mut state = SelectState::new(sample_scan());
+    removing(&mut state);
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Removing 2 items…"), "{screen}");
+    assert_snapshot!("select_cleanup_removing_120x32", screen);
 }
 
 #[test]
