@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Uninstall receipts with an underscore**: Uninstall finds installer receipts whose package id has an underscore, such as Microsoft's, and forgets them with the app.
 - **Slim and Compress result dialogs**: they say why each listed item failed. Under each path they show the error text, as the Upgrade dialog does.
 
 ## [0.8.2] - 2026-11-05
