@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::admin::run_compress_helper;
 use super::apfs;
 use super::cleaner::{RemovalFailure, RemovalReport};
 use super::host::Host;
@@ -211,6 +212,7 @@ pub struct CompressCandidate {
     pub estimated_saving_bytes: u64,
     pub total_bytes: u64,
     pub selected: bool,
+    pub needs_admin: bool,
 }
 
 /// Outcome of processing an individual file.
@@ -1310,6 +1312,7 @@ pub struct Compressor<'a> {
     pub host: &'a dyn Host,
     pub layout: &'a Layout,
     pub ignore: &'a IgnoreStore,
+    pub system_owner: u32,
 }
 
 impl CompressReport {
@@ -1348,7 +1351,8 @@ impl CompressReport {
 
 impl Compressor<'_> {
     /// Checks the path with the safety gate, then compresses or unpacks the file
-    /// or every file below it. Both the command line and the TUI come here.
+    /// or every file below it. The command line and the TUI come here for files and user-owned
+    /// apps. An app of the system goes to the root helper through `compress_as_root`.
     pub fn process_path<F>(
         &self,
         path: &Path,
@@ -1388,7 +1392,13 @@ impl Compressor<'_> {
             report.failures.push(CompressFailure { path, error });
             return Ok(report);
         }
-        Safety::can_compress_with_host(&path, self.ignore, self.layout, self.host)?;
+        Safety::can_compress_with_host(
+            &path,
+            self.ignore,
+            self.layout,
+            self.host,
+            self.system_owner,
+        )?;
         let path = path.canonicalize().unwrap_or(path);
 
         let busy = if options.dry_run {
@@ -1496,22 +1506,37 @@ impl Compressor<'_> {
         Ok(report)
     }
 
-    /// Compresses each path the TUI selected and sums up the result.
+    /// Compresses or unpacks one bundle of the system in the root helper. The helper refuses
+    /// a path that is not the real one, so the link is resolved here.
+    pub fn compress_as_root(&self, path: &Path, undo: bool) -> Result<CompressReport, String> {
+        let bundle = path.canonicalize().map_err(|e| e.to_string())?;
+        run_compress_helper(self.host, self.layout, &bundle, undo)
+    }
+
+    /// Compresses each row the TUI selected and sums up the result. A row that needs admin
+    /// rights goes to the root helper, one bundle per call.
     pub fn compress_selected(
         &self,
-        paths: &[PathBuf],
+        items: &[ScanItem],
         cancelled: &AtomicBool,
         mut on_progress: impl FnMut(usize, &Path),
         mut on_path_done: impl FnMut(&Path, u64),
     ) -> RemovalReport {
         let options = CompressOptions::default();
         let mut result = RemovalReport::default();
-        for (index, path) in paths.iter().enumerate() {
+        for (index, item) in items.iter().enumerate() {
+            let path = &item.path;
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
             on_progress(index, path);
-            match self.process_path(path, &options, cancelled, |_, _| {}) {
+            let outcome = if item.needs_admin {
+                self.compress_as_root(path, false)
+            } else {
+                self.process_path(path, &options, cancelled, |_, _| {})
+                    .map_err(|error| error.to_string())
+            };
+            match outcome {
                 Ok(report) => {
                     if report.processed_files > 0 {
                         on_path_done(path, report.saved_bytes);
@@ -1527,7 +1552,7 @@ impl Compressor<'_> {
                 }
                 Err(error) => result.failures.push(RemovalFailure {
                     path: path.clone(),
-                    error: error.to_string(),
+                    error,
                 }),
             }
         }
@@ -1545,7 +1570,7 @@ impl Compressor<'_> {
         if !is_bundle || Safety::enclosing_app_bundle(parent).is_some() {
             return None;
         }
-        Safety::can_compress_with_host(dir, self.ignore, self.layout, self.host)
+        Safety::can_compress_with_host(dir, self.ignore, self.layout, self.host, self.system_owner)
             .err()
             .map(|error| CompressFailure {
                 path: dir.to_path_buf(),
@@ -1665,31 +1690,38 @@ fn sampled_saving(root: &Path, total_bytes: u64, owner: u32) -> u64 {
     (total_bytes as f64 * saved as f64 / sampled as f64) as u64
 }
 
-/// Find compression candidates for the TUI (user-owned apps, Homebrew Cellar, Rust toolchains).
-pub fn find_compress_candidates(layout: &Layout, owner: u32) -> Vec<CompressCandidate> {
+/// Find compression candidates for the TUI (apps of the user and of the system, Homebrew Cellar, Rust toolchains).
+pub fn find_compress_candidates(
+    layout: &Layout,
+    owner: u32,
+    system_owner: u32,
+) -> Vec<CompressCandidate> {
     let mut candidates = Vec::new();
 
-    let mut push = |name: String, path: PathBuf, category: &'static str, min_bytes: u64| {
-        let total = super::sizer::DirSizer::measure(&path).bytes;
-        if total <= min_bytes {
-            return false;
-        }
-        let estimate = sampled_saving(&path, total, owner);
-        if estimate == 0 {
-            return false;
-        }
-        candidates.push(CompressCandidate {
-            name,
-            path,
-            category,
-            estimated_saving_bytes: estimate,
-            total_bytes: total,
-            selected: false,
-        });
-        true
-    };
+    let mut push =
+        |name: String, path: PathBuf, category: &'static str, min_bytes: u64, needs_admin: bool| {
+            let total = super::sizer::DirSizer::measure(&path).bytes;
+            if total <= min_bytes {
+                return false;
+            }
+            let files_of = if needs_admin { system_owner } else { owner };
+            let estimate = sampled_saving(&path, total, files_of);
+            if estimate == 0 {
+                return false;
+            }
+            candidates.push(CompressCandidate {
+                name,
+                path,
+                category,
+                estimated_saving_bytes: estimate,
+                total_bytes: total,
+                selected: false,
+                needs_admin,
+            });
+            true
+        };
 
-    // 1. User-owned app bundles in app roots
+    // 1. App bundles in app roots, owned by the user or by the system (root helper)
     for root in layout.app_roots() {
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
@@ -1698,13 +1730,15 @@ pub fn find_compress_candidates(layout: &Layout, owner: u32) -> Vec<CompressCand
             let p = entry.path();
             if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"))
                 && let Ok(meta) = fs::metadata(&p)
-                && (meta.uid() == owner || Safety::can_write_inside(&p))
             {
-                let name = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "App".to_string());
-                push(name, p, "Application", 5 * 1024 * 1024);
+                let needs_admin = Safety::belongs_to_system(&p, system_owner, owner);
+                if needs_admin || meta.uid() == owner || Safety::can_write_inside(&p) {
+                    let name = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "App".to_string());
+                    push(name, p, "Application", 5 * 1024 * 1024, needs_admin);
+                }
             }
         }
     }
@@ -1712,7 +1746,15 @@ pub fn find_compress_candidates(layout: &Layout, owner: u32) -> Vec<CompressCand
     // 2. Homebrew Cellar
     for prefix in layout.homebrew_prefixes() {
         let bp = prefix.join("Cellar");
-        if bp.is_dir() && push("Homebrew Cellar".to_string(), bp, "Package Manager", 0) {
+        if bp.is_dir()
+            && push(
+                "Homebrew Cellar".to_string(),
+                bp,
+                "Package Manager",
+                0,
+                false,
+            )
+        {
             break;
         }
     }
@@ -1720,23 +1762,31 @@ pub fn find_compress_candidates(layout: &Layout, owner: u32) -> Vec<CompressCand
     // 3. Rust toolchains
     let rustup = layout.user(".rustup/toolchains");
     if rustup.is_dir() {
-        push("Rust Toolchains".to_string(), rustup, "Developer Tools", 0);
+        push(
+            "Rust Toolchains".to_string(),
+            rustup,
+            "Developer Tools",
+            0,
+            false,
+        );
     }
 
     candidates
 }
 
 pub const SCAN_ID: &str = "compress";
+pub const ADMIN_REASON: &str = "compress apps that belong to the system";
 
 /// Creates a `CategoryScan` with compression candidates for the TUI select screen.
-pub fn compress_candidates_scan(layout: &Layout, owner: u32) -> CategoryScan {
-    let candidates = find_compress_candidates(layout, owner);
+pub fn compress_candidates_scan(layout: &Layout, owner: u32, system_owner: u32) -> CategoryScan {
+    let candidates = find_compress_candidates(layout, owner, system_owner);
     let mut app_items = Vec::new();
     let mut brew_items = Vec::new();
     let mut rust_items = Vec::new();
 
     for c in candidates {
-        let item = ScanItem::new(c.path, c.estimated_saving_bytes, false, false);
+        let mut item = ScanItem::new(c.path, c.estimated_saving_bytes, false, false);
+        item.needs_admin = c.needs_admin;
         match c.category {
             "Application" => app_items.push(item),
             "Package Manager" => brew_items.push(item),
@@ -1793,6 +1843,15 @@ pub(crate) mod testing {
         file_path
     }
 
+    /// An app that looks like the system's: its files belong to the test user, who is the
+    /// system owner here, and the host user is another one.
+    pub fn system_app(layout: &Layout) -> PathBuf {
+        let app = layout.system("Applications/Sys.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        make_repetitive_file(&app.join("Contents"), "data.bin", 6 * 1024 * 1024);
+        app
+    }
+
     pub fn is_compressed(path: &Path) -> bool {
         let meta = fs::symlink_metadata(path).unwrap();
         DarwinMetadataExt::st_flags(&meta) & UF_COMPRESSED != 0
@@ -1809,10 +1868,11 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{host_with, is_compressed, make_repetitive_file};
+    use super::testing::{host_with, is_compressed, make_repetitive_file, system_app};
     use super::*;
     use crate::core::apps::testing::sandbox;
     use crate::core::host::fake::real_uid;
+    use crate::core::safety::SYSTEM_OWNER;
     use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
     use tempfile::tempdir;
 
@@ -1867,11 +1927,68 @@ mod tests {
         fs::create_dir_all(app.join("Contents")).unwrap();
         make_repetitive_file(&app.join("Contents"), "data.bin", 6 * 1024 * 1024);
 
-        let own = find_compress_candidates(&layout, real_uid());
-        let other = find_compress_candidates(&layout, real_uid() + 1);
+        let own = find_compress_candidates(&layout, real_uid(), SYSTEM_OWNER);
+        let other = find_compress_candidates(&layout, real_uid() + 1, SYSTEM_OWNER);
 
         assert!(own.iter().any(|c| c.path == app), "{own:?}");
         assert!(other.iter().all(|c| c.path != app), "{other:?}");
+    }
+
+    #[test]
+    fn an_app_of_the_system_is_a_candidate_that_needs_admin() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+        let contents = app.join("Contents");
+        let touched = |path: &Path| {
+            let meta = fs::metadata(path).unwrap();
+            (
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+            )
+        };
+        let before = touched(&contents);
+
+        let found = find_compress_candidates(&layout, real_uid() + 1, real_uid());
+
+        let candidate = found.iter().find(|c| c.path == app).expect("listed");
+        assert!(candidate.needs_admin);
+        assert!(candidate.estimated_saving_bytes > 0);
+        assert_eq!(names_in(&contents), ["data.bin"]);
+        assert_eq!(touched(&contents), before, "the scan wrote into the bundle");
+    }
+
+    #[test]
+    fn an_app_of_the_user_does_not_need_admin() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+
+        let found = find_compress_candidates(&layout, real_uid(), SYSTEM_OWNER);
+
+        let candidate = found.iter().find(|c| c.path == app).expect("listed");
+        assert!(!candidate.needs_admin);
+    }
+
+    #[test]
+    fn a_row_that_needs_admin_says_so_in_json_and_others_do_not() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+
+        let scan = compress_candidates_scan(&layout, real_uid() + 1, real_uid());
+        let row = &scan.groups[0].items[0];
+        let json = serde_json::to_value(row).unwrap();
+
+        assert_eq!(row.path, app);
+        assert!(row.needs_admin);
+        assert_eq!(json["needs_admin"], true);
+        let plain = ScanItem::new(app, 1, false, false);
+        assert!(
+            serde_json::to_value(plain)
+                .unwrap()
+                .get("needs_admin")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1881,7 +1998,7 @@ mod tests {
         fs::create_dir_all(local.join("foo")).unwrap();
         make_repetitive_file(&local.join("foo"), "data.txt", 300_000);
 
-        let found = find_compress_candidates(&layout, real_uid());
+        let found = find_compress_candidates(&layout, real_uid(), SYSTEM_OWNER);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Homebrew Cellar");
         assert_eq!(found[0].path, local);
@@ -1890,7 +2007,7 @@ mod tests {
         fs::create_dir_all(opt.join("bar")).unwrap();
         make_repetitive_file(&opt.join("bar"), "data.txt", 300_000);
 
-        let found = find_compress_candidates(&layout, real_uid());
+        let found = find_compress_candidates(&layout, real_uid(), SYSTEM_OWNER);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Homebrew Cellar");
         assert_eq!(found[0].path, opt);
@@ -2469,6 +2586,7 @@ mod tests {
             host,
             layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
         compressor.process_path(path, options, &AtomicBool::new(false), |_, _| {})
     }
@@ -2638,6 +2756,7 @@ mod tests {
             host: &host,
             layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
         let mut calls = 0;
         let report = compressor
@@ -2730,6 +2849,40 @@ mod tests {
         assert!(files.iter().all(|f| !is_compressed(f)));
     }
 
+    fn rows(paths: &[&Path]) -> Vec<ScanItem> {
+        paths
+            .iter()
+            .map(|path| ScanItem::new(path.to_path_buf(), 0, true, false))
+            .collect()
+    }
+
+    #[test]
+    fn a_row_that_needs_admin_reaches_the_helper_with_the_real_path_of_the_bundle() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+        let link = layout.user("Linked");
+        std::os::unix::fs::symlink(app.parent().unwrap(), &link).unwrap();
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        host.set_uid(real_uid() + 1);
+        *host.admin_stdout.lock().unwrap() =
+            serde_json::to_string(&CompressReport::default()).unwrap();
+        let compressor = Compressor {
+            host: &host,
+            layout: &layout,
+            ignore: &IgnoreStore::default(),
+            system_owner: real_uid(),
+        };
+        let mut row = ScanItem::new(link.join("Sys.app"), 0, true, false);
+        row.needs_admin = true;
+
+        compressor.compress_selected(&[row], &AtomicBool::new(false), |_, _| {}, |_, _| {});
+
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "{scripts:?}");
+        assert!(scripts[0].contains(app.to_str().unwrap()), "{scripts:?}");
+        assert!(!scripts[0].contains("Linked"), "{scripts:?}");
+    }
+
     #[test]
     fn cancelling_stops_before_the_next_path() {
         let (_temp, layout) = sandbox();
@@ -2741,9 +2894,10 @@ mod tests {
             host: &host,
             layout: &layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
         let cancelled = AtomicBool::new(false);
-        let paths = [first.clone(), second.clone()];
+        let paths = rows(&[&first, &second]);
 
         let report = compressor.compress_selected(
             &paths,
@@ -2769,10 +2923,11 @@ mod tests {
             host: &host,
             layout: &layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
 
         let report = compressor.compress_selected(
-            std::slice::from_ref(&data),
+            &rows(&[&data]),
             &AtomicBool::new(false),
             |_, _| {},
             |_, _| {},
@@ -2796,9 +2951,10 @@ mod tests {
             host: &host,
             layout: &layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
 
-        let paths = [first.clone(), second.clone(), refused.clone()];
+        let paths = rows(&[&first, &second, &refused]);
         let mut reported = Vec::new();
 
         let report = compressor.compress_selected(
@@ -2851,7 +3007,7 @@ mod tests {
         let text = make(&apps.join("Text.app/Contents/Resources"));
         make_repetitive_file(&text, "strings.txt", 6 * 1024 * 1024);
 
-        let found = find_compress_candidates(&layout, real_uid());
+        let found = find_compress_candidates(&layout, real_uid(), SYSTEM_OWNER);
 
         let names: Vec<_> = found.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
@@ -3263,6 +3419,7 @@ mod tests {
             host: &crate::core::host::MacHost,
             layout: &layout,
             ignore: &IgnoreStore::default(),
+            system_owner: SYSTEM_OWNER,
         };
         let _report = compressor
             .process_path(&dest, &options, &cancelled, |_, _| {})

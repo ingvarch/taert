@@ -72,6 +72,7 @@ impl ScanItem {
             brew: None,
             role: None,
             also: Vec::new(),
+            needs_admin: false,
         }
     }
 

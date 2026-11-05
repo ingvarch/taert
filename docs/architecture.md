@@ -230,7 +230,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
    Only a file with the copy mark is deleted. The mark comes off before the swap, so the original never has it, even when a crash or a failed swap back leaves the original at the temporary name. A leftover without the mark is kept and listed as a failure on every run, until you compare it with the file beside it and remove the one you do not need. A crash in one of three short moments leaves an unmarked file, which is listed the same way: right after the temporary file is created and before it is marked, between removing the mark and the swap, and after a swap back before the copy is removed.
 
 5. **Safety Gate (`Safety::can_compress`)**:
-   Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. The path is made absolute before any check, and after the gate passes the walk starts from the real path, so `..` and a wrong letter case cannot get around the later checks. Compression is strictly limited to safe locations:
+   Every caller goes through `Compressor::process_path`, which runs the gate first. The command line and the TUI share it. TUI rows marked `needs_admin` skip it and go to `run_compress_helper`, which runs the gate again as root. The path is made absolute before any check, and after the gate passes the walk starts from the real path, so `..` and a wrong letter case cannot get around the later checks. Compression is strictly limited to safe locations:
    - User home directory (`~`, including `~/.rustup`, `~/.cargo/bin`, toolchains).
    - Application bundles in `/Applications` or `~/Applications`.
    - Homebrew prefix (`/opt/homebrew`, `/usr/local`).

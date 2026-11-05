@@ -139,7 +139,8 @@ pub fn helper_check(
     slim::check_ownership(bundle, system_owner)?;
     check_folders(bundle)?;
     id.verify(bundle)?;
-    Safety::can_compress_with_host(bundle, ignore, layout, host).map_err(|e| e.to_string())?;
+    Safety::can_compress_with_host(bundle, ignore, layout, host, system_owner)
+        .map_err(|e| e.to_string())?;
     Ok(id)
 }
 
@@ -176,6 +177,7 @@ fn compress_checked(
         host,
         layout,
         ignore,
+        system_owner: owner,
     };
     let options = CompressOptions {
         dry_run: false,

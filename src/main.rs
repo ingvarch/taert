@@ -129,7 +129,14 @@ fn main() -> ExitCode {
             None => handle_brew(&cli, use_plain, &ignore, &config, &context, console),
         },
 
-        Some(Command::Compress(ref args)) => handle_compress(args, &cli, &ignore, &context),
+        Some(Command::Compress(ref args)) => handle_compress(
+            args,
+            &cli,
+            &ignore,
+            &context,
+            crate::core::safety::SYSTEM_OWNER,
+            console,
+        ),
 
         Some(Command::Slim(ref args)) => {
             handle_slim(args, &cli, use_plain, &ignore, &context, console)
@@ -1508,6 +1515,8 @@ fn handle_compress(
     cli: &Cli,
     ignore: &IgnoreStore,
     context: &ScanContext,
+    system_owner: u32,
+    console: &mut Console,
 ) -> ExitCode {
     let options = crate::core::compress::CompressOptions {
         dry_run: cli.dry_run,
@@ -1518,22 +1527,34 @@ fn handle_compress(
         host: context.host,
         layout: context.layout,
         ignore,
+        system_owner,
     };
 
-    let report = match compressor.process_path(&args.path, &options, &cancelled, |_, _| {}) {
+    let path = Safety::absolute(&args.path);
+    let of_the_system =
+        Safety::is_app_of_the_system(&path, context.layout, system_owner, context.host.uid());
+    let result = if of_the_system {
+        compress_system_app(&compressor, context, &path, &options, &cancelled)
+    } else {
+        compressor
+            .process_path(&args.path, &options, &cancelled, |_, _| {})
+            .map_err(|e| e.to_string())
+    };
+    let report = match result {
         Ok(report) => report,
         Err(e) => {
             if cli.json {
                 let error_json = serde_json::json!({
-                    "error": e.to_string(),
+                    "error": e,
                     "path": args.path,
                 });
-                println!(
+                let _ = writeln!(
+                    console.out,
                     "{}",
                     serde_json::to_string_pretty(&error_json).unwrap_or_default()
                 );
             } else {
-                eprintln!("Error: {e}");
+                let _ = writeln!(console.err, "Error: {e}");
             }
             return ExitCode::FAILURE;
         }
@@ -1547,29 +1568,61 @@ fn handle_compress(
         session.finish();
     }
 
-    if cli.json {
+    let printed = if cli.json {
         match serde_json::to_string_pretty(&report) {
-            Ok(json) => {
-                println!("{json}");
-                if report.failures.is_empty() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
+            Ok(json) => writeln!(console.out, "{json}"),
             Err(e) => {
-                eprintln!("Failed to serialize JSON: {e}");
-                ExitCode::FAILURE
+                let _ = writeln!(console.err, "Failed to serialize JSON: {e}");
+                return ExitCode::FAILURE;
             }
         }
     } else {
-        PlainRunner::print_compress_report(&report, &args.path);
-        if report.failures.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        }
+        writeln!(
+            console.out,
+            "{}",
+            PlainRunner::compress_report_text(&report, &args.path)
+        )
+    };
+    if printed.is_ok() && report.failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
+}
+
+/// An app that belongs to the system. An estimate reads its files here. A change asks for the
+/// administrator password and goes to the root helper.
+fn compress_system_app(
+    compressor: &crate::core::compress::Compressor,
+    context: &ScanContext,
+    path: &std::path::Path,
+    options: &crate::core::compress::CompressOptions,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<crate::core::compress::CompressReport, String> {
+    if options.dry_run {
+        return compressor
+            .process_path_guarded(
+                path,
+                options,
+                compressor.system_owner,
+                cancelled,
+                |_| Ok(()),
+                |_, _| {},
+            )
+            .map_err(|e| e.to_string());
+    }
+    Safety::can_compress_with_host(
+        path,
+        compressor.ignore,
+        context.layout,
+        context.host,
+        compressor.system_owner,
+    )
+    .map_err(|e| e.to_string())?;
+    context
+        .admin
+        .prepare(context.host, crate::core::compress::ADMIN_REASON)?;
+    compressor.compress_as_root(path, options.undo)
 }
 
 fn handle_slim(
@@ -4902,5 +4955,111 @@ mod tests {
             "Error: --dry-run does not work in the interactive screen. Add --plain to see the preview.\n"
         );
         assert!(ran.out.is_empty());
+    }
+
+    use crate::core::compress::testing::system_app;
+
+    fn run_compress_cli(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
+        let cli = parse(args);
+        let Some(Command::Compress(ref compress_args)) = cli.command else {
+            panic!("not a compress command");
+        };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
+        let system_owner = crate::core::host::fake::real_uid();
+        run("", |console| {
+            handle_compress(
+                compress_args,
+                &cli,
+                &IgnoreStore::default(),
+                &context,
+                system_owner,
+                console,
+            )
+        })
+    }
+
+    fn system_host() -> FakeHost {
+        let host = FakeHost::idle();
+        host.set_uid(crate::core::host::fake::real_uid() + 1);
+        host.fail(SUDO_PROBE, "");
+        *host.tty.lock().unwrap() = true;
+        host
+    }
+
+    #[test]
+    fn a_dry_run_on_an_app_of_the_system_estimates_and_asks_nothing() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+        let host = system_host();
+
+        let ran = run_compress_cli(
+            &["compress", "--dry-run", app.to_str().unwrap()],
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Compression Estimate"), "{}", ran.out);
+        assert!(ran.out.contains("Compressed files: 1"), "{}", ran.out);
+        assert_eq!(host.sudo_asks(), 0);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn compressing_and_undoing_an_app_of_the_system_go_through_the_helper_each_after_one_password()
+    {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+        let host = system_host();
+        let report = crate::core::compress::CompressReport {
+            processed_files: 1,
+            saved_bytes: 1000,
+            ..Default::default()
+        };
+        *host.admin_stdout.lock().unwrap() = serde_json::to_string(&report).unwrap();
+
+        let ran = run_compress_cli(&["compress", app.to_str().unwrap()], &host, &layout);
+        let undone = run_compress_cli(
+            &["compress", "--undo", app.to_str().unwrap()],
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(undone.ok, "{}", undone.err);
+        assert!(ran.out.contains("Compressed files: 1"), "{}", ran.out);
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 2, "{scripts:?}");
+        assert!(scripts[0].contains("admin-helper compress --home"));
+        assert!(!scripts[0].contains("--undo"));
+        assert!(scripts[1].contains("admin-helper compress --undo"));
+        assert!(scripts[0].contains(app.to_str().unwrap()));
+        assert_eq!(host.sudo_asks(), 2);
+        assert!(
+            host.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.contains("sudo -v compress apps that belong to the system"))
+        );
+    }
+
+    #[test]
+    fn a_refused_password_fails_the_app_of_the_system_and_says_why() {
+        let (_temp, layout) = sandbox();
+        let app = system_app(&layout);
+        let host = system_host();
+        *host.sudo_refused.lock().unwrap() = true;
+
+        let ran = run_compress_cli(&["compress", app.to_str().unwrap()], &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(ran.err.contains(admin::NOT_GIVEN), "{}", ran.err);
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
     }
 }
