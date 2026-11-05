@@ -465,7 +465,7 @@ impl Safety {
             })
     }
 
-    fn is_app_bundle(path: &Path, layout: &Layout) -> bool {
+    pub(crate) fn is_app_bundle(path: &Path, layout: &Layout) -> bool {
         let is_app = |part: &std::ffi::OsStr| {
             Path::new(part)
                 .extension()
@@ -493,14 +493,18 @@ impl Safety {
             return Err(SafetyError::OutsideUninstallScope);
         }
 
-        let below_root = path.strip_prefix(&layout.root).unwrap_or(path);
-        let is_apple = below_root
-            .iter()
-            .any(|part| part.to_string_lossy().starts_with("com.apple."));
-        if is_apple {
+        if Self::has_apple_part(path, layout) {
             return Err(SafetyError::ProtectedSystemPath);
         }
         Ok(UninstallScope::System)
+    }
+
+    /// Whether a part of `path` below the layout's root starts with `com.apple.`.
+    pub(crate) fn has_apple_part(path: &Path, layout: &Layout) -> bool {
+        let below_root = path.strip_prefix(&layout.root).unwrap_or(path);
+        below_root
+            .iter()
+            .any(|part| part.to_string_lossy().starts_with("com.apple."))
     }
 
     /// Checks whether an app bundle allows writes inside, verifying App Management permission.

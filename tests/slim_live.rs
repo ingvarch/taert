@@ -165,6 +165,7 @@ fn test_live_build_and_slim_universal_app() {
         executable: Some("liveapp".to_string()),
         size_bytes: fs::metadata(&exe_path).unwrap().len(),
         last_used: None,
+        package: None,
     };
 
     let (binaries, intel_size) = slim::find_universal_binaries(&app_path);

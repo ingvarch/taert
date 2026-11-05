@@ -1142,6 +1142,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -1163,6 +1164,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -1186,6 +1188,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -1208,6 +1211,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -1322,6 +1326,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -1342,6 +1347,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         host.reply("codesign", "Authority=Mac Developer\n");
@@ -1363,6 +1369,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         host.reply(
@@ -1388,6 +1395,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         host.reply(
@@ -1414,6 +1422,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let mut ignore = IgnoreStore::default();
@@ -1445,6 +1454,7 @@ mod tests {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         };
         let host = FakeHost::idle();
         let ignore = IgnoreStore::default();
@@ -2262,6 +2272,7 @@ pub(crate) mod testing {
             executable: Some("testapp".to_string()),
             size_bytes: 10000,
             last_used: None,
+            package: None,
         }
     }
 

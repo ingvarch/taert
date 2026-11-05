@@ -1639,6 +1639,7 @@ impl App {
                             executable: None,
                             size_bytes: item.size_bytes,
                             last_used: item.modified,
+                            package: None,
                         };
                         let (binaries, _) = slim::find_universal_binaries(&item.path);
                         match slim::slim_app_logged(
