@@ -11,12 +11,12 @@ expression: output
    │   ✕ Old Broken Service               broken                     │  │ Bundle:  /Applications/Docker.app          │
    │   · Stuck Updater                    disabled · still running   │  │ Kind:    user agent                        │
    │   ○ Example Sync                     enabled                    │  │ State:   Running                           │
-   │                                                                 │  │ Program: /Applications/Docker.app/Contents/M
-   │                                                                 │  │ Plist:   /Users/user/Library/LaunchAgents/co
+   │                                                                 │  │ Program: /Applications/Docker.app/Contents │
+   │                                                                 │  │          /MacOS/Docker                     │
+   │                                                                 │  │ Plist:   /Users/user/Library/LaunchAgents/ │
+   │                                                                 │  │          com.docker.helper.plist           │
    │                                                                 │  │                                            │
    │                                                                 │  │ PID:     1234  CPU: 1.2%  Memory: 47.2 MB  │
-   │                                                                 │  │                                            │
-   │                                                                 │  │                                            │
    │                                                                 │  │                                            │
    │                                                                 │  │                                            │
    │                                                                 │  │                                            │

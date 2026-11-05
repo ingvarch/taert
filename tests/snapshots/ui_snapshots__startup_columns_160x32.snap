@@ -12,10 +12,10 @@ expression: output
    │   · Stuck Updater           daemon           disabled · still running  0.0%   8.4 MB   │  │ Kind:    user agent                                         │
    │   ○ Example Sync            background item  enabled                                   │  │ State:   Running                                            │
    │                                                                                        │  │ Program: /Applications/Docker.app/Contents/MacOS/Docker     │
-   │                                                                                        │  │ Plist:   /Users/user/Library/LaunchAgents/com.docker.helper.p
+   │                                                                                        │  │ Plist:   /Users/user/Library/LaunchAgents/com.docker.helper │
+   │                                                                                        │  │          .plist                                             │
    │                                                                                        │  │                                                             │
    │                                                                                        │  │ PID:     1234  CPU: 1.2%  Memory: 47.2 MB                   │
-   │                                                                                        │  │                                                             │
    │                                                                                        │  │                                                             │
    │                                                                                        │  │                                                             │
    │                                                                                        │  │                                                             │
