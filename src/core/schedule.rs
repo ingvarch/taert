@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+use super::admin;
 use super::bytes::format_bytes;
 use super::catalog::{Catalog, Category};
 use super::cleaner::{Cleaner, RemovalMode};
@@ -533,7 +534,11 @@ pub fn run_scheduled(
 
     // 2. Scan configured categories
     let ignore = IgnoreStore::load_from(&layout.ignore_path()).unwrap_or_default();
-    let context = ScanContext { layout, host };
+    let context = ScanContext {
+        layout,
+        host,
+        admin: admin::session(),
+    };
     let mut all_items: Vec<ScanItem> = Vec::new();
 
     for cat in &normalize_categories(&sched.categories) {

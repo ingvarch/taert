@@ -15,6 +15,7 @@ use crate::cli::{
     HistoryAction, HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs,
     SlimArgs, StartupArgs, UninstallArgs,
 };
+use crate::core::admin;
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
@@ -41,7 +42,17 @@ use crate::core::stores::{Config, IgnoreStore};
 use crate::core::uninstaller::{self, PlanRequest, Route, UninstallPlan, Uninstaller};
 use crate::plain::{Console, PlainRunner};
 
+/// Ends the sudo session when `main` returns or a panic unwinds.
+struct EndAdminSession;
+
+impl Drop for EndAdminSession {
+    fn drop(&mut self) {
+        admin::session().end(&MacHost);
+    }
+}
+
 fn main() -> ExitCode {
+    let _end_admin_session = EndAdminSession;
     let cli = Cli::parse();
     if let Some(Command::Completion { shell }) = cli.command {
         clap_complete::generate(shell, &mut Cli::command(), "taert", &mut std::io::stdout());
@@ -62,6 +73,7 @@ fn main() -> ExitCode {
     let context = ScanContext {
         layout: &layout,
         host: &MacHost,
+        admin: admin::session(),
     };
     let mut input = std::io::stdin().lock();
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1153,7 +1165,7 @@ fn handle_startup(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let ScanContext { layout, host } = *context;
+    let ScanContext { layout, host, .. } = *context;
     let out = &mut *console.out;
     if let Some(ref action) = args.action {
         let (label, is_enable) = match action {
@@ -1518,7 +1530,7 @@ fn handle_slim(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let ScanContext { layout, host } = *context;
+    let ScanContext { layout, host, .. } = *context;
     if !crate::core::slim::is_apple_silicon(host) {
         let _ = writeln!(
             console.err,
@@ -1738,7 +1750,7 @@ fn pick_apps_to_slim(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let ScanContext { layout, host } = *context;
+    let ScanContext { layout, host, .. } = *context;
     if !use_plain && !cli.json && !cli.dry_run {
         let mut app =
             ui::app::App::new(ignore.clone(), saved_config(layout)).with_permanent(cli.permanent);
@@ -1989,7 +2001,11 @@ mod tests {
         let Some(Command::Startup(ref startup_args)) = cli.command else {
             panic!("not a startup command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run("", |console| {
             handle_startup(
                 startup_args,
@@ -2018,7 +2034,11 @@ mod tests {
         let Some(Command::Slim(ref slim_args)) = cli.command else {
             panic!("not a slim command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_slim(
                 slim_args,
@@ -2054,7 +2074,11 @@ mod tests {
         let Some(Command::Doctor(ref doctor_args)) = cli.command else {
             panic!("not a doctor command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run("", |console| {
             handle_doctor(
                 doctor_args,
@@ -2077,7 +2101,11 @@ mod tests {
 
     fn brew(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
         let cli = parse(args);
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run("", |console| {
             handle_brew(
                 &cli,
@@ -2148,7 +2176,11 @@ mod tests {
 
     fn brew_cleanup(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
         let cli = parse(args);
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_brew_cleanup(&cli, true, &IgnoreStore::default(), &context, console)
         })
@@ -2306,7 +2338,11 @@ mod tests {
         else {
             panic!("not a brew uninstall command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_brew_uninstall(name, &cli, &IgnoreStore::default(), &context, console)
         })
@@ -2587,7 +2623,11 @@ mod tests {
         else {
             panic!("not a brew upgrade command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_brew_upgrade(name.as_deref(), &cli, &context, console)
         })
@@ -3031,7 +3071,11 @@ mod tests {
         let Some(Command::Uninstall(ref uninstall_args)) = cli.command else {
             panic!("not an uninstall command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_uninstall(
                 uninstall_args,
@@ -3049,7 +3093,11 @@ mod tests {
         let Some(Command::Clean(ref clean_args)) = cli.command else {
             panic!("not a clean command");
         };
-        let context = ScanContext { layout, host };
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
         run(typed, |console| {
             handle_clean(
                 clean_args,

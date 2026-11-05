@@ -34,6 +34,7 @@ use super::workspace::{
     CleanSubcategory, MainMenuChoice, StartConfirmKind, WorkspaceState, WorkspaceView,
     render_workspace,
 };
+use crate::core::admin;
 use crate::core::apps::{self, InstalledApp};
 use crate::core::cache::StorageCache;
 use crate::core::catalog::Category;
@@ -2080,6 +2081,7 @@ impl App {
                 &ScanContext {
                     layout: &layout,
                     host: &*host,
+                    admin: admin::session(),
                 },
                 category,
                 &ignore,
@@ -2110,6 +2112,7 @@ impl App {
                 &ScanContext {
                     layout: &layout,
                     host: &*host,
+                    admin: admin::session(),
                 },
                 &ignore,
                 Some(progress),

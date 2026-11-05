@@ -84,6 +84,7 @@ taert/
 │   ├── cli/
 │   │   └── args.rs             # Clap CLI flags, commands, and options
 │   ├── core/
+│   │   ├── admin.rs            # One sudo session per run: one password prompt, keep-alive, end on exit
 │   │   ├── app_caches.rs       # App cache and browser cache rows, and which start selected
 │   │   ├── apps.rs             # Installed apps and what their bundles say
 │   │   ├── bytes.rs            # Binary size formatting (KB, MB, GB)

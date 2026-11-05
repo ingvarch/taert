@@ -62,6 +62,14 @@ impl Host for TempTrashHost {
     fn pid(&self) -> u32 {
         MacHost.pid()
     }
+
+    fn has_tty(&self) -> bool {
+        MacHost.has_tty()
+    }
+
+    fn sudo_validate(&self, reason: &str) -> bool {
+        MacHost.sudo_validate(reason)
+    }
 }
 
 /// Runs a copy of the executable outside the bundle.

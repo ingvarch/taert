@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::admin::AdminSession;
 use super::app_caches;
 use super::catalog::{Catalog, Category, Target};
 use super::docker::DockerObject;
@@ -177,6 +178,7 @@ pub enum ScanProgressEvent {
 pub struct ScanContext<'a> {
     pub layout: &'a Layout,
     pub host: &'a dyn Host,
+    pub admin: &'static AdminSession,
 }
 
 pub struct CategoryScanner;
@@ -413,6 +415,7 @@ mod tests {
             &ScanContext {
                 layout: &layout,
                 host: &FakeHost::idle(),
+                admin: crate::core::admin::test_session(),
             },
             Category::Junk,
             &IgnoreStore::default(),
@@ -438,7 +441,11 @@ mod tests {
 
     fn junk(layout: &Layout, host: &FakeHost, ignore: &IgnoreStore) -> CategoryScan {
         CategoryScanner::scan_with(
-            &ScanContext { layout, host },
+            &ScanContext {
+                layout,
+                host,
+                admin: crate::core::admin::test_session(),
+            },
             "junk",
             "System Junk",
             Vec::new(),
@@ -478,6 +485,7 @@ mod tests {
         let context = ScanContext {
             layout: &layout,
             host: &host,
+            admin: crate::core::admin::test_session(),
         };
         let ignore = IgnoreStore::default();
 
@@ -501,6 +509,7 @@ mod tests {
         let context = ScanContext {
             layout: &layout,
             host: &host,
+            admin: crate::core::admin::test_session(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -532,6 +541,7 @@ mod tests {
         let context = ScanContext {
             layout: &layout,
             host: &host,
+            admin: crate::core::admin::test_session(),
         };
         let cancel = Arc::new(AtomicBool::new(true));
 
@@ -588,6 +598,7 @@ mod tests {
             &ScanContext {
                 layout: &layout,
                 host: &FakeHost::idle(),
+                admin: crate::core::admin::test_session(),
             },
             Category::Ai.id(),
             "AI",
