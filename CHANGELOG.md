@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Touch ID tip for sudo**: taert shows a one-line tip when sudo could use Touch ID and does not. It shows once per run, after taert asked for the administrator password.
 - **Uninstall Apps lists apps from installer packages**: apps that an installer package put in `/Library/Application Support`, such as Microsoft AutoUpdate, appear in the list under their folder, and `taert uninstall` finds them by name, bundle id, or path. taert removes them with their receipt. Their launch daemon, helper tool, and caches are listed for you to pick.
 
 ### Changed
