@@ -15,6 +15,7 @@ use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
 use super::components::list::{Column, ListRow};
 use super::components::modal::{Modal, dim_backdrop};
+use super::components::text::wrap_line;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::path_utils::prettify_path;
@@ -459,6 +460,9 @@ fn item_line(
         .render_line(width, theme)
 }
 
+/// Columns of a label such as `Plist:   `; wrapped values line up under the value.
+const LABEL_WIDTH: usize = 9;
+
 fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState, theme: &Theme) {
     let frame_w = area.width as usize;
     let frame_rows = (area.height as usize).saturating_sub(FRAME_ROWS);
@@ -468,37 +472,38 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
         return;
     };
 
+    let inner = frame_w.saturating_sub(FRAME_SIDES);
+    let wrap = |line, indent| wrap_line(line, inner, indent);
+    let label_style = theme.callout().add_modifier(Modifier::BOLD);
+    let field = |label: &'static str, value: String, style: Style| {
+        wrap(
+            Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(value, style),
+            ]),
+            LABEL_WIDTH,
+        )
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Name & Label
-    lines.push(Line::from(vec![
-        Span::styled("Name:    ", theme.callout().add_modifier(Modifier::BOLD)),
-        Span::styled(item.name.clone(), theme.body()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Label:   ", theme.callout().add_modifier(Modifier::BOLD)),
-        Span::styled(item.label.clone(), theme.footnote()),
-    ]));
+    lines.extend(field("Name:    ", item.name.clone(), theme.body()));
+    lines.extend(field("Label:   ", item.label.clone(), theme.footnote()));
 
     // Owning App
     if let Some(ref app) = item.app_name {
-        lines.push(Line::from(vec![
-            Span::styled("App:     ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(app.clone(), theme.body()),
-        ]));
+        lines.extend(field("App:     ", app.clone(), theme.body()));
     }
     if let Some(ref bundle) = item.app_bundle {
-        lines.push(Line::from(vec![
-            Span::styled("Bundle:  ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(prettify_path(bundle), theme.footnote()),
-        ]));
+        lines.extend(field("Bundle:  ", prettify_path(bundle), theme.footnote()));
     }
 
     // Kind & State
-    lines.push(Line::from(vec![
-        Span::styled("Kind:    ", theme.callout().add_modifier(Modifier::BOLD)),
-        Span::styled(item.kind.as_str().to_string(), theme.body()),
-    ]));
+    lines.extend(field(
+        "Kind:    ",
+        item.kind.as_str().to_string(),
+        theme.body(),
+    ));
 
     let (state_text, state_style): (&str, _) = match item.state {
         StartupState::Running => ("Running", theme.success()),
@@ -509,25 +514,16 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
         StartupState::Disabled => ("Disabled", theme.footnote()),
         StartupState::Broken => ("Broken (missing executable)", theme.danger()),
     };
-    lines.push(Line::from(vec![
-        Span::styled("State:   ", theme.callout().add_modifier(Modifier::BOLD)),
-        Span::styled(state_text.to_string(), state_style),
-    ]));
+    lines.extend(field("State:   ", state_text.to_string(), state_style));
 
     // Program Executable
     if let Some(ref prog) = item.program {
-        lines.push(Line::from(vec![
-            Span::styled("Program: ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(prettify_path(prog), theme.footnote()),
-        ]));
+        lines.extend(field("Program: ", prettify_path(prog), theme.footnote()));
     }
 
     // Plist path
     if let Some(ref plist) = item.plist_path {
-        lines.push(Line::from(vec![
-            Span::styled("Plist:   ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(prettify_path(plist), theme.footnote()),
-        ]));
+        lines.extend(field("Plist:   ", prettify_path(plist), theme.footnote()));
     }
 
     // Live Metrics
@@ -541,14 +537,17 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
             .map(format_bytes)
             .unwrap_or_else(|| "-".to_string());
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("PID:     ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{pid}"), theme.body()),
-            Span::styled("  CPU: ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(cpu_str, theme.body()),
-            Span::styled("  Memory: ", theme.callout().add_modifier(Modifier::BOLD)),
-            Span::styled(mem_str, theme.body()),
-        ]));
+        lines.extend(wrap(
+            Line::from(vec![
+                Span::styled("PID:     ", label_style),
+                Span::styled(format!("{pid}"), theme.body()),
+                Span::styled("  CPU: ", label_style),
+                Span::styled(cpu_str, theme.body()),
+                Span::styled("  Memory: ", label_style),
+                Span::styled(mem_str, theme.body()),
+            ]),
+            LABEL_WIDTH,
+        ));
     }
 
     // Protection note
@@ -565,7 +564,7 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
         } else {
             ("Registered by the app · Read-only", theme.footnote())
         };
-        lines.push(Line::from(Span::styled(note_text, note_style)));
+        lines.extend(wrap(Line::from(Span::styled(note_text, note_style)), 0));
     }
 
     // Message notification if any
@@ -576,10 +575,10 @@ fn render_item_details(frame: &mut Frame, area: Rect, state: &StartupScreenState
         } else {
             theme.success()
         };
-        lines.push(Line::from(Span::styled(
-            format!("Notice: {msg}"),
-            msg_style,
-        )));
+        lines.extend(wrap(
+            Line::from(Span::styled(format!("Notice: {msg}"), msg_style)),
+            0,
+        ));
     }
 
     // Pad lines to frame_rows
@@ -1060,5 +1059,46 @@ mod tests {
 
         assert_eq!(state.confirm, None);
         assert!(state.message.is_some_and(|(_, is_error)| is_error));
+    }
+
+    #[test]
+    fn long_detail_rows_wrap_inside_the_card() {
+        let mut long = item(StartupKind::Daemon, StartupState::Enabled, None);
+        long.plist_path = Some(format!("/Library/LaunchDaemons/{}.plist", "x".repeat(70)).into());
+        let mut state = StartupScreenState::new(vec![long], false);
+        let notice = "Registered by the app. Switch it in System Settings > General > Login Items & Extensions, or in the app.";
+        state.message = Some((notice.to_string(), true));
+        let theme = Theme::with_env(UiEnv::default());
+        let area = Rect::new(0, 0, 50, 30);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 30)).unwrap();
+
+        terminal
+            .draw(|f| render_item_details(f, area, &state, &theme))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..30)
+            .map(|y| (0..50).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        let bottom = rows.iter().position(|r| r.starts_with('╰')).unwrap();
+        let inside = &rows[1..bottom];
+        assert!(inside.iter().all(|r| r.ends_with('│')), "{rows:#?}");
+        let cells: Vec<String> = inside
+            .iter()
+            .map(|r| {
+                r.trim_start_matches('│')
+                    .trim_end_matches('│')
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        let joined = cells.join(" ");
+        assert!(joined.contains(&format!("Notice: {notice}")), "{rows:#?}");
+        let first = inside.iter().position(|r| r.contains("Plist:")).unwrap();
+        assert!(
+            inside[first + 1].starts_with(&format!("│ {}x", " ".repeat(9))),
+            "{rows:#?}"
+        );
     }
 }
