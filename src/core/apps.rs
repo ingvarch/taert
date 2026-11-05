@@ -619,7 +619,15 @@ pub fn is_common_name(name: &str) -> bool {
     COMMON_NAMES.contains(&name.to_lowercase().as_str())
 }
 
-fn embedded_bundles(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+/// Bundles with one of `extensions` inside `folder`, at any depth up to a limit.
+/// Links are not followed.
+pub fn nested_bundles(
+    folder: &Path,
+    extensions: &[&str],
+    skipped: &[&str],
+    depth: usize,
+    found: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
@@ -631,15 +639,17 @@ fn embedded_bundles(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
             continue;
         }
         let path = entry.path();
-        let is_helper = path.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("appex") || extension.eq_ignore_ascii_case("xpc")
+        let wanted = path.extension().is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|wanted| extension.eq_ignore_ascii_case(wanted))
         });
-        if is_helper {
+        if wanted {
             found.push(path.clone());
         }
         let name = entry.file_name();
-        if !SKIPPED_IN_BUNDLES.iter().any(|skipped| name == *skipped) {
-            embedded_bundles(&path, depth - 1, found);
+        if !skipped.iter().any(|skip| name == *skip) {
+            nested_bundles(&path, extensions, skipped, depth - 1, found);
         }
     }
 }
@@ -670,7 +680,13 @@ pub fn embedded_bundle_ids(app: &Path, own_id: Option<&str>) -> (Vec<String>, Ve
 
     let mut bundles = Vec::new();
     for folder in EMBEDDED_FOLDERS {
-        embedded_bundles(&app.join(folder), MAX_EMBEDDED_DEPTH, &mut bundles);
+        nested_bundles(
+            &app.join(folder),
+            &["appex", "xpc"],
+            SKIPPED_IN_BUNDLES,
+            MAX_EMBEDDED_DEPTH,
+            &mut bundles,
+        );
     }
     let mut embedded: Vec<String> = bundles
         .iter()

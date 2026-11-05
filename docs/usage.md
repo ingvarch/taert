@@ -174,7 +174,8 @@ taert looks for:
 - folders named after the app, in `~/Library`, `~/.config`, `~/.cache`, `~/.local/share`, and under the vendor's folder;
 - launch agents and daemons, by name or because they start a program inside the app;
 - browser native messaging hosts that start the app, data of its extensions and helpers, and crash reports;
-- files outside your home folder: `/Library` folders, privileged helpers, `/Users/Shared`, and installer receipts.
+- files outside your home folder: `/Library` folders, privileged helpers, `/Users/Shared`, and installer receipts;
+- for an app that an installer package put in `/Library/Application Support`: launch agents, launch daemons, privileged helpers, and caches named after an app inside it. taert drops the last part of that inner app's id, so `com.acme.autoupdate.fba` gives `com.acme.autoupdate`. It uses the id only when it starts with the same two parts as the outer app's id.
 
 What starts selected depends on how sure taert is that a file belongs to the app:
 
@@ -187,6 +188,7 @@ What starts selected depends on how sure taert is that a file belongs to the app
 | Folders named after the app in `~/Library` and `~/.cache` | Folders and launch entries that only mention the app's name, or use a common or short one |
 | Installer receipts | Folders named after the app without its channel, like `Zed` for Zed Nightly, and files that continue a two-part id such as `md.obsidian` |
 | | Crash reports in `/Library/Logs/DiagnosticReports` |
+| | For an app from an installer package: launch, helper, and cache files named after the id of its inner bundles |
 
 Removal runs in this order. Open apps get a quit request and up to 40 seconds to answer it, so they can ask you to save. A Homebrew cask goes next, through `brew uninstall --cask` of the Homebrew install that holds it, without `--zap` and with `HOMEBREW_NO_AUTOREMOVE=1`, so Homebrew removes no other formula. Then taert stops the app: launch agents are unloaded, the app leaves Launch Services, the login item that opens this copy leaves Login Items, its login helpers stop, and remaining processes get `SIGTERM`, then `SIGKILL`. If its login item cannot be removed (for example, macOS refuses Automation for System Events), the report says so and names where to remove it by hand. The app bundle goes to the Trash as you, even when the app has package receipts or root files. A bundle you cannot remove goes, with its root files, in a password step before taert stops the app, so cancelling keeps that app installed and running. Receipts and files only root can remove follow once the bundle is gone, and macOS asks for your password for them. If you refuse the prompt, the app is already gone (in the Trash, or removed by Homebrew or `--permanent`) and only those files stay, and the report says so. If the Trash call fails, the app and all its files stay, and the report tells you to allow your terminal in System Settings > Privacy & Security > App Management. An app's other files go only after the app itself, so a failed removal never leaves an app without its data. Last, its Dock tile goes.
 

@@ -12,8 +12,8 @@ use plist::Value;
 use serde::{Deserialize, Serialize};
 
 use super::apps::{
-    InstalledApp, embedded_bundle_ids, is_common_name, is_reverse_dns, is_top_level_app,
-    jetbrains_selector,
+    InstalledApp, bundle_id_of, embedded_bundle_ids, is_common_name, is_reverse_dns,
+    is_top_level_app, jetbrains_selector, nested_bundles,
 };
 use super::host::Host;
 use super::layout::Layout;
@@ -29,6 +29,7 @@ const MIN_CHANNEL_BASE: usize = 3;
 const MIN_FAMILY_PARTS: usize = 3;
 const MIN_NAME_OUTSIDE_HOME: usize = 5;
 const MIN_VENDOR_TOKEN: usize = 3;
+const MAX_INNER_APP_DEPTH: usize = 12;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const PKGUTIL_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -244,6 +245,7 @@ pub fn find_leftovers(
     finder.launch_entries();
     finder.native_hosts();
     finder.embedded_helpers(others);
+    finder.by_package_stems();
     finder.known_products();
     finder.crash_reports();
     let mut receipts = finder.receipts(host);
@@ -791,6 +793,75 @@ impl<'a> Finder<'a> {
             for (path, leaf) in entries(&layout.user("Library/Preferences/ByHost")) {
                 if leaf.starts_with(&prefix) && leaf.ends_with(".plist") {
                     self.add(path, evidence);
+                }
+            }
+        }
+    }
+
+    /// An installer script writes launch files and caches that the receipt does
+    /// not list. They are named after the id of the app's inner bundles, minus
+    /// the last part.
+    fn by_package_stems(&mut self) {
+        if self.app.package.is_none() {
+            return;
+        }
+        let Some(own) = self.id else {
+            return;
+        };
+        let vendor: Vec<String> = own
+            .split('.')
+            .take(2)
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let mut bundles = Vec::new();
+        nested_bundles(
+            &self.app.path,
+            &["app"],
+            &[],
+            MAX_INNER_APP_DEPTH,
+            &mut bundles,
+        );
+        let stems: BTreeSet<String> = bundles
+            .iter()
+            .filter_map(|bundle| bundle_id_of(bundle))
+            .filter_map(|id| id.rsplit_once('.').map(|(parent, _)| parent.to_string()))
+            .filter(|parent| {
+                let parts: Vec<String> = parent.split('.').map(str::to_ascii_lowercase).collect();
+                parts.len() >= MIN_FAMILY_PARTS && parts[..2] == vendor[..]
+            })
+            .collect();
+        if stems.is_empty() {
+            return;
+        }
+
+        let layout = self.layout;
+        let launch = [
+            layout.user("Library/LaunchAgents"),
+            layout.system("Library/LaunchAgents"),
+            layout.system("Library/LaunchDaemons"),
+        ];
+        for folder in &launch {
+            for (path, leaf) in entries(folder) {
+                let Some(name) = leaf.strip_suffix(".plist") else {
+                    continue;
+                };
+                if !path.is_file() || path.is_symlink() {
+                    continue;
+                }
+                if stems.iter().any(|stem| has_id_boundary(name, stem)) {
+                    self.add(path, Evidence::RelatedName);
+                }
+            }
+        }
+        let named = [
+            layout.system("Library/PrivilegedHelperTools"),
+            layout.system("Library/Caches"),
+            layout.user("Library/Caches"),
+        ];
+        for folder in &named {
+            for (path, leaf) in entries(folder) {
+                if stems.iter().any(|stem| has_id_boundary(&leaf, stem)) {
+                    self.add(path, Evidence::RelatedName);
                 }
             }
         }
@@ -1803,6 +1874,161 @@ mod tests {
 
         assert_found(&found, &own, Evidence::BundleId);
         assert_absent(&found, &other);
+    }
+
+    const ACME_PKG: &str = "com.acme.package.Acme_AutoUpdate";
+
+    fn package_app(layout: &Layout, inner_ids: &[&str], package: Option<&str>) -> InstalledApp {
+        let mut target = installed(layout, "Acme AutoUpdate", "com.acme.autoupdate2");
+        for (index, id) in inner_ids.iter().enumerate() {
+            let name = match index {
+                0 => "Acme Daemon".to_string(),
+                _ => format!("Acme Tool {index}"),
+            };
+            let inner = target.path.join(format!("Contents/MacOS/{name}.app"));
+            fake_app(&inner, id, &name);
+        }
+        target.package = package.map(str::to_string);
+        target
+    }
+
+    fn stem_files(layout: &Layout) -> [PathBuf; 6] {
+        [
+            file(layout.system("Library/LaunchDaemons/com.acme.autoupdate.helper.plist")),
+            file(layout.system("Library/PrivilegedHelperTools/com.acme.autoupdate.helper")),
+            file(layout.system("Library/Caches/com.acme.autoupdate.fba")),
+            file(layout.user("Library/Caches/com.acme.autoupdate.helper")),
+            file(layout.system("Library/LaunchAgents/com.acme.autoupdate.agent.plist")),
+            file(layout.user("Library/LaunchAgents/com.acme.autoupdate.agent.plist")),
+        ]
+    }
+
+    #[test]
+    fn a_package_app_finds_files_named_after_the_parent_of_an_inner_id() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.autoupdate.fba"], Some(ACME_PKG));
+        let files = stem_files(&layout);
+
+        let found = find(&target, &layout);
+
+        for path in &files {
+            assert_found(&found, path, Evidence::RelatedName);
+        }
+    }
+
+    #[test]
+    fn a_package_app_finds_stem_files_for_an_inner_app_deep_in_the_bundle() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &[], Some(ACME_PKG));
+        let helper = target.path.join("Contents/Library/Helpers/Acme Agent.app");
+        fake_app(&helper, "com.acme.agent", "Acme Agent");
+        fake_app(
+            &helper.join("Contents/MacOS/Acme Daemon.app"),
+            "com.acme.autoupdate.fba",
+            "Acme Daemon",
+        );
+        let files = stem_files(&layout);
+
+        let found = find(&target, &layout);
+
+        for path in &files {
+            assert_found(&found, path, Evidence::RelatedName);
+        }
+    }
+
+    #[test]
+    fn a_package_app_leaves_files_that_only_share_the_vendor() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.autoupdate.fba"], Some(ACME_PKG));
+        let other = file(layout.system("Library/LaunchDaemons/com.acme.other.plist"));
+        let vendor = file(layout.system("Library/Caches/com.acme"));
+        let longer = file(layout.system("Library/Caches/com.acme.autoupdater"));
+
+        let found = find(&target, &layout);
+
+        assert_absent(&found, &other);
+        assert_absent(&found, &vendor);
+        assert_absent(&found, &longer);
+    }
+
+    #[test]
+    fn an_inner_id_whose_parent_has_two_parts_adds_no_stem() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.tool"], Some(ACME_PKG));
+        let files = stem_files(&layout);
+        let vendor = file(layout.system("Library/Caches/com.acme.other"));
+
+        let found = find(&target, &layout);
+
+        for path in files.iter().chain([&vendor]) {
+            assert_absent(&found, path);
+        }
+    }
+
+    #[test]
+    fn an_inner_id_of_another_vendor_adds_no_stem() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["org.other.helper.x"], Some(ACME_PKG));
+        let cache = file(layout.system("Library/Caches/org.other.helper"));
+
+        let found = find(&target, &layout);
+
+        assert_absent(&found, &cache);
+    }
+
+    #[test]
+    fn an_app_without_a_package_does_not_look_for_the_parent_id() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.autoupdate.fba"], None);
+        let files = stem_files(&layout);
+
+        let found = find(&target, &layout);
+
+        for path in &files {
+            assert_absent(&found, path);
+        }
+    }
+
+    #[test]
+    fn a_link_to_another_app_inside_the_bundle_is_not_followed() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &[], Some(ACME_PKG));
+        let outside = layout.system("Library/Elsewhere/Linked.app");
+        fake_app(&outside, "com.acme.autoupdate.fba", "Linked");
+        std::os::unix::fs::symlink(&outside, target.path.join("Contents/MacOS/Linked.app"))
+            .unwrap();
+        let files = stem_files(&layout);
+
+        let found = find(&target, &layout);
+
+        for path in &files {
+            assert_absent(&found, path);
+        }
+    }
+
+    #[test]
+    fn a_package_app_skips_a_link_named_after_a_stem_in_a_launch_folder() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.autoupdate.fba"], Some(ACME_PKG));
+        let real = file(layout.system("Library/Elsewhere/com.other.daemon.plist"));
+        let link = layout.system("Library/LaunchDaemons/com.acme.autoupdate.helper.plist");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let found = find(&target, &layout);
+
+        assert_absent(&found, &link);
+    }
+
+    #[test]
+    fn a_package_app_skips_a_folder_named_after_a_stem_in_a_launch_folder() {
+        let (_temp, layout) = sandbox();
+        let target = package_app(&layout, &["com.acme.autoupdate.fba"], Some(ACME_PKG));
+        let plist = folder(layout.system("Library/LaunchDaemons/com.acme.autoupdate.helper.plist"));
+
+        let found = find(&target, &layout);
+
+        assert_absent(&found, &plist);
     }
 
     fn pkg_host(id: &str, location: &str, files: &str) -> FakeHost {
