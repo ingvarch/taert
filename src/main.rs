@@ -185,9 +185,14 @@ fn main() -> ExitCode {
 fn handle_admin_helper(args: Vec<std::ffi::OsString>) -> ExitCode {
     let answer = match AdminHelperCli::try_parse_from(args) {
         Ok(cli) => {
-            let AdminHelperCommand::AdminHelper(AdminHelperAction::Compress(args)) = cli.command;
-            admin_helper::answer_or_error(|| {
-                admin_helper::run_compress(&args.home, &args.bundle, args.undo)
+            let AdminHelperCommand::AdminHelper(action) = cli.command;
+            admin_helper::answer_or_error(|| match action {
+                AdminHelperAction::Compress(args) => {
+                    admin_helper::run_compress(&args.home, &args.bundle, args.undo)
+                }
+                AdminHelperAction::Slim(args) => {
+                    admin_helper::run_slim(&args.home, args.owner, args.group, &args.bundle)
+                }
             })
         }
         Err(error) => admin_helper::error_answer(error.to_string().trim()),
@@ -2175,10 +2180,10 @@ mod tests {
         let app = layout.user("Applications/Fat.app");
         write_test_app(&app, "com.vendor.fat");
         let host = apple_silicon_host();
-        host.reply("codesign -dv", &format!("Authority={authority}\n"));
-        host.reply("codesign --verify", "");
-        host.reply("spctl", "");
-        host.reply("ditto", "");
+        host.reply("/usr/bin/codesign -dv", &format!("Authority={authority}\n"));
+        host.reply("/usr/bin/codesign --verify", "");
+        host.reply("/usr/sbin/spctl", "");
+        host.reply("/usr/bin/ditto", "");
         fake_ditto(&host, &app);
         (host, app)
     }
@@ -3279,7 +3284,10 @@ mod tests {
 
     fn apple_silicon_host() -> FakeHost {
         let host = crate::core::slim::testing::user_host();
-        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host.reply(
+            "/usr/sbin/sysctl hw.optional.arm64",
+            "hw.optional.arm64: 1\n",
+        );
         host
     }
 
@@ -3699,7 +3707,7 @@ mod tests {
 
         assert!(!ran.ok);
         assert!(ran.err.contains("requires an Apple Silicon Mac"));
-        assert!(!host.ran("codesign"));
+        assert!(!host.ran("/usr/bin/codesign"));
     }
 
     #[test]
@@ -3733,7 +3741,7 @@ mod tests {
             ran.err,
             "Error: No installed app matches 'NonExistentApp12345'\n"
         );
-        assert!(!host.ran("codesign"));
+        assert!(!host.ran("/usr/bin/codesign"));
     }
 
     #[test]
@@ -3746,7 +3754,7 @@ mod tests {
         assert!(ran.ok);
         assert!(ran.out.contains("Slim Fat? [y/N]: "));
         assert!(ran.out.contains("Cancelled."));
-        assert!(!host.ran("ditto"));
+        assert!(!host.ran("/usr/bin/ditto"));
     }
 
     #[test]
@@ -3758,7 +3766,7 @@ mod tests {
 
         assert!(ran.ok, "{}", ran.err);
         assert!(ran.out.contains("Slimmed Fat, saved"));
-        assert!(host.ran("ditto"));
+        assert!(host.ran("/usr/bin/ditto"));
     }
 
     #[test]
@@ -3772,7 +3780,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
         assert_eq!(json["error"], "confirmation needed, pass --force");
         assert_eq!(json["app"], "Fat");
-        assert!(!host.ran("ditto"));
+        assert!(!host.ran("/usr/bin/ditto"));
     }
 
     #[test]
@@ -3784,7 +3792,7 @@ mod tests {
 
         assert!(ran.ok, "{}", ran.err);
         assert!(!ran.out.contains("Slim Fat?"));
-        assert!(host.ran("ditto"));
+        assert!(host.ran("/usr/bin/ditto"));
     }
 
     /// The allocated size of the binary in an app made by `slim_ready`.
@@ -3800,6 +3808,7 @@ mod tests {
             saved: binary_size(&old).saturating_sub(binary_size(app)),
             old_app: Some((old, "denied".to_string())),
             holding_left: None,
+            remover: crate::core::slim::Remover::User,
         };
         done.summary("Fat")
     }
@@ -3838,6 +3847,7 @@ mod tests {
             saved: before - binary_size(&app),
             old_app: None,
             holding_left: None,
+            remover: crate::core::slim::Remover::User,
         };
         assert!(
             ran.out.contains(&format!(
@@ -3864,6 +3874,7 @@ mod tests {
             saved: before.saturating_sub(binary_size(&app)),
             old_app: None,
             holding_left: Some((holding, error)),
+            remover: crate::core::slim::Remover::User,
         };
         assert!(
             ran.out.contains(&format!("{}\n", done.summary("Fat"))),
@@ -3907,6 +3918,7 @@ mod tests {
             saved: before - binary_size(&app),
             old_app: None,
             holding_left: None,
+            remover: crate::core::slim::Remover::User,
         };
         assert!(
             ran.out.contains(&format!("{}\n", done.summary("Fat"))),
@@ -3936,7 +3948,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|line| line.starts_with("codesign --verify"))
+            .filter(|line| line.starts_with("/usr/bin/codesign --verify"))
             .count();
         assert_eq!(checks, 1);
     }
@@ -3984,7 +3996,7 @@ mod tests {
             "{}",
             ran.err
         );
-        assert!(!host.ran("ditto"));
+        assert!(!host.ran("/usr/bin/ditto"));
         assert!(old.join("Contents/MacOS/testapp").exists());
     }
 
@@ -3993,7 +4005,10 @@ mod tests {
         let (_temp, layout) = sandbox();
         let (_ready, _app) = slim_ready(&layout);
         let host = FakeHost::default();
-        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host.reply(
+            "/usr/sbin/sysctl hw.optional.arm64",
+            "hw.optional.arm64: 1\n",
+        );
         host.fail("/bin/ps", "");
 
         let ran = slim(&["slim", "--json"], &host, &layout);
@@ -4042,14 +4057,17 @@ mod tests {
         let (_temp, layout) = sandbox();
         let (_ready, _app) = slim_ready(&layout);
         let host = FakeHost::default();
-        host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
+        host.reply(
+            "/usr/sbin/sysctl hw.optional.arm64",
+            "hw.optional.arm64: 1\n",
+        );
         host.fail("/bin/ps", "");
 
         let ran = slim(&["slim", "Fat", "--force"], &host, &layout);
 
         assert!(!ran.ok);
         assert!(ran.err.contains("Could not list running programs"));
-        assert!(!host.ran("ditto"));
+        assert!(!host.ran("/usr/bin/ditto"));
     }
 
     #[test]
@@ -4063,7 +4081,7 @@ mod tests {
         unsafe { std::env::remove_var("TAERT_SLIM_ALLOW_ADHOC") };
         assert!(!ran.ok);
         assert!(ran.err.contains("Not signed with a Developer ID"));
-        assert!(!host.ran("ditto"));
+        assert!(!host.ran("/usr/bin/ditto"));
     }
 
     #[test]

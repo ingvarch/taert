@@ -1324,6 +1324,7 @@ fn snapshot_slim_outcome() {
             "denied".to_string(),
         )),
         holding_left: None,
+        remover: slim::Remover::User,
     };
     state.overlay = ModalOverlay::Outcome(RemovalReport {
         removed_count: 2,
