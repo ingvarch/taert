@@ -12,7 +12,8 @@ use plist::Value;
 use serde::{Deserialize, Serialize};
 
 use super::apps::{
-    InstalledApp, embedded_bundle_ids, is_common_name, is_reverse_dns, jetbrains_selector,
+    InstalledApp, embedded_bundle_ids, is_common_name, is_reverse_dns, is_top_level_app,
+    jetbrains_selector,
 };
 use super::host::Host;
 use super::layout::Layout;
@@ -978,15 +979,10 @@ impl<'a> Finder<'a> {
         }
 
         let root = self.layout.root.join(location);
-        let is_top_level_app = |relative: &&str| {
-            let parts: Vec<&str> = relative.split('/').collect();
-            let is_app = |part: &&str| part.to_ascii_lowercase().ends_with(".app");
-            parts.last().is_some_and(is_app) && !parts[..parts.len() - 1].iter().any(is_app)
-        };
         let holds_another_app = listing
             .stdout
             .lines()
-            .filter(is_top_level_app)
+            .filter(|relative| is_top_level_app(relative))
             .any(|relative| root.join(relative) != self.app.path);
         if holds_another_app {
             return false;
