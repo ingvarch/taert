@@ -1,12 +1,12 @@
 //! Commands taert runs on the Mac, behind a trait so tests never touch the real system.
 
-use std::io::Read;
+use crate::core::admin::{self, NOT_GIVEN};
+use std::io::{IsTerminal, Read};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
-const SUDO_PROBE: Duration = Duration::from_secs(3);
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,6 +40,10 @@ pub trait Host: Send + Sync {
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
     fn uid(&self) -> u32;
     fn pid(&self) -> u32;
+    /// Whether stdin and stderr are a terminal, so sudo can ask for a password there.
+    fn has_tty(&self) -> bool;
+    /// Asks for the password with `sudo -v` on the terminal. True when sudo accepted it.
+    fn sudo_validate(&self, reason: &str) -> bool;
 }
 
 pub struct MacHost;
@@ -110,10 +114,13 @@ impl Host for MacHost {
     ) -> Result<String, String> {
         let output = if unsafe { libc::geteuid() } == 0 {
             self.run("/bin/sh", &["-c", script], timeout)
-        } else if self.run("/usr/bin/sudo", &["-n", "true"], SUDO_PROBE).ok {
+        } else if admin::probe(self) {
             let args = ["-n", "/bin/sh", "-c", script];
             self.run("/usr/bin/sudo", &args, timeout)
         } else {
+            if admin::session().is_refused() {
+                return Err(NOT_GIVEN.to_string());
+            }
             // The dialog works over the full-screen TUI, where sudo has no prompt to show.
             let args = [
                 "-e",
@@ -133,7 +140,7 @@ impl Host for MacHost {
             return Ok(output.stdout);
         }
         Err(if output.stderr.contains("-128") {
-            "The administrator password was not given".to_string()
+            NOT_GIVEN.to_string()
         } else {
             output.stderr.trim().to_string()
         })
@@ -165,6 +172,34 @@ impl Host for MacHost {
     fn pid(&self) -> u32 {
         std::process::id()
     }
+
+    fn has_tty(&self) -> bool {
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+    }
+
+    fn sudo_validate(&self, reason: &str) -> bool {
+        use std::os::unix::process::CommandExt;
+        eprintln!("taert needs administrator rights to {reason}.");
+        let mut command = Command::new("/usr/bin/sudo");
+        command
+            .args(["-v", "-p", "Password for %u: "])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // Ctrl-C at the prompt must stop sudo only, so taert ignores it meanwhile.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        let accepted = command.status().is_ok_and(|status| status.success());
+        unsafe {
+            libc::signal(libc::SIGINT, previous);
+        }
+        accepted
+    }
 }
 
 /// The pid as `kill` takes it, or an error for pid 0 (a whole process group), pid 1 (launchd),
@@ -184,6 +219,7 @@ pub fn shell_quote(text: &str) -> String {
 #[cfg(test)]
 pub mod fake {
     use super::*;
+    use crate::core::admin::NOT_GIVEN;
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -208,6 +244,10 @@ pub mod fake {
         pub simulate_trash: Mutex<bool>,
         pub uid: Mutex<Option<u32>>,
         pub pid: Mutex<Option<u32>>,
+        pub tty: Mutex<bool>,
+        pub sudo_refused: Mutex<bool>,
+        /// Set when `sudo_validate` returned false; root scripts are refused after it.
+        password_refused: Mutex<bool>,
     }
 
     impl FakeHost {
@@ -335,6 +375,9 @@ pub mod fake {
         }
 
         fn run_admin(&self, script: &str, _prompt: &str) -> Result<(), String> {
+            if *self.password_refused.lock().unwrap() {
+                return Err(NOT_GIVEN.to_string());
+            }
             self.admin_scripts.lock().unwrap().push(script.to_string());
             if let Some(effect) = self.admin_effect.lock().unwrap().as_ref() {
                 effect();
@@ -386,6 +429,19 @@ pub mod fake {
 
         fn pid(&self) -> u32 {
             self.pid.lock().unwrap().unwrap_or(u32::MAX)
+        }
+
+        fn has_tty(&self) -> bool {
+            *self.tty.lock().unwrap()
+        }
+
+        fn sudo_validate(&self, reason: &str) -> bool {
+            self.calls.lock().unwrap().push(format!("sudo -v {reason}"));
+            let accepted = !*self.sudo_refused.lock().unwrap();
+            if !accepted {
+                *self.password_refused.lock().unwrap() = true;
+            }
+            accepted
         }
     }
 }
