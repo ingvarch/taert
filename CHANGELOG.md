@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Administrator password**: Startup Items and Doctor ask for the administrator password once per run, in the terminal. The confirm dialog of a daemon says that taert asks for the password first. `taert startup disable` and `enable` for a daemon, and every read with `--all`, ask before the root step.
+
 ### Fixed
 - **Uninstall receipts with an underscore**: Uninstall finds installer receipts whose package id has an underscore, such as Microsoft's, and forgets them with the app.
 - **Slim and Compress result dialogs**: they say why each listed item failed. Under each path they show the error text, as the Upgrade dialog does.

@@ -153,6 +153,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
   - Broken items: user launch agents whose target binary is missing from disk can be permanently deleted after explicit confirmation, verified by `Safety::can_remove`.
   - `taert doctor` quits a process by sending `SIGTERM` after a confirmation that starts with focus on Cancel. `Host::signal` returns a `Result`, and a failed signal keeps the finding and shows the error. It refuses pid 0, pid 1, and a pid too large for `pid_t` (which `kill` would read as a negative group) for every caller and sends nothing (`signal_pid`). Implementations provide `raw_signal`, which only `signal` calls. A finding for pid 0 or 1 says it is part of macOS instead of advising to quit it.
   - `taert doctor` offers `taert startup disable` for a broken item only when the item has no read-only reason. Otherwise the finding shows the reason and has no action.
+  - Startup Items and Doctor call `AdminGate::ask` before a daemon switch, and `taert startup` calls `AdminSession::prepare` before a daemon switch and before every `--all` read.
 
 ## Universal App Slimming
 

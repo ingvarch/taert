@@ -1165,8 +1165,16 @@ fn handle_startup(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let ScanContext { layout, host, .. } = *context;
+    let ScanContext {
+        layout,
+        host,
+        admin,
+    } = *context;
     let out = &mut *console.out;
+    // A refusal needs no handling here: the root step then fails with the reason.
+    if args.all {
+        let _ = admin.prepare(host, "read background task records");
+    }
     if let Some(ref action) = args.action {
         let (label, is_enable) = match action {
             cli::StartupAction::Disable { label } => (label, false),
@@ -1181,6 +1189,12 @@ fn handle_startup(
                 return ExitCode::FAILURE;
             }
         };
+        if item.kind == startup::StartupKind::Daemon
+            && !cli.dry_run
+            && item.read_only_reason().is_none()
+        {
+            let _ = admin.prepare(host, "switch system daemons");
+        }
 
         let result = if is_enable {
             startup::enable_item(host, layout, ignore, &item, cli.dry_run)
@@ -1997,6 +2011,15 @@ mod tests {
     }
 
     fn startup(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {
+        startup_ignoring(args, &IgnoreStore::default(), host, layout)
+    }
+
+    fn startup_ignoring(
+        args: &[&str],
+        ignore: &IgnoreStore,
+        host: &FakeHost,
+        layout: &Layout,
+    ) -> Ran {
         let cli = parse(args);
         let Some(Command::Startup(ref startup_args)) = cli.command else {
             panic!("not a startup command");
@@ -2011,7 +2034,7 @@ mod tests {
                 startup_args,
                 &cli,
                 true,
-                &IgnoreStore::default(),
+                ignore,
                 &Config::default(),
                 &context,
                 console,
@@ -3309,6 +3332,148 @@ mod tests {
         assert!(json.ok);
         let scan: serde_json::Value = serde_json::from_str(&json.out).unwrap();
         assert_eq!(scan["items"][0]["label"], "com.example.demo");
+    }
+
+    fn layout_with_a_daemon() -> (tempfile::TempDir, Layout, FakeHost) {
+        let (temp, layout) = sandbox();
+        let folder = layout.system("Library/LaunchDaemons");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut daemon = plist::Dictionary::new();
+        daemon.insert("Label".into(), "com.example.daemon".into());
+        daemon.insert("Program".into(), "/bin/ls".into());
+        plist::Value::Dictionary(daemon)
+            .to_file_xml(folder.join("com.example.daemon.plist"))
+            .unwrap();
+        let host = FakeHost::idle();
+        *host.tty.lock().unwrap() = true;
+        host.reply(
+            "/bin/launchctl print system",
+            "system = {\n services = {\n 0 - com.example.daemon\n }\n}\n",
+        );
+        host.reply(
+            "/bin/launchctl print-disabled system",
+            "disabled services = {\n \"com.example.daemon\" => enabled\n}\n",
+        );
+        (temp, layout, host)
+    }
+
+    #[test]
+    fn startup_switching_a_daemon_asks_for_the_password_first() {
+        for action in ["disable", "enable"] {
+            let (_temp, layout, host) = layout_with_a_daemon();
+
+            startup(&["startup", action, "com.example.daemon"], &host, &layout);
+
+            assert_eq!(host.sudo_asks(), 1, "{action}");
+            assert!(host.ran("sudo -v switch system daemons"), "{action}");
+            assert_eq!(host.admin_scripts.lock().unwrap().len(), 1, "{action}");
+        }
+    }
+
+    #[test]
+    fn startup_stops_at_a_refused_password_before_any_root_step() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+        *host.sudo_refused.lock().unwrap() = true;
+
+        let ran = startup(
+            &["startup", "disable", "com.example.daemon"],
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok);
+        assert!(
+            ran.err.contains(crate::core::admin::NOT_GIVEN),
+            "{}",
+            ran.err
+        );
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_switching_a_read_only_daemon_does_not_ask_for_the_password() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+        let ignore = IgnoreStore {
+            roots: vec!["/bin/ls".into()],
+        };
+
+        let ran = startup_ignoring(
+            &["startup", "disable", "com.example.daemon"],
+            &ignore,
+            &host,
+            &layout,
+        );
+
+        assert!(!ran.ok);
+        assert_eq!(host.sudo_asks(), 0, "{}", ran.err);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_dry_run_does_not_ask_for_the_password() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+
+        let ran = startup(
+            &["startup", "disable", "com.example.daemon", "--dry-run"],
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn startup_switching_a_user_agent_does_not_ask_for_the_password() {
+        let (_temp, layout) = layout_with_a_launch_agent();
+        let host = FakeHost::idle();
+        *host.tty.lock().unwrap() = true;
+
+        startup(&["startup", "disable", "com.example.demo"], &host, &layout);
+
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn startup_all_asks_once_before_it_reads_the_background_records() {
+        for args in [
+            &["startup", "--all", "--json"][..],
+            &["startup", "--all", "--plain"],
+            &["startup", "--all", "--json", "--dry-run"],
+        ] {
+            let (_temp, layout, host) = layout_with_a_daemon();
+            startup(args, &host, &layout);
+
+            assert_eq!(host.sudo_asks(), 1, "{args:?}");
+            assert!(host.ran("sudo -v read background task records"), "{args:?}");
+            assert_eq!(host.admin_scripts.lock().unwrap().len(), 1, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn startup_all_with_a_daemon_switch_asks_once() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+
+        startup(
+            &["startup", "--all", "disable", "com.example.daemon"],
+            &host,
+            &layout,
+        );
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn startup_all_stops_reading_at_a_refused_password() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+        *host.sudo_refused.lock().unwrap() = true;
+
+        startup(&["startup", "--all", "--json"], &host, &layout);
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -16,6 +16,7 @@ use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
 use super::components::list::ListRow;
 use super::components::modal::{Modal, dim_backdrop};
+use super::startup::password_line;
 use super::theme::Theme;
 use crate::core::doctor::{DoctorReport, Finding, FindingAction, FindingSeverity};
 use crate::core::startup::StartupItem;
@@ -546,6 +547,7 @@ fn render_confirm_modal(
 ) {
     dim_backdrop(frame.buffer_mut(), area);
 
+    let mut password = None;
     let (title, message, action_label, tint) = match confirm {
         DoctorActionConfirm::KillProcess { name, pid } => (
             "Stop Process",
@@ -555,15 +557,18 @@ fn render_confirm_modal(
             "Send SIGTERM",
             theme.p.orange,
         ),
-        DoctorActionConfirm::DisableStartupItem { item } => (
-            "Switch Off Startup Item",
-            format!(
-                "Disable '{}' so it no longer runs in the background?",
-                item.name
-            ),
-            "Switch Off",
-            theme.p.orange,
-        ),
+        DoctorActionConfirm::DisableStartupItem { item } => {
+            password = password_line(item.kind, theme);
+            (
+                "Switch Off Startup Item",
+                format!(
+                    "Disable '{}' so it no longer runs in the background?",
+                    item.name
+                ),
+                "Switch Off",
+                theme.p.orange,
+            )
+        }
         DoctorActionConfirm::ExploreStorage => (
             "Open Explore Storage",
             "Switch to interactive Explore Storage to find what takes up disk space?".to_string(),
@@ -577,12 +582,16 @@ fn render_confirm_modal(
         Button::new("Cancel").focused(selected_button == 1),
     ];
 
+    let mut lines = vec![Line::from(Span::styled(message, theme.body()))];
+    if let Some(line) = password {
+        lines.push(Line::from(""));
+        lines.push(line);
+    }
+    lines.push(Line::from(""));
+
     Modal::new(title)
         .tint(tint)
-        .message(vec![
-            Line::from(Span::styled(message, theme.body())),
-            Line::from(""),
-        ])
+        .message(lines)
         .buttons(buttons)
         .hints(Line::from(vec![
             Span::styled(theme.g.key_enter, theme.accent_text()),
@@ -595,7 +604,58 @@ fn render_confirm_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_words;
+    use super::*;
+    use crate::core::startup::{StartupKind, StartupState};
+
+    fn disable_dialog(kind: StartupKind) -> String {
+        let item = StartupItem {
+            label: "com.test.item".into(),
+            name: "Test".into(),
+            app_name: None,
+            app_bundle: None,
+            kind,
+            state: StartupState::Running,
+            program: None,
+            plist_path: None,
+            pid: Some(9),
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        };
+        let report = DoctorReport {
+            seconds: 1,
+            findings: Vec::new(),
+            checks: Vec::new(),
+        };
+        let mut state = DoctorScreenState::new_done(report);
+        state.confirm = Some(DoctorActionConfirm::DisableStartupItem { item });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|f| render_doctor(f, &state, &Theme::new()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn the_daemon_disable_dialog_says_a_password_comes_first() {
+        let text = disable_dialog(StartupKind::Daemon);
+
+        assert!(
+            text.contains("taert asks for your administrator password first."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_user_agent_disable_dialog_does_not_mention_a_password() {
+        let text = disable_dialog(StartupKind::UserAgent);
+
+        assert!(!text.contains("administrator password"), "{text}");
+    }
 
     #[test]
     fn wrap_words_splits_a_word_wider_than_the_width() {
