@@ -1,0 +1,35 @@
+---
+source: tests/ui_snapshots.rs
+expression: screen
+---
+ taert › Optimize › Slim apps                                                                   0 of 4 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ /Applications ──────────────────────────────────────────────────────────────────────────── 3 items · 810.7 MB ─╮
+   │ ▌ ○ Viscosity                                                               ━────────────────   4.8%    40.7 MB │
+   │   ○ Brave Browser                                                           ━━━━━━━━━━━━─────  69.8%   590.0 MB │
+   │   ○ Slack                                                                   ━━━━─────────────  21.3%   180.0 MB │
+   ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+   ╭─ ~/Applications ───────────────────────────────────────────────────────────────────────────── 1 item · 35.0 MB ─╮
+   │   ○ Sublime Text        ╭────────────────────────────────────────────────────────────╮───────   4.1%    35.0 MB │
+   ╰─────────────────────────│ Nothing was slimmed                                        │──────────────────────────╯
+                             │                                                            │
+                             │                                                            │
+                             │ 1 item failed to slim:                                     │
+                             │   ✕ /Applications/Brave Browser.app                        │
+                             │ Step 7 failed: macOS refused. Allow your terminal in       │
+                             │ System Settings > Privacy & Security > App Management,     │
+                             │ or move the app to the Trash in Finder                     │
+                             │                                                            │
+                             │                                                            │
+                             │                                                      Done  │
+                             │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+                             ╰────────────────────────────────────────────────────────────╯
+
+
+
+
+
+   Safari stays: Apple apps are part of macOS.
+   Pages stays: App Store apps are managed by the App Store.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
