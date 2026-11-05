@@ -42,11 +42,22 @@ pub trait Host: Send + Sync {
     fn pid(&self) -> u32;
     /// Whether stdin and stderr are a terminal, so sudo can ask for a password there.
     fn has_tty(&self) -> bool;
+    /// Whether the user is in the `admin` group, the only one the default sudoers lets use sudo.
+    /// True when it cannot tell.
+    fn is_admin(&self) -> bool;
     /// Asks for the password with `sudo -v` on the terminal. True when sudo accepted it.
     fn sudo_validate(&self, reason: &str) -> bool;
 }
 
 pub struct MacHost;
+
+fn groups_have_admin(text: &str) -> bool {
+    text.split_whitespace().any(|group| group == "admin")
+}
+
+fn admin_from(output: &Output) -> bool {
+    !output.ok || groups_have_admin(&output.stdout)
+}
 
 fn read_pipe(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
     thread::spawn(move || {
@@ -177,6 +188,10 @@ impl Host for MacHost {
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
     }
 
+    fn is_admin(&self) -> bool {
+        admin_from(&self.run("/usr/bin/id", &["-Gn"], Duration::from_secs(3)))
+    }
+
     fn sudo_validate(&self, reason: &str) -> bool {
         use std::os::unix::process::CommandExt;
         eprintln!("taert needs administrator rights to {reason}.");
@@ -252,6 +267,7 @@ pub mod fake {
         pub pid: Mutex<Option<u32>>,
         pub tty: Mutex<bool>,
         pub sudo_refused: Mutex<bool>,
+        pub not_admin: Mutex<bool>,
         /// Set when `sudo_validate` returned false; root scripts are refused after it.
         password_refused: Mutex<bool>,
     }
@@ -462,6 +478,10 @@ pub mod fake {
             *self.tty.lock().unwrap()
         }
 
+        fn is_admin(&self) -> bool {
+            !*self.not_admin.lock().unwrap()
+        }
+
         fn sudo_validate(&self, reason: &str) -> bool {
             self.calls.lock().unwrap().push(format!("sudo -v {reason}"));
             let accepted = !*self.sudo_refused.lock().unwrap();
@@ -476,6 +496,29 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_admin_group_is_found_by_whole_word() {
+        assert!(groups_have_admin("staff everyone admin\n"));
+        assert!(!groups_have_admin("staff everyone"));
+        assert!(!groups_have_admin("administrators"));
+    }
+
+    #[test]
+    fn a_failed_group_lookup_counts_as_admin() {
+        let failed = Output {
+            ok: false,
+            ..Default::default()
+        };
+        let staff = Output {
+            ok: true,
+            stdout: "staff".to_string(),
+            ..Default::default()
+        };
+
+        assert!(admin_from(&failed));
+        assert!(!admin_from(&staff));
+    }
 
     #[test]
     fn a_command_reports_what_it_printed() {

@@ -67,6 +67,10 @@ impl Host for TempTrashHost {
         MacHost.has_tty()
     }
 
+    fn is_admin(&self) -> bool {
+        MacHost.is_admin()
+    }
+
     fn sudo_validate(&self, reason: &str) -> bool {
         MacHost.sudo_validate(reason)
     }
