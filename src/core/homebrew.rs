@@ -629,6 +629,7 @@ fn item(label: String, size_bytes: u64, selected: bool, brew: Option<BrewTask>) 
         brew,
         role: None,
         also: Vec::new(),
+        needs_admin: false,
     }
 }
 

@@ -272,13 +272,6 @@ impl PlainRunner {
         write!(console.out, "{}", Self::notes_text(&report.notes))
     }
 
-    pub fn print_compress_report(
-        report: &crate::core::compress::CompressReport,
-        target: &std::path::Path,
-    ) {
-        println!("{}", Self::compress_report_text(report, target));
-    }
-
     pub fn compress_report_text(
         report: &crate::core::compress::CompressReport,
         target: &std::path::Path,

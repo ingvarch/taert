@@ -961,8 +961,14 @@ impl SelectState {
 
     pub fn open_confirmation(&mut self) {
         if !self.scan.selected_items().is_empty() {
-            self.asks_password = self.scan.id == uninstaller::PLAN_ID
-                && uninstaller::needs_password(&self.scan, &self.routes);
+            self.asks_password = (self.scan.id == uninstaller::PLAN_ID
+                && uninstaller::needs_password(&self.scan, &self.routes))
+                || (self.scan.id == compress::SCAN_ID
+                    && self
+                        .scan
+                        .selected_items()
+                        .iter()
+                        .any(|item| item.needs_admin));
             self.overlay = ModalOverlay::Confirm(ConfirmButton::Cancel);
         }
     }

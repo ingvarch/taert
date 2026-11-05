@@ -15,6 +15,9 @@ use super::host::{Host, MacHost};
 use super::layout::Layout;
 use super::stores::IgnoreStore;
 
+/// The uid that owns the system's apps.
+pub const SYSTEM_OWNER: u32 = 0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileIdentity {
     pub dev: u64,
@@ -612,6 +615,24 @@ impl Safety {
         writable
     }
 
+    /// An app that every entry of belongs to `system_owner`, seen by a user who is not that
+    /// owner. The helper that runs as root changes such an app.
+    pub fn belongs_to_system(bundle: &Path, system_owner: u32, user: u32) -> bool {
+        user != system_owner
+            && fs::symlink_metadata(bundle).is_ok_and(|meta| meta.uid() == system_owner)
+            && super::slim::check_ownership(bundle, system_owner).is_ok()
+    }
+
+    /// An app bundle in an app folder that belongs to the system for `user`.
+    pub fn is_app_of_the_system(
+        path: &Path,
+        layout: &Layout,
+        system_owner: u32,
+        user: u32,
+    ) -> bool {
+        Self::is_app_bundle(path, layout) && Self::belongs_to_system(path, system_owner, user)
+    }
+
     pub fn is_homebrew_path_in(path: &Path, layout: &Layout) -> bool {
         let brew_roots = [
             layout.system("opt/homebrew"),
@@ -674,7 +695,7 @@ impl Safety {
         ignore: &IgnoreStore,
         layout: &Layout,
     ) -> Result<(), SafetyError> {
-        Self::can_compress_with_host(path, ignore, layout, &MacHost)
+        Self::can_compress_with_host(path, ignore, layout, &MacHost, SYSTEM_OWNER)
     }
 
     pub fn can_compress_with_host(
@@ -682,6 +703,7 @@ impl Safety {
         ignore: &IgnoreStore,
         layout: &Layout,
         host: &dyn Host,
+        system_owner: u32,
     ) -> Result<(), SafetyError> {
         let absolute = Self::absolute(path);
         let path = absolute.as_path();
@@ -763,7 +785,9 @@ impl Safety {
             Self::enclosing_app_bundle(path).or_else(|| Self::enclosing_app_bundle(&canonical))
         {
             Self::check_bundle_not_running(&bundle, host)?;
-            if !Self::can_write_inside(&bundle) {
+            let of_the_system =
+                Self::is_app_of_the_system(&bundle, layout, system_owner, host.uid());
+            if !of_the_system && !Self::can_write_inside(&bundle) {
                 return Err(SafetyError::AppManagementPermission);
             }
         }
@@ -1414,7 +1438,7 @@ mod tests {
     }
 
     fn compress_check(path: &Path, layout: &Layout, host: &FakeHost) -> Result<(), SafetyError> {
-        Safety::can_compress_with_host(path, &IgnoreStore::default(), layout, host)
+        Safety::can_compress_with_host(path, &IgnoreStore::default(), layout, host, SYSTEM_OWNER)
     }
 
     fn running_app(layout: &Layout, folder: &str) -> (PathBuf, FakeHost) {
@@ -1438,6 +1462,63 @@ mod tests {
             relative.push("..");
         }
         relative.join(path.strip_prefix("/").unwrap())
+    }
+
+    fn closed_bundle(layout: &Layout) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bundle = make(&layout.system("Applications/Foo.app/Contents"));
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).unwrap();
+        bundle.parent().unwrap().to_path_buf()
+    }
+
+    #[test]
+    fn an_app_of_the_system_does_not_get_the_app_management_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, layout) = sandbox();
+        let bundle = closed_bundle(&layout);
+        let host = FakeHost::idle();
+        host.set_uid(crate::core::host::fake::real_uid() + 1);
+        let system_owner = crate::core::host::fake::real_uid();
+        let check = |system_owner| {
+            Safety::can_compress_with_host(
+                &bundle,
+                &IgnoreStore::default(),
+                &layout,
+                &host,
+                system_owner,
+            )
+        };
+
+        let result = check(system_owner);
+        let user_result = check(system_owner + 5);
+        fs::set_permissions(bundle.join("Contents"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(user_result, Err(SafetyError::AppManagementPermission));
+    }
+
+    #[test]
+    fn a_bundle_of_the_system_outside_the_app_folders_still_gets_the_app_management_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, layout) = sandbox();
+        let bundle = make(&layout.user("Downloads/Foo.app/Contents"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::set_permissions(bundle.join("Contents"), fs::Permissions::from_mode(0o555)).unwrap();
+        let host = FakeHost::idle();
+        host.set_uid(crate::core::host::fake::real_uid() + 1);
+
+        let result = Safety::can_compress_with_host(
+            &bundle,
+            &IgnoreStore::default(),
+            &layout,
+            &host,
+            crate::core::host::fake::real_uid(),
+        );
+        fs::set_permissions(bundle.join("Contents"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(result, Err(SafetyError::AppManagementPermission));
     }
 
     #[test]

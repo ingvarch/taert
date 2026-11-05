@@ -49,6 +49,7 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
 use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::purger::{self, PurgeScanEvent, Purger};
+use crate::core::safety::SYSTEM_OWNER;
 use crate::core::scanner::{
     CategoryScan, CategoryScanner, ScanContext, ScanItem, ScanProgressEvent, scan_all_categories,
 };
@@ -1552,7 +1553,13 @@ impl App {
         }
         if matches!(&self.screen, Screen::Select(select) if select.asks_password) {
             // A refusal does not stop the run: every root step then fails with the refusal.
-            let _ = self.admin.ask(&*self.host, uninstaller::ADMIN_REASON);
+            let reason = match &self.screen {
+                Screen::Select(select) if select.scan.id == compress::SCAN_ID => {
+                    compress::ADMIN_REASON
+                }
+                _ => uninstaller::ADMIN_REASON,
+            };
+            let _ = self.admin.ask(&*self.host, reason);
         }
         if let Screen::Select(ref mut select) = self.screen {
             let mut selected_items: Vec<_> =
@@ -1596,9 +1603,9 @@ impl App {
                         host: &*host,
                         layout: &layout,
                         ignore: &ignore,
+                        system_owner: SYSTEM_OWNER,
                     };
-                    let paths: Vec<_> = selected_items.iter().map(|i| i.path.clone()).collect();
-                    let total_count = paths.len();
+                    let total_count = selected_items.len();
                     let history = HistoryLog::new(layout.history_path());
                     let session = history.start_run(
                         &command_for_scan(compress::SCAN_ID),
@@ -1606,7 +1613,7 @@ impl App {
                         Some(total_count),
                     );
                     let report = compressor.compress_selected(
-                        &paths,
+                        &selected_items,
                         &cancelled,
                         |index, path| {
                             let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
@@ -2007,7 +2014,8 @@ impl App {
         let owner = self.host.uid();
 
         thread::spawn(move || {
-            let scan = crate::core::compress::compress_candidates_scan(&layout, owner);
+            let scan =
+                crate::core::compress::compress_candidates_scan(&layout, owner, SYSTEM_OWNER);
             let _ = tx.send(ScanMessage::Finished(scan));
         });
 
@@ -4582,6 +4590,95 @@ mod tests {
             assert!(!screen.contains("permanently"), "{screen}");
             assert!(!screen.contains("Trash"), "{screen}");
             assert!(!screen.contains("Clean Complete"), "{screen}");
+        }
+
+        const PROBE: &str = "/usr/bin/sudo -n true";
+
+        /// `prepare(["Idle", "Sys"])` with "Sys" marked as an app of the system, on a Mac with a
+        /// terminal and no sudo ticket. The helper answers that it compressed one file.
+        fn with_system_app(
+            refuses: bool,
+        ) -> (TempDir, App, Arc<FakeHost>, Vec<(PathBuf, PathBuf)>) {
+            let (temp, mut app, made) = prepare(&["Idle", "Sys"], &[]);
+            let host = FakeHost::idle();
+            host.set_uid(crate::core::host::fake::real_uid());
+            host.fail(PROBE, "");
+            *host.tty.lock().unwrap() = true;
+            *host.sudo_refused.lock().unwrap() = refuses;
+            let report = crate::core::compress::CompressReport {
+                processed_files: 1,
+                saved_bytes: 1000,
+                ..Default::default()
+            };
+            *host.admin_stdout.lock().unwrap() = serde_json::to_string(&report).unwrap();
+            let host = Arc::new(host);
+            app.host = host.clone();
+            let Screen::Select(select) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            select.scan.groups[0].items[1].needs_admin = true;
+            (temp, app, host, made)
+        }
+
+        #[test]
+        fn confirming_an_app_of_the_system_asks_once_and_sends_it_to_the_helper() {
+            let (_temp, mut app, host, made) = with_system_app(false);
+
+            run_selection(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert!(
+                host.calls
+                    .lock()
+                    .unwrap()
+                    .contains(&"sudo -v compress apps that belong to the system".to_string())
+            );
+            let scripts = host.admin_scripts.lock().unwrap();
+            assert_eq!(scripts.len(), 1, "{scripts:?}");
+            assert!(scripts[0].contains("admin-helper compress"), "{scripts:?}");
+            assert!(scripts[0].contains(&made[1].0.display().to_string()));
+            assert!(is_compressed(&made[0].1));
+            assert!(!is_compressed(&made[1].1));
+            let report = outcome(&app);
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(report.removed_count, 2);
+            let history = HistoryLog::new(app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(history[0].items.len(), 2);
+        }
+
+        #[test]
+        fn the_question_names_the_password_only_when_an_app_of_the_system_is_selected() {
+            let (_temp, mut app, _host, _made) = with_system_app(false);
+            press(&mut app, &[KeyCode::Enter]);
+            let screen = screen_text(&app);
+            assert!(
+                screen.contains("taert asks for your administrator password first."),
+                "{screen}"
+            );
+
+            let (_temp, mut app, _made) = prepare(&["Idle"], &[]);
+            press(&mut app, &[KeyCode::Enter]);
+            assert!(!screen_text(&app).contains("password"));
+        }
+
+        #[test]
+        fn after_a_refusal_the_app_of_the_system_fails_and_the_rest_goes_on() {
+            let (_temp, mut app, host, made) = with_system_app(true);
+
+            run_selection(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert!(host.admin_scripts.lock().unwrap().is_empty());
+            assert!(is_compressed(&made[0].1));
+            let report = outcome(&app);
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].path, made[1].0);
+            assert_eq!(
+                report.failures[0].error,
+                "The administrator password was not given"
+            );
         }
 
         #[test]

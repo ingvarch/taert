@@ -43,6 +43,13 @@ pub struct ScanItem {
     /// More folders of this row. `size_bytes` covers them, and they go with it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<ScanItem>,
+    /// The row belongs to the system, so changing it takes the administrator password.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_admin: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ScanItem {
@@ -60,6 +67,7 @@ impl ScanItem {
             brew: None,
             role: None,
             also: Vec::new(),
+            needs_admin: false,
         }
     }
 
