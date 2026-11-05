@@ -1708,7 +1708,7 @@ fn render_confirmation_dialog(
     }
     if state.asks_password {
         message.push(Line::from(Span::styled(
-            "macOS will ask for your password.",
+            super::terminal::PASSWORD_FIRST,
             theme.warning(),
         )));
     }

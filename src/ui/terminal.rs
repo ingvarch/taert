@@ -33,6 +33,9 @@ pub fn release_terminal(run: &mut dyn FnMut()) {
     }
 }
 
+/// The line a confirm dialog shows when the run will ask for the administrator password.
+pub const PASSWORD_FIRST: &str = "taert asks for your administrator password first.";
+
 pub struct AdminGate {
     session: &'static AdminSession,
     release: fn(&mut dyn FnMut()),

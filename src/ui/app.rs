@@ -1547,6 +1547,10 @@ impl App {
         if matches!(&self.screen, Screen::Select(select) if select.upgrade.is_some()) {
             return self.start_upgrade();
         }
+        if matches!(&self.screen, Screen::Select(select) if select.asks_password) {
+            // A refusal does not stop the run: every root step then fails with the refusal.
+            let _ = self.admin.ask(&*self.host, uninstaller::ADMIN_REASON);
+        }
         if let Screen::Select(ref mut select) = self.screen {
             let mut selected_items: Vec<_> =
                 select.scan.selected_items().into_iter().cloned().collect();
@@ -2198,7 +2202,7 @@ mod tests {
     use std::time::Instant;
     use tempfile::tempdir;
 
-    /// An app that sees an empty Mac: no files at its home and a host that runs nothing.
+    /// An app that sees an empty Mac: no files at its home, a host that runs nothing, and its own sudo session.
     fn offline(mut app: App) -> App {
         app.layout = Layout {
             home: "/nonexistent/home".into(),
@@ -2206,6 +2210,7 @@ mod tests {
             user_cache: None,
         };
         app.host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        app.admin = gate_with(counting_release);
         app
     }
 
@@ -3746,6 +3751,185 @@ mod tests {
             assert!(!bundle.exists());
         }
 
+        const PROBE: &str = "/usr/bin/sudo -n true";
+        const ASK: &str = "sudo -v remove apps and their system files";
+
+        /// An app on a Mac with a terminal and no sudo ticket.
+        fn app_with_terminal(refuses: bool) -> (TempDir, App, Arc<FakeHost>) {
+            let (temp, mut app) = app_in_sandbox();
+            let host = FakeHost::default();
+            host.simulate_trash();
+            host.fail(PROBE, "");
+            *host.tty.lock().unwrap() = true;
+            *host.sudo_refused.lock().unwrap() = refuses;
+            let host = Arc::new(host);
+            app.host = host.clone();
+            (temp, app, host)
+        }
+
+        fn receipt_for(app: &App, id: &str) -> ScanItem {
+            let path = app
+                .layout
+                .system("private/var/db/receipts")
+                .join(format!("{id}.plist"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+            let mut receipt = ScanItem::new(path, 1, true, false);
+            receipt.role = Some(UninstallRole::Receipt {
+                package: id.to_string(),
+            });
+            receipt
+        }
+
+        fn review(app: &mut App, apps: Vec<InstalledApp>, plan: UninstallPlan) {
+            app_list(app, apps);
+            app.handle_key(KeyCode::Char('d'));
+            deliver(app, ScanMessage::Planned(plan));
+        }
+
+        #[test]
+        fn confirming_a_plan_with_root_work_asks_for_the_password_once_before_it_starts() {
+            let (_temp, mut app, host) = app_with_terminal(false);
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let mut plan = plan_for(&foo, &app);
+            plan.scan.groups[0]
+                .items
+                .push(receipt_for(&app, "com.acme.foo"));
+            let receipt = plan.scan.groups[0].items[2].path.clone();
+            let asked_by_then = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+            let (seen, watched) = (asked_by_then.clone(), host.clone());
+            *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+                seen.store(watched.sudo_asks(), std::sync::atomic::Ordering::SeqCst);
+                let _ = std::fs::remove_file(&receipt);
+            }));
+            review(&mut app, vec![foo], plan);
+
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            let at = host.position(ASK).unwrap();
+            let calls = host.calls.lock().unwrap().clone();
+            assert!(calls[..at].iter().all(|c| c == PROBE), "{calls:?}");
+            assert_eq!(releases(), 1);
+            assert_eq!(asked_by_then.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn the_confirm_line_says_taert_asks_before_it_starts() {
+            let (_temp, mut app, _host) = app_with_terminal(false);
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let mut plan = plan_for(&foo, &app);
+            plan.scan.groups[0]
+                .items
+                .push(receipt_for(&app, "com.acme.foo"));
+            review(&mut app, vec![foo], plan);
+
+            app.handle_key(KeyCode::Char('d'));
+
+            let text = screen_rows(&app, 100, 30)
+                .iter()
+                .map(|row| row.replace('│', " "))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                text.contains("taert asks for your administrator password first."),
+                "{text}"
+            );
+            assert!(!text.contains("macOS will ask"), "{text}");
+        }
+
+        #[test]
+        fn confirming_a_plan_with_no_root_work_asks_nothing() {
+            let (_temp, mut app, host) = app_with_terminal(false);
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let plan = plan_for(&foo, &app);
+            review(&mut app, vec![foo], plan);
+
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            assert_eq!(host.sudo_asks(), 0);
+            assert_eq!(releases(), 0);
+            assert!(!screen_text(&app).contains("password"));
+        }
+
+        #[test]
+        fn a_refused_password_still_runs_the_removal_and_fails_the_root_rows() {
+            let (_temp, mut app, host) = app_with_terminal(true);
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let bundle = foo.path.clone();
+            let mut plan = plan_for(&foo, &app);
+            plan.scan.groups[0]
+                .items
+                .push(receipt_for(&app, "com.acme.foo"));
+            let receipt = plan.scan.groups[0].items[2].path.clone();
+            review(&mut app, vec![foo], plan);
+
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert!(host.trashed().contains(&bundle));
+            assert!(host.admin_scripts.lock().unwrap().is_empty());
+            assert!(receipt.exists());
+            let text = screen_text(&app);
+            assert!(
+                text.contains("The administrator password was not given"),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn two_root_steps_in_one_run_ask_once() {
+            let (_temp, mut app, host) = app_with_terminal(false);
+            let foo = installed(&app, "Foo", "com.acme.foo");
+            let beta = installed(&app, "Foo Beta", "com.acme.foo.beta");
+            let contents = foo.path.join("Contents");
+            let mut plan = plan_for(&foo, &app);
+            let mut beta_plan = plan_for(&beta, &app);
+            beta_plan.scan.groups[0].items.truncate(1);
+            beta_plan.scan.groups[0]
+                .items
+                .push(receipt_for(&app, "com.acme.foo.beta"));
+            plan.scan.groups[0].items.truncate(1);
+            plan.scan.groups.push(beta_plan.scan.groups.remove(0));
+            plan.apps.push(beta_plan.apps.remove(0));
+            let (bundle, receipt) = (foo.path.clone(), plan.scan.groups[1].items[1].path.clone());
+            std::fs::set_permissions(
+                &contents,
+                std::os::unix::fs::PermissionsExt::from_mode(0o555),
+            )
+            .unwrap();
+            *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+                if bundle.exists() {
+                    let _ = std::fs::set_permissions(
+                        bundle.join("Contents"),
+                        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                    );
+                    let _ = std::fs::remove_dir_all(&bundle);
+                } else {
+                    let _ = std::fs::remove_file(&receipt);
+                }
+            }));
+            review(&mut app, vec![foo, beta], plan);
+
+            press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
+            wait_for_removal(&mut app);
+
+            let _ = std::fs::set_permissions(
+                &contents,
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            );
+            assert_eq!(host.sudo_asks(), 1);
+            let scripts = host.admin_scripts.lock().unwrap().clone();
+            assert_eq!(scripts.len(), 2, "{scripts:?}\n{}", screen_text(&app));
+        }
+
         #[test]
         fn the_review_of_a_cask_app_says_permanent() {
             let (_temp, app) = app_in_sandbox();
@@ -4466,7 +4650,6 @@ mod tests {
         *host.tty.lock().unwrap() = true;
         let mut app = new_app();
         app.host = host.clone();
-        app.admin = gate_with(counting_release);
         (app, host)
     }
 
