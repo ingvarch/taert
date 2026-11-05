@@ -1,9 +1,12 @@
 //! One sudo session per run: ask for the password once, keep the ticket alive, end it on exit.
 
+use crate::core::admin_helper;
+use crate::core::apps::InstalledApp;
 use crate::core::compress::CompressReport;
 use crate::core::host::{Host, MacHost, shell_quote};
 use crate::core::layout::Layout;
-use std::path::Path;
+use crate::core::slim::{self, Remover, SlimDone};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -12,6 +15,8 @@ use std::time::Duration;
 const SUDO_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const SLIM_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const SLIM_PROMPT: &str = "taert wants to slim an app";
 const COMPRESS_PROMPT: &str = "taert wants to compress an app";
 const UNDO_PROMPT: &str = "taert wants to undo the compression of an app";
 
@@ -153,12 +158,9 @@ pub fn run_compress_helper(
     bundle: &Path,
     undo: bool,
 ) -> Result<CompressReport, String> {
-    let exe = std::env::current_exe()
-        .and_then(|exe| exe.canonicalize())
-        .map_err(|e| format!("Could not find the taert program: {e}"))?;
     let script = format!(
-        "PATH=/usr/bin:/bin:/usr/sbin:/sbin {} admin-helper compress{} --home {} {}",
-        quoted(&exe)?,
+        "{HELPER_PATH} {} admin-helper compress{} --home {} {}",
+        quoted(&helper_exe()?)?,
         if undo { " --undo" } else { "" },
         quoted(&layout.home)?,
         quoted(bundle)?,
@@ -168,6 +170,17 @@ pub fn run_compress_helper(
     parse_helper_answer(&answer)
 }
 
+/// The taert program that the script starts as root.
+fn helper_exe() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|e| format!("Could not find the taert program: {e}"))
+}
+
+/// The `PATH` every script of the helper sets for itself, so root never runs a program from
+/// the `PATH` of the user.
+const HELPER_PATH: &str = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
+
 /// The path quoted for the script. A lossy copy would name another file.
 fn quoted(path: &Path) -> Result<String, String> {
     path.to_str()
@@ -175,13 +188,26 @@ fn quoted(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "the path is not valid UTF-8".to_string())
 }
 
-fn parse_helper_answer(answer: &str) -> Result<CompressReport, String> {
-    let unreadable = || format!("The admin helper gave an answer taert cannot read: {answer}");
+fn parse_helper_answer<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, String> {
+    parse_step_answer(answer).map_err(|(_, error)| error)
+}
+
+/// The answer of the helper, or the error with the step that failed (step 1 when it names none).
+fn parse_step_answer<T: serde::de::DeserializeOwned>(answer: &str) -> Result<T, (usize, String)> {
+    let unreadable = || (1, unreadable_answer(answer));
     let value: serde_json::Value = serde_json::from_str(answer).map_err(|_| unreadable())?;
     if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
-        return Err(error.to_string());
+        let step = value
+            .get("step")
+            .and_then(|step| step.as_u64())
+            .map_or(1, |step| step as usize);
+        return Err((step, error.to_string()));
     }
     serde_json::from_value(value).map_err(|_| unreadable())
+}
+
+fn unreadable_answer(answer: &str) -> String {
+    format!("The admin helper gave an answer taert cannot read: {answer}")
 }
 
 const BIOUTIL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -232,9 +258,65 @@ fn has_fingerprints(host: &dyn Host) -> bool {
     })
 }
 
+#[derive(serde::Deserialize)]
+struct SlimAnswer {
+    saved: u64,
+    old_app: PathBuf,
+    handover_error: Option<String>,
+}
+
+/// Slims one root-owned app in taert run as root, then moves the old app to the Trash as the
+/// user. The helper leaves the old app in `/Applications`; any other place is refused.
+pub fn run_slim_helper(
+    host: &dyn Host,
+    layout: &Layout,
+    app: &InstalledApp,
+) -> Result<SlimDone, (usize, String)> {
+    let script = slim_script(host, layout, &app.path).map_err(|error| (1, error))?;
+    let answer = host
+        .run_admin_output(&script, SLIM_PROMPT, SLIM_TIMEOUT)
+        .map_err(|error| (1, error))?;
+    let done: SlimAnswer = parse_step_answer(&answer)?;
+    let old_app = done.old_app.as_path();
+    let in_applications = old_app.parent() == Some(layout.system("Applications").as_path())
+        && match (old_app.file_name(), app.path.file_stem()) {
+            (Some(old), Some(name)) => slim::is_old_copy_name(old, name),
+            _ => false,
+        };
+    let in_holding = old_app.file_name() == app.path.file_name()
+        && old_app.parent().is_some_and(|holding| {
+            holding.file_name().is_some()
+                && holding.parent() == Some(admin_helper::holdings(layout).as_path())
+        });
+    let kept = |error, remover| SlimDone {
+        saved: done.saved,
+        old_app: Some((done.old_app.clone(), error)),
+        holding_left: None,
+        remover,
+    };
+    match done.handover_error {
+        None if in_applications => Ok(slim::trash_old_app(done.old_app, done.saved, host)),
+        Some(error) if in_applications => Ok(kept(error, Remover::Admin)),
+        Some(error) if in_holding => Ok(kept(error, Remover::AdminHolding)),
+        _ => Err((1, unreadable_answer(&answer))),
+    }
+}
+
+fn slim_script(host: &dyn Host, layout: &Layout, app: &Path) -> Result<String, String> {
+    Ok(format!(
+        "{HELPER_PATH} {} admin-helper slim --home {} --owner {} --group {} {}",
+        quoted(&helper_exe()?)?,
+        quoted(&layout.home)?,
+        host.uid(),
+        unsafe { libc::getgid() },
+        quoted(app)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::bytes::format_bytes;
     use crate::core::host::fake::FakeHost;
     use std::time::Instant;
 
@@ -714,5 +796,270 @@ mod tests {
         session.prepare(&*host, "x").unwrap();
 
         assert!(!session.take_hint());
+    }
+
+    /// The layout of `helper_layout` with its root in `dir`, so no path of the real Mac is used.
+    fn slim_layout(dir: &Path) -> Layout {
+        Layout {
+            root: dir.to_path_buf(),
+            ..helper_layout()
+        }
+    }
+
+    /// An app at `<dir>/Applications/Foo.app` and the answer of a helper that slimmed it and
+    /// moved the old copy to `<dir>/Applications/<old name>`.
+    fn slimmed(dir: &Path, old_name: &str) -> (InstalledApp, PathBuf, String) {
+        let app = crate::core::slim::testing::app_for(
+            &dir.join("Applications/Foo.app"),
+            "com.vendor.foo",
+        );
+        let old = dir.join("Applications").join(old_name);
+        let answer = serde_json::json!({ "saved": 4096, "old_app": old });
+        (app, old, answer.to_string())
+    }
+
+    fn slim_host(answer: &str) -> FakeHost {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = answer.to_string();
+        host.set_uid(501);
+        host
+    }
+
+    #[test]
+    fn the_slim_script_sets_its_own_path_and_quotes_every_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, answer) = slimmed(dir.path(), "Foo.taert-old.app");
+        let host = slim_host(&answer);
+
+        run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap();
+
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let gid = unsafe { libc::getgid() };
+        assert_eq!(
+            host.admin_scripts.lock().unwrap()[0],
+            format!(
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin {} admin-helper slim --home '/Users/it'\\''s me' --owner 501 --group {gid} {}",
+                shell_quote(&exe.to_string_lossy()),
+                shell_quote(&app.path.to_string_lossy()),
+            )
+        );
+        assert_eq!(
+            *host.admin_prompts.lock().unwrap(),
+            ["taert wants to slim an app"]
+        );
+    }
+
+    #[test]
+    fn the_parent_trashes_the_returned_old_app_as_the_user_with_one_root_call() {
+        for old_name in ["Foo.taert-old.app", "Foo.taert-old 2.app"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (app, old, answer) = slimmed(dir.path(), old_name);
+            let host = slim_host(&answer);
+
+            let done = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap();
+
+            assert_eq!(
+                done,
+                SlimDone {
+                    saved: 4096,
+                    old_app: None,
+                    holding_left: None,
+                    remover: Remover::User,
+                }
+            );
+            assert_eq!(host.trashed(), [old]);
+            assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn the_parent_refuses_an_old_app_outside_applications_or_with_another_name_and_trashes_nothing()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        let root = dir.path();
+        for old in [
+            root.join("Applications/Vendor/Foo.taert-old.app"),
+            root.join("Library/Foo.taert-old.app"),
+            root.join("Applications/../Foo.taert-old.app"),
+            PathBuf::from("/Users/x/Foo.taert-old.app"),
+            root.join("Applications/Bar.taert-old.app"),
+            root.join("Applications/Foo.app"),
+            root.join("Applications/Foo"),
+            root.join("Applications/Foo.taert-old"),
+            root.join("Applications/Foo.taert-old 1.app"),
+            root.join("Applications/Foo.taert-old 02.app"),
+            root.join("Applications/Foo.taert-old x.app"),
+            root.join("Applications/Foobar.taert-old.app"),
+        ] {
+            let answer = serde_json::json!({ "saved": 4096, "old_app": old }).to_string();
+            let host = slim_host(&answer);
+
+            let (step, error) = run_slim_helper(&host, &slim_layout(root), &app).unwrap_err();
+
+            assert_eq!(step, 1, "{old:?}");
+            assert!(error.contains("cannot read"), "{old:?}: {error}");
+            assert!(host.trashed().is_empty(), "{old:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_trash_keeps_the_old_app_in_the_result_and_asks_for_nothing_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, old, answer) = slimmed(dir.path(), "Foo.taert-old.app");
+        let host = slim_host(&answer);
+        host.fail_trash("denied");
+
+        let done = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap();
+
+        assert_eq!(done.saved, 4096);
+        assert_eq!(done.old_app, Some((old, "denied".to_string())));
+        assert_eq!(done.holding_left, None);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_old_app_that_could_not_be_handed_over_is_not_sent_to_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        let holding = dir
+            .path()
+            .join("Library/Application Support/taert/slim/1.0");
+        let old = holding.join("Foo.app");
+        let answer = serde_json::json!({
+            "saved": 4096, "old_app": old, "handover_error": "denied",
+        });
+        let host = slim_host(&answer.to_string());
+
+        let done = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap();
+
+        assert_eq!(done.old_app, Some((old, "denied".to_string())));
+        assert_eq!(done.holding_left, None);
+        assert_eq!(done.remover, Remover::AdminHolding);
+        assert_eq!(
+            done.summary("Foo"),
+            format!(
+                "Slimmed Foo, saved {}. taert could not give you the old app (denied). An administrator must remove the folder {}, which holds it.",
+                format_bytes(4096),
+                holding.display()
+            )
+        );
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn an_old_app_in_applications_that_root_still_owns_is_left_for_finder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, old, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        let answer = serde_json::json!({
+            "saved": 4096, "old_app": old, "handover_error": "denied",
+        });
+        let host = slim_host(&answer.to_string());
+
+        let done = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap();
+
+        assert_eq!(done.old_app, Some((old.clone(), "denied".to_string())));
+        assert_eq!(done.remover, Remover::Admin);
+        assert_eq!(
+            done.summary("Foo"),
+            format!(
+                "Slimmed Foo, saved {}. The old app is at {}, but taert could not give it to you (denied). Move it to the Trash in Finder, which asks for an administrator password.",
+                format_bytes(4096),
+                old.display()
+            )
+        );
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn an_old_app_left_by_root_elsewhere_is_refused_and_nothing_is_trashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        let slim = dir.path().join("Library/Application Support/taert/slim");
+        for old in [
+            dir.path().join("Library/Foo.app"),
+            slim.join("Foo.app"),
+            slim.join("1.0/Bar.app"),
+            slim.join("1.0/Contents/Foo.app"),
+            slim.join("../1.0/Foo.app"),
+            slim.join("1.0/../Foo.app"),
+            dir.path().join("Applications/Vendor/Foo.taert-old.app"),
+        ] {
+            let answer = serde_json::json!({
+                "saved": 4096, "old_app": old, "handover_error": "denied",
+            });
+            let host = slim_host(&answer.to_string());
+
+            let (step, error) = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap_err();
+
+            assert_eq!(step, 1, "{old:?}");
+            assert!(error.contains("cannot read"), "{old:?}: {error}");
+            assert!(host.trashed().is_empty(), "{old:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_password_stops_the_slim_at_step_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, answer) = slimmed(dir.path(), "Foo.taert-old.app");
+        let host = slim_host(&answer);
+        *host.sudo_refused.lock().unwrap() = true;
+        assert!(!host.sudo_validate("slim"));
+
+        let result = run_slim_helper(&host, &slim_layout(dir.path()), &app);
+
+        assert_eq!(result.unwrap_err(), (1, NOT_GIVEN.to_string()));
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert!(host.trashed().is_empty());
+    }
+
+    #[test]
+    fn an_error_answer_keeps_its_step_and_trashes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        for (answer, expected) in [
+            (r#"{"error":"no arm","step":3}"#, (3, "no arm")),
+            (r#"{"error":"stopped"}"#, (1, "stopped")),
+        ] {
+            let host = slim_host(answer);
+
+            let result = run_slim_helper(&host, &slim_layout(dir.path()), &app);
+
+            assert_eq!(result.unwrap_err(), (expected.0, expected.1.to_string()));
+            assert!(host.trashed().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_answer_that_is_not_the_slim_answer_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _, _) = slimmed(dir.path(), "Foo.taert-old.app");
+        for answer in ["Segmentation fault", "{}", r#"{"saved": 1}"#] {
+            let host = slim_host(answer);
+
+            let (step, error) = run_slim_helper(&host, &slim_layout(dir.path()), &app).unwrap_err();
+
+            assert_eq!(step, 1);
+            assert!(error.contains("cannot read"), "{error}");
+            assert!(host.trashed().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_before_the_slim_prompt() {
+        use std::os::unix::ffi::OsStrExt;
+        let host = slim_host("{}");
+        let app = crate::core::slim::testing::app_for(
+            Path::new(std::ffi::OsStr::from_bytes(b"/Applications/\xff.app")),
+            "com.vendor.x",
+        );
+
+        let result = run_slim_helper(&host, &helper_layout(), &app);
+
+        assert_eq!(
+            result.unwrap_err(),
+            (1, "the path is not valid UTF-8".to_string())
+        );
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
     }
 }

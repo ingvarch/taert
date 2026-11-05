@@ -424,6 +424,27 @@ fn the_admin_helper_answers_a_user_process_with_a_json_error() {
         .stdout("{\"error\":\"admin-helper must run as root\"}\n");
 }
 
+#[test]
+fn the_admin_helper_answers_a_user_process_that_slims_with_a_json_error() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    taert(&home)
+        .args([
+            "admin-helper",
+            "slim",
+            "--owner",
+            "501",
+            "--group",
+            "20",
+            "--home",
+        ])
+        .arg(&home_path)
+        .arg(home_path.join("Applications/Foo.app"))
+        .assert()
+        .success()
+        .stdout("{\"error\":\"admin-helper must run as root\",\"step\":1}\n");
+}
+
 /// Runs the admin helper with `args` and returns the text of its one `{"error"}` answer.
 fn admin_helper_error(args: &[&str]) -> String {
     let home = tempfile::tempdir().unwrap();

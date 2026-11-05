@@ -109,6 +109,9 @@ pub enum AdminHelperCommand {
 pub enum AdminHelperAction {
     /// Compress or unpack one root-owned app bundle
     Compress(AdminHelperCompressArgs),
+
+    /// Slim one root-owned app bundle and hand the old app to the user
+    Slim(AdminHelperSlimArgs),
 }
 
 #[derive(Debug, Args)]
@@ -120,6 +123,23 @@ pub struct AdminHelperCompressArgs {
     /// The home folder of the user who asked
     #[arg(long)]
     pub home: PathBuf,
+
+    pub bundle: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct AdminHelperSlimArgs {
+    /// The home folder of the user who asked
+    #[arg(long)]
+    pub home: PathBuf,
+
+    /// The uid that gets the old app
+    #[arg(long)]
+    pub owner: u32,
+
+    /// The gid that gets the old app
+    #[arg(long)]
+    pub group: u32,
 
     pub bundle: PathBuf,
 }
@@ -351,10 +371,71 @@ mod tests {
         ])
         .unwrap();
 
-        let AdminHelperCommand::AdminHelper(AdminHelperAction::Compress(args)) = cli.command;
+        let AdminHelperCommand::AdminHelper(AdminHelperAction::Compress(args)) = cli.command else {
+            panic!("compress expected");
+        };
         assert!(args.undo);
         assert_eq!(args.home, PathBuf::from("/Users/a b"));
         assert_eq!(args.bundle, PathBuf::from("/Applications/Foo.app"));
+    }
+
+    #[test]
+    fn the_admin_helper_slims_with_the_owner_and_group_of_the_parent() {
+        let cli = AdminHelperCli::try_parse_from([
+            "taert",
+            "admin-helper",
+            "slim",
+            "--home",
+            "/Users/a b",
+            "--owner",
+            "501",
+            "--group",
+            "20",
+            "/Applications/Foo.app",
+        ])
+        .unwrap();
+
+        let AdminHelperCommand::AdminHelper(AdminHelperAction::Slim(args)) = cli.command else {
+            panic!("slim expected");
+        };
+        assert_eq!(args.home, PathBuf::from("/Users/a b"));
+        assert_eq!((args.owner, args.group), (501, 20));
+        assert_eq!(args.bundle, PathBuf::from("/Applications/Foo.app"));
+    }
+
+    #[test]
+    fn the_admin_helper_has_no_slim_cleanup_job() {
+        let cli = AdminHelperCli::try_parse_from([
+            "taert",
+            "admin-helper",
+            "slim-cleanup",
+            "--home",
+            "/Users/a",
+            "--owner",
+            "501",
+            "/Applications/Foo.app.taert-slim-tmp",
+        ]);
+
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn the_slim_jobs_need_every_argument() {
+        let parse = |args: &[&str]| AdminHelperCli::try_parse_from(args);
+        let slim = ["taert", "admin-helper", "slim"];
+        assert!(parse(&[&slim[..], &["--home", "/h", "--owner", "1", "/A.app"]].concat()).is_err());
+        assert!(parse(&[&slim[..], &["--home", "/h", "--group", "1", "/A.app"]].concat()).is_err());
+        assert!(parse(&[&slim[..], &["--owner", "1", "--group", "1", "/A.app"]].concat()).is_err());
+        assert!(
+            parse(
+                &[
+                    &slim[..],
+                    &["--home", "/h", "--owner", "x", "--group", "1", "/A.app"]
+                ]
+                .concat()
+            )
+            .is_err()
+        );
     }
 
     #[test]

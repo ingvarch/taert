@@ -4169,10 +4169,10 @@ mod tests {
         /// Gives the app at `bundle` an Intel slice large enough to free blocks.
         fn ready_host(bundle: &Path) -> FakeHost {
             let host = user_host();
-            host.reply("ditto", "");
+            host.reply("/usr/bin/ditto", "");
             fake_ditto(&host, bundle);
-            host.reply("codesign", "");
-            host.reply("spctl", "");
+            host.reply("/usr/bin/codesign", "");
+            host.reply("/usr/sbin/spctl", "");
             host
         }
 
@@ -4213,7 +4213,7 @@ mod tests {
             write_test_app(&first, "com.vendor.a");
             write_test_app(&second, "com.vendor.b");
             let host = ready_host(&first);
-            let release = hold(&host, "ditto");
+            let release = hold(&host, "/usr/bin/ditto");
             let mut app = select_app(slim_scan(&[&first, &second]));
             app.layout = layout;
             app.host = Arc::new(host);
@@ -4265,6 +4265,7 @@ mod tests {
                 saved: report.freed_bytes,
                 old_app: None,
                 holding_left: Some((holding, error)),
+                remover: slim::Remover::User,
             };
             assert!(
                 report.notes.contains(&done.summary("X")),
