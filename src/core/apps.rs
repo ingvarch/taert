@@ -15,7 +15,7 @@ use super::date_utils::parse_rfc3339;
 use super::host::Host;
 use super::layout::Layout;
 use super::path_utils::prettify_path;
-use super::safety::Safety;
+use super::safety::{Safety, is_installer_package_id, package_location};
 use super::scanner::{CategoryScan, ScanItem, ScanProgressEvent, ToolGroup};
 use super::sizer::DirSizer;
 
@@ -25,7 +25,6 @@ const MDLS_TIMEOUT: Duration = Duration::from_secs(30);
 const NO_DATE: &str = "(null)";
 const BUNDLE_SEARCH_DEPTH: usize = 3;
 const PKGUTIL_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_PACKAGE_APP_DEPTH: usize = 4;
 
 /// Apple apps people install themselves. Every other `com.apple.` id is part of macOS.
 const REMOVABLE_APPLE_APPS: &[&str] = &[
@@ -165,16 +164,6 @@ pub fn is_reverse_dns(id: &str) -> bool {
     id.contains('.') && parts.all(valid)
 }
 
-/// `com.vendor.package.Name_X`, the shape of an installer package id.
-pub fn is_package_id(id: &str) -> bool {
-    id.contains('.')
-        && !id.starts_with('.')
-        && !id.contains("..")
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-}
-
 /// An app of a package listing: the last part ends with `.app`, no earlier part does.
 pub fn is_top_level_app(relative: &str) -> bool {
     let parts: Vec<&str> = relative.split('/').collect();
@@ -182,26 +171,48 @@ pub fn is_top_level_app(relative: &str) -> bool {
     parts.last().is_some_and(is_app) && !parts[..parts.len() - 1].iter().any(is_app)
 }
 
-fn package_location(receipt: &Path) -> Option<String> {
-    let info = Value::from_file(receipt).ok()?.into_dictionary()?;
-    Some(
-        info.get("InstallPrefixPath")
-            .and_then(Value::as_string)
-            .unwrap_or_default()
-            .trim_start_matches('/')
-            .to_string(),
-    )
-}
-
 fn is_package_bundle(path: &Path, layout: &Layout) -> bool {
-    let Ok(inside) = path.strip_prefix(layout.system("Library/Application Support")) else {
-        return false;
-    };
     let is_plain = path.components().all(|part| part != Component::ParentDir);
     is_plain
-        && !Safety::has_apple_part(path, layout)
-        && inside.iter().count() <= MAX_PACKAGE_APP_DEPTH
+        && Safety::is_package_location(path, layout)
         && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+/// The top-level apps `pkgutil --files` lists for a package. `None` when pkgutil fails or
+/// the package has an app in an app folder, because that app is the one to remove.
+fn package_bundles(
+    host: &dyn Host,
+    layout: &Layout,
+    package: &str,
+    location: &str,
+) -> Option<Vec<PathBuf>> {
+    let listing = host.run("/usr/sbin/pkgutil", &["--files", package], PKGUTIL_TIMEOUT);
+    if !listing.ok {
+        return None;
+    }
+    let bundles: Vec<PathBuf> = listing
+        .stdout
+        .lines()
+        .filter(|line| is_top_level_app(line))
+        .map(|line| layout.root.join(location).join(line))
+        .collect();
+    let in_app_folder = bundles
+        .iter()
+        .any(|path| Safety::is_app_bundle(path, layout));
+    (!in_app_folder).then_some(bundles)
+}
+
+/// Whether the package's receipt and listing still say `path` is one of its apps.
+pub fn package_holds(host: &dyn Host, layout: &Layout, package: &str, path: &Path) -> bool {
+    if !is_installer_package_id(package) {
+        return false;
+    }
+    let receipt = layout
+        .system("private/var/db/receipts")
+        .join(format!("{package}.plist"));
+    package_location(&receipt)
+        .and_then(|location| package_bundles(host, layout, package, &location))
+        .is_some_and(|bundles| bundles.iter().any(|bundle| bundle == path))
 }
 
 /// Apps that an installer package put in `/Library/Application Support`.
@@ -220,29 +231,15 @@ pub fn find_package_apps(layout: &Layout, host: &dyn Host) -> Vec<InstalledApp> 
         let Some(id) = receipt.file_stem().map(|id| id.to_string_lossy()) else {
             continue;
         };
-        if !is_package_id(&id) || id.to_ascii_lowercase().starts_with("com.apple.") {
+        if !is_installer_package_id(&id) {
             continue;
         }
         let Some(location) = package_location(&receipt) else {
             continue;
         };
-        let listing = host.run("/usr/sbin/pkgutil", &["--files", &id], PKGUTIL_TIMEOUT);
-        if !listing.ok {
+        let Some(bundles) = package_bundles(host, layout, &id, &location) else {
             continue;
-        }
-
-        let bundles: Vec<PathBuf> = listing
-            .stdout
-            .lines()
-            .filter(|line| is_top_level_app(line))
-            .map(|line| layout.root.join(&location).join(line))
-            .collect();
-        if bundles
-            .iter()
-            .any(|path| Safety::is_app_bundle(path, layout))
-        {
-            continue;
-        }
+        };
         for path in bundles {
             if !is_package_bundle(&path, layout) || apps.iter().any(|app| app.path == path) {
                 continue;
@@ -805,6 +802,7 @@ mod tests {
     use super::testing::*;
     use super::*;
     use crate::core::host::fake::FakeHost;
+    use crate::core::safety::is_package_id;
     use std::fs;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, UNIX_EPOCH};
@@ -1329,6 +1327,103 @@ mod tests {
     }
 
     #[test]
+    fn a_package_holds_the_bundle_it_lists_at_the_top_level() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        receipt(&layout, ACME_PACKAGE, Some(ACME_PREFIX));
+        let host = FakeHost::default();
+        files(&host, ACME_PACKAGE, ACME_LISTING);
+
+        assert!(package_holds(&host, &layout, ACME_PACKAGE, &path));
+    }
+
+    #[test]
+    fn a_package_no_longer_holds_what_it_stopped_listing() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        receipt(&layout, ACME_PACKAGE, Some(ACME_PREFIX));
+        let host = FakeHost::default();
+        files(
+            &host,
+            ACME_PACKAGE,
+            "Other.app\nAcme AutoUpdate.app/Contents/Info.plist\n",
+        );
+        assert!(!package_holds(&host, &layout, ACME_PACKAGE, &path));
+
+        let failing = FakeHost::default();
+        failing.fail(
+            "/usr/sbin/pkgutil --files com.acme.package.Acme_AutoUpdate",
+            "",
+        );
+        assert!(!package_holds(&failing, &layout, ACME_PACKAGE, &path));
+
+        let nested = layout
+            .system(ACME_PREFIX)
+            .join("Host.app/Acme AutoUpdate.app");
+        files(
+            &host,
+            ACME_PACKAGE,
+            "Host.app\nHost.app/Acme AutoUpdate.app\n",
+        );
+        assert!(!package_holds(&host, &layout, ACME_PACKAGE, &nested));
+    }
+
+    #[test]
+    fn a_package_with_an_app_in_an_app_folder_holds_nothing() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        fake_app(
+            &layout.system("Applications/Acme.app"),
+            "com.acme.main",
+            "acme",
+        );
+        receipt(&layout, ACME_PACKAGE, Some("/"));
+        let host = FakeHost::default();
+        files(
+            &host,
+            ACME_PACKAGE,
+            &format!("Applications/Acme.app\n{ACME_PREFIX}/Acme AutoUpdate.app\n"),
+        );
+
+        assert!(!package_holds(&host, &layout, ACME_PACKAGE, &path));
+    }
+
+    #[test]
+    fn a_package_without_a_receipt_holds_nothing() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        let host = FakeHost::default();
+        files(&host, ACME_PACKAGE, ACME_LISTING);
+
+        assert!(!package_holds(&host, &layout, ACME_PACKAGE, &path));
+    }
+
+    #[test]
+    fn a_package_id_with_a_path_in_it_holds_nothing() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        receipt(&layout, ACME_PACKAGE, Some(ACME_PREFIX));
+        let package = format!("../receipts/{ACME_PACKAGE}");
+        let host = FakeHost::default();
+        files(&host, &package, ACME_LISTING);
+
+        assert!(!package_holds(&host, &layout, &package, &path));
+    }
+
+    #[test]
+    fn an_apple_package_holds_nothing() {
+        let (_temp, layout) = sandbox();
+        let path = acme_bundle(&layout);
+        let host = FakeHost::default();
+        for package in ["com.apple.pkg.Acme_AutoUpdate", "COM.Apple.pkg.Acme_Helper"] {
+            receipt(&layout, package, Some(ACME_PREFIX));
+            files(&host, package, ACME_LISTING);
+
+            assert!(!package_holds(&host, &layout, package, &path), "{package}");
+        }
+    }
+
+    #[test]
     fn a_package_with_an_app_in_an_app_folder_is_skipped() {
         let (_temp, layout) = sandbox();
         acme_bundle(&layout);
@@ -1451,6 +1546,25 @@ mod tests {
         let found = find_package_apps(&layout, &host);
 
         assert_eq!(names(&found), ["Outer"]);
+    }
+
+    #[test]
+    fn an_app_in_a_package_folder_inside_another_app_is_not_an_app() {
+        let (_temp, layout) = sandbox();
+        fake_app(
+            &layout.system("Library/Application Support/Host.app/Foo.app"),
+            "com.acme.foo",
+            "foo",
+        );
+        receipt(
+            &layout,
+            ACME_PACKAGE,
+            Some("Library/Application Support/Host.app"),
+        );
+        let host = FakeHost::default();
+        files(&host, ACME_PACKAGE, "Foo.app\n");
+
+        assert!(find_package_apps(&layout, &host).is_empty());
     }
 
     #[test]

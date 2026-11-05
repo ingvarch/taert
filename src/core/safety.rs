@@ -8,6 +8,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+use plist::Value;
 use thiserror::Error;
 
 use super::host::{Host, MacHost};
@@ -56,6 +57,8 @@ pub enum SafetyError {
     UnsafeName,
     #[error("path is not an app or a place apps keep their files")]
     OutsideUninstallScope,
+    #[error("app is not one an installer package put here")]
+    NotPackageApp,
     #[error("app is currently running")]
     AppIsRunning,
     #[error("could not list running programs, so cannot tell whether the app is running")]
@@ -127,6 +130,40 @@ const HOME_APP_FOLDERS: &[&str] = &[
 
 /// Most nested an app sits below an app folder: `Vendor/Suite/Foo.app`.
 const MAX_BUNDLE_DEPTH: usize = 3;
+const MAX_PACKAGE_APP_DEPTH: usize = 4;
+
+fn is_app_name(part: &std::ffi::OsStr) -> bool {
+    Path::new(part)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+}
+
+/// `com.vendor.package.Name_X`, the shape of an installer package id.
+pub(crate) fn is_package_id(id: &str) -> bool {
+    id.contains('.')
+        && !id.starts_with('.')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// A package id taert may act on: well formed and not Apple's.
+pub(crate) fn is_installer_package_id(id: &str) -> bool {
+    is_package_id(id) && !id.to_ascii_lowercase().starts_with("com.apple.")
+}
+
+/// The install folder a package receipt names, relative to the root.
+pub(crate) fn package_location(receipt: &Path) -> Option<String> {
+    let info = Value::from_file(receipt).ok()?.into_dictionary()?;
+    Some(
+        info.get("InstallPrefixPath")
+            .and_then(Value::as_string)
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_string(),
+    )
+}
 
 pub struct Safety;
 
@@ -397,6 +434,70 @@ impl Safety {
         ignore: &IgnoreStore,
         layout: &Layout,
     ) -> Result<UninstallScope, SafetyError> {
+        let is_bundle = Self::is_app_bundle(path, layout);
+        Self::check_uninstall_target(path, is_bundle, ignore, layout)?;
+
+        if is_bundle {
+            Ok(UninstallScope::Bundle)
+        } else if layout.is_user_path(path) {
+            Ok(UninstallScope::Home)
+        } else {
+            Self::system_scope(path, layout)
+        }
+    }
+
+    /// Can an uninstall remove this app that an installer package put in
+    /// `/Library/Application Support`? The package's receipt must name the folder.
+    pub fn can_uninstall_package_app(
+        path: &Path,
+        package: &str,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+    ) -> Result<UninstallScope, SafetyError> {
+        Self::check_uninstall_target(path, true, ignore, layout)?;
+        if Self::is_package_app(path, package, layout) {
+            Ok(UninstallScope::Bundle)
+        } else {
+            Err(SafetyError::NotPackageApp)
+        }
+    }
+
+    fn is_package_app(path: &Path, package: &str, layout: &Layout) -> bool {
+        if !Self::is_package_location(path, layout) || !is_installer_package_id(package) {
+            return false;
+        }
+        let receipt = layout
+            .system("private/var/db/receipts")
+            .join(format!("{package}.plist"));
+        package_location(&receipt)
+            .is_some_and(|location| path.starts_with(layout.root.join(location)))
+    }
+
+    /// Where an installer package may put an app: a `.app` at most
+    /// `MAX_PACKAGE_APP_DEPTH` parts below `/Library/Application Support`, in no other
+    /// `.app` and no `com.apple.` folder.
+    pub(crate) fn is_package_location(path: &Path, layout: &Layout) -> bool {
+        let Ok(inside) = path.strip_prefix(layout.system("Library/Application Support")) else {
+            return false;
+        };
+        let parts: Vec<_> = inside.iter().collect();
+        let Some((name, folders)) = parts.split_last() else {
+            return false;
+        };
+        is_app_name(name)
+            && parts.len() <= MAX_PACKAGE_APP_DEPTH
+            && !folders.iter().any(|part| is_app_name(part))
+            && !Self::has_apple_part(path, layout)
+    }
+
+    /// The checks every uninstall target passes, whatever kind of target it is.
+    /// A bundle only needs its parent free of links.
+    fn check_uninstall_target(
+        path: &Path,
+        is_bundle: bool,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+    ) -> Result<(), SafetyError> {
         if path.as_os_str().is_empty() || path == Path::new("/") {
             return Err(SafetyError::RootPath);
         }
@@ -409,7 +510,6 @@ impl Safety {
             return Err(SafetyError::NotFound);
         }
 
-        let is_bundle = Self::is_app_bundle(path, layout);
         let checked_for_links = if is_bundle {
             path.parent().unwrap_or(path)
         } else {
@@ -435,14 +535,7 @@ impl Safety {
         if Self::is_ignored_or_protected(path, ignore) {
             return Err(SafetyError::Ignored);
         }
-
-        if is_bundle {
-            Ok(UninstallScope::Bundle)
-        } else if layout.is_user_path(path) {
-            Ok(UninstallScope::Home)
-        } else {
-            Self::system_scope(path, layout)
-        }
+        Ok(())
     }
 
     /// A root removal follows folder links, so no folder between a place macOS
@@ -466,17 +559,12 @@ impl Safety {
     }
 
     pub(crate) fn is_app_bundle(path: &Path, layout: &Layout) -> bool {
-        let is_app = |part: &std::ffi::OsStr| {
-            Path::new(part)
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-        };
-        is_app(path.as_os_str())
+        is_app_name(path.as_os_str())
             && layout.app_roots().iter().any(|root| {
                 path.strip_prefix(root).is_ok_and(|inside| {
                     let parts: Vec<_> = inside.iter().collect();
                     let folders = &parts[..parts.len().saturating_sub(1)];
-                    parts.len() <= MAX_BUNDLE_DEPTH && !folders.iter().any(|part| is_app(part))
+                    parts.len() <= MAX_BUNDLE_DEPTH && !folders.iter().any(|part| is_app_name(part))
                 })
             })
     }
@@ -1044,6 +1132,144 @@ mod tests {
         assert_eq!(
             uninstall_check(&library, &layout),
             Err(SafetyError::ProtectedRoot)
+        );
+    }
+
+    const ACME_PACKAGE: &str = "com.acme.package.Acme_AutoUpdate";
+    const ACME_PREFIX: &str = "Library/Application Support/Acme/AU2";
+
+    fn package_receipt(layout: &Layout, id: &str, prefix: &str) {
+        let folder = make(&layout.system("private/var/db/receipts"));
+        let mut info = plist::Dictionary::new();
+        info.insert("InstallPrefixPath".into(), prefix.into());
+        plist::Value::Dictionary(info)
+            .to_file_xml(folder.join(format!("{id}.plist")))
+            .unwrap();
+    }
+
+    fn package_check(
+        path: &Path,
+        package: &str,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+    ) -> Result<UninstallScope, SafetyError> {
+        Safety::can_uninstall_package_app(path, package, ignore, layout)
+    }
+
+    #[test]
+    fn a_package_app_inside_the_receipt_folder_can_be_uninstalled() {
+        let (_temp, layout) = sandbox();
+        package_receipt(&layout, ACME_PACKAGE, ACME_PREFIX);
+        let app = make(&layout.system(ACME_PREFIX).join("Acme AutoUpdate.app"));
+
+        assert_eq!(
+            package_check(&app, ACME_PACKAGE, &IgnoreStore::default(), &layout),
+            Ok(UninstallScope::Bundle)
+        );
+        assert_eq!(
+            uninstall_check(&app, &layout),
+            Err(SafetyError::OutsideUninstallScope)
+        );
+    }
+
+    #[test]
+    fn a_package_app_is_refused_unless_every_rule_holds() {
+        let (_temp, layout) = sandbox();
+        let none = IgnoreStore::default();
+        let apple = "com.apple.package.Acme";
+        let other = "com.acme.package.Other";
+        package_receipt(&layout, ACME_PACKAGE, ACME_PREFIX);
+        package_receipt(&layout, apple, ACME_PREFIX);
+        package_receipt(&layout, "com.acme.package.Elsewhere", "Library/Other");
+        package_receipt(
+            &layout,
+            "com.acme.package.Deep",
+            "Library/Application Support",
+        );
+        let app = make(&layout.system(ACME_PREFIX).join("Acme AutoUpdate.app"));
+        let outside = make(&layout.system("Library/Other/Acme.app"));
+        let inside_app = make(&layout.system("Library/Application Support/Host.app/Acme.app"));
+        let deep = make(&layout.system("Library/Application Support/a/b/c/d/Acme.app"));
+        let apple_dir = make(&layout.system("Library/Application Support/com.apple.x/Acme.app"));
+        let not_app = make(&layout.system(ACME_PREFIX).join("Acme"));
+        let mut ignored = IgnoreStore::default();
+        ignored.add(app.display().to_string());
+        let refused = Err(SafetyError::NotPackageApp);
+
+        assert_eq!(package_check(&app, other, &none, &layout), refused);
+        assert_eq!(package_check(&app, apple, &none, &layout), refused);
+        assert_eq!(package_check(&app, "bad id", &none, &layout), refused);
+        assert_eq!(
+            package_check(&outside, "com.acme.package.Elsewhere", &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&outside, ACME_PACKAGE, &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&inside_app, "com.acme.package.Deep", &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&deep, "com.acme.package.Deep", &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&apple_dir, "com.acme.package.Deep", &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&not_app, ACME_PACKAGE, &none, &layout),
+            refused
+        );
+        assert_eq!(
+            package_check(&app, ACME_PACKAGE, &ignored, &layout),
+            Err(SafetyError::Ignored)
+        );
+        assert_eq!(
+            package_check(&app.join("missing.app"), ACME_PACKAGE, &none, &layout),
+            Err(SafetyError::NotFound)
+        );
+        assert_eq!(
+            SafetyError::NotPackageApp.to_string(),
+            "app is not one an installer package put here"
+        );
+    }
+
+    #[test]
+    fn a_package_app_outside_the_receipt_folder_is_refused() {
+        let (_temp, layout) = sandbox();
+        package_receipt(&layout, ACME_PACKAGE, ACME_PREFIX);
+        let sibling = make(&layout.system("Library/Application Support/Other/Acme.app"));
+
+        assert_eq!(
+            package_check(&sibling, ACME_PACKAGE, &IgnoreStore::default(), &layout),
+            Err(SafetyError::NotPackageApp)
+        );
+    }
+
+    #[test]
+    fn a_package_id_with_two_dots_in_a_row_is_refused() {
+        let (_temp, layout) = sandbox();
+        package_receipt(&layout, "com.acme..x", ACME_PREFIX);
+        let app = make(&layout.system(ACME_PREFIX).join("Acme AutoUpdate.app"));
+
+        assert_eq!(
+            package_check(&app, "com.acme..x", &IgnoreStore::default(), &layout),
+            Err(SafetyError::NotPackageApp)
+        );
+    }
+
+    #[test]
+    fn an_apple_package_id_is_refused_in_any_letter_case() {
+        let (_temp, layout) = sandbox();
+        package_receipt(&layout, "COM.APPLE.x", ACME_PREFIX);
+        let app = make(&layout.system(ACME_PREFIX).join("Acme AutoUpdate.app"));
+
+        assert_eq!(
+            package_check(&app, "COM.APPLE.x", &IgnoreStore::default(), &layout),
+            Err(SafetyError::NotPackageApp)
         );
     }
 
