@@ -412,6 +412,48 @@ fn ignore_add_with_dry_run_saves_nothing() {
 }
 
 #[test]
+fn the_admin_helper_answers_a_user_process_with_a_json_error() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    taert(&home)
+        .args(["admin-helper", "compress", "--home"])
+        .arg(&home_path)
+        .arg(home_path.join("Applications/Foo.app"))
+        .assert()
+        .success()
+        .stdout("{\"error\":\"admin-helper must run as root\"}\n");
+}
+
+/// Runs the admin helper with `args` and returns the text of its one `{"error"}` answer.
+fn admin_helper_error(args: &[&str]) -> String {
+    let home = tempfile::tempdir().unwrap();
+    let output = taert(&home)
+        .arg("admin-helper")
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let answer: serde_json::Value = serde_json::from_slice(&output).expect("one JSON object");
+    let object = answer.as_object().expect("a JSON object");
+    assert_eq!(object.len(), 1, "{answer}");
+    object["error"].as_str().expect("an error text").to_string()
+}
+
+#[test]
+fn the_admin_helper_answers_missing_arguments_with_a_json_error() {
+    let error = admin_helper_error(&["compress", "/Applications/Foo.app"]);
+    assert!(error.contains("--home"), "{error}");
+}
+
+#[test]
+fn the_admin_helper_answers_help_with_a_json_error() {
+    let error = admin_helper_error(&["--help"]);
+    assert!(error.contains("compress"), "{error}");
+}
+
+#[test]
 fn config_with_dry_run_saves_nothing() {
     let home = tempfile::tempdir().unwrap();
     taert(&home)

@@ -470,6 +470,21 @@ fn copy_acl(c_src: &CString, c_dst: &CString) -> io::Result<()> {
     if res == 0 { Ok(()) } else { Err(error) }
 }
 
+/// Whether `path` has an extended ACL, even one with no entries.
+pub(crate) fn has_acl(path: &Path) -> io::Result<bool> {
+    let c_file = c_path(path)?;
+    let acl = unsafe { acl_get_file(c_file.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    unsafe { acl_free(acl) };
+    Ok(true)
+}
+
 /// Removes every ACL entry from `c_path`.
 fn clear_acl(c_path: &CString) -> io::Result<()> {
     let existing = unsafe { acl_get_file(c_path.as_ptr(), ACL_TYPE_EXTENDED) };
@@ -1339,20 +1354,42 @@ impl Compressor<'_> {
         path: &Path,
         options: &CompressOptions,
         cancelled: &AtomicBool,
-        mut on_file: F,
+        on_file: F,
     ) -> Result<CompressReport, SafetyError>
     where
         F: FnMut(&Path, &FileOutcome),
     {
-        let path = Safety::absolute(path);
-        Safety::can_compress_with_host(&path, self.ignore, self.layout, self.host)?;
-        let path = path.canonicalize().unwrap_or(path);
+        let owner = self.host.uid();
+        self.process_path_guarded(path, options, owner, cancelled, |_| Ok(()), on_file)
+    }
 
+    /// Like `process_path`, for the files of `owner`. `before` runs ahead of each change in a
+    /// folder or file, and an error from it is recorded as a failure and ends the walk.
+    pub(crate) fn process_path_guarded<B, F>(
+        &self,
+        path: &Path,
+        options: &CompressOptions,
+        owner: u32,
+        cancelled: &AtomicBool,
+        mut before: B,
+        mut on_file: F,
+    ) -> Result<CompressReport, SafetyError>
+    where
+        B: FnMut(&Path) -> Result<(), String>,
+        F: FnMut(&Path, &FileOutcome),
+    {
+        let path = Safety::absolute(path);
         let mut report = CompressReport {
             dry_run: options.dry_run,
             undo: options.undo,
             ..Default::default()
         };
+        if let Err(error) = before(&path) {
+            report.failures.push(CompressFailure { path, error });
+            return Ok(report);
+        }
+        Safety::can_compress_with_host(&path, self.ignore, self.layout, self.host)?;
+        let path = path.canonicalize().unwrap_or(path);
 
         let busy = if options.dry_run {
             HashSet::new()
@@ -1367,12 +1404,16 @@ impl Compressor<'_> {
         };
 
         if path.is_file() {
+            if let Err(error) = before(&path) {
+                report.failures.push(CompressFailure { path, error });
+                return Ok(report);
+            }
             if !options.dry_run
                 && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
             {
                 self.remove_stale_temps(parent, Some(name), &mut report);
             }
-            self.process_file(&path, options, &busy, &mut report, &mut on_file);
+            process_file(&path, options, owner, &busy, &mut report, &mut on_file);
             return Ok(report);
         }
 
@@ -1386,6 +1427,14 @@ impl Compressor<'_> {
                 || Safety::is_live_data_path(&current_dir, self.layout)
             {
                 continue;
+            }
+
+            if let Err(error) = before(&current_dir) {
+                report.failures.push(CompressFailure {
+                    path: current_dir,
+                    error,
+                });
+                return Ok(report);
             }
 
             if !options.dry_run {
@@ -1425,7 +1474,21 @@ impl Compressor<'_> {
                 } else if file_type.is_file()
                     && stale_temp_owner(&entry.file_name().to_string_lossy()).is_none()
                 {
-                    self.process_file(&entry_path, options, &busy, &mut report, &mut on_file);
+                    if let Err(error) = before(&entry_path) {
+                        report.failures.push(CompressFailure {
+                            path: entry_path,
+                            error,
+                        });
+                        return Ok(report);
+                    }
+                    process_file(
+                        &entry_path,
+                        options,
+                        owner,
+                        &busy,
+                        &mut report,
+                        &mut on_file,
+                    );
                 }
             }
         }
@@ -1490,37 +1553,6 @@ impl Compressor<'_> {
             })
     }
 
-    fn process_file<F>(
-        &self,
-        path: &Path,
-        options: &CompressOptions,
-        busy: &HashSet<PathBuf>,
-        report: &mut CompressReport,
-        on_file: &mut F,
-    ) where
-        F: FnMut(&Path, &FileOutcome),
-    {
-        report.scanned_files += 1;
-        let in_use = !busy.is_empty() && path.canonicalize().is_ok_and(|real| busy.contains(&real));
-        let res = if in_use {
-            Ok(FileOutcome::Skipped(SkipReason::OpenForWriting))
-        } else if options.undo {
-            undo_file(path, options.dry_run, self.host.uid())
-        } else {
-            compress_file(path, options.dry_run, self.host.uid())
-        };
-        match res {
-            Ok(outcome) => {
-                on_file(path, &outcome);
-                report.record(&outcome);
-            }
-            Err(e) => report.failures.push(CompressFailure {
-                path: path.to_path_buf(),
-                error: e.to_string(),
-            }),
-        }
-    }
-
     /// Deletes temporary files left by runs that are gone, for one file or for all of `dir`.
     fn remove_stale_temps(&self, dir: &Path, only: Option<&OsStr>, report: &mut CompressReport) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -1546,6 +1578,37 @@ impl Compressor<'_> {
                 });
             }
         }
+    }
+}
+
+fn process_file<F>(
+    path: &Path,
+    options: &CompressOptions,
+    owner: u32,
+    busy: &HashSet<PathBuf>,
+    report: &mut CompressReport,
+    on_file: &mut F,
+) where
+    F: FnMut(&Path, &FileOutcome),
+{
+    report.scanned_files += 1;
+    let in_use = !busy.is_empty() && path.canonicalize().is_ok_and(|real| busy.contains(&real));
+    let res = if in_use {
+        Ok(FileOutcome::Skipped(SkipReason::OpenForWriting))
+    } else if options.undo {
+        undo_file(path, options.dry_run, owner)
+    } else {
+        compress_file(path, options.dry_run, owner)
+    };
+    match res {
+        Ok(outcome) => {
+            on_file(path, &outcome);
+            report.record(&outcome);
+        }
+        Err(e) => report.failures.push(CompressFailure {
+            path: path.to_path_buf(),
+            error: e.to_string(),
+        }),
     }
 }
 
@@ -1714,14 +1777,11 @@ pub fn compress_candidates_scan(layout: &Layout, owner: u32) -> CategoryScan {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
-    use crate::core::apps::testing::sandbox;
-    use crate::core::host::fake::real_uid;
-    use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
-    use tempfile::tempdir;
+    use crate::core::host::fake::{FakeHost, real_uid};
 
-    fn make_repetitive_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
+    pub fn make_repetitive_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
         let file_path = dir.join(name);
         let pattern = "Hello APFS transparent decmpfs compression!\n".as_bytes();
         let mut data = Vec::with_capacity(size_bytes);
@@ -1732,6 +1792,29 @@ mod tests {
         fs::write(&file_path, &data).unwrap();
         file_path
     }
+
+    pub fn is_compressed(path: &Path) -> bool {
+        let meta = fs::symlink_metadata(path).unwrap();
+        DarwinMetadataExt::st_flags(&meta) & UF_COMPRESSED != 0
+    }
+
+    pub fn host_with(ps: &str, lsof: &str) -> FakeHost {
+        let host = FakeHost::default();
+        host.set_uid(real_uid());
+        host.reply("/bin/ps", ps);
+        host.reply("/usr/sbin/lsof", lsof);
+        host
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{host_with, is_compressed, make_repetitive_file};
+    use super::*;
+    use crate::core::apps::testing::sandbox;
+    use crate::core::host::fake::real_uid;
+    use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
+    use tempfile::tempdir;
 
     #[test]
     fn a_file_is_compressed_only_for_the_host_user() {
@@ -2033,11 +2116,6 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names == [name]
-    }
-
-    fn is_compressed(path: &Path) -> bool {
-        let meta = fs::symlink_metadata(path).unwrap();
-        DarwinMetadataExt::st_flags(&meta) & UF_COMPRESSED != 0
     }
 
     fn temp_file_in(dir: &Path) -> PathBuf {
@@ -2381,14 +2459,6 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), orig_bytes);
     }
 
-    fn host_with(ps: &str, lsof: &str) -> crate::core::host::fake::FakeHost {
-        let host = crate::core::host::fake::FakeHost::default();
-        host.set_uid(real_uid());
-        host.reply("/bin/ps", ps);
-        host.reply("/usr/sbin/lsof", lsof);
-        host
-    }
-
     fn run(
         layout: &Layout,
         host: &crate::core::host::fake::FakeHost,
@@ -2560,6 +2630,104 @@ mod tests {
         assert!(live.exists());
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.scanned_files, 0);
+    }
+
+    fn guarded_run(path: &Path, layout: &Layout, fail_from: usize) -> (usize, CompressReport) {
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        let compressor = Compressor {
+            host: &host,
+            layout,
+            ignore: &IgnoreStore::default(),
+        };
+        let mut calls = 0;
+        let report = compressor
+            .process_path_guarded(
+                path,
+                &real_run(),
+                real_uid(),
+                &AtomicBool::new(false),
+                |_| {
+                    calls += 1;
+                    if calls >= fail_from {
+                        Err("the bundle moved".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_, _| {},
+            )
+            .unwrap();
+        (calls, report)
+    }
+
+    #[test]
+    fn a_failing_guard_ends_the_walk_before_the_next_change() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let files = ["a.txt", "b.txt", "c.txt"].map(|n| make_repetitive_file(&dir, n, 300_000));
+
+        let (calls, report) = guarded_run(&dir, &layout, 4);
+
+        assert_eq!(calls, 4);
+        assert_eq!(report.processed_files, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].error, "the bundle moved");
+        assert_eq!(files.iter().filter(|f| is_compressed(f)).count(), 1);
+    }
+
+    #[test]
+    fn a_guard_that_fails_first_changes_nothing() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let file = make_repetitive_file(&dir, "a.txt", 300_000);
+
+        let (calls, report) = guarded_run(&dir, &layout, 1);
+
+        assert_eq!(calls, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(!is_compressed(&file));
+    }
+
+    #[test]
+    fn a_guard_that_fails_first_changes_no_single_file() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let file = make_repetitive_file(&dir, "a.txt", 300_000);
+
+        let (calls, report) = guarded_run(&file, &layout, 1);
+
+        assert_eq!(calls, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(!is_compressed(&file));
+    }
+
+    #[test]
+    fn the_guard_runs_again_just_before_a_single_file_changes() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let file = make_repetitive_file(&dir, "a.txt", 300_000);
+
+        let (calls, report) = guarded_run(&file, &layout, 2);
+
+        assert_eq!(calls, 2);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].error, "the bundle moved");
+        assert!(!is_compressed(&file));
+    }
+
+    #[test]
+    fn a_folder_the_guard_refuses_ends_the_walk() {
+        let (_temp, layout) = sandbox();
+        let dir = make(&layout.user("Projects/data"));
+        let files =
+            ["one", "two"].map(|sub| make_repetitive_file(&make(&dir.join(sub)), "a.txt", 300_000));
+
+        let (calls, report) = guarded_run(&dir, &layout, 3);
+
+        assert_eq!(calls, 3);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].path.is_dir(), "{:?}", report.failures);
+        assert!(files.iter().all(|f| !is_compressed(f)));
     }
 
     #[test]

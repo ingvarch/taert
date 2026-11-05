@@ -238,6 +238,7 @@ pub mod fake {
         pub calls: Mutex<Vec<String>>,
         pub replies: Mutex<Vec<(String, VecDeque<Output>)>>,
         pub admin_scripts: Mutex<Vec<String>>,
+        pub admin_prompts: Mutex<Vec<String>>,
         pub admin_result: Mutex<Option<String>>,
         pub admin_stdout: Mutex<String>,
         pub admin_effect: Mutex<Option<Effect>>,
@@ -399,11 +400,12 @@ pub mod fake {
             }
         }
 
-        fn run_admin(&self, script: &str, _prompt: &str) -> Result<(), String> {
+        fn run_admin(&self, script: &str, prompt: &str) -> Result<(), String> {
             if *self.password_refused.lock().unwrap() {
                 return Err(NOT_GIVEN.to_string());
             }
             self.admin_scripts.lock().unwrap().push(script.to_string());
+            self.admin_prompts.lock().unwrap().push(prompt.to_string());
             if let Some(effect) = self.admin_effect.lock().unwrap().as_ref() {
                 effect();
             }
