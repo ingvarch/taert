@@ -9,10 +9,6 @@ use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Frame, Terminal};
 
@@ -29,6 +25,7 @@ use super::progress::{ProgressState, render_progress};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
 use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
+use super::terminal::{AdminGate, enter_tui, leave_tui};
 use super::theme::Theme;
 use super::workspace::{
     CleanSubcategory, MainMenuChoice, StartConfirmKind, WorkspaceState, WorkspaceView,
@@ -139,6 +136,7 @@ pub struct App {
     pub storage_cache: Arc<RwLock<StorageCache>>,
     pub layout: Layout,
     pub host: Arc<dyn Host>,
+    pub admin: AdminGate,
     /// Apps of the last search, which decide what a selection in the list means.
     pub installed: Vec<InstalledApp>,
     /// The plan shown for review. Its selection lives in the select screen.
@@ -176,6 +174,7 @@ impl App {
             storage_cache: Arc::new(RwLock::new(StorageCache::new())),
             layout: Layout::current(),
             host: Arc::new(MacHost),
+            admin: AdminGate::production(),
             installed: Vec::new(),
             plan: None,
             permanent: false,
@@ -271,6 +270,7 @@ impl App {
             storage_cache: Arc::new(RwLock::new(StorageCache::new())),
             layout: Layout::current(),
             host: Arc::new(MacHost),
+            admin: AdminGate::production(),
             installed: Vec::new(),
             plan: None,
             permanent: false,
@@ -300,6 +300,7 @@ impl App {
             storage_cache,
             layout: Layout::current(),
             host: Arc::new(MacHost),
+            admin: AdminGate::production(),
             installed: Vec::new(),
             plan: None,
             permanent: false,
@@ -404,18 +405,13 @@ impl App {
     }
 
     pub fn run(&mut self) -> io::Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
+        enter_tui()?;
+        let backend = CrosstermBackend::new(stdout());
         let mut terminal = Terminal::new(backend)?;
 
         let res = self.main_loop(&mut terminal);
 
-        // Restore terminal state
-        let _ = disable_raw_mode();
-        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = terminal.show_cursor();
+        leave_tui();
 
         res
     }
@@ -426,6 +422,9 @@ impl App {
     ) -> io::Result<()> {
         self.start_pending_brew_check();
         while !self.should_quit {
+            if std::mem::take(&mut self.admin.redraw_all) {
+                terminal.clear()?;
+            }
             terminal.draw(|frame| {
                 let area = frame.area();
                 if area.width < 40 || area.height < 12 {
