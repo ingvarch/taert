@@ -278,7 +278,7 @@ pub fn run_slim_helper(
         .map_err(|error| (1, error))?;
     let done: SlimAnswer = parse_step_answer(&answer)?;
     let old_app = done.old_app.as_path();
-    let in_applications = old_app.parent() == Some(layout.system("Applications").as_path())
+    let in_applications = slim::is_directly_in_applications(old_app, layout)
         && match (old_app.file_name(), app.path.file_stem()) {
             (Some(old), Some(name)) => slim::is_old_copy_name(old, name),
             _ => false,

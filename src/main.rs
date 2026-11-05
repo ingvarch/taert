@@ -138,9 +138,15 @@ fn main() -> ExitCode {
             console,
         ),
 
-        Some(Command::Slim(ref args)) => {
-            handle_slim(args, &cli, use_plain, &ignore, &context, console)
-        }
+        Some(Command::Slim(ref args)) => handle_slim(
+            args,
+            &cli,
+            use_plain,
+            &ignore,
+            &context,
+            crate::core::safety::SYSTEM_OWNER,
+            console,
+        ),
 
         Some(Command::Analyze(ref args)) => handle_analyze(
             args.path.clone(),
@@ -1636,6 +1642,7 @@ fn handle_slim(
     use_plain: bool,
     ignore: &IgnoreStore,
     context: &ScanContext,
+    system_owner: u32,
     console: &mut Console,
 ) -> ExitCode {
     let ScanContext { layout, host, .. } = *context;
@@ -1648,7 +1655,7 @@ fn handle_slim(
     }
 
     if args.names.is_empty() {
-        return pick_apps_to_slim(cli, use_plain, ignore, context, console);
+        return pick_apps_to_slim(cli, use_plain, ignore, context, system_owner, console);
     }
 
     let installed = crate::core::slim::candidate_apps(layout);
@@ -1677,17 +1684,16 @@ fn handle_slim(
         history.start_run("slim", mode, Some(selected.len()))
     });
 
+    let rules = crate::core::slim::SlimRules {
+        rosetta_apps: &rosetta,
+        running: Some(&running),
+        skip_developer_id: false,
+        system_owner,
+    };
     for app in &selected {
-        let binaries = match crate::core::slim::check_eligibility(
-            app,
-            host,
-            layout,
-            ignore,
-            &rosetta,
-            Some(&running),
-            false,
-        ) {
-            Ok(b) => b,
+        let eligible = match crate::core::slim::check_eligibility(app, host, layout, ignore, &rules)
+        {
+            Ok(eligible) => eligible,
             Err(reason) => {
                 if cli.json {
                     let err = serde_json::json!({
@@ -1713,7 +1719,8 @@ fn handle_slim(
             }
         };
 
-        let intel_size: u64 = binaries
+        let intel_size: u64 = eligible
+            .binaries
             .iter()
             .filter_map(|p| {
                 crate::core::slim::parse_fat_header_from_file(p)
@@ -1790,7 +1797,7 @@ fn handle_slim(
         let Some(session) = history_session.as_ref() else {
             unreachable!("a dry run continues before the slim step");
         };
-        let slim_res = crate::core::slim::slim_app_logged(session, app, &binaries, host, false);
+        let slim_res = slim_one(context, session, app, eligible.needs_admin);
         match slim_res {
             Ok(done) => {
                 if cli.json {
@@ -1851,11 +1858,28 @@ fn handle_slim(
     ExitCode::SUCCESS
 }
 
+/// Slims one app: an app that belongs to root goes to the root helper after one password prompt.
+fn slim_one(
+    context: &ScanContext,
+    session: &crate::core::history::HistorySession,
+    app: &InstalledApp,
+    needs_admin: bool,
+) -> Result<crate::core::slim::SlimDone, (usize, String)> {
+    if needs_admin {
+        context
+            .admin
+            .prepare(context.host, crate::core::slim::ADMIN_REASON)
+            .map_err(|error| (1, error))?;
+    }
+    crate::core::slim::slim_logged(session, context.host, context.layout, app, needs_admin)
+}
+
 fn pick_apps_to_slim(
     cli: &Cli,
     use_plain: bool,
     ignore: &IgnoreStore,
     context: &ScanContext,
+    system_owner: u32,
     console: &mut Console,
 ) -> ExitCode {
     let ScanContext { layout, host, .. } = *context;
@@ -1878,19 +1902,18 @@ fn pick_apps_to_slim(
                     .as_ref()
                     .ok_or_else(|| crate::core::slim::PS_FAILED.to_string())
                     .and_then(|running| {
-                        crate::core::slim::check_eligibility(
-                            &app,
-                            host,
-                            layout,
-                            ignore,
-                            &rosetta,
-                            Some(running),
-                            false,
-                        )
+                        let rules = crate::core::slim::SlimRules {
+                            rosetta_apps: &rosetta,
+                            running: Some(running),
+                            skip_developer_id: false,
+                            system_owner,
+                        };
+                        crate::core::slim::check_eligibility(&app, host, layout, ignore, &rules)
                     });
                 match eligible {
-                    Ok(binaries) => {
-                        let intel_bytes: u64 = binaries
+                    Ok(eligible) => {
+                        let intel_bytes: u64 = eligible
+                            .binaries
                             .iter()
                             .filter_map(|p| {
                                 crate::core::slim::parse_fat_header_from_file(p)
@@ -1915,6 +1938,7 @@ fn pick_apps_to_slim(
                             intel_bytes,
                             eligible: true,
                             reason: None,
+                            needs_admin: eligible.needs_admin,
                         }
                     }
                     Err(reason) => crate::core::slim::SlimAppInfo {
@@ -1924,6 +1948,7 @@ fn pick_apps_to_slim(
                         intel_bytes: 0,
                         eligible: false,
                         reason: Some(reason),
+                        needs_admin: false,
                     },
                 }
             })
@@ -1941,7 +1966,7 @@ fn pick_apps_to_slim(
         };
     }
 
-    let mut scan = crate::core::slim::slim_scan(layout, host, ignore, None, None);
+    let mut scan = crate::core::slim::slim_scan(layout, host, ignore, system_owner, None, None);
 
     let _ = write!(console.out, "{}", PlainRunner::scan_text(&scan));
     if cli.dry_run {
@@ -1954,9 +1979,11 @@ fn pick_apps_to_slim(
         return ExitCode::FAILURE;
     }
 
-    let selected_paths: Vec<_> = scan
-        .selected_items()
+    let selected = scan.selected_items();
+    let selected_paths: Vec<_> = selected.iter().map(|item| item.path.clone()).collect();
+    let of_root: Vec<_> = selected
         .iter()
+        .filter(|item| item.needs_admin)
         .map(|item| item.path.clone())
         .collect();
 
@@ -1978,8 +2005,7 @@ fn pick_apps_to_slim(
     let mut total_saved = 0u64;
     let mut any_trashed = false;
     for app in &chosen {
-        let (binaries, _) = crate::core::slim::find_universal_binaries(&app.path);
-        match crate::core::slim::slim_app_logged(&session, app, &binaries, host, false) {
+        match slim_one(context, &session, app, of_root.contains(&app.path)) {
             Ok(done) => {
                 total_saved += done.saved;
                 any_trashed |= done.old_app.is_none();
@@ -2149,6 +2175,24 @@ mod tests {
         host: &FakeHost,
         layout: &Layout,
     ) -> Ran {
+        slim_typed_for(
+            args,
+            typed,
+            use_plain,
+            host,
+            layout,
+            crate::core::safety::SYSTEM_OWNER,
+        )
+    }
+
+    fn slim_typed_for(
+        args: &[&str],
+        typed: &str,
+        use_plain: bool,
+        host: &FakeHost,
+        layout: &Layout,
+        system_owner: u32,
+    ) -> Ran {
         let cli = parse(args);
         let Some(Command::Slim(ref slim_args)) = cli.command else {
             panic!("not a slim command");
@@ -2165,6 +2209,7 @@ mod tests {
                 use_plain,
                 &IgnoreStore::default(),
                 &context,
+                system_owner,
                 console,
             )
         })
@@ -2176,8 +2221,11 @@ mod tests {
     }
 
     fn slim_ready_signed_by(layout: &Layout, authority: &str) -> (FakeHost, std::path::PathBuf) {
+        slim_ready_at(layout.user("Applications/Fat.app"), authority)
+    }
+
+    fn slim_ready_at(app: std::path::PathBuf, authority: &str) -> (FakeHost, std::path::PathBuf) {
         use crate::core::slim::testing::{fake_ditto, write_test_app};
-        let app = layout.user("Applications/Fat.app");
         write_test_app(&app, "com.vendor.fat");
         let host = apple_silicon_host();
         host.reply("/usr/bin/codesign -dv", &format!("Authority={authority}\n"));
@@ -5079,5 +5127,172 @@ mod tests {
         assert!(ran.err.contains(admin::NOT_GIVEN), "{}", ran.err);
         assert_eq!(host.sudo_asks(), 1);
         assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    /// "Fat" in `/Applications`, which looks like an app of root: its files belong to the test
+    /// user, who is the system owner here, and the host user is another one.
+    fn slim_system_ready(layout: &Layout) -> (FakeHost, std::path::PathBuf) {
+        let (host, app) = slim_ready_at(
+            layout.system("Applications/Fat.app"),
+            "Developer ID Application: Acme Corp (123)",
+        );
+        host.set_uid(crate::core::host::fake::real_uid() + 1);
+        host.fail(SUDO_PROBE, "");
+        *host.tty.lock().unwrap() = true;
+        let answer = serde_json::json!({
+            "saved": 1000,
+            "old_app": layout.system("Applications/Fat.taert-old.app"),
+        });
+        *host.admin_stdout.lock().unwrap() = answer.to_string();
+        (host, app)
+    }
+
+    fn slim_as_system(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
+        let system_owner = crate::core::host::fake::real_uid();
+        slim_typed_for(args, typed, false, host, layout, system_owner)
+    }
+
+    #[test]
+    fn a_dry_run_on_an_app_of_root_asks_nothing() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_system_ready(&layout);
+
+        let ran = slim_as_system(&["slim", "Fat", "--dry-run"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Would slim Fat, saving "), "{}", ran.out);
+        assert!(
+            ran.out
+                .contains("of Intel code. Original will go to Trash.")
+        );
+        assert_eq!(host.sudo_asks(), 0);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn slimming_an_app_of_root_asks_then_the_password_then_runs_the_helper() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_system_ready(&layout);
+
+        let ran = slim_as_system(&["slim", "Fat"], "y\n", &host, &layout);
+
+        assert!(ran.ok, "{}{}", ran.out, ran.err);
+        assert!(ran.out.starts_with("Slim Fat? [y/N]: "), "{}", ran.out);
+        assert!(ran.out.contains("Slimmed Fat, saved "), "{}", ran.out);
+        assert_eq!(host.sudo_asks(), 1);
+        let calls = host.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "sudo -v slim apps that belong to the system")
+        );
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "{scripts:?}");
+        assert!(scripts[0].contains("admin-helper slim"), "{scripts:?}");
+        assert!(scripts[0].contains(app.to_str().unwrap()));
+        assert!(!calls.iter().any(|call| call.starts_with("/usr/bin/ditto")));
+    }
+
+    #[test]
+    fn declining_the_slim_of_an_app_of_root_asks_for_no_password() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_system_ready(&layout);
+
+        let ran = slim_as_system(&["slim", "Fat"], "n\n", &host, &layout);
+
+        assert!(ran.out.contains("Cancelled."), "{}", ran.out);
+        assert_eq!(host.sudo_asks(), 0);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_plain_picker_sends_an_app_of_root_to_the_helper() {
+        let (_temp, layout) = sandbox();
+        let (host, app) = slim_system_ready(&layout);
+        let system_owner = crate::core::host::fake::real_uid();
+
+        let ran = slim_typed_for(
+            &["slim", "--force"],
+            "all\n",
+            true,
+            &host,
+            &layout,
+            system_owner,
+        );
+
+        assert!(ran.ok, "{}{}", ran.out, ran.err);
+        assert!(ran.out.contains("Slimmed Fat, saved "), "{}", ran.out);
+        assert_eq!(host.sudo_asks(), 1);
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "{scripts:?}");
+        assert!(scripts[0].contains("admin-helper slim"), "{scripts:?}");
+        assert!(scripts[0].contains(app.to_str().unwrap()));
+        let calls = host.calls.lock().unwrap();
+        assert!(!calls.iter().any(|call| call.starts_with("/usr/bin/ditto")));
+    }
+
+    #[test]
+    fn a_refused_password_fails_the_slim_of_an_app_of_root() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_system_ready(&layout);
+        *host.sudo_refused.lock().unwrap() = true;
+
+        let ran = slim_as_system(&["slim", "Fat"], "y\n", &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(
+            ran.err
+                .contains(&format!("failed at step 1: {}", admin::NOT_GIVEN)),
+            "{}",
+            ran.err
+        );
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_json_list_names_needs_admin_only_for_an_app_of_root() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_system_ready(&layout);
+        let store = layout.system("Applications/Store.app");
+        crate::core::slim::testing::write_test_app(&store, "com.vendor.store");
+        std::fs::create_dir_all(store.join("Contents/_MASReceipt")).unwrap();
+
+        let ran = slim_as_system(&["slim", "--json"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let row = |name: &str| {
+            json.as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap()
+        };
+        assert_eq!(row("Fat")["eligible"], true);
+        assert_eq!(row("Fat")["needs_admin"], true);
+        assert_eq!(row("Store")["eligible"], false);
+        assert!(row("Store").get("needs_admin").is_none());
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn the_json_list_has_no_needs_admin_for_the_apps_of_the_user() {
+        let (_temp, layout) = sandbox();
+        let (host, _app) = slim_ready(&layout);
+        let system_owner = crate::core::host::fake::real_uid() + 1;
+
+        let ran = slim_typed_for(&["slim", "--json"], "", false, &host, &layout, system_owner);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        let fat = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "Fat")
+            .unwrap();
+        assert_eq!(fat["eligible"], true, "{fat}");
+        assert!(fat.get("needs_admin").is_none(), "{fat}");
     }
 }

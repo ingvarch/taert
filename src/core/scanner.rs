@@ -48,7 +48,7 @@ pub struct ScanItem {
     pub needs_admin: bool,
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 

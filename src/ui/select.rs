@@ -963,7 +963,7 @@ impl SelectState {
         if !self.scan.selected_items().is_empty() {
             self.asks_password = (self.scan.id == uninstaller::PLAN_ID
                 && uninstaller::needs_password(&self.scan, &self.routes))
-                || (self.scan.id == compress::SCAN_ID
+                || (matches!(self.scan.id.as_str(), compress::SCAN_ID | slim::SCAN_ID)
                     && self
                         .scan
                         .selected_items()

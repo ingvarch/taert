@@ -1557,6 +1557,7 @@ impl App {
                 Screen::Select(select) if select.scan.id == compress::SCAN_ID => {
                     compress::ADMIN_REASON
                 }
+                Screen::Select(select) if select.scan.id == slim::SCAN_ID => slim::ADMIN_REASON,
                 _ => uninstaller::ADMIN_REASON,
             };
             let _ = self.admin.ask(&*self.host, reason);
@@ -1665,14 +1666,14 @@ impl App {
                             last_used: item.modified,
                             package: None,
                         };
-                        let (binaries, _) = slim::find_universal_binaries(&item.path);
-                        match slim::slim_app_logged(
+                        let result = slim::slim_logged(
                             &session,
-                            &installed_app,
-                            &binaries,
                             &*host,
-                            false,
-                        ) {
+                            &layout,
+                            &installed_app,
+                            item.needs_admin,
+                        );
+                        match result {
                             Ok(done) => {
                                 total_saved += done.saved;
                                 apps_slimmed += 1;
@@ -2044,7 +2045,14 @@ impl App {
                 return;
             }
             let (progress, bridge) = forward_progress(tx.clone());
-            let scan = slim::slim_scan(&layout, &*host, &ignore, Some(progress), Some(cancel_scan));
+            let scan = slim::slim_scan(
+                &layout,
+                &*host,
+                &ignore,
+                SYSTEM_OWNER,
+                Some(progress),
+                Some(cancel_scan),
+            );
             let _ = bridge.join();
             let _ = tx.send(ScanMessage::Finished(scan));
         });
@@ -4203,6 +4211,113 @@ mod tests {
             assert!(screen.contains("goes to the Trash"), "{screen}");
             assert!(!screen.contains("permanently"), "{screen}");
             assert!(!screen.contains("cannot be undone"), "{screen}");
+        }
+
+        const PROBE: &str = "/usr/bin/sudo -n true";
+
+        type SystemApp = (
+            tempfile::TempDir,
+            App,
+            Arc<FakeHost>,
+            std::path::PathBuf,
+            std::path::PathBuf,
+        );
+
+        /// A slim list of `Sys` and `Mine`, with `Sys` first and marked as an app of root, on a Mac with a
+        /// terminal and no sudo ticket. The helper answers that it slimmed `Sys`.
+        fn with_system_app(refuses: bool) -> SystemApp {
+            let (temp, layout) = sandbox();
+            let mine = layout.user("Applications/Mine.app");
+            let sys = layout.system("Applications/Sys.app");
+            write_test_app(&mine, "com.vendor.mine");
+            write_test_app(&sys, "com.vendor.sys");
+            let host = ready_host(&mine);
+            host.fail(PROBE, "");
+            *host.tty.lock().unwrap() = true;
+            *host.sudo_refused.lock().unwrap() = refuses;
+            let answer = serde_json::json!({
+                "saved": 1000,
+                "old_app": layout.system("Applications/Sys.taert-old.app"),
+            });
+            *host.admin_stdout.lock().unwrap() = answer.to_string();
+            let host = Arc::new(host);
+            let mut app = select_app(slim_scan(&[&sys, &mine]));
+            app.layout = layout;
+            app.host = host.clone();
+            let Screen::Select(select) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            select.scan.groups[0].items[0].needs_admin = true;
+            (temp, app, host, mine, sys)
+        }
+
+        fn confirm_and_wait(app: &mut App) {
+            press(app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            while app.removal_rx.is_some() {
+                app.poll_removal();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        #[test]
+        fn confirming_an_app_of_root_asks_once_and_sends_it_to_the_helper() {
+            let (_temp, mut app, host, mine, sys) = with_system_app(false);
+
+            confirm_and_wait(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert!(
+                host.calls
+                    .lock()
+                    .unwrap()
+                    .contains(&"sudo -v slim apps that belong to the system".to_string())
+            );
+            let scripts = host.admin_scripts.lock().unwrap();
+            assert_eq!(scripts.len(), 1, "{scripts:?}");
+            assert!(scripts[0].contains("admin-helper slim"), "{scripts:?}");
+            assert!(scripts[0].contains(&sys.display().to_string()));
+            assert!(!scripts[0].contains(&mine.display().to_string()));
+            let report = report_of(&app);
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(report.removed_count, 2);
+            assert!(report.freed_bytes >= 1000);
+            assert_eq!(slim_runs(&app.layout)[0].items.len(), 2);
+        }
+
+        #[test]
+        fn the_question_names_the_password_only_when_an_app_of_root_is_selected() {
+            let (_temp, mut app, _host, _mine, _sys) = with_system_app(false);
+            press(&mut app, &[KeyCode::Enter]);
+            let screen = screen_text(&app);
+            assert!(
+                screen.contains("taert asks for your administrator password first."),
+                "{screen}"
+            );
+
+            let mut app = select_app(slim_scan(&[Path::new("/Applications/X.app")]));
+            press(&mut app, &[KeyCode::Enter]);
+            assert!(!screen_text(&app).contains("password"));
+        }
+
+        #[test]
+        fn after_a_refusal_the_app_of_root_fails_and_the_rest_goes_on() {
+            let (_temp, mut app, host, mine, sys) = with_system_app(true);
+
+            confirm_and_wait(&mut app);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert!(host.admin_scripts.lock().unwrap().is_empty());
+            let report = report_of(&app);
+            assert_eq!(report.removed_count, 1);
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].path, sys);
+            let runs = slim_runs(&app.layout);
+            assert_eq!(runs[0].items.len(), 1);
+            assert_eq!(runs[0].items[0].path, mine);
+            assert_eq!(
+                report.failures[0].error,
+                "Step 1 failed: The administrator password was not given"
+            );
         }
 
         #[test]
