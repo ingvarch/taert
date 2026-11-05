@@ -850,13 +850,16 @@ impl<'a> Replacement<'a> {
 }
 
 /// Check eligibility of a single file for compression.
-pub fn check_eligibility_compress(path: &Path, meta: &fs::Metadata) -> Result<(), SkipReason> {
+pub fn check_eligibility_compress(
+    path: &Path,
+    meta: &fs::Metadata,
+    owner: u32,
+) -> Result<(), SkipReason> {
     if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.nlink() > 1 {
         return Err(SkipReason::SymlinkOrHardlink);
     }
 
-    let uid = unsafe { libc::geteuid() };
-    if meta.uid() != uid {
+    if meta.uid() != owner {
         return Err(SkipReason::NotUserOwned);
     }
 
@@ -886,8 +889,12 @@ pub fn check_eligibility_compress(path: &Path, meta: &fs::Metadata) -> Result<()
 }
 
 /// Estimate compression ratio on a file without modifying disk.
-pub fn estimate_file(path: &Path, meta: &fs::Metadata) -> Result<FileOutcome, SkipReason> {
-    check_eligibility_compress(path, meta)?;
+pub fn estimate_file(
+    path: &Path,
+    meta: &fs::Metadata,
+    owner: u32,
+) -> Result<FileOutcome, SkipReason> {
+    check_eligibility_compress(path, meta, owner)?;
 
     let len = meta.len();
     if len < 4096 {
@@ -1030,23 +1037,25 @@ fn write_compressed_fork(
 pub fn compress_file(
     path: &Path,
     dry_run: bool,
+    owner: u32,
 ) -> Result<FileOutcome, Box<dyn std::error::Error>> {
-    compress_file_probed(path, dry_run, &no_probe)
+    compress_file_probed(path, dry_run, owner, &no_probe)
 }
 
 fn compress_file_probed(
     path: &Path,
     dry_run: bool,
+    owner: u32,
     probe: Probe,
 ) -> Result<FileOutcome, Box<dyn std::error::Error>> {
     let meta = fs::symlink_metadata(path)?;
 
-    if let Err(reason) = check_eligibility_compress(path, &meta) {
+    if let Err(reason) = check_eligibility_compress(path, &meta, owner) {
         return Ok(FileOutcome::Skipped(reason));
     }
 
     if dry_run {
-        return match estimate_file(path, &meta) {
+        return match estimate_file(path, &meta, owner) {
             Ok(outcome) => Ok(outcome),
             Err(reason) => Ok(FileOutcome::Skipped(reason)),
         };
@@ -1122,13 +1131,18 @@ fn compress_into(
 }
 
 /// Unpack a compressed file back to a normal file using the atomic 4-step pipeline.
-pub fn undo_file(path: &Path, dry_run: bool) -> Result<FileOutcome, Box<dyn std::error::Error>> {
-    undo_file_probed(path, dry_run, &no_probe)
+pub fn undo_file(
+    path: &Path,
+    dry_run: bool,
+    owner: u32,
+) -> Result<FileOutcome, Box<dyn std::error::Error>> {
+    undo_file_probed(path, dry_run, owner, &no_probe)
 }
 
 fn undo_file_probed(
     path: &Path,
     dry_run: bool,
+    owner: u32,
     probe: Probe,
 ) -> Result<FileOutcome, Box<dyn std::error::Error>> {
     let meta = fs::symlink_metadata(path)?;
@@ -1137,8 +1151,7 @@ fn undo_file_probed(
         return Ok(FileOutcome::Skipped(SkipReason::SymlinkOrHardlink));
     }
 
-    let uid = unsafe { libc::geteuid() };
-    if meta.uid() != uid {
+    if meta.uid() != owner {
         return Ok(FileOutcome::Skipped(SkipReason::NotUserOwned));
     }
 
@@ -1492,9 +1505,9 @@ impl Compressor<'_> {
         let res = if in_use {
             Ok(FileOutcome::Skipped(SkipReason::OpenForWriting))
         } else if options.undo {
-            undo_file(path, options.dry_run)
+            undo_file(path, options.dry_run, self.host.uid())
         } else {
-            compress_file(path, options.dry_run)
+            compress_file(path, options.dry_run, self.host.uid())
         };
         match res {
             Ok(outcome) => {
@@ -1540,7 +1553,7 @@ const SAMPLE_FILES: usize = 48;
 
 /// Estimates how many bytes compressing `root` would free: compresses a sample
 /// of its files, weighted by size, in memory and applies the ratio to `total_bytes`.
-fn sampled_saving(root: &Path, total_bytes: u64) -> u64 {
+fn sampled_saving(root: &Path, total_bytes: u64, owner: u32) -> u64 {
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -1579,7 +1592,7 @@ fn sampled_saving(root: &Path, total_bytes: u64) -> u64 {
             continue;
         };
         sampled += len;
-        if let Ok(FileOutcome::Compressed { saved_bytes, .. }) = estimate_file(path, &meta) {
+        if let Ok(FileOutcome::Compressed { saved_bytes, .. }) = estimate_file(path, &meta, owner) {
             saved += saved_bytes;
         }
     }
@@ -1590,16 +1603,15 @@ fn sampled_saving(root: &Path, total_bytes: u64) -> u64 {
 }
 
 /// Find compression candidates for the TUI (user-owned apps, Homebrew Cellar, Rust toolchains).
-pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
+pub fn find_compress_candidates(layout: &Layout, owner: u32) -> Vec<CompressCandidate> {
     let mut candidates = Vec::new();
-    let uid = unsafe { libc::geteuid() };
 
     let mut push = |name: String, path: PathBuf, category: &'static str, min_bytes: u64| {
         let total = super::sizer::DirSizer::measure(&path).bytes;
         if total <= min_bytes {
             return false;
         }
-        let estimate = sampled_saving(&path, total);
+        let estimate = sampled_saving(&path, total, owner);
         if estimate == 0 {
             return false;
         }
@@ -1623,7 +1635,7 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
             let p = entry.path();
             if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"))
                 && let Ok(meta) = fs::metadata(&p)
-                && (meta.uid() == uid || Safety::can_write_inside(&p))
+                && (meta.uid() == owner || Safety::can_write_inside(&p))
             {
                 let name = p
                     .file_stem()
@@ -1654,8 +1666,8 @@ pub fn find_compress_candidates(layout: &Layout) -> Vec<CompressCandidate> {
 pub const SCAN_ID: &str = "compress";
 
 /// Creates a `CategoryScan` with compression candidates for the TUI select screen.
-pub fn compress_candidates_scan(layout: &Layout) -> CategoryScan {
-    let candidates = find_compress_candidates(layout);
+pub fn compress_candidates_scan(layout: &Layout, owner: u32) -> CategoryScan {
+    let candidates = find_compress_candidates(layout, owner);
     let mut app_items = Vec::new();
     let mut brew_items = Vec::new();
     let mut rust_items = Vec::new();
@@ -1705,6 +1717,7 @@ pub fn compress_candidates_scan(layout: &Layout) -> CategoryScan {
 mod tests {
     use super::*;
     use crate::core::apps::testing::sandbox;
+    use crate::core::host::fake::real_uid;
     use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
     use tempfile::tempdir;
 
@@ -1721,13 +1734,71 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_compressed_only_for_the_host_user() {
+        let (_temp, layout) = sandbox();
+        let dir = layout.user("Projects/data");
+        fs::create_dir_all(&dir).unwrap();
+        let file = make_repetitive_file(&dir, "a.txt", 300_000);
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+
+        host.set_uid(real_uid() + 1);
+        let other = run(&layout, &host, &dir, &real_run()).unwrap();
+        assert_eq!(other.skipped.not_user_owned, 1);
+        assert!(!is_compressed(&file));
+
+        host.set_uid(real_uid());
+        let own = run(&layout, &host, &dir, &real_run()).unwrap();
+        assert_eq!(own.processed_files, 1);
+        assert!(is_compressed(&file));
+    }
+
+    #[test]
+    fn a_file_is_unpacked_only_for_the_host_user() {
+        let (_temp, layout) = sandbox();
+        let dir = layout.user("Projects/data");
+        fs::create_dir_all(&dir).unwrap();
+        let file = make_repetitive_file(&dir, "a.txt", 300_000);
+        let host = host_with("    1     0 /sbin/launchd\n", "");
+        run(&layout, &host, &dir, &real_run()).unwrap();
+        assert!(is_compressed(&file));
+        let undo = CompressOptions {
+            undo: true,
+            ..real_run()
+        };
+
+        host.set_uid(real_uid() + 1);
+        let other = run(&layout, &host, &dir, &undo).unwrap();
+        assert_eq!(other.skipped.not_user_owned, 1);
+        assert!(is_compressed(&file));
+
+        host.set_uid(real_uid());
+        let own = run(&layout, &host, &dir, &undo).unwrap();
+        assert_eq!(own.processed_files, 1);
+        assert!(!is_compressed(&file));
+    }
+
+    #[test]
+    fn the_sample_estimate_follows_the_given_owner() {
+        let (_temp, layout) = sandbox();
+        let app = layout.user("Applications/Mine.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        make_repetitive_file(&app.join("Contents"), "data.bin", 6 * 1024 * 1024);
+
+        let own = find_compress_candidates(&layout, real_uid());
+        let other = find_compress_candidates(&layout, real_uid() + 1);
+
+        assert!(own.iter().any(|c| c.path == app), "{own:?}");
+        assert!(other.iter().all(|c| c.path != app), "{other:?}");
+    }
+
+    #[test]
     fn the_cellar_of_either_prefix_is_a_candidate() {
         let (_temp, layout) = sandbox();
         let local = layout.system("usr/local/Cellar");
         fs::create_dir_all(local.join("foo")).unwrap();
         make_repetitive_file(&local.join("foo"), "data.txt", 300_000);
 
-        let found = find_compress_candidates(&layout);
+        let found = find_compress_candidates(&layout, real_uid());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Homebrew Cellar");
         assert_eq!(found[0].path, local);
@@ -1736,7 +1807,7 @@ mod tests {
         fs::create_dir_all(opt.join("bar")).unwrap();
         make_repetitive_file(&opt.join("bar"), "data.txt", 300_000);
 
-        let found = find_compress_candidates(&layout);
+        let found = find_compress_candidates(&layout, real_uid());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "Homebrew Cellar");
         assert_eq!(found[0].path, opt);
@@ -1751,7 +1822,7 @@ mod tests {
         let meta_before = fs::symlink_metadata(&file).unwrap();
         let blocks_before = meta_before.blocks();
 
-        let outcome = compress_file(&file, false).unwrap();
+        let outcome = compress_file(&file, false, real_uid()).unwrap();
         match outcome {
             FileOutcome::Compressed {
                 saved_bytes,
@@ -1810,7 +1881,7 @@ mod tests {
         let mode_before = meta_before.mode() & 0o7777;
         let mtime_before = meta_before.mtime();
 
-        let outcome = compress_file(&file, false).unwrap();
+        let outcome = compress_file(&file, false, real_uid()).unwrap();
         assert!(matches!(outcome, FileOutcome::Compressed { .. }));
 
         let meta_after = fs::symlink_metadata(&file).unwrap();
@@ -1891,7 +1962,7 @@ mod tests {
         );
         let before = times_of(&file);
 
-        let outcome = compress_file(&file, false).unwrap();
+        let outcome = compress_file(&file, false, real_uid()).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Compressed { .. }));
         assert_eq!(times_of(&file), before);
@@ -1911,7 +1982,7 @@ mod tests {
         fs::write(&file, &data).unwrap();
 
         let meta_before = fs::symlink_metadata(&file).unwrap();
-        let outcome = compress_file(&file, false).unwrap();
+        let outcome = compress_file(&file, false, real_uid()).unwrap();
 
         assert_eq!(outcome, FileOutcome::Skipped(SkipReason::Incompressible));
         let meta_after = fs::symlink_metadata(&file).unwrap();
@@ -1927,7 +1998,7 @@ mod tests {
         let file2 = temp.path().join("link2.txt");
         fs::hard_link(&file1, &file2).unwrap();
 
-        let outcome = compress_file(&file1, false).unwrap();
+        let outcome = compress_file(&file1, false, real_uid()).unwrap();
         assert_eq!(outcome, FileOutcome::Skipped(SkipReason::SymlinkOrHardlink));
 
         let file3 = make_repetitive_file(temp.path(), "orig.txt", 100_000);
@@ -1936,7 +2007,7 @@ mod tests {
         let c_dst = CString::new(file4.to_str().unwrap()).unwrap();
         let ret = unsafe { libc::clonefile(c_src.as_ptr(), c_dst.as_ptr(), 0) };
         if ret == 0 {
-            let outcome_clone = compress_file(&file4, false).unwrap();
+            let outcome_clone = compress_file(&file4, false, real_uid()).unwrap();
             assert_eq!(
                 outcome_clone,
                 FileOutcome::Skipped(SkipReason::SharesCloneBlocks)
@@ -2001,7 +2072,7 @@ mod tests {
                 Ok(())
             };
 
-            let result = compress_file_probed(&file, false, &fail);
+            let result = compress_file_probed(&file, false, real_uid(), &fail);
 
             assert!(fired.get(), "{step:?} never ran");
             assert!(result.is_err(), "{step:?}");
@@ -2017,7 +2088,7 @@ mod tests {
             let temp = tempdir().unwrap();
             let file = make_repetitive_file(temp.path(), "safe.txt", 300_000);
             let orig_bytes = fs::read(&file).unwrap();
-            compress_file(&file, false).unwrap();
+            compress_file(&file, false, real_uid()).unwrap();
             let fired = std::cell::Cell::new(false);
             let fail = |at: Step| {
                 if at == step {
@@ -2027,7 +2098,7 @@ mod tests {
                 Ok(())
             };
 
-            let result = undo_file_probed(&file, false, &fail);
+            let result = undo_file_probed(&file, false, real_uid(), &fail);
 
             assert!(fired.get(), "{step:?} never ran");
             assert!(result.is_err(), "{step:?}");
@@ -2053,7 +2124,7 @@ mod tests {
             Ok(())
         };
 
-        assert!(compress_file_probed(&file, false, &fail).is_err());
+        assert!(compress_file_probed(&file, false, real_uid(), &fail).is_err());
 
         assert_eq!(fs::read(&file).unwrap(), orig_bytes);
         assert!(only_file_left(temp.path(), "big.txt"));
@@ -2072,7 +2143,7 @@ mod tests {
             Ok(())
         };
 
-        let outcome = compress_file_probed(&file, false, &count).unwrap();
+        let outcome = compress_file_probed(&file, false, real_uid(), &count).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Compressed { .. }));
         assert_eq!(blocks.get(), size.div_ceil(BLOCK_SIZE));
@@ -2092,7 +2163,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &write);
+        let result = compress_file_probed(&file, false, real_uid(), &write);
 
         assert!(result.is_err());
         assert_eq!(fs::read(&file).unwrap(), expected);
@@ -2113,7 +2184,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &write);
+        let result = compress_file_probed(&file, false, real_uid(), &write);
 
         assert!(result.is_err());
         assert_eq!(fs::read(&file).unwrap(), expected);
@@ -2134,7 +2205,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &replace);
+        let result = compress_file_probed(&file, false, real_uid(), &replace);
 
         assert!(result.is_err());
         assert_eq!(fs::read(&file).unwrap(), b"saved by an editor");
@@ -2146,7 +2217,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let file = make_repetitive_file(temp.path(), "full.txt", 500_000);
         let orig_bytes = fs::read(&file).unwrap();
-        compress_file(&file, false).unwrap();
+        compress_file(&file, false, real_uid()).unwrap();
         let blocks = std::cell::Cell::new(0);
         let fill_the_disk = |at: Step| {
             if at == Step::WriteData {
@@ -2158,7 +2229,7 @@ mod tests {
             Ok(())
         };
 
-        let result = undo_file_probed(&file, false, &fill_the_disk);
+        let result = undo_file_probed(&file, false, real_uid(), &fill_the_disk);
 
         assert!(result.is_err());
         assert!(only_file_left(temp.path(), "full.txt"));
@@ -2177,8 +2248,8 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "locked.txt", 300_000);
         set_flags(&file, UF_IMMUTABLE);
 
-        let outcome = compress_file(&file, false);
-        let undo = undo_file(&file, false);
+        let outcome = compress_file(&file, false, real_uid());
+        let undo = undo_file(&file, false, real_uid());
         set_flags(&file, 0);
 
         assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
@@ -2234,7 +2305,7 @@ mod tests {
         write_attribute(&file, "user.tag", b"red");
         deny(&file, "writeextattr");
 
-        let outcome = compress_file(&file, false).unwrap();
+        let outcome = compress_file(&file, false, real_uid()).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Compressed { .. }));
         assert_eq!(
@@ -2258,7 +2329,7 @@ mod tests {
         deny(&file, "readextattr");
         let orig_bytes = fs::read(&file).unwrap();
 
-        let result = compress_file(&file, false);
+        let result = compress_file(&file, false, real_uid());
 
         assert!(result.is_err());
         assert!(!is_compressed(&file));
@@ -2272,7 +2343,7 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "round.txt", 300_000);
         let orig_bytes = fs::read(&file).unwrap();
 
-        let compress_outcome = compress_file(&file, false).unwrap();
+        let compress_outcome = compress_file(&file, false, real_uid()).unwrap();
         assert!(matches!(compress_outcome, FileOutcome::Compressed { .. }));
 
         let meta_comp = fs::symlink_metadata(&file).unwrap();
@@ -2281,7 +2352,7 @@ mod tests {
             UF_COMPRESSED
         );
 
-        let undo_outcome = undo_file(&file, false).unwrap();
+        let undo_outcome = undo_file(&file, false, real_uid()).unwrap();
         assert!(matches!(undo_outcome, FileOutcome::Unpacked { .. }));
 
         let meta_restored = fs::symlink_metadata(&file).unwrap();
@@ -2301,7 +2372,7 @@ mod tests {
         let orig_bytes = fs::read(&file).unwrap();
         let meta_before = fs::symlink_metadata(&file).unwrap();
 
-        let outcome = compress_file(&file, true).unwrap();
+        let outcome = compress_file(&file, true, real_uid()).unwrap();
         assert!(matches!(outcome, FileOutcome::Compressed { .. }));
 
         let meta_after = fs::symlink_metadata(&file).unwrap();
@@ -2312,6 +2383,7 @@ mod tests {
 
     fn host_with(ps: &str, lsof: &str) -> crate::core::host::fake::FakeHost {
         let host = crate::core::host::fake::FakeHost::default();
+        host.set_uid(real_uid());
         host.reply("/bin/ps", ps);
         host.reply("/usr/sbin/lsof", lsof);
         host
@@ -2611,7 +2683,7 @@ mod tests {
         let text = make(&apps.join("Text.app/Contents/Resources"));
         make_repetitive_file(&text, "strings.txt", 6 * 1024 * 1024);
 
-        let found = find_compress_candidates(&layout);
+        let found = find_compress_candidates(&layout, real_uid());
 
         let names: Vec<_> = found.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
@@ -2647,11 +2719,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let file = make_repetitive_file(temp.path(), "append.log", 300_000);
         set_flags(&file, UF_APPEND);
-        let outcome = compress_file(&file, false);
+        let outcome = compress_file(&file, false, real_uid());
         set_flags(&file, 0);
-        compress_file(&file, false).unwrap();
+        compress_file(&file, false, real_uid()).unwrap();
         set_flags(&file, flags_of(&file) | UF_APPEND);
-        let undo = undo_file(&file, false);
+        let undo = undo_file(&file, false, real_uid());
         set_flags(&file, flags_of(&file) & !UF_APPEND);
 
         assert_eq!(outcome.unwrap(), FileOutcome::Skipped(SkipReason::Locked));
@@ -2665,7 +2737,7 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
         deny(&file, "delete");
 
-        let outcome = compress_file(&file, false);
+        let outcome = compress_file(&file, false, real_uid());
         let leftovers = names_in(temp.path());
         lift_acl(&file);
 
@@ -2679,7 +2751,7 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "acl.txt", 300_000);
         deny(temp.path(), "delete_child");
 
-        let outcome = compress_file(&file, false);
+        let outcome = compress_file(&file, false, real_uid());
         let leftovers = names_in(temp.path());
         lift_acl(temp.path());
 
@@ -2694,11 +2766,11 @@ mod tests {
             let dir = make(&temp.path().join("ap"));
             let plain = make_repetitive_file(&dir, "plain.txt", 300_000);
             let packed = make_repetitive_file(&dir, "packed.txt", 300_000);
-            compress_file(&packed, false).unwrap();
+            compress_file(&packed, false, real_uid()).unwrap();
             set_flags(&dir, flag);
 
-            let outcome = compress_file(&plain, false);
-            let undo = undo_file(&packed, false);
+            let outcome = compress_file(&plain, false, real_uid());
+            let undo = undo_file(&packed, false, real_uid());
             let mut leftovers = names_in(&dir);
             leftovers.sort();
             set_flags(&dir, 0);
@@ -2716,7 +2788,7 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "plain.txt", 300_000);
         deny(temp.path(), "delete,file_inherit");
 
-        let outcome = compress_file(&file, false);
+        let outcome = compress_file(&file, false, real_uid());
         let leftovers = names_in(temp.path());
         let acl = unsafe { acl_get_file(c_path(&file).unwrap().as_ptr(), ACL_TYPE_EXTENDED) };
         let has_acl = !acl.is_null();
@@ -2739,7 +2811,7 @@ mod tests {
             Ok(())
         };
 
-        assert!(compress_file_probed(&file, false, &fail).is_err());
+        assert!(compress_file_probed(&file, false, real_uid(), &fail).is_err());
 
         assert!(only_file_left(temp.path(), "safe.txt"));
     }
@@ -2757,7 +2829,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &fail);
+        let result = compress_file_probed(&file, false, real_uid(), &fail);
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
 
         let message = result.unwrap_err().to_string();
@@ -2780,8 +2852,8 @@ mod tests {
             Ok(())
         };
 
-        compress_file_probed(&file, false, &look).unwrap();
-        undo_file_probed(&file, false, &look).unwrap();
+        compress_file_probed(&file, false, real_uid(), &look).unwrap();
+        undo_file_probed(&file, false, real_uid(), &look).unwrap();
 
         assert_eq!(*modes.borrow(), [0o600, 0o600]);
         assert_eq!(fs::metadata(&file).unwrap().mode() & 0o777, 0o600);
@@ -2808,7 +2880,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &rotate);
+        let result = compress_file_probed(&file, false, real_uid(), &rotate);
 
         assert!(result.is_err());
         let kept = kept_files(temp.path(), &expected, "live.log.1");
@@ -2833,7 +2905,7 @@ mod tests {
             Ok(())
         };
 
-        assert!(compress_file_probed(&file, false, &replace).is_err());
+        assert!(compress_file_probed(&file, false, real_uid(), &replace).is_err());
 
         assert_eq!(fs::read(&file).unwrap(), b"saved by an editor");
         let kept = kept_files(temp.path(), &expected, "live.log");
@@ -2864,7 +2936,7 @@ mod tests {
             Ok(())
         };
 
-        let result = compress_file_probed(&file, false, &write_and_freeze);
+        let result = compress_file_probed(&file, false, real_uid(), &write_and_freeze);
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         let stuck = temp_file_in(&dir);
         let left_by_a_gone_run = dir.join(format!(".live.log.taert-tmp-{}-1-2.tmp", dead_pid()));
@@ -2888,9 +2960,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let file = make_repetitive_file(temp.path(), "mark.txt", 300_000);
 
-        compress_file(&file, false).unwrap();
+        compress_file(&file, false, real_uid()).unwrap();
         let after_compress = read_attribute(&file, COPY_MARK.to_str().unwrap());
-        undo_file(&file, false).unwrap();
+        undo_file(&file, false, real_uid()).unwrap();
         let after_undo = read_attribute(&file, COPY_MARK.to_str().unwrap());
 
         assert_eq!(after_compress, None);
@@ -2943,9 +3015,9 @@ mod tests {
         let file = make_repetitive_file(temp.path(), "large.txt", size);
 
         memory::take_biggest();
-        let compressed = compress_file(&file, false).unwrap();
+        let compressed = compress_file(&file, false, real_uid()).unwrap();
         let compress_peak = memory::take_biggest();
-        let unpacked = undo_file(&file, false).unwrap();
+        let unpacked = undo_file(&file, false, real_uid()).unwrap();
         let undo_peak = memory::take_biggest();
 
         assert!(matches!(compressed, FileOutcome::Compressed { .. }));

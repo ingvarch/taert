@@ -3164,7 +3164,7 @@ mod tests {
     }
 
     fn apple_silicon_host() -> FakeHost {
-        let host = FakeHost::idle();
+        let host = crate::core::slim::testing::user_host();
         host.reply("sysctl hw.optional.arm64", "hw.optional.arm64: 1\n");
         host
     }

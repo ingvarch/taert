@@ -515,7 +515,7 @@ pub fn check_eligibility(
     }
 
     // 5. Owned by another user, or holding a setuid or setgid file
-    check_ownership(&app.path, unsafe { libc::geteuid() })?;
+    check_ownership(&app.path, host.uid())?;
     let users_dir = layout
         .home
         .ancestors()
@@ -697,7 +697,7 @@ pub fn slim_app(
     host: &dyn Host,
     skip_developer_id: bool,
 ) -> Result<SlimDone, (usize, String)> {
-    check_ownership(&app.path, unsafe { libc::geteuid() }).map_err(|e| (1, e))?;
+    check_ownership(&app.path, host.uid()).map_err(|e| (1, e))?;
     let before = fingerprint(&app.path).map_err(|e| (1, e.to_string()))?;
 
     let parent = app
@@ -1144,7 +1144,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Apple apps are part of macOS");
@@ -1166,7 +1166,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(
@@ -1190,7 +1190,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let mut rosetta = HashSet::new();
         rosetta.insert("com.vendor.rosetta".to_string());
@@ -1213,7 +1213,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let processes = vec![(
             123,
@@ -1239,7 +1239,7 @@ mod tests {
     ) -> Result<Vec<PathBuf>, String> {
         check_eligibility(
             app,
-            &FakeHost::idle(),
+            &testing::user_host(),
             layout,
             &IgnoreStore::default(),
             &HashSet::new(),
@@ -1284,7 +1284,7 @@ mod tests {
         let (_dir, layout) = test_env();
         let app_path = layout.system("Applications").join("Two  Spaces.app");
         write_test_app(&app_path, "com.vendor.twospaces");
-        let host = FakeHost::default();
+        let host = FakeHost::default().as_real_user();
         host.reply(
             "codesign -dv",
             "Authority=Developer ID Application: Acme Corp (123)\n",
@@ -1328,7 +1328,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Belongs to another user");
@@ -1349,7 +1349,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply("codesign", "Authority=Mac Developer\n");
         let ignore = IgnoreStore::default();
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
@@ -1371,7 +1371,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply(
             "codesign -dv",
             "Authority=Developer ID Application: Acme Corp (123)\n",
@@ -1397,7 +1397,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply(
             "codesign -dv",
             "Authority=Developer ID Application: Acme Corp (123)\n",
@@ -1424,7 +1424,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let mut ignore = IgnoreStore::default();
         ignore.add(ignored_app.to_string_lossy().to_string());
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
@@ -1456,7 +1456,7 @@ mod tests {
             last_used: None,
             package: None,
         };
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         let ignore = IgnoreStore::default();
         let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
         assert_eq!(res.unwrap_err(), "Already Apple Silicon only");
@@ -1464,7 +1464,7 @@ mod tests {
 
     /// Cloning works and nothing is checked yet.
     fn cloning_host(app_path: &Path) -> FakeHost {
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply("ditto", "");
         fake_ditto(&host, app_path);
         host
@@ -1534,7 +1534,7 @@ mod tests {
         let app_path = dir.path().join("X.app");
         write_test_app(&app_path, "com.vendor.x");
         let before = fs::read(app_path.join("Contents/MacOS/testapp")).unwrap();
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.when("ditto", {
             let partial = holding_of(&app_path).join("X.app");
             move || {
@@ -1715,7 +1715,7 @@ mod tests {
         write_test_app(&app_path, "com.vendor.setuid");
         let binary = app_path.join("Contents/MacOS/testapp");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o4755)).unwrap();
-        let host = FakeHost::idle();
+        let host = testing::user_host();
 
         let result = check_eligibility(
             &app_for(&app_path, "com.vendor.setuid"),
@@ -1728,7 +1728,7 @@ mod tests {
         );
         assert_eq!(result.unwrap_err(), "Contains a setuid or setgid file");
 
-        let other = unsafe { libc::geteuid() } + 1;
+        let other = crate::core::host::fake::real_uid() + 1;
         assert_eq!(
             check_ownership(&app_path, other).unwrap_err(),
             "Belongs to another user"
@@ -1751,7 +1751,7 @@ mod tests {
         let link = layout.system("Applications").join("Linked.app");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let app = app_for(&link, "com.vendor.linked");
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply(
             "codesign -dv",
             "Authority=Developer ID Application: Acme Corp (123)\n",
@@ -1787,13 +1787,50 @@ mod tests {
         );
     }
 
+    fn check_and_slim_with_uid(uid: u32) -> (Result<(), String>, Result<(), (usize, String)>) {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Owned.app");
+        write_test_app(&app_path, "com.vendor.owned");
+        let app = app_for(&app_path, "com.vendor.owned");
+        let host = ready_host(&app_path);
+        host.set_uid(uid);
+        let eligibility = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &HashSet::new(),
+            None,
+            true,
+        )
+        .map(drop);
+        let slimmed = slim_app(&app, &binaries_of(&app_path), &host, true).map(drop);
+        (eligibility, slimmed)
+    }
+
+    #[test]
+    fn test_expected_owner_comes_from_the_host() {
+        let me = crate::core::host::fake::real_uid();
+
+        let (eligibility, slimmed) = check_and_slim_with_uid(me + 1);
+        assert_eq!(eligibility.unwrap_err(), "Belongs to another user");
+        assert_eq!(
+            slimmed.unwrap_err(),
+            (1, "Belongs to another user".to_string())
+        );
+
+        let (eligibility, slimmed) = check_and_slim_with_uid(me);
+        assert!(eligibility.is_ok(), "{eligibility:?}");
+        assert!(slimmed.is_ok(), "{slimmed:?}");
+    }
+
     #[test]
     fn test_ownership_passes_for_own_plain_files() {
         let dir = tempdir().unwrap();
         let app_path = dir.path().join("Plain.app");
         write_test_app(&app_path, "com.vendor.plain");
 
-        let me = unsafe { libc::geteuid() };
+        let me = crate::core::host::fake::real_uid();
 
         assert_eq!(check_ownership(&app_path, me), Ok(()));
     }
@@ -1801,7 +1838,7 @@ mod tests {
     fn app_with_scan_host(layout: &Layout, name: &str) -> FakeHost {
         let app_path = layout.system("Applications").join(format!("{name}.app"));
         write_test_app(&app_path, &format!("com.vendor.{name}"));
-        let host = FakeHost::idle();
+        let host = testing::user_host();
         host.reply(
             "codesign -dv",
             "Authority=Developer ID Application: Acme Corp (123)\n",
@@ -2089,7 +2126,7 @@ mod tests {
         let (_dir, layout) = test_env();
         let app_path = layout.system("Applications").join("Psy.app");
         write_test_app(&app_path, "com.vendor.psy");
-        let host = FakeHost::default();
+        let host = FakeHost::default().as_real_user();
         host.fail("/bin/ps", "");
         host.reply(
             "codesign -dv",
@@ -2206,6 +2243,10 @@ mod tests {
 pub(crate) mod testing {
     use super::*;
     use crate::core::host::fake::FakeHost;
+
+    pub fn user_host() -> FakeHost {
+        FakeHost::idle().as_real_user()
+    }
 
     pub fn make_fat_binary_32(slices: &[(u32, u32, u32, u32, u32)], payloads: &[&[u8]]) -> Vec<u8> {
         let mut buf = Vec::new();
