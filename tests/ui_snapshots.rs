@@ -1329,6 +1329,23 @@ fn snapshot_slim_outcome() {
 }
 
 #[test]
+fn snapshot_slim_outcome_with_a_refused_step() {
+    let mut state = SelectState::new(slim_apps_list());
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        failures: vec![RemovalFailure {
+            path: PathBuf::from("/Applications/Brave Browser.app"),
+            error: "Step 7 failed: macOS refused. Allow your terminal in System Settings > Privacy & Security > App Management, or move the app to the Trash in Finder".to_string(),
+        }],
+        ..Default::default()
+    });
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("1 item failed to slim:"), "{screen}");
+    assert!(screen.contains("Step 7 failed: macOS refused."), "{screen}");
+    assert_snapshot!("select_slim_outcome_refused_120x32", screen);
+}
+
+#[test]
 fn snapshot_compress_outcome() {
     let mut state = SelectState::new(CategoryScan {
         notes: Vec::new(),

@@ -1965,7 +1965,7 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
                 format!("  ✕ {}", prettify_path(&fail.path)),
                 theme.callout(),
             )));
-            if kind == RunKind::Upgrade {
+            if matches!(kind, RunKind::Upgrade | RunKind::Slim | RunKind::Compress) {
                 message.push(Line::from(Span::styled(
                     fail.error.clone(),
                     theme.callout(),
@@ -2017,6 +2017,7 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use crate::core::apps::testing::{fake_app, sandbox};
+    use crate::core::cleaner::RemovalFailure;
     use crate::ui::env::UiEnv;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2492,6 +2493,83 @@ mod tests {
 
         assert!(text.contains("Saved 0 B of Intel code."), "{text}");
         assert!(!text.contains("0 B freed across"), "{text}");
+    }
+
+    fn scan_of(id: &str, title: &str) -> CategoryScan {
+        CategoryScan {
+            notes: Vec::new(),
+            id: id.to_string(),
+            title: title.to_string(),
+            groups: Vec::new(),
+        }
+    }
+
+    fn failures(count: usize) -> Vec<RemovalFailure> {
+        (1..=count)
+            .map(|n| RemovalFailure {
+                path: PathBuf::from(format!("/Applications/App{n}.app")),
+                error: format!("Reason number {n} stayed unclear"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_slim_outcome_says_why_the_item_failed() {
+        let mut state = SelectState::new(scan_of(slim::SCAN_ID, "Slim"));
+        let error = "Step 7 failed: macOS refused. Allow your terminal in System Settings > \
+                     Privacy & Security > App Management, or move the app to the Trash in Finder";
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            failures: vec![RemovalFailure {
+                path: PathBuf::from("/Applications/Foo.app"),
+                error: error.to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let theme = Theme::with_env(UiEnv::default());
+        let text = testing::screen_words(120, 32, |frame| render_select(frame, &state, &theme));
+
+        assert!(text.contains("/Applications/Foo.app"), "{text}");
+        assert!(text.contains("Step 7 failed: macOS refused."), "{text}");
+        assert!(
+            text.contains("move the app to the Trash in Finder"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_compress_outcome_lists_three_failures_with_their_errors() {
+        let mut state = SelectState::new(scan_of(compress::SCAN_ID, "Compress"));
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            failures: failures(4),
+            ..Default::default()
+        });
+
+        let text = screen(&state);
+
+        assert!(text.contains("4 items failed to compress:"), "{text}");
+        for n in 1..=3 {
+            assert!(text.contains(&format!("App{n}.app")), "{text}");
+            assert!(
+                text.contains(&format!("Reason number {n} stayed unclear")),
+                "{text}"
+            );
+        }
+        assert!(!text.contains("App4.app"), "{text}");
+    }
+
+    #[test]
+    fn a_remove_outcome_shows_only_the_path_of_a_failure() {
+        let mut state = SelectState::new(scan_of("purge", "Clean"));
+        state.overlay = ModalOverlay::Outcome(RemovalReport {
+            failures: failures(1),
+            ..Default::default()
+        });
+
+        let text = screen(&state);
+
+        assert!(text.contains("App1.app"), "{text}");
+        assert!(!text.contains("Reason number 1"), "{text}");
     }
 
     #[test]
