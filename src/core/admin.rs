@@ -71,7 +71,7 @@ impl AdminSession {
             state.ticket = Some(self.start_keep_alive(false));
             return Ok(());
         }
-        if !host.has_tty() {
+        if !host.has_tty() || !host.is_admin() {
             return Ok(());
         }
         if host.sudo_validate(reason) {
@@ -86,7 +86,11 @@ impl AdminSession {
 
     pub fn will_prompt(&self, host: &dyn Host) -> bool {
         let state = self.lock();
-        !state.refused && state.ticket.is_none() && !probe(host) && host.has_tty()
+        !state.refused
+            && state.ticket.is_none()
+            && !probe(host)
+            && host.has_tty()
+            && host.is_admin()
     }
 
     pub fn is_refused(&self) -> bool {
@@ -322,6 +326,27 @@ mod tests {
         session.end(&*host);
 
         assert_eq!(host.count(KILL), 1);
+    }
+
+    #[test]
+    fn a_standard_account_gets_the_dialog_and_no_sudo_prompt() {
+        let (host, session) = fixture(true);
+        host.fail(PROBE, "");
+        *host.not_admin.lock().unwrap() = true;
+        *host.sudo_refused.lock().unwrap() = true;
+
+        assert!(!session.will_prompt(&*host));
+        assert_eq!(session.prepare(&*host, "remove files"), Ok(()));
+        session.end(&*host);
+
+        assert_eq!(host.sudo_asks(), 0);
+        assert!(!session.is_refused());
+        assert!(!session.will_prompt(&*host));
+        assert_eq!(host.run_admin("rm x", "p"), Ok(()));
+        assert_eq!(
+            *host.admin_scripts.lock().unwrap(),
+            vec!["rm x".to_string()]
+        );
     }
 
     #[test]
