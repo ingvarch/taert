@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Uninstall Apps lists apps from installer packages**: apps that an installer package put in `/Library/Application Support`, such as Microsoft AutoUpdate, appear in the list under their folder, and `taert uninstall` finds them by name, bundle id, or path. taert removes them with their receipt. Their launch daemon, helper tool, and caches are listed for you to pick.
+
 ### Changed
 - **Administrator password**: Startup Items and Doctor ask for the administrator password once per run, in the terminal. The confirm dialog of a daemon says that taert asks for the password first. `taert startup disable` and `enable` for a daemon, and every read with `--all`, ask before the root step.
 

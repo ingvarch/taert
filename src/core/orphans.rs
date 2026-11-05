@@ -170,7 +170,7 @@ pub fn scan(
 
     // Step 4.2: Collect installed IDs
     let mut installed_ids: Vec<String> = Vec::new();
-    let all_apps = apps::find_apps(layout)
+    let all_apps = apps::find_all_apps(layout, host)
         .into_iter()
         .chain(apps::find_copies(layout));
     for app in all_apps {
@@ -320,7 +320,7 @@ pub fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::apps::testing::{fake_app, sandbox, write_info};
+    use crate::core::apps::testing::{fake_app, package_app, package_listing, sandbox, write_info};
     use crate::core::host::fake::FakeHost;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -370,6 +370,29 @@ mod tests {
         old_file(&layout.user("Library/Preferences/com.acme.foo.plist"), then);
         old_folder(
             &layout.user("Library/Saved Application State/com.acme.foo.savedState"),
+            then,
+        );
+
+        let res = scan(&layout, &host, &IgnoreStore::default(), now, None, None);
+        assert!(
+            res.groups.is_empty(),
+            "expected no rows, got {:?}",
+            res.groups
+        );
+    }
+
+    #[test]
+    fn files_of_an_app_from_an_installer_package_are_not_listed() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("mdfind", "");
+        package_app(&layout);
+        package_listing(&host);
+
+        let now = SystemTime::now();
+        let then = now - 40 * DAY;
+        old_file(
+            &layout.user("Library/Preferences/com.acme.autoupdate2.plist"),
             then,
         );
 

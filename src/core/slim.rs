@@ -1914,6 +1914,21 @@ mod tests {
     }
 
     #[test]
+    fn test_candidates_leave_out_an_app_from_an_installer_package() {
+        let (_dir, layout) = test_env();
+        let in_folder = layout.system("Applications/Sound.app");
+        write_test_app(&in_folder, "com.vendor.Sound");
+        crate::core::apps::testing::package_app(&layout);
+
+        let paths: Vec<PathBuf> = candidate_apps(&layout)
+            .into_iter()
+            .map(|app| app.path)
+            .collect();
+
+        assert_eq!(paths, vec![in_folder]);
+    }
+
+    #[test]
     fn test_xattr_retry_only_after_codesign_failure() {
         let dir = tempdir().unwrap();
         let app_path = dir.path().join("X.app");

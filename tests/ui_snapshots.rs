@@ -1059,6 +1059,25 @@ fn snapshot_select_apps() {
     assert_snapshot!("select_apps_80x24", narrow);
 }
 
+#[test]
+fn snapshot_select_apps_with_a_folder_of_package_apps() {
+    let mut list = app_list();
+    list.groups.push(ToolGroup {
+        tool: "/Library/Application Support/Microsoft/MAU2.0".to_string(),
+        items: vec![app_row(
+            "/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app",
+            24_000_000,
+            None,
+        )],
+    });
+    let state = SelectState::with_preserved_selection(list);
+
+    assert_snapshot!(
+        "select_apps_with_package_apps_120x32",
+        select_screen(&state)
+    );
+}
+
 fn slim_apps_list() -> CategoryScan {
     CategoryScan {
         notes: vec![
