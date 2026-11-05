@@ -12,6 +12,7 @@ use crossterm::terminal::{
 
 use crate::core::admin::{self, AdminSession, NOT_GIVEN};
 use crate::core::host::Host;
+use crate::core::layout::Layout;
 
 pub(super) fn enter_tui() -> io::Result<()> {
     enable_raw_mode()?;
@@ -64,6 +65,14 @@ impl AdminGate {
         (self.release)(&mut || result = self.session.prepare(host, reason));
         self.redraw_all = true;
         result
+    }
+
+    /// The tip to print after the screen closes, so it stays on the terminal.
+    pub fn quit_hint(&self, host: &dyn Host, layout: &Layout) -> Option<&'static str> {
+        self.session
+            .take_hint()
+            .then(|| admin::touch_id_hint(host, layout))
+            .flatten()
     }
 }
 
@@ -181,5 +190,38 @@ mod tests {
         assert_eq!(releases(), 0);
         assert_eq!(host.sudo_asks(), 0);
         assert!(!gate.redraw_all);
+    }
+
+    fn enrolled_host() -> FakeHost {
+        let host = host(true);
+        host.fail(PROBE, "");
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t2 biometric template(s)\n",
+        );
+        host
+    }
+
+    #[test]
+    fn the_quit_tip_shows_once_after_taert_asked() {
+        let (_dir, layout) = crate::core::apps::testing::sandbox();
+        let host = enrolled_host();
+        let mut gate = gate();
+        gate.ask(&host, "remove files").unwrap();
+
+        let tip = gate.quit_hint(&host, &layout).unwrap();
+
+        assert!(tip.starts_with("Tip: sudo can use Touch ID."));
+        assert_eq!(gate.quit_hint(&host, &layout), None);
+    }
+
+    #[test]
+    fn no_quit_tip_when_taert_did_not_ask() {
+        let (_dir, layout) = crate::core::apps::testing::sandbox();
+        let host = enrolled_host();
+        let gate = gate();
+
+        assert_eq!(gate.quit_hint(&host, &layout), None);
+        assert_eq!(host.count("/usr/bin/bioutil"), 0);
     }
 }

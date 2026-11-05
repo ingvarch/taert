@@ -802,6 +802,21 @@ fn pick_apps_to_uninstall(
     finish_uninstall(plan, cli, use_plain, ignore, context, console)
 }
 
+/// Prepares the sudo session and, the first time taert itself asked, prints the Touch ID tip on stderr.
+fn prepare_admin(
+    context: &ScanContext,
+    reason: &str,
+    err: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    context.admin.prepare(context.host, reason)?;
+    if context.admin.take_hint()
+        && let Some(hint) = admin::touch_id_hint(context.host, context.layout)
+    {
+        let _ = writeln!(err, "{hint}");
+    }
+    Ok(())
+}
+
 fn run_tui(app: &mut ui::app::App, cli: &Cli, console: &mut Console) -> ExitCode {
     if cli.dry_run {
         let _ = writeln!(
@@ -834,9 +849,7 @@ fn run_uninstall(
     };
     if uninstaller::needs_password(&plan.scan, routes) {
         // A refusal needs no text here: the report says what stayed.
-        let _ = context
-            .admin
-            .prepare(context.host, uninstaller::ADMIN_REASON);
+        let _ = prepare_admin(context, uninstaller::ADMIN_REASON, &mut *console.err);
     }
     let run_mode = if cli.force { "force" } else { "interactive" };
     let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
@@ -1192,15 +1205,11 @@ fn handle_startup(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let ScanContext {
-        layout,
-        host,
-        admin,
-    } = *context;
+    let ScanContext { layout, host, .. } = *context;
     let out = &mut *console.out;
     // A refusal needs no handling here: the root step then fails with the reason.
     if args.all {
-        let _ = admin.prepare(host, "read background task records");
+        let _ = prepare_admin(context, "read background task records", &mut *console.err);
     }
     if let Some(ref action) = args.action {
         let (label, is_enable) = match action {
@@ -1220,7 +1229,7 @@ fn handle_startup(
             && !cli.dry_run
             && item.read_only_reason().is_none()
         {
-            let _ = admin.prepare(host, "switch system daemons");
+            let _ = prepare_admin(context, "switch system daemons", &mut *console.err);
         }
 
         let result = if is_enable {
@@ -3492,6 +3501,63 @@ mod tests {
 
         assert_eq!(host.sudo_asks(), 1);
         assert_eq!(host.admin_scripts.lock().unwrap().len(), 2);
+    }
+
+    const TOUCH_ID_TIP: &str = "Tip: sudo can use Touch ID.";
+
+    fn enrolled(host: &FakeHost) {
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t2 biometric template(s)\n",
+        );
+    }
+
+    #[test]
+    fn the_touch_id_tip_prints_once_for_two_prepares_in_one_run() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+        enrolled(&host);
+        host.fail(SUDO_PROBE, "");
+
+        let ran = startup(
+            &["startup", "--all", "disable", "com.example.daemon"],
+            &host,
+            &layout,
+        );
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(ran.err.matches(TOUCH_ID_TIP).count(), 1, "{}", ran.err);
+        assert!(!ran.out.contains(TOUCH_ID_TIP));
+    }
+
+    #[test]
+    fn no_touch_id_tip_when_taert_did_not_ask_for_the_password() {
+        let (_temp, layout, host) = layout_with_a_daemon();
+        enrolled(&host);
+        host.reply(SUDO_PROBE, "");
+
+        let ran = startup(
+            &["startup", "disable", "com.example.daemon"],
+            &host,
+            &layout,
+        );
+
+        assert!(host.ran("/usr/bin/sudo -n true"));
+        assert_eq!(host.sudo_asks(), 0);
+        assert!(!ran.err.contains(TOUCH_ID_TIP), "{}", ran.err);
+        assert_eq!(host.count("/usr/bin/bioutil"), 0);
+    }
+
+    #[test]
+    fn a_forced_uninstall_prints_the_touch_id_tip_after_asking() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = password_host();
+        with_a_receipt(&layout);
+        enrolled(&host);
+
+        let ran = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(ran.err.matches(TOUCH_ID_TIP).count(), 1, "{}", ran.err);
     }
 
     #[test]

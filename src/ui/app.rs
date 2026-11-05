@@ -419,6 +419,9 @@ impl App {
         let res = self.main_loop(&mut terminal);
 
         leave_tui();
+        if let Some(hint) = self.admin.quit_hint(&*self.host, &self.layout) {
+            println!("{hint}");
+        }
 
         res
     }

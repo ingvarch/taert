@@ -202,6 +202,11 @@ Another copy of the app, another channel of it such as Foo Beta, or an app whose
 
 An app in `/Applications` that is a link goes alone: the link is removed, and the app it points to stays, with its files. A Homebrew cask that holds several apps stays with Homebrew: only the selected app goes, and `brew list` keeps showing the cask. Security agents such as CrowdStrike, Jamf, and SentinelOne are left alone, because they need their vendor's uninstaller. Paths on the ignore list are left out too.
 
+Touch ID for sudo: when taert had to ask for the administrator password (in Uninstall, Startup Items, or Doctor), you have fingerprints enrolled, and sudo does not use them, taert prints a one-line tip once per run. In the interactive screen it shows after you quit. taert never changes files in `/etc/pam.d`. To turn Touch ID on for sudo:
+
+- If `/etc/pam.d/sudo_local` does not exist, copy `/etc/pam.d/sudo_local.template` to `/etc/pam.d/sudo_local`, then remove the `#` before `pam_tid.so`.
+- If it exists, add the line `auth sufficient pam_tid.so` at its top and keep your lines.
+
 taert never edits your configuration. If `~/.zshrc`, `~/.config/fish/config.fish`, or a similar file still mentions a removed path, taert names the file and line.
 
 If macOS refuses a removal, give your terminal **Full Disk Access** for files in `~/Library`, and **App Management** for app bundles, in System Settings > Privacy & Security.

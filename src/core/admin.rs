@@ -27,6 +27,7 @@ pub struct AdminSession {
 struct State {
     refused: bool,
     asked: bool,
+    hint_taken: bool,
     ticket: Option<Ticket>,
 }
 
@@ -101,6 +102,14 @@ impl AdminSession {
         self.lock().asked
     }
 
+    /// True once, after taert's own `sudo -v` succeeded, so a tip shows at most once per run.
+    pub fn take_hint(&self) -> bool {
+        let mut state = self.lock();
+        let due = state.asked && !state.hint_taken;
+        state.hint_taken |= due;
+        due
+    }
+
     pub fn end(&self, host: &dyn Host) {
         let Some(ticket) = self.lock().ticket.take() else {
             return;
@@ -173,6 +182,54 @@ fn parse_helper_answer(answer: &str) -> Result<CompressReport, String> {
         return Err(error.to_string());
     }
     serde_json::from_value(value).map_err(|_| unreadable())
+}
+
+const BIOUTIL_TIMEOUT: Duration = Duration::from_secs(5);
+
+const COPY_TEMPLATE_HINT: &str = "Tip: sudo can use Touch ID. Copy /etc/pam.d/sudo_local.template to /etc/pam.d/sudo_local and remove the # before pam_tid.so.";
+const ADD_LINE_HINT: &str = "Tip: sudo can use Touch ID. Add the line auth sufficient pam_tid.so at the top of /etc/pam.d/sudo_local.";
+
+/// A tip for turning on Touch ID for sudo, when fingerprints are enrolled and PAM does not use them.
+pub fn touch_id_hint(host: &dyn Host, layout: &Layout) -> Option<&'static str> {
+    let local_path = layout.system("etc/pam.d/sudo_local");
+    let read = |path| std::fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let local = read(&local_path);
+    let sudo = read(&layout.system("etc/pam.d/sudo"));
+    if [&local, &sudo]
+        .into_iter()
+        .any(|text| text.as_ref().is_ok_and(|text| enables_touch_id(text)))
+    {
+        return None;
+    }
+    if !has_fingerprints(host) {
+        return None;
+    }
+    Some(if local_path.symlink_metadata().is_ok() {
+        ADD_LINE_HINT
+    } else {
+        COPY_TEMPLATE_HINT
+    })
+}
+
+fn enables_touch_id(pam: &str) -> bool {
+    pam.lines().any(|line| {
+        line.find("pam_tid.so")
+            .is_some_and(|at| !line[..at].contains('#'))
+    })
+}
+
+fn has_fingerprints(host: &dyn Host) -> bool {
+    let output = host.run("/usr/bin/bioutil", &["-c"], BIOUTIL_TIMEOUT);
+    if !output.ok {
+        return false;
+    }
+    let own = format!("User {}:", host.uid());
+    output.stdout.lines().any(|line| {
+        line.strip_prefix(&own)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|count| count.parse::<u32>().ok())
+            .is_some_and(|count| count > 0)
+    })
 }
 
 #[cfg(test)]
@@ -501,5 +558,161 @@ mod tests {
         assert_eq!(bundle.unwrap_err(), "the path is not valid UTF-8");
         assert_eq!(home.unwrap_err(), "the path is not valid UTF-8");
         assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    const BIOUTIL: &str = "/usr/bin/bioutil -c";
+    const COPY_HINT: &str = "Tip: sudo can use Touch ID. Copy /etc/pam.d/sudo_local.template to /etc/pam.d/sudo_local and remove the # before pam_tid.so.";
+    const ADD_HINT: &str = "Tip: sudo can use Touch ID. Add the line auth sufficient pam_tid.so at the top of /etc/pam.d/sudo_local.";
+    const ENROLLED: &str =
+        "User 501:\t2 biometric template(s)\nOperation performed successfully.\n";
+
+    fn pam_sandbox(files: &[(&str, &str)]) -> (tempfile::TempDir, Layout) {
+        let (dir, layout) = crate::core::apps::testing::sandbox();
+        for (name, text) in files {
+            let path = layout.system(&format!("etc/pam.d/{name}"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        (dir, layout)
+    }
+
+    #[test]
+    fn no_hint_when_sudo_local_enables_touch_id() {
+        let (_dir, layout) =
+            pam_sandbox(&[("sudo_local", "auth       sufficient     pam_tid.so\n")]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), None);
+        assert_eq!(host.count("/usr/bin/bioutil"), 0);
+    }
+
+    #[test]
+    fn no_hint_when_sudo_enables_touch_id() {
+        let (_dir, layout) = pam_sandbox(&[(
+            "sudo",
+            "auth sufficient pam_tid.so\nauth required pam_opendirectory.so\n",
+        )]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), None);
+        assert_eq!(host.count("/usr/bin/bioutil"), 0);
+    }
+
+    #[test]
+    fn a_commented_line_does_not_enable_touch_id() {
+        let (_dir, layout) = pam_sandbox(&[
+            ("sudo_local", "#auth sufficient pam_tid.so\n"),
+            ("sudo", "auth required pam_opendirectory.so\n"),
+        ]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), Some(ADD_HINT));
+        assert_eq!(host.count("/usr/bin/bioutil"), 1);
+        assert!(host.ran(BIOUTIL));
+    }
+
+    #[test]
+    fn a_comment_after_the_line_still_counts() {
+        let (_dir, layout) =
+            pam_sandbox(&[("sudo_local", "auth sufficient pam_tid.so # touch id\n")]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), None);
+    }
+
+    #[test]
+    fn without_sudo_local_the_hint_says_to_copy_the_template() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", "auth required pam_opendirectory.so\n")]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), Some(COPY_HINT));
+    }
+
+    #[test]
+    fn an_unreadable_sudo_local_still_gets_the_add_line_hint() {
+        let (_dir, layout) = pam_sandbox(&[]);
+        let path = layout.system("etc/pam.d/sudo_local");
+        std::fs::create_dir_all(path).unwrap();
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), Some(ADD_HINT));
+    }
+
+    #[test]
+    fn a_non_utf8_byte_in_a_comment_does_not_hide_an_active_line() {
+        let (_dir, layout) = pam_sandbox(&[]);
+        let path = layout.system("etc/pam.d/sudo_local");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"# caf\xe9\nauth sufficient pam_tid.so\n").unwrap();
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_hint(&host, &layout), None);
+    }
+
+    #[test]
+    fn no_hint_without_fingerprints() {
+        let (_dir, layout) = pam_sandbox(&[]);
+
+        let none = FakeHost::default();
+        none.reply(BIOUTIL, "User 501:\t0 biometric template(s)\n");
+        assert_eq!(touch_id_hint(&none, &layout), None);
+
+        let failed = FakeHost::default();
+        failed.fail(BIOUTIL, "no biometrics");
+        assert_eq!(touch_id_hint(&failed, &layout), None);
+
+        let failed_with_text = FakeHost::default();
+        failed_with_text.fail_after_printing(BIOUTIL, "User 501:\t2 biometric template(s)\n");
+        assert_eq!(touch_id_hint(&failed_with_text, &layout), None);
+
+        let other_user = FakeHost::default();
+        other_user.reply(BIOUTIL, "User 502:\t2 biometric template(s)\n");
+        assert_eq!(touch_id_hint(&other_user, &layout), None);
+
+        let other_text = FakeHost::default();
+        other_text.reply(BIOUTIL, "Biometrics are not available\n");
+        assert_eq!(touch_id_hint(&other_text, &layout), None);
+    }
+
+    #[test]
+    fn the_hint_follows_the_uid_of_the_host() {
+        let (_dir, layout) = pam_sandbox(&[]);
+        let host = FakeHost::default();
+        host.set_uid(502);
+        host.reply(
+            BIOUTIL,
+            "User 501:\t1 biometric template(s)\nUser 502:\t3 biometric template(s)\n",
+        );
+
+        assert_eq!(touch_id_hint(&host, &layout), Some(COPY_HINT));
+    }
+
+    #[test]
+    fn the_hint_is_taken_once_and_only_after_taert_asked() {
+        let (host, session) = fixture(true);
+        host.fail(PROBE, "");
+        assert!(!session.take_hint());
+
+        session.prepare(&*host, "x").unwrap();
+        assert!(session.take_hint());
+        assert!(!session.take_hint());
+        session.prepare(&*host, "x").unwrap();
+        assert!(!session.take_hint());
+    }
+
+    #[test]
+    fn a_ticket_from_the_terminal_gives_no_hint() {
+        let (host, session) = fixture(true);
+        host.reply(PROBE, "");
+        session.prepare(&*host, "x").unwrap();
+
+        assert!(!session.take_hint());
     }
 }
