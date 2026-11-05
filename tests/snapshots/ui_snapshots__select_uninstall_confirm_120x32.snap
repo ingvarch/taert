@@ -18,7 +18,7 @@ expression: select_screen(&state)
                              │ Personal files and apps (1.8 GB) will be moved to the      │
                              │ Trash. System files will be permanently deleted.           │
                              │ Open apps are quit first.                                  │
-                             │ macOS will ask for your password.                          │
+                             │ taert asks for your administrator password first.          │
                              │                                                            │
                              │                                                            │
                              │                                       Cancel    Uninstall  │

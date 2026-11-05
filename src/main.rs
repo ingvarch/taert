@@ -801,6 +801,7 @@ fn run_tui(app: &mut ui::app::App, cli: &Cli, console: &mut Console) -> ExitCode
 
 fn run_uninstall(
     plan: &UninstallPlan,
+    routes: &HashMap<PathBuf, Route>,
     cli: &Cli,
     ignore: &IgnoreStore,
     context: &ScanContext,
@@ -811,6 +812,12 @@ fn run_uninstall(
     } else {
         RemovalMode::Trash
     };
+    if uninstaller::needs_password(&plan.scan, routes) {
+        // A refusal needs no text here: the report says what stayed.
+        let _ = context
+            .admin
+            .prepare(context.host, uninstaller::ADMIN_REASON);
+    }
     let run_mode = if cli.force { "force" } else { "interactive" };
     let app_names: Vec<_> = plan.apps.iter().map(|a| a.app.name.as_str()).collect();
     let command = format!("uninstall {}", app_names.join(", "));
@@ -887,18 +894,18 @@ fn finish_uninstall(
         return ExitCode::SUCCESS;
     }
 
-    if cli.force {
-        return run_uninstall(&plan, cli, ignore, context, console);
-    }
-
-    if !use_plain {
+    if !cli.force && !use_plain {
         let mut app = ui::app::App::with_plan(plan, ignore.clone(), saved_config(context.layout))
             .with_permanent(cli.permanent);
         return run_tui(&mut app, cli, console);
     }
 
-    // The list and the confirmation read the same routes, so they cannot disagree.
+    // The list, the confirmation, and the run read the same routes, so they cannot disagree.
     let routes = uninstaller::routes(&plan);
+    if cli.force {
+        return run_uninstall(&plan, &routes, cli, ignore, context, console);
+    }
+
     let _ = write!(
         console.out,
         "{}",
@@ -910,7 +917,7 @@ fn finish_uninstall(
         return ExitCode::FAILURE;
     }
     match PlainRunner::prompt_confirm(&plan.scan, console, plan_mode(&routes, cli.permanent)) {
-        Ok(true) => run_uninstall(&plan, cli, ignore, context, console),
+        Ok(true) => run_uninstall(&plan, &routes, cli, ignore, context, console),
         Ok(false) => {
             let _ = writeln!(console.out, "Operation cancelled.");
             ExitCode::SUCCESS
@@ -4188,6 +4195,146 @@ mod tests {
         let runs = runs_in(&layout);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].mode, "interactive");
+    }
+
+    const SUDO_PROBE: &str = "/usr/bin/sudo -n true";
+
+    /// Writes a package receipt of the fixture app, which only root can remove.
+    fn with_a_receipt(layout: &Layout) -> PathBuf {
+        let receipt = layout.system("private/var/db/receipts/is.taert.fixture.plist");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, b"x").unwrap();
+        receipt
+    }
+
+    /// The fake root step removes `receipt`, as the real one does.
+    fn root_removes(host: &FakeHost, receipt: PathBuf) {
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            let _ = std::fs::remove_file(&receipt);
+        }));
+    }
+
+    fn password_host() -> std::sync::Arc<FakeHost> {
+        let host = FakeHost::idle();
+        host.simulate_trash();
+        host.fail(SUDO_PROBE, "");
+        *host.tty.lock().unwrap() = true;
+        std::sync::Arc::new(host)
+    }
+
+    #[test]
+    fn a_forced_uninstall_with_root_files_asks_once_before_the_first_admin_script() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = password_host();
+        let receipt = with_a_receipt(&layout);
+        let asked_before_script = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen, watched) = (asked_before_script.clone(), host.clone());
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            seen.store(watched.sudo_asks(), std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::remove_file(&receipt);
+        }));
+
+        let ran = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(
+            asked_before_script.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_plain_uninstall_with_root_files_asks_once_after_yes() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = password_host();
+        root_removes(&host, with_a_receipt(&layout));
+
+        let ran = uninstall_typing(
+            &["uninstall", "Taert Fixture", "--plain"],
+            "\nyes\n",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(host.sudo_asks(), 1);
+    }
+
+    #[test]
+    fn a_plain_uninstall_answered_no_asks_nothing() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = password_host();
+        with_a_receipt(&layout);
+
+        let ran = uninstall_typing(
+            &["uninstall", "Taert Fixture", "--plain"],
+            "\nno\n",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.ends_with("Operation cancelled.\n"), "{}", ran.out);
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn a_refused_password_adds_no_text_and_the_report_says_what_stayed() {
+        let forced_uninstall = |prepare: &dyn Fn(&FakeHost)| {
+            let (temp, layout) = layout_with_the_fixture_app();
+            let host = password_host();
+            with_a_receipt(&layout);
+            prepare(&host);
+            let ran = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+            let base = temp.path().canonicalize().unwrap();
+            let unrooted = |text: &str| text.replace(&*base.to_string_lossy(), "<temp>");
+            (host, unrooted(&ran.out), unrooted(&ran.err))
+        };
+
+        let (host, out, err) = forced_uninstall(&|host| {
+            *host.sudo_refused.lock().unwrap() = true;
+        });
+        let (_, report_out, report_err) = forced_uninstall(&|host| {
+            *host.tty.lock().unwrap() = false;
+            *host.admin_result.lock().unwrap() = Some(admin::NOT_GIVEN.to_string());
+        });
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(err.matches(admin::NOT_GIVEN).count(), 1, "{err}");
+        assert_eq!(out, report_out);
+        assert_eq!(err, report_err);
+    }
+
+    #[test]
+    fn an_uninstall_without_root_files_asks_nothing() {
+        let (_temp, layout) = layout_with_the_fixture_app();
+        let host = password_host();
+
+        let ran = uninstall(&["uninstall", "Taert Fixture", "--force"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn dry_run_and_json_never_ask_for_the_password() {
+        for flag in ["--dry-run", "--json"] {
+            let (_temp, layout) = layout_with_the_fixture_app();
+            let host = password_host();
+            with_a_receipt(&layout);
+
+            let ran = uninstall(
+                &["uninstall", "Taert Fixture", flag, "--force"],
+                &host,
+                &layout,
+            );
+
+            assert!(ran.ok, "{flag}: {}", ran.err);
+            assert_eq!(host.sudo_asks(), 0, "{flag}");
+        }
     }
 
     const SAFARI: &str = "Library/Caches/com.apple.Safari";

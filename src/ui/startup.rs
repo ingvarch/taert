@@ -16,6 +16,7 @@ use super::components::hints::Hint;
 use super::components::list::{Column, ListRow};
 use super::components::modal::{Modal, dim_backdrop};
 use super::components::text::wrap_line;
+use super::terminal::PASSWORD_FIRST;
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::path_utils::prettify_path;
@@ -23,7 +24,6 @@ use crate::core::startup::{Btm, StartupItem, StartupKind, StartupScan, StartupSt
 
 const SPLIT_MIN_WIDTH: u16 = 100;
 const MAX_NOTE_ROWS: usize = 3;
-const PASSWORD_FIRST: &str = "taert asks for your administrator password first.";
 
 /// The note a daemon switch shows before the password prompt.
 pub(crate) fn password_line(kind: StartupKind, theme: &Theme) -> Option<Line<'static>> {

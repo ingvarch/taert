@@ -726,6 +726,9 @@ pub fn config_mentions(layout: &Layout, removed: &[PathBuf]) -> Vec<String> {
     found
 }
 
+/// What taert says an uninstall needs the password for.
+pub const ADMIN_REASON: &str = "remove apps and their system files";
+
 /// True when the selection holds a row only root can remove.
 pub fn needs_password(scan: &CategoryScan, routes: &HashMap<PathBuf, Route>) -> bool {
     scan.selected_items()
