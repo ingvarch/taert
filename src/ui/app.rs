@@ -1988,9 +1988,10 @@ impl App {
     fn launch_compress_scan(&mut self) {
         let (tx, rx) = mpsc::channel();
         let layout = self.layout.clone();
+        let owner = self.host.uid();
 
         thread::spawn(move || {
-            let scan = crate::core::compress::compress_candidates_scan(&layout);
+            let scan = crate::core::compress::compress_candidates_scan(&layout, owner);
             let _ = tx.send(ScanMessage::Finished(scan));
         });
 
@@ -3918,7 +3919,7 @@ mod tests {
         use crate::core::history::{OutcomeKind, RunRecord};
         use crate::core::host::fake::FakeHost;
         use crate::core::slim::testing::{
-            fake_ditto, holding_of, make_slim_save_space, write_test_app,
+            fake_ditto, holding_of, make_slim_save_space, user_host, write_test_app,
         };
 
         const TRASH_NOTE: &str =
@@ -3958,7 +3959,7 @@ mod tests {
 
         /// Gives the app at `bundle` an Intel slice large enough to free blocks.
         fn ready_host(bundle: &Path) -> FakeHost {
-            let host = FakeHost::idle();
+            let host = user_host();
             host.reply("ditto", "");
             fake_ditto(&host, bundle);
             host.reply("codesign", "");
@@ -4256,6 +4257,7 @@ mod tests {
                 ps.push_str(&program);
             }
             let host = FakeHost::default();
+            host.set_uid(crate::core::host::fake::real_uid());
             host.reply("/bin/ps", &ps);
             host.reply("/usr/sbin/lsof", "");
             let items = made

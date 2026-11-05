@@ -224,6 +224,11 @@ pub mod fake {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    /// The uid of the user running the tests.
+    pub fn real_uid() -> u32 {
+        unsafe { libc::getuid() }
+    }
+
     type Effect = Box<dyn Fn() + Send>;
     type RunEffect = Arc<dyn Fn() + Send + Sync>;
 
@@ -338,6 +343,12 @@ pub mod fake {
 
         pub fn set_uid(&self, uid: u32) {
             *self.uid.lock().unwrap() = Some(uid);
+        }
+
+        /// The fake host with the uid of the user running the tests, for tests whose files must pass an owner check.
+        pub fn as_real_user(self) -> Self {
+            self.set_uid(real_uid());
+            self
         }
 
         pub fn set_pid(&self, pid: u32) {
