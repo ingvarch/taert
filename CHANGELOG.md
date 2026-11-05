@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-05
+
 ### Fixed
 - **Startup Items detail card**: long text in the Service detail card wraps inside the card instead of running past its edge. This covers the notice for an item an app registered, a long `Label`, and long `Bundle`, `Program`, and `Plist` paths.
 
