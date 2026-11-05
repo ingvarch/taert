@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_helper;
 pub mod apfs;
 pub mod app_caches;
 pub mod apps;

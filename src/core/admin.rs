@@ -1,6 +1,9 @@
 //! One sudo session per run: ask for the password once, keep the ticket alive, end it on exit.
 
-use crate::core::host::{Host, MacHost};
+use crate::core::compress::CompressReport;
+use crate::core::host::{Host, MacHost, shell_quote};
+use crate::core::layout::Layout;
+use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -8,6 +11,9 @@ use std::time::Duration;
 
 const SUDO_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const HELPER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const COMPRESS_PROMPT: &str = "taert wants to compress an app";
+const UNDO_PROMPT: &str = "taert wants to undo the compression of an app";
 
 pub const NOT_GIVEN: &str = "The administrator password was not given";
 
@@ -125,6 +131,44 @@ impl AdminSession {
 /// Whether sudo runs without asking: the terminal has a ticket, or taert runs as root.
 pub(crate) fn probe(host: &dyn Host) -> bool {
     host.run("/usr/bin/sudo", &["-n", "true"], SUDO_TIMEOUT).ok
+}
+
+/// Compresses or unpacks one root-owned bundle in taert run as root.
+pub fn run_compress_helper(
+    host: &dyn Host,
+    layout: &Layout,
+    bundle: &Path,
+    undo: bool,
+) -> Result<CompressReport, String> {
+    let exe = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|e| format!("Could not find the taert program: {e}"))?;
+    let script = format!(
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin {} admin-helper compress{} --home {} {}",
+        quoted(&exe)?,
+        if undo { " --undo" } else { "" },
+        quoted(&layout.home)?,
+        quoted(bundle)?,
+    );
+    let prompt = if undo { UNDO_PROMPT } else { COMPRESS_PROMPT };
+    let answer = host.run_admin_output(&script, prompt, HELPER_TIMEOUT)?;
+    parse_helper_answer(&answer)
+}
+
+/// The path quoted for the script. A lossy copy would name another file.
+fn quoted(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(shell_quote)
+        .ok_or_else(|| "the path is not valid UTF-8".to_string())
+}
+
+fn parse_helper_answer(answer: &str) -> Result<CompressReport, String> {
+    let unreadable = || format!("The admin helper gave an answer taert cannot read: {answer}");
+    let value: serde_json::Value = serde_json::from_str(answer).map_err(|_| unreadable())?;
+    if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
+        return Err(error.to_string());
+    }
+    serde_json::from_value(value).map_err(|_| unreadable())
 }
 
 #[cfg(test)]
@@ -292,6 +336,145 @@ mod tests {
             host.run_admin_output("rm x", "p", Duration::from_secs(1)),
             Err(NOT_GIVEN.to_string())
         );
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    fn helper_layout() -> Layout {
+        Layout {
+            home: "/Users/it's me".into(),
+            root: "/".into(),
+            user_cache: None,
+        }
+    }
+
+    const REPORT: &str = r#"{"scanned_files":3,"processed_files":2,"original_bytes":100,"compressed_bytes":40,"saved_bytes":60,"original_blocks":0,"compressed_blocks":0,"saved_blocks":0,"skipped":{"already_compressed":0,"symlink_or_hardlink":0,"cloned":0,"cloud_or_dataless":0,"has_xattr":0,"not_user_owned":0,"incompressible":0,"not_compressed":0,"locked":0,"open_for_writing":0},"failures":[],"dry_run":false,"undo":false}"#;
+
+    #[test]
+    fn the_helper_script_sets_its_own_path_and_quotes_every_part() {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = REPORT.to_string();
+        let bundle = Path::new("/Applications/My \"quoted\" it's.app");
+
+        run_compress_helper(&host, &helper_layout(), bundle, false).unwrap();
+        run_compress_helper(&host, &helper_layout(), bundle, true).unwrap();
+
+        let scripts = host.admin_scripts.lock().unwrap();
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let start = format!(
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin {} admin-helper compress",
+            shell_quote(&exe.to_string_lossy())
+        );
+        let rest = r#" --home '/Users/it'\''s me' '/Applications/My "quoted" it'\''s.app'"#;
+        assert_eq!(scripts[0], format!("{start}{rest}"));
+        assert_eq!(scripts[1], format!("{start} --undo{rest}"));
+    }
+
+    #[test]
+    fn the_prompt_says_whether_the_helper_compresses_or_undoes() {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = REPORT.to_string();
+        let bundle = Path::new("/Applications/A.app");
+
+        run_compress_helper(&host, &helper_layout(), bundle, false).unwrap();
+        run_compress_helper(&host, &helper_layout(), bundle, true).unwrap();
+
+        assert_eq!(
+            *host.admin_prompts.lock().unwrap(),
+            [
+                "taert wants to compress an app",
+                "taert wants to undo the compression of an app"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_error_answer_becomes_an_error() {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = r#"{"error": "x"}"#.to_string();
+
+        let result = run_compress_helper(
+            &host,
+            &helper_layout(),
+            Path::new("/Applications/A.app"),
+            false,
+        );
+
+        assert_eq!(result.unwrap_err(), "x");
+    }
+
+    #[test]
+    fn a_report_answer_becomes_the_report() {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = REPORT.to_string();
+
+        let report = run_compress_helper(
+            &host,
+            &helper_layout(),
+            Path::new("/Applications/A.app"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.processed_files, 2);
+        assert_eq!(report.saved_bytes, 60);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_json_is_an_error() {
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = "Segmentation fault".to_string();
+
+        let result = run_compress_helper(
+            &host,
+            &helper_layout(),
+            Path::new("/Applications/A.app"),
+            false,
+        );
+
+        assert!(result.unwrap_err().contains("Segmentation fault"));
+    }
+
+    #[test]
+    fn a_refused_password_is_reported_as_it_is() {
+        let host = FakeHost::default();
+        *host.sudo_refused.lock().unwrap() = true;
+        assert!(!host.sudo_validate("compress"));
+
+        let result = run_compress_helper(
+            &host,
+            &helper_layout(),
+            Path::new("/Applications/A.app"),
+            false,
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "The administrator password was not given"
+        );
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_before_the_prompt() {
+        use std::os::unix::ffi::OsStrExt;
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = REPORT.to_string();
+        let not_utf8 = Path::new(std::ffi::OsStr::from_bytes(b"/Applications/\xff.app"));
+        let home_not_utf8 = Layout {
+            home: std::ffi::OsStr::from_bytes(b"/Users/\xff").into(),
+            ..helper_layout()
+        };
+
+        let bundle = run_compress_helper(&host, &helper_layout(), not_utf8, false);
+        let home = run_compress_helper(
+            &host,
+            &home_not_utf8,
+            Path::new("/Applications/A.app"),
+            false,
+        );
+
+        assert_eq!(bundle.unwrap_err(), "the path is not valid UTF-8");
+        assert_eq!(home.unwrap_err(), "the path is not valid UTF-8");
         assert!(host.admin_scripts.lock().unwrap().is_empty());
     }
 }

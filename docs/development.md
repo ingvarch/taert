@@ -64,6 +64,8 @@ CI runs these checks and a release snapshot on every push to `main` and all pull
 
 `cargo test --test uninstall_live -- --ignored` runs real uninstalls of a throwaway app in a temporary home folder. They read `/Applications`, and macOS may ask to let your terminal control System Events.
 
+`cargo test --test admin_helper_live -- --ignored --nocapture` runs the helper through sudo on a throwaway root-owned bundle in `/Applications`.
+
 Unit tests and TUI tests use a temporary `Layout` and the fake `Host`, so they do not touch your taert files, launchd, Trash, or `/Applications`. Code that saves config, history, the ignore list, or project folders takes its path from the `Layout` it gets (`config_path()`, `history_path()`, `ignore_path()`, `projects_path()`). Scans read the Trash of each volume under the `Layout`'s `Volumes` folder.
 
 The command handlers in `src/main.rs` take the `Host` and `Layout` they need and a `Console` that holds the input, output, and error streams. Their tests run on the fake `Host` and a temporary `Layout`, type the answers to prompts, and check what the handler writes to each stream. A test that removes files first checks that every row of the scan lies in the temporary folder.
@@ -85,6 +87,7 @@ taert/
 │   │   └── args.rs             # Clap CLI flags, commands, and options
 │   ├── core/
 │   │   ├── admin.rs            # One sudo session per run: one password prompt, keep-alive, end on exit
+│   │   ├── admin_helper.rs     # The root side of `taert admin-helper`: checks and compresses one root-owned app
 │   │   ├── app_caches.rs       # App cache and browser cache rows, and which start selected
 │   │   ├── apps.rs             # Installed apps and what their bundles say
 │   │   ├── bytes.rs            # Binary size formatting (KB, MB, GB)

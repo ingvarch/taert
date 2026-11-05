@@ -89,6 +89,41 @@ pub enum Command {
     Completion { shell: clap_complete::Shell },
 }
 
+/// `taert admin-helper`, which runs as root. It has a parser of its own, so neither the help
+/// nor the completions of `Cli` list it.
+#[derive(Debug, Parser)]
+#[command(name = "taert")]
+pub struct AdminHelperCli {
+    #[command(subcommand)]
+    pub command: AdminHelperCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminHelperCommand {
+    /// Run a step as root for taert itself (started through sudo)
+    #[command(subcommand)]
+    AdminHelper(AdminHelperAction),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminHelperAction {
+    /// Compress or unpack one root-owned app bundle
+    Compress(AdminHelperCompressArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AdminHelperCompressArgs {
+    /// Unpack the files instead of compressing them
+    #[arg(long)]
+    pub undo: bool,
+
+    /// The home folder of the user who asked
+    #[arg(long)]
+    pub home: PathBuf,
+
+    pub bundle: PathBuf,
+}
+
 #[derive(Debug, Args, Default)]
 pub struct ScheduleArgs {
     #[command(subcommand)]
@@ -296,4 +331,77 @@ pub struct CompressArgs {
 pub struct SlimArgs {
     /// App to slim, by name or bundle id (shows the list of apps if omitted)
     pub names: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_admin_helper_takes_its_arguments() {
+        let cli = AdminHelperCli::try_parse_from([
+            "taert",
+            "admin-helper",
+            "compress",
+            "--undo",
+            "--home",
+            "/Users/a b",
+            "/Applications/Foo.app",
+        ])
+        .unwrap();
+
+        let AdminHelperCommand::AdminHelper(AdminHelperAction::Compress(args)) = cli.command;
+        assert!(args.undo);
+        assert_eq!(args.home, PathBuf::from("/Users/a b"));
+        assert_eq!(args.bundle, PathBuf::from("/Applications/Foo.app"));
+    }
+
+    #[test]
+    fn the_admin_helper_needs_a_home_and_a_bundle() {
+        let parse = |args: &[&str]| AdminHelperCli::try_parse_from(args);
+        assert!(parse(&["taert", "admin-helper", "compress", "/A.app"]).is_err());
+        assert!(parse(&["taert", "admin-helper", "compress", "--home", "/h"]).is_err());
+    }
+
+    #[test]
+    fn the_admin_helper_takes_no_flag_of_the_other_commands() {
+        let args = [
+            "taert",
+            "admin-helper",
+            "compress",
+            "--home",
+            "/h",
+            "/A.app",
+        ];
+        assert!(AdminHelperCli::try_parse_from(args).is_ok());
+        for flag in ["--dry-run", "--force", "--permanent", "--json", "--plain"] {
+            assert!(AdminHelperCli::try_parse_from([&args[..], &[flag]].concat()).is_err());
+            assert!(Cli::try_parse_from([&args[..1], &[flag], &args[1..]].concat()).is_err());
+        }
+    }
+
+    #[test]
+    fn the_admin_helper_is_not_in_the_help() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("admin-helper"), "{help}");
+    }
+
+    #[test]
+    fn the_admin_helper_is_in_no_completion_script() {
+        use clap_complete::Shell;
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::Elvish,
+            Shell::PowerShell,
+        ] {
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "taert", &mut script);
+
+            let script = String::from_utf8(script).unwrap();
+            assert!(!script.contains("admin-helper"), "{shell}");
+        }
+    }
 }

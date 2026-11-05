@@ -577,7 +577,7 @@ pub fn check_eligibility(
 }
 
 /// Every entry under `root` (and `root` itself), sorted, without following links.
-fn walk_entries(root: &Path) -> std::io::Result<Vec<(PathBuf, fs::Metadata)>> {
+pub(crate) fn walk_entries(root: &Path) -> std::io::Result<Vec<(PathBuf, fs::Metadata)>> {
     fn visit(path: &Path, out: &mut Vec<(PathBuf, fs::Metadata)>) -> std::io::Result<()> {
         let meta = fs::symlink_metadata(path)?;
         let is_dir = meta.is_dir();

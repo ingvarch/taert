@@ -11,11 +11,10 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 
 use crate::cli::{
-    BrewAction, CleanArgs, CleanCategory, Cli, Command, CompressArgs, ConfigArgs, DoctorArgs,
-    HistoryAction, HistoryArgs, IgnoreAction, LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs,
-    SlimArgs, StartupArgs, UninstallArgs,
+    AdminHelperAction, AdminHelperCli, AdminHelperCommand, BrewAction, CleanArgs, CleanCategory,
+    Cli, Command, CompressArgs, ConfigArgs, DoctorArgs, HistoryAction, HistoryArgs, IgnoreAction,
+    LargeArgs, PurgeArgs, ScheduleAction, ScheduleArgs, SlimArgs, StartupArgs, UninstallArgs,
 };
-use crate::core::admin;
 use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
@@ -40,6 +39,7 @@ use crate::core::startup;
 use crate::core::status;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::uninstaller::{self, PlanRequest, Route, UninstallPlan, Uninstaller};
+use crate::core::{admin, admin_helper};
 use crate::plain::{Console, PlainRunner};
 
 /// Ends the sudo session when `main` returns or a panic unwinds.
@@ -52,8 +52,12 @@ impl Drop for EndAdminSession {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "admin-helper") {
+        return handle_admin_helper(args);
+    }
     let _end_admin_session = EndAdminSession;
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args);
     if let Some(Command::Completion { shell }) = cli.command {
         clap_complete::generate(shell, &mut Cli::command(), "taert", &mut std::io::stdout());
         return ExitCode::SUCCESS;
@@ -167,6 +171,22 @@ fn main() -> ExitCode {
 
         Some(Command::Completion { .. }) => ExitCode::SUCCESS,
     }
+}
+
+/// Prints one JSON object and exits 0 even on an error, bad arguments and `--help` included,
+/// because the parent reads stdout only when the script exits with 0.
+fn handle_admin_helper(args: Vec<std::ffi::OsString>) -> ExitCode {
+    let answer = match AdminHelperCli::try_parse_from(args) {
+        Ok(cli) => {
+            let AdminHelperCommand::AdminHelper(AdminHelperAction::Compress(args)) = cli.command;
+            admin_helper::answer_or_error(|| {
+                admin_helper::run_compress(&args.home, &args.bundle, args.undo)
+            })
+        }
+        Err(error) => admin_helper::error_answer(error.to_string().trim()),
+    };
+    println!("{answer}");
+    ExitCode::SUCCESS
 }
 
 fn saved_config(layout: &Layout) -> Config {

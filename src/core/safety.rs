@@ -602,7 +602,12 @@ impl Safety {
             return true;
         }
         let probe = contents.join(".taert-write-probe");
-        let writable = fs::File::create(&probe).is_ok();
+        let _ = fs::remove_file(&probe);
+        let writable = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .is_ok();
         let _ = fs::remove_file(&probe);
         writable
     }
@@ -883,6 +888,20 @@ mod tests {
     use crate::core::host::fake::FakeHost;
     use std::fs::File;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_write_probe_does_not_follow_a_planted_link() {
+        let temp = tempdir().unwrap();
+        let bundle = temp.path().join("Foo.app");
+        fs::create_dir_all(bundle.join("Contents")).unwrap();
+        let target = temp.path().join("target");
+        fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, bundle.join("Contents/.taert-write-probe")).unwrap();
+
+        Safety::can_write_inside(&bundle);
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+    }
 
     #[test]
     fn test_critical_roots_cannot_be_removed() {

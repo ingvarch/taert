@@ -14,6 +14,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Startup Manager | `crate::core::startup` | Scans, associates, inspects live metrics, and switches launchd/login items |
 | Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
+| Admin Helper | `crate::core::admin_helper`, `crate::core::admin` | Compresses one root-owned app bundle in taert run as root |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
 | Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes through read-only `brew info` and `brew outdated` calls, and removes unused dependencies, old versions, and one formula that nothing uses through brew |
 | Orphan Detector | `crate::core::orphans` | Finds files left behind by apps that are gone with Spotlight and bundle ID checks |
@@ -242,6 +243,31 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 
 7. **Tests in CI**:
    The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. A comment on issue #38 records the runner image of the first run that included the tests of the compress fixes. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
+
+## Admin Helper
+
+[`admin_helper.rs`](../src/core/admin_helper.rs) is the root side of the hidden command `taert admin-helper compress [--undo] --home <path> <bundle>`. [`admin::run_compress_helper`](../src/core/admin.rs) starts it.
+
+Compress copies owners, flags, attributes, and ACLs, and swaps a copy in with `renamex_np`. In a bundle that belongs to root, the user can do none of this, and `Host::run_admin` runs only shell scripts. So the work runs in a second taert process as root, started with `sudo` or the administrator dialog through `Host::run_admin_output`. The parent runs the script `PATH=/usr/bin:/bin:/usr/sbin:/sbin '<exe>' admin-helper compress ...`, with every part quoted. macOS sudo keeps the PATH of the user, so the script sets its own.
+
+`main` parses `admin-helper` with a parser of its own, `AdminHelperCli` in `src/cli.rs`, before it parses the other commands. So the help and the shell completions do not list the helper, and the global flags, such as `--dry-run`, do not exist for it.
+
+The helper does not trust the parent. Before it writes, `helper_check` checks the bundle again:
+
+- The process runs as root.
+- The path is an app bundle in an app folder, and `Safety::is_safe_as_root` passes: every folder between the app folder and the bundle belongs to root, and only root can write in it.
+- The bundle is not a link, every entry in it belongs to root, and none is setuid or setgid.
+- No folder in the bundle, the bundle included, can be written by others or by a group besides wheel, and none has an access control list. A folder like that would let a user process swap an entry for a link while root works in it.
+- `Safety::can_compress_with_host` passes, the check for a running app and for App Management included. App Management applies to root too.
+
+Before each folder and file it changes, the helper checks that the bundle path still has the device and inode it had at the check and is not a link. It stops with an error otherwise. Its `lsof` runs as root, so it sees files that root daemons hold open.
+
+The helper reads one file of the user (`--home`): the ignore list. `--home` must be a full path to a folder that is not a link. The helper opens the ignore file without following a link in its last part, and reads it only when it is a regular file of the owner of `--home`. Folders on the way to it are followed, so a link there can point elsewhere, but the file must still belong to the user, and nothing from it is shown. A missing file means no list; any other problem stops the helper with `Could not read the ignore list`, which quotes nothing from the file. Root writes only inside the root-owned bundle. It always exits with 0 and prints one JSON object, the `CompressReport` or `{"error": "..."}`, bad arguments and `--help` included, because a non-zero exit drops the output. A non-zero exit means that sudo or the dialog failed, for example a refused password, and the parent reports that.
+
+Trade-offs:
+
+- Root runs the binary that taert runs from (`current_exe`). The user can usually write that file, for example a Homebrew install. Whoever can change it can run code as root the next time taert uses sudo.
+- `/Applications` is `root:admin 775`, so a process of an admin user can rename entries in it. The device and inode check narrows that window, and cannot close it.
 
 ## APFS Space Accounting
 
