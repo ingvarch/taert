@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use super::apps::{
     InstalledApp, bundle_id_of, embedded_bundle_ids, find_apps, find_copies, is_common_name,
-    official_uninstaller,
+    official_uninstaller, package_holds,
 };
 use super::cleaner::{
     Cleaner, ItemRemovalError, RemovalFailure, RemovalMode, RemovalProgress, RemovalReport,
@@ -328,6 +328,20 @@ fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<Cask> {
     }
 }
 
+/// A package app goes through its own gate; every other bundle through `can_uninstall`.
+fn check_app(
+    app: &InstalledApp,
+    path: &Path,
+    ignore: &IgnoreStore,
+    layout: &Layout,
+) -> Result<(), SafetyError> {
+    match &app.package {
+        Some(package) => Safety::can_uninstall_package_app(path, package, ignore, layout),
+        None => Safety::can_uninstall(path, ignore, layout),
+    }
+    .map(|_| ())
+}
+
 fn leftover_rows(
     request: &PlanRequest,
     app: &InstalledApp,
@@ -356,7 +370,7 @@ fn leftover_rows(
         rows.push(row);
     }
 
-    for package in findings.receipts {
+    for package in findings.receipts.into_iter().chain(app.package.clone()) {
         let path = layout.system(RECEIPTS).join(format!("{package}.plist"));
         if listed.insert(path.clone()) {
             let size = DirSizer::size_of(&path);
@@ -399,8 +413,7 @@ pub fn build_plan(
                 "{} needs the uninstaller from {vendor}, so taert leaves it alone.",
                 app.name
             ));
-        } else if let Err(reason) = Safety::can_uninstall(&app.path, request.ignore, request.layout)
-        {
+        } else if let Err(reason) = check_app(app, &app.path, request.ignore, request.layout) {
             plan.notes.push(format!("{} stays: {reason}.", app.name));
         } else {
             going.push(app);
@@ -951,6 +964,10 @@ impl Uninstaller<'_> {
         Safety::can_uninstall(path, self.ignore, self.layout).map(|_| ())
     }
 
+    fn check_bundle(&self, app: &InstalledApp, path: &Path) -> Result<(), SafetyError> {
+        check_app(app, path, self.ignore, self.layout)
+    }
+
     fn sort_out<'p>(&self, plan: &'p UninstallPlan) -> Vec<Job<'p>> {
         plan.apps
             .iter()
@@ -1059,14 +1076,22 @@ impl Uninstaller<'_> {
         let Some(bundle) = job.bundle else {
             return;
         };
-        let checked = Cleaner::verify(bundle, |path| self.check(path))
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                let unchanged = bundle_id_of(&job.plan.app.path) == job.plan.app.bundle_id;
-                unchanged
-                    .then_some(())
-                    .ok_or_else(|| "The app changed after the review".to_string())
-            });
+        let app = &job.plan.app;
+        let checked = Cleaner::verify(bundle, |path| {
+            self.check_bundle(app, path)?;
+            let held = app
+                .package
+                .as_deref()
+                .is_none_or(|package| package_holds(self.host, self.layout, package, path));
+            held.then_some(()).ok_or(SafetyError::NotPackageApp)
+        })
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            let unchanged = bundle_id_of(&job.plan.app.path) == job.plan.app.bundle_id;
+            unchanged
+                .then_some(())
+                .ok_or_else(|| "The app changed after the review".to_string())
+        });
         if let Err(reason) = checked {
             tally.step(&bundle.path);
             tally.failed(&bundle.path, reason);
@@ -1277,7 +1302,10 @@ impl Uninstaller<'_> {
             return;
         };
         self.count_bundle(job, bundle, tally);
-        match Cleaner::new(self.host, self.mode).remove_verified(bundle, |path| self.check(path)) {
+        let app = &job.plan.app;
+        let removal = Cleaner::new(self.host, self.mode)
+            .remove_verified(bundle, |path| self.check_bundle(app, path));
+        match removal {
             Ok(()) => {
                 tally.removed(bundle, self.mode);
                 job.bundle_done = true;
@@ -1718,6 +1746,117 @@ mod plan_tests {
             .any(|item| item.path == path)
     }
 
+    const ACME_PACKAGE: &str = "com.acme.package.Acme_AutoUpdate";
+    const ACME_PREFIX: &str = "Library/Application Support/Acme/AU2";
+
+    fn package_app(layout: &Layout) -> InstalledApp {
+        package_app_of(layout, ACME_PACKAGE)
+    }
+
+    fn package_app_of(layout: &Layout, package: &str) -> InstalledApp {
+        let path = layout.system(ACME_PREFIX).join("Acme AutoUpdate.app");
+        fake_app(&path, "com.acme.autoupdate2", "autoupdate");
+        let receipts = layout.system("private/var/db/receipts");
+        fs::create_dir_all(&receipts).unwrap();
+        let mut info = plist::Dictionary::new();
+        info.insert("InstallPrefixPath".into(), ACME_PREFIX.into());
+        Value::Dictionary(info)
+            .to_file_xml(receipts.join(format!("{package}.plist")))
+            .unwrap();
+        InstalledApp {
+            path,
+            package: Some(package.to_string()),
+            ..app("Acme AutoUpdate", "com.acme.autoupdate2")
+        }
+    }
+
+    #[test]
+    fn a_package_app_has_a_bundle_row_and_a_selected_receipt_row() {
+        let (_temp, layout) = sandbox();
+        let acme = package_app(&layout);
+        let receipt = layout
+            .system("private/var/db/receipts")
+            .join(format!("{ACME_PACKAGE}.plist"));
+
+        let plan = plan_for(std::slice::from_ref(&acme), &layout);
+
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert_eq!(plan.apps.len(), 1);
+        assert_eq!(row(&plan, &acme.path).role, Some(UninstallRole::Bundle));
+        let receipt_row = row(&plan, &receipt);
+        assert!(receipt_row.selected);
+        assert_eq!(
+            receipt_row.role,
+            Some(UninstallRole::Receipt {
+                package: ACME_PACKAGE.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_receipt_that_pkgutil_also_finds_is_one_row() {
+        let (_temp, layout) = sandbox();
+        let found = "com.acme.autoupdate2.pkg";
+        let acme = package_app_of(&layout, found);
+        let host = FakeHost::default();
+        host.reply(
+            &format!("/usr/sbin/pkgutil --file-info {}", acme.path.display()),
+            &format!("pkgid: {found}\n"),
+        );
+        host.reply(
+            &format!("/usr/sbin/pkgutil --pkg-info {found}"),
+            &format!("package-id: {found}\nvolume: /\nlocation: {ACME_PREFIX}\n"),
+        );
+        host.reply(
+            &format!("/usr/sbin/pkgutil --files {found}"),
+            "Acme AutoUpdate.app\n",
+        );
+        let ignore = IgnoreStore::default();
+        let request = PlanRequest {
+            selected: std::slice::from_ref(&acme),
+            installed: std::slice::from_ref(&acme),
+            ignore: &ignore,
+            host: &host,
+            layout: &layout,
+        };
+        let findings = find_leftovers(&acme, &[], &host, &layout);
+        assert_eq!(findings.receipts, [found]);
+
+        let plan = build_plan(&request, None, None);
+
+        let receipts = plan
+            .scan
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .filter(|item| matches!(item.role, Some(UninstallRole::Receipt { .. })))
+            .count();
+        assert_eq!(receipts, 1);
+    }
+
+    #[test]
+    fn a_package_app_whose_receipt_is_gone_stays() {
+        let (_temp, layout) = sandbox();
+        let acme = package_app(&layout);
+        fs::remove_file(
+            layout
+                .system("private/var/db/receipts")
+                .join(format!("{ACME_PACKAGE}.plist")),
+        )
+        .unwrap();
+
+        let plan = plan_for(std::slice::from_ref(&acme), &layout);
+
+        assert!(plan.apps.is_empty());
+        assert_eq!(
+            plan.notes,
+            vec![format!(
+                "Acme AutoUpdate stays: {}.",
+                SafetyError::NotPackageApp
+            )]
+        );
+    }
+
     #[test]
     fn the_bundle_comes_first_and_is_selected() {
         let (_temp, layout) = sandbox();
@@ -1823,13 +1962,12 @@ mod plan_tests {
     #[test]
     fn files_named_after_an_inner_id_of_a_package_app_are_listed_but_not_selected() {
         let (_temp, layout) = sandbox();
-        let mut acme = installed(&layout, "Acme AutoUpdate", "com.acme.autoupdate2");
+        let acme = package_app(&layout);
         fake_app(
             &acme.path.join("Contents/MacOS/Acme Daemon.app"),
             "com.acme.autoupdate.fba",
             "Acme Daemon",
         );
-        acme.package = Some("com.acme.package.Acme_AutoUpdate".to_string());
         let files = [
             layout.system("Library/LaunchDaemons/com.acme.autoupdate.helper.plist"),
             layout.system("Library/LaunchAgents/com.acme.autoupdate.agent.plist"),
@@ -2462,6 +2600,99 @@ mod run_tests {
 
     fn unlock_folder(path: &Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    const ACME_PACKAGE: &str = "com.acme.package.Acme_AutoUpdate";
+    const ACME_PREFIX: &str = "Library/Application Support/Acme/AU2";
+
+    fn package_plan(layout: &Layout) -> (UninstallPlan, PathBuf) {
+        let path = layout.system(ACME_PREFIX).join("Acme AutoUpdate.app");
+        fake_app(&path, "com.acme.autoupdate2", "autoupdate");
+        let receipt =
+            file(layout.system("private/var/db/receipts/com.acme.package.Acme_AutoUpdate.plist"));
+        let mut info = plist::Dictionary::new();
+        info.insert("InstallPrefixPath".into(), ACME_PREFIX.into());
+        Value::Dictionary(info).to_file_xml(&receipt).unwrap();
+        let acme = InstalledApp {
+            path: path.clone(),
+            package: Some(ACME_PACKAGE.to_string()),
+            ..app("Acme AutoUpdate", "com.acme.autoupdate2")
+        };
+        let rows = vec![row(
+            &receipt,
+            UninstallRole::Receipt {
+                package: ACME_PACKAGE.to_string(),
+            },
+        )];
+        (plan_of(&acme, rows), path)
+    }
+
+    #[test]
+    fn a_package_app_goes_to_the_trash_and_its_receipt_is_forgotten() {
+        let (_temp, layout) = sandbox();
+        let (plan, path) = package_plan(&layout);
+        let host = FakeHost::default();
+        host.reply(
+            &format!("/usr/sbin/pkgutil --files {ACME_PACKAGE}"),
+            "Acme AutoUpdate.app\nAcme AutoUpdate.app/Contents/Info.plist\n",
+        );
+        let receipt =
+            layout.system("private/var/db/receipts/com.acme.package.Acme_AutoUpdate.plist");
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            fs::remove_file(&receipt).unwrap();
+        }));
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!path.exists());
+        assert_eq!(host.trashed(), vec![path]);
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert!(
+            scripts[0].contains("/usr/sbin/pkgutil --forget 'com.acme.package.Acme_AutoUpdate'"),
+            "{scripts:?}"
+        );
+    }
+
+    #[test]
+    fn a_package_app_the_package_no_longer_lists_stays() {
+        let (_temp, layout) = sandbox();
+        let (plan, path) = package_plan(&layout);
+        let host = FakeHost::default();
+        host.reply(
+            &format!("/usr/sbin/pkgutil --files {ACME_PACKAGE}"),
+            "Other.app\n",
+        );
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(path.exists());
+        assert!(host.trashed().is_empty());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].error,
+            "Safety check failed: app is not one an installer package put here"
+        );
+    }
+
+    #[test]
+    fn a_package_app_stays_when_pkgutil_cannot_list_the_package() {
+        let (_temp, layout) = sandbox();
+        let (plan, path) = package_plan(&layout);
+        let host = FakeHost::default();
+        host.fail(&format!("/usr/sbin/pkgutil --files {ACME_PACKAGE}"), "no");
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(path.exists());
+        assert!(host.trashed().is_empty());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(
+            report.failures[0].error,
+            "Safety check failed: app is not one an installer package put here"
+        );
     }
 
     #[test]
