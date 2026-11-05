@@ -17,7 +17,7 @@ use super::apps::{
 };
 use super::host::Host;
 use super::layout::Layout;
-use super::safety::FileIdentity;
+use super::safety::{FileIdentity, is_installer_package_id};
 use super::startup::launch_program;
 
 const MIN_NAME: usize = 2;
@@ -1009,7 +1009,7 @@ impl<'a> Finder<'a> {
             for (_, leaf) in entries(&self.layout.system("private/var/db/receipts")) {
                 if let Some(id) = leaf.strip_suffix(".plist")
                     && has_id_boundary(id, own)
-                    && is_reverse_dns(id)
+                    && is_installer_package_id(id)
                 {
                     receipts.insert(id.to_string());
                 }
@@ -1024,8 +1024,7 @@ impl<'a> Finder<'a> {
             .filter_map(|line| line.strip_prefix("pkgid: "))
         {
             let id = id.trim();
-            let is_apple = id.to_ascii_lowercase().starts_with("com.apple.");
-            if is_reverse_dns(id) && !is_apple && self.package_payload(host, id) {
+            if is_installer_package_id(id) && self.package_payload(host, id) {
                 receipts.insert(id.to_string());
             }
         }
@@ -2118,6 +2117,21 @@ mod tests {
     }
 
     #[test]
+    fn apple_receipts_named_after_the_bundle_id_are_never_forgotten() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Tool", "com.apple.acmetool");
+        file(
+            layout
+                .system("private/var/db/receipts")
+                .join("com.apple.acmetool.pkg.plist"),
+        );
+
+        let findings = find_leftovers(&target, &[], &FakeHost::default(), &layout);
+
+        assert!(findings.receipts.is_empty());
+    }
+
+    #[test]
     fn receipts_named_after_the_bundle_id_are_found_without_pkgutil() {
         let (_temp, layout) = sandbox();
         let target = installed(&layout, "Foo", "com.acme.foo");
@@ -2129,5 +2143,41 @@ mod tests {
         let findings = find_leftovers(&target, &[], &FakeHost::default(), &layout);
 
         assert_eq!(findings.receipts, ["com.acme.foo.pkg"]);
+    }
+
+    #[test]
+    fn a_package_id_with_an_underscore_gives_a_receipt() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Tool", "com.acme.tool");
+        let host = pkg_host("com.acme.package.Acme_Tool", "/", "Applications/Tool.app\n");
+
+        let findings = find_leftovers(&target, &[], &host, &layout);
+
+        assert_eq!(findings.receipts, ["com.acme.package.Acme_Tool"]);
+    }
+
+    #[test]
+    fn a_receipt_file_with_an_underscore_is_found_by_name() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Tool", "com.acme.tool");
+        let receipts = "private/var/db/receipts";
+        file(layout.system(receipts).join("com.acme.tool.pkg_main.plist"));
+
+        let findings = find_leftovers(&target, &[], &FakeHost::default(), &layout);
+
+        assert_eq!(findings.receipts, ["com.acme.tool.pkg_main"]);
+    }
+
+    #[test]
+    fn apple_and_malformed_package_ids_are_not_taken() {
+        let (_temp, layout) = sandbox();
+        let target = installed(&layout, "Tool", "com.acme.tool");
+        for id in ["com.apple.pkg.Acme_Tool", "../x.y"] {
+            let host = pkg_host(id, "/", "Applications/Tool.app\n");
+
+            let findings = find_leftovers(&target, &[], &host, &layout);
+
+            assert!(findings.receipts.is_empty(), "{id}");
+        }
     }
 }
