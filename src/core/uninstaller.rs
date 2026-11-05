@@ -1821,6 +1821,43 @@ mod plan_tests {
     }
 
     #[test]
+    fn files_named_after_an_inner_id_of_a_package_app_are_listed_but_not_selected() {
+        let (_temp, layout) = sandbox();
+        let mut acme = installed(&layout, "Acme AutoUpdate", "com.acme.autoupdate2");
+        fake_app(
+            &acme.path.join("Contents/MacOS/Acme Daemon.app"),
+            "com.acme.autoupdate.fba",
+            "Acme Daemon",
+        );
+        acme.package = Some("com.acme.package.Acme_AutoUpdate".to_string());
+        let files = [
+            layout.system("Library/LaunchDaemons/com.acme.autoupdate.helper.plist"),
+            layout.system("Library/LaunchAgents/com.acme.autoupdate.agent.plist"),
+            layout.user("Library/LaunchAgents/com.acme.autoupdate.agent.plist"),
+            layout.system("Library/PrivilegedHelperTools/com.acme.autoupdate.helper"),
+            layout.system("Library/Caches/com.acme.autoupdate.fba"),
+            layout.user("Library/Caches/com.acme.autoupdate.helper"),
+        ];
+        for path in &files {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+
+        let plan = plan_for(&[acme], &layout);
+
+        for path in &files {
+            let item = row(&plan, path);
+            assert!(!item.selected, "{path:?}");
+            assert_eq!(
+                item.role,
+                Some(UninstallRole::Leftover {
+                    evidence: Evidence::RelatedName
+                })
+            );
+        }
+    }
+
+    #[test]
     fn selected_rows_come_before_the_ones_to_decide_on() {
         let (_temp, layout) = sandbox();
         let foo = installed(&layout, "Foo Studio", "com.acme.foo");
