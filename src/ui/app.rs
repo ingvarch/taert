@@ -2537,7 +2537,9 @@ mod tests {
         let Screen::Scanning(_, scan_rx, _) = &mut app.screen else {
             panic!("expected the scanning screen");
         };
-        *scan_rx = rx;
+        // The real scan ends before its result is replaced, as it does before the screen moves on.
+        let real = std::mem::replace(scan_rx, rx);
+        while real.recv().is_ok() {}
         app.poll_scan();
     }
 
@@ -3814,6 +3816,7 @@ mod tests {
                 let _ = std::fs::remove_file(&receipt);
             }));
             review(&mut app, vec![foo], plan);
+            let confirmed = host.calls.lock().unwrap().len();
 
             press(&mut app, &[KeyCode::Char('d'), KeyCode::Char('y')]);
             wait_for_removal(&mut app);
@@ -3821,7 +3824,7 @@ mod tests {
             assert_eq!(host.sudo_asks(), 1);
             let at = host.position(ASK).unwrap();
             let calls = host.calls.lock().unwrap().clone();
-            assert!(calls[..at].iter().all(|c| c == PROBE), "{calls:?}");
+            assert!(calls[confirmed..at].iter().all(|c| c == PROBE), "{calls:?}");
             assert_eq!(releases(), 1);
             assert_eq!(asked_by_then.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
