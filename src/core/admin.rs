@@ -137,19 +137,6 @@ mod tests {
     const KEEP_ALIVE: &str = "/usr/bin/sudo -n -v";
     const KILL: &str = "/usr/bin/sudo -k";
 
-    fn count(host: &FakeHost, command: &str) -> usize {
-        host.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|line| line.starts_with(command))
-            .count()
-    }
-
-    fn asks(host: &FakeHost) -> usize {
-        count(host, "sudo -v")
-    }
-
     fn fixture(tty: bool) -> (Arc<FakeHost>, AdminSession) {
         let host = Arc::new(FakeHost::default());
         *host.tty.lock().unwrap() = tty;
@@ -176,8 +163,8 @@ mod tests {
         assert_eq!(session.prepare(&*host, "remove files"), Ok(()));
         session.end(&*host);
 
-        assert_eq!(asks(&host), 0);
-        assert_eq!(count(&host, KILL), 0);
+        assert_eq!(host.sudo_asks(), 0);
+        assert_eq!(host.count(KILL), 0);
         assert!(!session.asked());
     }
 
@@ -188,13 +175,13 @@ mod tests {
 
         assert_eq!(session.prepare(&*host, "remove files"), Ok(()));
         assert_eq!(session.prepare(&*host, "remove files"), Ok(()));
-        assert_eq!(count(&host, PROBE), 1);
+        assert_eq!(host.count(PROBE), 1);
         assert!(session.asked());
         session.end(&*host);
 
         assert!(host.ran("sudo -v remove files"));
-        assert_eq!(asks(&host), 1);
-        assert_eq!(count(&host, KILL), 1);
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(host.count(KILL), 1);
     }
 
     #[test]
@@ -211,13 +198,13 @@ mod tests {
             session.prepare(&*host, "remove files"),
             Err(NOT_GIVEN.to_string())
         );
-        assert_eq!(count(&host, PROBE), 1);
+        assert_eq!(host.count(PROBE), 1);
 
         assert!(session.is_refused());
         assert!(!session.asked());
-        assert_eq!(asks(&host), 1);
+        assert_eq!(host.sudo_asks(), 1);
         session.end(&*host);
-        assert_eq!(count(&host, KILL), 0);
+        assert_eq!(host.count(KILL), 0);
     }
 
     #[test]
@@ -228,8 +215,8 @@ mod tests {
         assert_eq!(session.prepare(&*host, "remove files"), Ok(()));
         session.end(&*host);
 
-        assert_eq!(asks(&host), 0);
-        assert_eq!(count(&host, KILL), 0);
+        assert_eq!(host.sudo_asks(), 0);
+        assert_eq!(host.count(KILL), 0);
     }
 
     #[test]
@@ -261,12 +248,12 @@ mod tests {
         host.fail(PROBE, "");
         session.prepare(&*host, "x").unwrap();
 
-        assert!(wait_until(|| count(&host, KEEP_ALIVE) >= 2));
+        assert!(wait_until(|| host.count(KEEP_ALIVE) >= 2));
         session.end(&*host);
 
-        let after_end = count(&host, KEEP_ALIVE);
+        let after_end = host.count(KEEP_ALIVE);
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(count(&host, KEEP_ALIVE), after_end);
+        assert_eq!(host.count(KEEP_ALIVE), after_end);
     }
 
     #[test]
@@ -275,7 +262,7 @@ mod tests {
         host.reply(PROBE, "");
         session.prepare(&*host, "x").unwrap();
 
-        assert!(wait_until(|| count(&host, KEEP_ALIVE) >= 1));
+        assert!(wait_until(|| host.count(KEEP_ALIVE) >= 1));
         session.end(&*host);
     }
 
@@ -290,7 +277,7 @@ mod tests {
         session.end(&*host);
         session.end(&*host);
 
-        assert_eq!(count(&host, KILL), 1);
+        assert_eq!(host.count(KILL), 1);
     }
 
     #[test]

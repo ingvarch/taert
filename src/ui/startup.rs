@@ -23,6 +23,12 @@ use crate::core::startup::{Btm, StartupItem, StartupKind, StartupScan, StartupSt
 
 const SPLIT_MIN_WIDTH: u16 = 100;
 const MAX_NOTE_ROWS: usize = 3;
+const PASSWORD_FIRST: &str = "taert asks for your administrator password first.";
+
+/// The note a daemon switch shows before the password prompt.
+pub(crate) fn password_line(kind: StartupKind, theme: &Theme) -> Option<Line<'static>> {
+    (kind == StartupKind::Daemon).then(|| Line::from(Span::styled(PASSWORD_FIRST, theme.callout())))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupConfirm {
@@ -653,6 +659,7 @@ fn render_confirm_modal(
                     theme.callout(),
                 )));
             }
+            message.extend(password_line(item.kind, theme));
 
             let buttons = vec![
                 Button::primary(action_name).focused(state.confirm_button == 0),
@@ -677,7 +684,7 @@ fn render_confirm_modal(
                 return;
             };
 
-            let message = vec![
+            let mut message = vec![
                 Line::from(vec![
                     Span::styled("Stop ", theme.body().add_modifier(Modifier::BOLD)),
                     Span::styled(format!("\"{}\"", item.name), theme.accent_text()),
@@ -694,6 +701,7 @@ fn render_confirm_modal(
                     theme.callout(),
                 )),
             ];
+            message.extend(password_line(item.kind, theme));
 
             let buttons = vec![
                 Button::primary("Stop").focused(state.confirm_button == 0),
@@ -1048,6 +1056,51 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("Registered by the app · Read-only"), "{text}");
+    }
+
+    const PASSWORD_LINE: &str = "taert asks for your administrator password first.";
+
+    fn confirm_text(item: StartupItem, confirm: StartupConfirm) -> String {
+        let mut state = StartupScreenState::new(vec![item], false);
+        state.confirm = Some(confirm);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|f| render_startup(f, &state, &Theme::new()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn the_daemon_confirm_dialogs_say_a_password_comes_first() {
+        let daemon = || item(StartupKind::Daemon, StartupState::Running, Some(9));
+        let toggle = |enable| StartupConfirm::Toggle { index: 0, enable };
+
+        for confirm in [
+            toggle(false),
+            toggle(true),
+            StartupConfirm::Stop { index: 0 },
+        ] {
+            let text = confirm_text(daemon(), confirm.clone());
+            assert!(text.contains(PASSWORD_LINE), "{confirm:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn the_user_agent_confirm_dialogs_do_not_mention_a_password() {
+        let agent = || item(StartupKind::UserAgent, StartupState::Running, Some(9));
+
+        for confirm in [
+            StartupConfirm::Toggle {
+                index: 0,
+                enable: false,
+            },
+            StartupConfirm::Stop { index: 0 },
+        ] {
+            let text = confirm_text(agent(), confirm);
+            assert!(!text.contains("administrator password"), "{text}");
+        }
     }
 
     #[test]

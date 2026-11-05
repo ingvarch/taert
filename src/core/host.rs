@@ -329,6 +329,20 @@ pub mod fake {
                 .position(|line| line.starts_with(command))
         }
 
+        pub fn count(&self, command: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with(command))
+                .count()
+        }
+
+        /// How many times `sudo -v` asked for the password.
+        pub fn sudo_asks(&self) -> usize {
+            self.count("sudo -v")
+        }
+
         pub fn fail_trash(&self, error: &str) {
             *self.trash_error.lock().unwrap() = Some(error.to_string());
         }

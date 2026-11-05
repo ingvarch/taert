@@ -65,53 +65,52 @@ impl AdminGate {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
+    use super::AdminGate;
     use crate::core::admin::test_session;
-    use crate::core::host::fake::FakeHost;
     use std::cell::Cell;
-
-    const PROBE: &str = "/usr/bin/sudo -n true";
 
     thread_local! {
         static RELEASES: Cell<usize> = const { Cell::new(0) };
     }
 
-    fn counting_release(run: &mut dyn FnMut()) {
+    /// Counts the release and runs `run` in place of the terminal.
+    pub(crate) fn counting_release(run: &mut dyn FnMut()) {
         RELEASES.with(|n| n.set(n.get() + 1));
         run();
     }
 
-    fn counting_release_without_running(_run: &mut dyn FnMut()) {
-        RELEASES.with(|n| n.set(n.get() + 1));
+    pub(crate) fn releases() -> usize {
+        RELEASES.with(Cell::get)
     }
 
-    fn releases() -> usize {
-        RELEASES.with(Cell::get)
+    /// A gate on a session of its own, with the release count back at zero.
+    pub(crate) fn gate_with(release: fn(&mut dyn FnMut())) -> AdminGate {
+        RELEASES.with(|n| n.set(0));
+        AdminGate::new(test_session(), release)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{counting_release, gate_with, releases};
+    use super::*;
+    use crate::core::host::fake::FakeHost;
+
+    const PROBE: &str = "/usr/bin/sudo -n true";
+
+    fn counting_release_without_running(_run: &mut dyn FnMut()) {
+        counting_release(&mut || {});
     }
 
     fn gate() -> AdminGate {
         gate_with(counting_release)
     }
 
-    fn gate_with(release: fn(&mut dyn FnMut())) -> AdminGate {
-        RELEASES.with(|n| n.set(0));
-        AdminGate::new(test_session(), release)
-    }
-
     fn host(tty: bool) -> FakeHost {
         let host = FakeHost::default();
         *host.tty.lock().unwrap() = tty;
         host
-    }
-
-    fn asks(host: &FakeHost) -> usize {
-        host.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|line| line.starts_with("sudo -v"))
-            .count()
     }
 
     #[test]
@@ -123,7 +122,7 @@ mod tests {
         assert_eq!(gate.ask(&host, "remove files"), Ok(()));
 
         assert_eq!(releases(), 0);
-        assert_eq!(asks(&host), 0);
+        assert_eq!(host.sudo_asks(), 0);
         assert!(!gate.redraw_all);
     }
 
@@ -136,7 +135,7 @@ mod tests {
         assert_eq!(gate.ask(&host, "remove files"), Ok(()));
 
         assert_eq!(releases(), 1);
-        assert_eq!(asks(&host), 1);
+        assert_eq!(host.sudo_asks(), 1);
         assert!(gate.redraw_all);
     }
 
@@ -149,7 +148,7 @@ mod tests {
         assert_eq!(gate.ask(&host, "remove files"), Err(NOT_GIVEN.to_string()));
 
         assert_eq!(releases(), 1);
-        assert_eq!(asks(&host), 0);
+        assert_eq!(host.sudo_asks(), 0);
     }
 
     #[test]
@@ -165,7 +164,7 @@ mod tests {
         assert_eq!(gate.ask(&host, "remove files"), Err(NOT_GIVEN.to_string()));
 
         assert_eq!(releases(), 1);
-        assert_eq!(asks(&host), 1);
+        assert_eq!(host.sudo_asks(), 1);
     }
 
     #[test]
@@ -177,7 +176,7 @@ mod tests {
         assert_eq!(gate.ask(&host, "remove files"), Ok(()));
 
         assert_eq!(releases(), 0);
-        assert_eq!(asks(&host), 0);
+        assert_eq!(host.sudo_asks(), 0);
         assert!(!gate.redraw_all);
     }
 }

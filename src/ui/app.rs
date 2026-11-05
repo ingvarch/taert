@@ -123,6 +123,13 @@ fn review_state(plan: &UninstallPlan) -> SelectState {
     state
 }
 
+/// A refusal needs no handling here: the switch then fails with the reason.
+fn ask_for_daemon(admin: &mut AdminGate, host: &dyn Host, item: &startup::StartupItem) {
+    if item.kind == startup::StartupKind::Daemon {
+        let _ = admin.ask(host, "switch system daemons");
+    }
+}
+
 pub struct App {
     pub theme: Theme,
     pub screen: Screen,
@@ -1130,6 +1137,7 @@ impl App {
                                 match action {
                                     StartupConfirm::Toggle { index, enable } => {
                                         if let Some(item) = state.items.get(index) {
+                                            ask_for_daemon(&mut self.admin, &*self.host, item);
                                             let res = if enable {
                                                 startup::enable_item(
                                                     &*self.host,
@@ -1159,6 +1167,7 @@ impl App {
                                     }
                                     StartupConfirm::Stop { index } => {
                                         if let Some(item) = state.items.get(index) {
+                                            ask_for_daemon(&mut self.admin, &*self.host, item);
                                             let res = startup::stop_item(&*self.host, item);
                                             state.finish_action(res);
                                             state.apply_scan(startup::scan_startup_with(
@@ -1248,6 +1257,7 @@ impl App {
                                             });
                                     }
                                     DoctorActionConfirm::DisableStartupItem { item } => {
+                                        ask_for_daemon(&mut self.admin, &*self.host, &item);
                                         let res = startup::disable_item(
                                             &*self.host,
                                             &self.layout,
@@ -2180,7 +2190,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::core::scanner::{ScanItem, ToolGroup};
+    use crate::core::startup::StartupKind;
     use crate::ui::analyze::SortOrder;
+    use crate::ui::terminal::testing::{counting_release, gate_with, releases};
     use ratatui::backend::TestBackend;
     use std::path::Path;
     use std::time::Instant;
@@ -4447,6 +4459,156 @@ mod tests {
         };
         assert_eq!(state.findings().len(), 1);
         assert!(matches!(&state.message, Some((m, true)) if m.contains("denied")));
+    }
+
+    fn asking_app() -> (App, Arc<crate::core::host::fake::FakeHost>) {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        *host.tty.lock().unwrap() = true;
+        let mut app = new_app();
+        app.host = host.clone();
+        app.admin = gate_with(counting_release);
+        (app, host)
+    }
+
+    fn switchable(label: &str, kind: StartupKind) -> startup::StartupItem {
+        let folder = match kind {
+            StartupKind::Daemon => "/Library/LaunchDaemons",
+            _ => "/Library/LaunchAgents",
+        };
+        startup::StartupItem {
+            label: label.into(),
+            name: label.into(),
+            app_name: None,
+            app_bundle: None,
+            kind,
+            state: startup::StartupState::Running,
+            program: None,
+            plist_path: Some(format!("{folder}/{label}.plist").into()),
+            pid: Some(9),
+            cpu_percent: None,
+            memory_bytes: None,
+            is_apple: false,
+            is_security: false,
+            is_ignored: false,
+        }
+    }
+
+    fn confirm_in_startup(app: &mut App, item: startup::StartupItem, confirm: StartupConfirm) {
+        let mut state = StartupScreenState::new(vec![item], false);
+        state.confirm = Some(confirm);
+        app.screen = Screen::Startup(state);
+        app.handle_key(KeyCode::Enter);
+    }
+
+    fn disable_in_startup(app: &mut App, item: startup::StartupItem) {
+        let confirm = StartupConfirm::Toggle {
+            index: 0,
+            enable: false,
+        };
+        confirm_in_startup(app, item, confirm);
+    }
+
+    #[test]
+    fn disabling_two_daemons_asks_for_the_password_once() {
+        let (mut app, host) = asking_app();
+
+        disable_in_startup(&mut app, switchable("com.test.one", StartupKind::Daemon));
+        disable_in_startup(&mut app, switchable("com.test.two", StartupKind::Daemon));
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.ran("sudo -v switch system daemons"));
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 2);
+        assert_eq!(releases(), 1);
+    }
+
+    #[test]
+    fn stopping_a_daemon_asks_for_the_password() {
+        let (mut app, host) = asking_app();
+
+        confirm_in_startup(
+            &mut app,
+            switchable("com.test.one", StartupKind::Daemon),
+            StartupConfirm::Stop { index: 0 },
+        );
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(releases(), 1);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enabling_a_daemon_asks_for_the_password() {
+        let (mut app, host) = asking_app();
+
+        confirm_in_startup(
+            &mut app,
+            switchable("com.test.one", StartupKind::Daemon),
+            StartupConfirm::Toggle {
+                index: 0,
+                enable: true,
+            },
+        );
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn disabling_a_user_agent_does_not_ask_for_the_password() {
+        let (mut app, host) = asking_app();
+
+        disable_in_startup(
+            &mut app,
+            switchable("com.test.agent", StartupKind::UserAgent),
+        );
+
+        assert_eq!(host.sudo_asks(), 0);
+        assert_eq!(releases(), 0);
+    }
+
+    #[test]
+    fn a_refused_password_fails_the_switch_and_is_not_asked_again() {
+        let (mut app, host) = asking_app();
+        *host.sudo_refused.lock().unwrap() = true;
+
+        disable_in_startup(&mut app, switchable("com.test.one", StartupKind::Daemon));
+
+        let Screen::Startup(state) = &app.screen else {
+            panic!("expected the startup screen");
+        };
+        assert_eq!(
+            state.message,
+            Some((
+                "Failed to disable daemon: The administrator password was not given".to_string(),
+                true
+            ))
+        );
+        disable_in_startup(&mut app, switchable("com.test.two", StartupKind::Daemon));
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabling_a_daemon_finding_in_doctor_asks_for_the_password_once() {
+        let (mut app, host) = asking_app();
+
+        for label in ["com.test.one", "com.test.two"] {
+            let report = crate::core::doctor::DoctorReport {
+                seconds: 1,
+                findings: vec![doctor_finding(None)],
+                checks: Vec::new(),
+            };
+            let mut state = DoctorScreenState::new_done(report);
+            state.confirm = Some(DoctorActionConfirm::DisableStartupItem {
+                item: switchable(label, StartupKind::Daemon),
+            });
+            app.screen = Screen::Doctor(state);
+            app.handle_key(KeyCode::Enter);
+        }
+
+        assert_eq!(host.sudo_asks(), 1);
+        assert!(host.ran("sudo -v switch system daemons"));
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 2);
     }
 
     fn doctor_finding(
