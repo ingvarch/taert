@@ -36,8 +36,6 @@ const COPY_HARD_LINK: &str =
 const OLD_COPY_CHANGED: &str =
     "The old app in the holding folder is not the app taert checked, so taert left it there";
 const BAD_HOME: &str = "--home must be the full path of a folder that is not a link";
-const NOT_IN_APPLICATIONS: &str =
-    "taert slims apps that belong to root only directly in /Applications";
 const UNSAFE_HOLDING: &str =
     "The folder taert copies the app to is a link or can be changed by others";
 const OTHER_VOLUME: &str = "The app is on another volume than the folder taert copies it to";
@@ -277,10 +275,10 @@ pub fn slim_bundle(
     }
     // The swap resolves the folders above the app by path. `/Applications` is the only one the
     // user cannot replace with a link.
-    let applications = layout.system("Applications");
-    if bundle.parent() != Some(applications.as_path()) {
-        return Err(first(NOT_IN_APPLICATIONS.to_string()));
+    if !slim::is_directly_in_applications(bundle, layout) {
+        return Err(first(slim::ROOT_ONLY_IN_APPLICATIONS.to_string()));
     }
+    let applications = layout.system("Applications");
     let ignore = read_ignore(layout).map_err(first)?;
     let id = helper_check(bundle, layout, &ignore, euid, system_owner, host).map_err(first)?;
     // The rules that read the app run here, so a refusal comes before any write, and again on
@@ -1445,7 +1443,7 @@ mod tests {
             (&owned, real_uid() + 1, "Belongs to another user"),
             (&setuid, real_uid(), "Contains a setuid or setgid file"),
             (&not_an_app, real_uid(), NOT_APP),
-            (&below_user, real_uid(), NOT_IN_APPLICATIONS),
+            (&below_user, real_uid(), slim::ROOT_ONLY_IN_APPLICATIONS),
         ] {
             let before = slim::fingerprint(bundle).unwrap();
             let host = slim_host();
@@ -1468,7 +1466,10 @@ mod tests {
 
         let failure = slim_as_root(&layout, &bundle, &host, real_uid());
 
-        assert_eq!(failure.unwrap_err(), (1, NOT_IN_APPLICATIONS.to_string()));
+        assert_eq!(
+            failure.unwrap_err(),
+            (1, slim::ROOT_ONLY_IN_APPLICATIONS.to_string())
+        );
         assert_eq!(fs::read(binary_of(&bundle)).unwrap(), before);
         assert!(!host.ran("/usr/bin/ditto"));
     }

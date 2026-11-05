@@ -517,6 +517,54 @@ pub fn check_app_rules(
     Ok(())
 }
 
+/// The rules of `check_eligibility` that do not belong to the app.
+pub struct SlimRules<'a> {
+    pub rosetta_apps: &'a HashSet<String>,
+    pub running: Option<&'a [(u32, u32, String)]>,
+    pub skip_developer_id: bool,
+    /// The user whose apps the root helper slims.
+    pub system_owner: u32,
+}
+
+/// An app that qualifies for slimming.
+#[derive(Debug)]
+pub struct Eligible {
+    pub binaries: Vec<PathBuf>,
+    /// The app belongs to root, so the root helper slims it.
+    pub needs_admin: bool,
+}
+
+pub const ADMIN_REASON: &str = "slim apps that belong to the system";
+pub(crate) const ROOT_ONLY_IN_APPLICATIONS: &str =
+    "taert slims apps that belong to root only directly in /Applications";
+
+/// The only place where taert slims an app of root, and where the helper leaves its old copy.
+pub(crate) fn is_directly_in_applications(path: &Path, layout: &Layout) -> bool {
+    path.parent() == Some(layout.system("Applications").as_path())
+}
+
+/// Whether the user slims the app, or the helper of root does, or neither can. An app whose
+/// every entry belongs to the system owner goes to the helper when it lies directly in
+/// `/Applications`.
+fn check_who_slims(
+    app: &InstalledApp,
+    host: &dyn Host,
+    layout: &Layout,
+    system_owner: u32,
+) -> Result<bool, String> {
+    let user = host.uid();
+    let of_the_system = user != system_owner
+        && fs::symlink_metadata(&app.path).is_ok_and(|meta| meta.uid() == system_owner);
+    if !of_the_system {
+        return check_ownership(&app.path, user).map(|()| false);
+    }
+    if !is_directly_in_applications(&app.path, layout) {
+        return Err(ROOT_ONLY_IN_APPLICATIONS.to_string());
+    }
+    check_ownership(&app.path, system_owner)?;
+    Ok(true)
+}
+
 /// Verifies whether an app qualifies for slimming according to safety and integrity rules.
 /// Returns the qualifying universal binaries or an error describing why it stays.
 pub fn check_eligibility(
@@ -524,14 +572,12 @@ pub fn check_eligibility(
     host: &dyn Host,
     layout: &Layout,
     ignore: &IgnoreStore,
-    rosetta_apps: &HashSet<String>,
-    running: Option<&[(u32, u32, String)]>,
-    skip_developer_id: bool,
-) -> Result<Vec<PathBuf>, String> {
-    check_app_rules(app, rosetta_apps, running)?;
+    rules: &SlimRules,
+) -> Result<Eligible, String> {
+    check_app_rules(app, rules.rosetta_apps, rules.running)?;
 
     // 5. Owned by another user, or holding a setuid or setgid file
-    check_ownership(&app.path, host.uid())?;
+    let needs_admin = check_who_slims(app, host, layout, rules.system_owner)?;
     let users_dir = layout
         .home
         .ancestors()
@@ -549,7 +595,11 @@ pub fn check_eligibility(
         return Err(e.to_string());
     }
 
-    check_signed_universal(app, host, skip_developer_id)
+    let binaries = check_signed_universal(app, host, rules.skip_developer_id)?;
+    Ok(Eligible {
+        binaries,
+        needs_admin,
+    })
 }
 
 /// The rules that look at the code: an Intel slice to remove, a Developer ID signature, and a
@@ -1176,15 +1226,21 @@ fn stage_clone(
     Ok(saved)
 }
 
-/// Slims an app bundle and logs the outcome to the history session on success.
-pub fn slim_app_logged(
+/// Slims one app and records it once in the history session. An app that needs admin goes to
+/// the root helper; any other app is slimmed here.
+pub fn slim_logged(
     session: &HistorySession,
-    app: &InstalledApp,
-    binaries: &[PathBuf],
     host: &dyn Host,
-    skip_developer_id: bool,
+    layout: &Layout,
+    app: &InstalledApp,
+    needs_admin: bool,
 ) -> Result<SlimDone, (usize, String)> {
-    let result = slim_app(app, binaries, host, skip_developer_id);
+    let result = if needs_admin {
+        super::admin::run_slim_helper(host, layout, app)
+    } else {
+        let (binaries, _) = find_universal_binaries(&app.path);
+        slim_app(app, &binaries, host, false)
+    };
     if let Ok(done) = &result {
         session.record_item(&ItemOutcome::changed(app.path.clone(), done.saved));
     }
@@ -1209,6 +1265,7 @@ pub fn slim_scan(
     layout: &Layout,
     host: &dyn Host,
     ignore: &IgnoreStore,
+    system_owner: u32,
     progress: Option<Sender<ScanProgressEvent>>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> CategoryScan {
@@ -1247,9 +1304,16 @@ pub fn slim_scan(
                 scan.notes.push(format!("{} stays: {PS_FAILED}.", app.name));
                 continue;
             };
-            match check_eligibility(app, host, layout, ignore, &rosetta, Some(running), false) {
-                Ok(binaries) => {
-                    let intel_size: u64 = binaries
+            let rules = SlimRules {
+                rosetta_apps: &rosetta,
+                running: Some(running),
+                skip_developer_id: false,
+                system_owner,
+            };
+            match check_eligibility(app, host, layout, ignore, &rules) {
+                Ok(eligible) => {
+                    let intel_size: u64 = eligible
+                        .binaries
                         .iter()
                         .filter_map(|p| parse_fat_header_from_file(p).ok().flatten())
                         .map(|h| {
@@ -1267,6 +1331,7 @@ pub fn slim_scan(
                         // Crucial requirement: No app starts selected.
                         let mut item = ScanItem::new(app.path.clone(), intel_size, false, false);
                         item.modified = app.last_used;
+                        item.needs_admin = eligible.needs_admin;
                         items.push(item);
                         if let Some(ref tx) = progress {
                             let _ = tx.send(ScanProgressEvent::ItemFound { bytes: intel_size });
@@ -1301,13 +1366,16 @@ pub struct SlimAppInfo {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The root helper slims the app, after one administrator password prompt.
+    #[serde(default, skip_serializing_if = "super::scanner::is_false")]
+    pub needs_admin: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::testing::*;
     use super::*;
-    use crate::core::history::{HistoryLog, OutcomeKind};
+    use crate::core::history::HistoryLog;
     use crate::core::host::fake::{FakeHost, real_uid};
     use crate::core::sizer::DirSizer;
     use std::io::Write;
@@ -1448,7 +1516,13 @@ mod tests {
         };
         let host = testing::user_host();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, true),
+        );
         assert_eq!(res.unwrap_err(), "Apple apps are part of macOS");
     }
 
@@ -1470,7 +1544,13 @@ mod tests {
         };
         let host = testing::user_host();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, true),
+        );
         assert_eq!(
             res.unwrap_err(),
             "App Store apps are managed by the App Store"
@@ -1496,7 +1576,7 @@ mod tests {
         let ignore = IgnoreStore::default();
         let mut rosetta = HashSet::new();
         rosetta.insert("com.vendor.rosetta".to_string());
-        let res = check_eligibility(&app, &host, &layout, &ignore, &rosetta, None, true);
+        let res = check_eligibility(&app, &host, &layout, &ignore, &rules(&rosetta, None, true));
         assert_eq!(res.unwrap_err(), "Set to open using Rosetta");
     }
 
@@ -1527,9 +1607,7 @@ mod tests {
             &host,
             &layout,
             &ignore,
-            &HashSet::new(),
-            Some(&processes),
-            true,
+            &rules(&HashSet::new(), Some(&processes), true),
         );
         assert_eq!(res.unwrap_err(), "App is currently running");
     }
@@ -1544,10 +1622,9 @@ mod tests {
             &testing::user_host(),
             layout,
             &IgnoreStore::default(),
-            &HashSet::new(),
-            Some(table),
-            true,
+            &rules(&HashSet::new(), Some(table), true),
         )
+        .map(|eligible| eligible.binaries)
     }
 
     #[test]
@@ -1601,7 +1678,14 @@ mod tests {
             ),
         );
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
 
         assert!(scan.groups.is_empty(), "{:?}", scan.groups);
         assert!(
@@ -1632,7 +1716,13 @@ mod tests {
         };
         let host = testing::user_host();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, true),
+        );
         assert_eq!(res.unwrap_err(), "Belongs to another user");
     }
 
@@ -1654,7 +1744,13 @@ mod tests {
         let host = testing::user_host();
         host.reply("/usr/bin/codesign", "Authority=Mac Developer\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, false),
+        );
         assert_eq!(res.unwrap_err(), "Not signed with a Developer ID");
     }
 
@@ -1680,7 +1776,13 @@ mod tests {
         );
         host.fail("/usr/bin/codesign --verify", "code has been modified\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, false),
+        );
         assert_eq!(res.unwrap_err(), "Already fails the signature check");
     }
 
@@ -1707,7 +1809,13 @@ mod tests {
         host.reply("/usr/bin/codesign --verify", "");
         host.fail("/usr/sbin/spctl", "rejected\n");
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, false),
+        );
         assert_eq!(res.unwrap_err(), "Already fails the Gatekeeper check");
     }
 
@@ -1729,7 +1837,13 @@ mod tests {
         let host = testing::user_host();
         let mut ignore = IgnoreStore::default();
         ignore.add(ignored_app.to_string_lossy().to_string());
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, true),
+        );
         assert!(res.is_err());
     }
 
@@ -1760,7 +1874,13 @@ mod tests {
         };
         let host = testing::user_host();
         let ignore = IgnoreStore::default();
-        let res = check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, true);
+        let res = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, true),
+        );
         assert_eq!(res.unwrap_err(), "Already Apple Silicon only");
     }
 
@@ -1812,11 +1932,10 @@ mod tests {
             &host,
             &layout,
             &IgnoreStore::default(),
-            &HashSet::new(),
-            None,
-            false,
+            &rules(&HashSet::new(), None, false),
         )
-        .unwrap();
+        .unwrap()
+        .binaries;
         slim_app(&app, &binaries, &host, false).unwrap();
 
         let calls = host.calls.lock().unwrap().clone();
@@ -2468,9 +2587,7 @@ mod tests {
             &host,
             &layout,
             &IgnoreStore::default(),
-            &HashSet::new(),
-            None,
-            true,
+            &rules(&HashSet::new(), None, true),
         );
         assert_eq!(result.unwrap_err(), "Contains a setuid or setgid file");
 
@@ -2508,8 +2625,13 @@ mod tests {
         fake_ditto(&host, &link);
         let ignore = IgnoreStore::default();
 
-        let eligibility =
-            check_eligibility(&app, &host, &layout, &ignore, &HashSet::new(), None, false);
+        let eligibility = check_eligibility(
+            &app,
+            &host,
+            &layout,
+            &ignore,
+            &rules(&HashSet::new(), None, false),
+        );
         assert_eq!(eligibility.unwrap_err(), LINKED_APP);
 
         let result = slim_app(&app, &binaries_of(&link), &host, false);
@@ -2524,7 +2646,14 @@ mod tests {
         assert!(!holding_of(&link).exists());
         assert!(!holding_of(&real).exists());
 
-        let scan = slim_scan(&layout, &host, &ignore, None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &ignore,
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
         assert!(scan.groups.is_empty());
         assert!(
             scan.notes.contains(&format!("Linked stays: {LINKED_APP}.")),
@@ -2545,9 +2674,7 @@ mod tests {
             &host,
             &layout,
             &IgnoreStore::default(),
-            &HashSet::new(),
-            None,
-            true,
+            &rules(&HashSet::new(), None, true),
         )
         .map(drop);
         let slimmed = slim_app(&app, &binaries_of(&app_path), &host, true).map(drop);
@@ -2598,7 +2725,14 @@ mod tests {
         let host = app_with_scan_host(&layout, "Broken");
         host.fail("/usr/bin/codesign --verify", "code has been modified\n");
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
 
         assert!(scan.groups.is_empty());
         assert!(
@@ -2616,7 +2750,14 @@ mod tests {
         host.reply("/usr/bin/codesign --verify", "");
         host.fail("/usr/sbin/spctl", "rejected\n");
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
 
         assert!(scan.groups.is_empty());
         assert!(
@@ -2634,7 +2775,14 @@ mod tests {
         host.reply("/usr/bin/codesign --verify", "");
         host.reply("/usr/sbin/spctl", "");
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
 
         assert_eq!(scan.groups.len(), 1, "{:?}", scan.notes);
     }
@@ -2648,7 +2796,14 @@ mod tests {
         let app_path = layout.system("Applications/Sound.app");
         write_test_app(&holding_of(&app_path).join("Sound.app"), "com.vendor.Sound");
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
 
         let listed: Vec<&PathBuf> = scan
             .groups
@@ -2909,7 +3064,14 @@ mod tests {
         assert!(matches!(result, Err((6, _))), "{result:?}");
         assert!(!holding_of(&app_path).exists());
 
-        let scan = slim_scan(&layout, &host, &IgnoreStore::default(), None, None);
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::safety::SYSTEM_OWNER,
+            None,
+            None,
+        );
         assert!(scan.groups.is_empty());
         assert!(
             scan.notes
@@ -2953,50 +3115,297 @@ mod tests {
     }
 
     #[test]
-    fn slim_app_logged_records_the_bytes_saved() {
-        let dir = tempdir().unwrap();
-        let app_path = dir.path().join("SwapApp.app");
-        write_test_app(&app_path, "com.vendor.swap");
-        let app = app_for(&app_path, "com.vendor.swap");
+    fn slim_logged_slims_an_app_of_the_user_and_records_it() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Mine.app");
+        write_test_app(&app_path, "com.vendor.mine");
         let host = ready_host(&app_path);
-
         let history_dir = tempdir().unwrap();
         let log = HistoryLog::new(history_dir.path().join("history.jsonl"));
         let session = log.start_run("slim", "force", Some(1));
 
-        let done = slim_app_logged(&session, &app, &binaries_of(&app_path), &host, true).unwrap();
+        let done = slim_logged(
+            &session,
+            &host,
+            &layout,
+            &app_for(&app_path, "com.vendor.mine"),
+            false,
+        )
+        .unwrap();
         session.finish();
 
         let runs = log.load_runs().unwrap();
-        assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].items.len(), 1);
-        assert_eq!(runs[0].items[0].outcome, OutcomeKind::Changed);
-        assert_eq!(runs[0].items[0].path, app.path.to_string_lossy());
         assert_eq!(runs[0].items[0].bytes, done.saved);
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+    }
 
-        let dir2 = tempdir().unwrap();
-        let app_path2 = dir2.path().join("TargetApp.app");
-        write_test_app(&app_path2, "com.vendor.target");
-        let host2 = cloning_host(&app_path2);
-        host2.fail("/usr/bin/codesign", "verification failed\n");
+    #[test]
+    fn slim_logged_sends_an_app_of_root_to_the_helper_and_records_it_once() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Sys.app");
+        write_test_app(&app_path, "com.vendor.sys");
+        let old = layout.system("Applications").join("Sys.taert-old.app");
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() =
+            serde_json::json!({ "saved": 4096, "old_app": old }).to_string();
+        let history_dir = tempdir().unwrap();
+        let log = HistoryLog::new(history_dir.path().join("history.jsonl"));
+        let session = log.start_run("slim", "force", Some(1));
 
-        let history_dir2 = tempdir().unwrap();
-        let log2 = HistoryLog::new(history_dir2.path().join("history.jsonl"));
-        let session2 = log2.start_run("slim", "force", Some(1));
+        let done = slim_logged(
+            &session,
+            &host,
+            &layout,
+            &app_for(&app_path, "com.vendor.sys"),
+            true,
+        )
+        .unwrap();
+        session.finish();
 
-        let res2 = slim_app_logged(
-            &session2,
-            &app_for(&app_path2, "com.vendor.target"),
-            &binaries_of(&app_path2),
-            &host2,
+        assert_eq!(done.saved, 4096);
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+        let runs = log.load_runs().unwrap();
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(runs[0].items[0].bytes, 4096);
+    }
+
+    #[test]
+    fn slim_logged_records_nothing_when_the_helper_fails() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Sys.app");
+        write_test_app(&app_path, "com.vendor.sys");
+        let host = FakeHost::default();
+        *host.admin_stdout.lock().unwrap() = "not json".to_string();
+        let history_dir = tempdir().unwrap();
+        let log = HistoryLog::new(history_dir.path().join("history.jsonl"));
+        let session = log.start_run("slim", "force", Some(1));
+
+        let result = slim_logged(
+            &session,
+            &host,
+            &layout,
+            &app_for(&app_path, "com.vendor.sys"),
             true,
         );
-        assert!(res2.is_err());
-        session2.finish();
+        session.finish();
 
-        let runs2 = log2.load_runs().unwrap();
-        assert_eq!(runs2.len(), 1);
-        assert!(runs2[0].items.is_empty());
+        assert!(result.is_err());
+        assert!(log.load_runs().unwrap()[0].items.is_empty());
+    }
+
+    fn rules<'a>(
+        rosetta_apps: &'a HashSet<String>,
+        running: Option<&'a [(u32, u32, String)]>,
+        skip_developer_id: bool,
+    ) -> SlimRules<'a> {
+        SlimRules {
+            rosetta_apps,
+            running,
+            skip_developer_id,
+            system_owner: crate::core::safety::SYSTEM_OWNER,
+        }
+    }
+
+    /// The files belong to the test user, who is the system owner here; the host is another user.
+    fn system_rules(rosetta_apps: &HashSet<String>) -> SlimRules<'_> {
+        SlimRules {
+            system_owner: crate::core::host::fake::real_uid(),
+            ..rules(rosetta_apps, None, true)
+        }
+    }
+
+    fn as_other_user(host: &FakeHost) {
+        host.set_uid(crate::core::host::fake::real_uid() + 1);
+    }
+
+    #[test]
+    fn a_system_app_is_eligible_and_needs_admin() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Sys.app");
+        write_test_app(&app_path, "com.vendor.sys");
+        let host = ready_host(&app_path);
+        as_other_user(&host);
+        let none = HashSet::new();
+
+        let eligible = check_eligibility(
+            &app_for(&app_path, "com.vendor.sys"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &system_rules(&none),
+        )
+        .unwrap();
+
+        assert!(eligible.needs_admin);
+        assert_eq!(eligible.binaries, binaries_of(&app_path));
+    }
+
+    #[test]
+    fn no_app_needs_admin_when_the_user_is_the_system_owner() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Mine.app");
+        write_test_app(&app_path, "com.vendor.mine");
+        let host = ready_host(&app_path);
+        let none = HashSet::new();
+
+        let eligible = check_eligibility(
+            &app_for(&app_path, "com.vendor.mine"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &system_rules(&none),
+        )
+        .unwrap();
+
+        assert!(!eligible.needs_admin);
+    }
+
+    #[test]
+    fn an_app_of_the_user_does_not_need_admin_when_root_is_the_system_owner() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Mine.app");
+        write_test_app(&app_path, "com.vendor.mine");
+        let host = ready_host(&app_path);
+        let none = HashSet::new();
+        let rules = SlimRules {
+            system_owner: crate::core::host::fake::real_uid() + 1,
+            ..rules(&none, None, true)
+        };
+
+        let eligible = check_eligibility(
+            &app_for(&app_path, "com.vendor.mine"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &rules,
+        )
+        .unwrap();
+
+        assert!(!eligible.needs_admin);
+    }
+
+    #[test]
+    fn a_setuid_file_in_a_system_app_is_still_refused() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Sys.app");
+        write_test_app(&app_path, "com.vendor.sys");
+        fs::set_permissions(
+            app_path.join("Contents/MacOS/testapp"),
+            fs::Permissions::from_mode(0o4755),
+        )
+        .unwrap();
+        let host = testing::user_host();
+        as_other_user(&host);
+        let none = HashSet::new();
+
+        let result = check_eligibility(
+            &app_for(&app_path, "com.vendor.sys"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &system_rules(&none),
+        );
+
+        assert_eq!(result.unwrap_err(), "Contains a setuid or setgid file");
+    }
+
+    #[test]
+    fn an_app_of_neither_the_user_nor_the_system_is_refused() {
+        let (_dir, layout) = test_env();
+        let app_path = layout.system("Applications").join("Other.app");
+        write_test_app(&app_path, "com.vendor.other");
+        let host = testing::user_host();
+        as_other_user(&host);
+        let none = HashSet::new();
+        let rules = SlimRules {
+            system_owner: crate::core::host::fake::real_uid() + 2,
+            ..rules(&none, None, true)
+        };
+
+        let result = check_eligibility(
+            &app_for(&app_path, "com.vendor.other"),
+            &host,
+            &layout,
+            &IgnoreStore::default(),
+            &rules,
+        );
+
+        assert_eq!(result.unwrap_err(), "Belongs to another user");
+    }
+
+    #[test]
+    fn a_system_app_outside_applications_is_refused() {
+        let (_dir, layout) = test_env();
+        let vendor = layout.system("Applications/Vendor");
+        let in_vendor = vendor.join("Deep.app");
+        let in_user = layout.user("Applications").join("Away.app");
+        write_test_app(&in_vendor, "com.vendor.deep");
+        write_test_app(&in_user, "com.vendor.away");
+        let host = testing::user_host();
+        as_other_user(&host);
+        let none = HashSet::new();
+
+        for (path, id) in [(in_vendor, "com.vendor.deep"), (in_user, "com.vendor.away")] {
+            let result = check_eligibility(
+                &app_for(&path, id),
+                &host,
+                &layout,
+                &IgnoreStore::default(),
+                &system_rules(&none),
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "taert slims apps that belong to root only directly in /Applications"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scan_marks_a_system_app_as_needing_admin() {
+        let (_dir, layout) = test_env();
+        let sys = layout.system("Applications").join("Sys.app");
+        write_test_app(&sys, "com.vendor.sys");
+        let host = testing::user_host();
+        host.reply(
+            "/usr/bin/codesign -dv",
+            "Authority=Developer ID Application: Acme Corp (123)\n",
+        );
+        host.reply("/usr/bin/codesign --verify", "");
+        host.reply("/usr/sbin/spctl", "");
+        as_other_user(&host);
+
+        let scan = slim_scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            crate::core::host::fake::real_uid(),
+            None,
+            None,
+        );
+
+        assert_eq!(scan.groups.len(), 1, "{:?}", scan.notes);
+        let items = &scan.groups[0].items;
+        assert_eq!(items.len(), 1, "{:?}", scan.notes);
+        assert!(items[0].needs_admin);
+    }
+
+    #[test]
+    fn the_json_row_names_needs_admin_only_when_true() {
+        let row = |needs_admin| SlimAppInfo {
+            name: "X".to_string(),
+            path: PathBuf::from("/Applications/X.app"),
+            bundle_id: None,
+            intel_bytes: 1,
+            eligible: true,
+            reason: None,
+            needs_admin,
+        };
+
+        let json = serde_json::to_value(row(true)).unwrap();
+        assert_eq!(json["needs_admin"], true);
+        let json = serde_json::to_value(row(false)).unwrap();
+        assert!(json.get("needs_admin").is_none(), "{json}");
     }
 }
 
