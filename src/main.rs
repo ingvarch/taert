@@ -673,7 +673,7 @@ fn handle_uninstall(
     context: &ScanContext,
     console: &mut Console,
 ) -> ExitCode {
-    let mut installed = apps::find_apps(context.layout);
+    let mut installed = apps::find_all_apps(context.layout, context.host);
 
     if args.names.is_empty() {
         if cli.force {
@@ -1916,7 +1916,9 @@ fn pick_apps_to_slim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::apps::testing::{fake_app, sandbox};
+    use crate::core::apps::testing::{
+        ACME_PACKAGE, ACME_PREFIX, fake_app, package_app, package_listing, sandbox,
+    };
     use crate::core::homebrew::testing::{AUTOREMOVE_DRY_RUN, BREW_INFO, BREW_OUTDATED_BUN};
     use crate::core::host::fake::FakeHost;
     use std::os::unix::fs::PermissionsExt;
@@ -3953,6 +3955,58 @@ mod tests {
     fn fixture_is_untouched(layout: &Layout) -> bool {
         layout.user("Applications/Taert Fixture.app").exists()
             && layout.user("Library/Caches/is.taert.fixture").exists()
+    }
+
+    fn layout_with_a_package_app() -> (tempfile::TempDir, Layout, FakeHost, PathBuf) {
+        let (temp, layout) = sandbox();
+        let path = package_app(&layout);
+        let host = FakeHost::idle();
+        package_listing(&host);
+        (temp, layout, host, path)
+    }
+
+    #[test]
+    fn uninstall_finds_an_app_from_a_package_by_name_bundle_id_and_path() {
+        let (_temp, layout, host, path) = layout_with_a_package_app();
+
+        for term in [
+            "Acme AutoUpdate",
+            "com.acme.autoupdate2",
+            path.to_str().unwrap(),
+        ] {
+            let ran = uninstall(&["uninstall", term, "--dry-run"], &host, &layout);
+
+            assert!(ran.ok, "{term}: {}", ran.err);
+            assert!(ran.out.contains("Acme AutoUpdate.app"), "{term}");
+            assert!(ran.out.contains("Dry run completed"), "{term}");
+        }
+    }
+
+    #[test]
+    fn the_uninstall_list_has_a_section_for_the_folder_of_a_package_app() {
+        let (_temp, layout, host, _path) = layout_with_a_package_app();
+        fake_app(&layout.system("Applications/Big.app"), "com.big.one", "big");
+
+        let ran = uninstall(&["uninstall", "--dry-run"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let section = crate::core::path_utils::prettify_path(&layout.system(ACME_PREFIX));
+        let applications = ran.out.find("Big.app").unwrap();
+        let folder = ran.out.find(&format!("[{section}]")).unwrap();
+        assert!(applications < folder, "{}", ran.out);
+        assert!(ran.out.contains("Acme AutoUpdate.app"), "{}", ran.out);
+    }
+
+    #[test]
+    fn the_uninstall_json_list_has_the_package_of_an_app_from_a_package() {
+        let (_temp, layout, host, _path) = layout_with_a_package_app();
+
+        let ran = uninstall(&["uninstall", "--json"], &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let list: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(list[0]["bundle_id"], "com.acme.autoupdate2");
+        assert_eq!(list[0]["package"], ACME_PACKAGE);
     }
 
     #[test]

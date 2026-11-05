@@ -17,7 +17,7 @@ use plist::Value;
 use serde::Serialize;
 
 use super::apps::{
-    InstalledApp, bundle_id_of, embedded_bundle_ids, find_apps, find_copies, is_common_name,
+    InstalledApp, bundle_id_of, embedded_bundle_ids, find_all_apps, find_copies, is_common_name,
     official_uninstaller, package_holds,
 };
 use super::cleaner::{
@@ -1006,7 +1006,7 @@ impl Uninstaller<'_> {
             .filter(|job| job.bundle.is_some())
             .filter_map(|job| fs::canonicalize(&job.plan.app.path).ok())
             .collect();
-        let installed: Vec<InstalledApp> = find_apps(self.layout)
+        let installed: Vec<InstalledApp> = find_all_apps(self.layout, self.host)
             .into_iter()
             .chain(find_copies(self.layout))
             .chain(
@@ -1686,7 +1686,9 @@ fn root_script(jobs: &[Job]) -> String {
 #[cfg(test)]
 mod plan_tests {
     use super::*;
-    use crate::core::apps::testing::{app, fake_app, sandbox, write_info};
+    use crate::core::apps::testing::{
+        ACME_PACKAGE, ACME_PREFIX, app, fake_app, sandbox, write_info,
+    };
     use crate::core::host::fake::FakeHost;
     use crate::core::leftovers::{Evidence, UninstallRole};
     use crate::core::scanner::ScanItem;
@@ -1745,9 +1747,6 @@ mod plan_tests {
             .flat_map(|g| &g.items)
             .any(|item| item.path == path)
     }
-
-    const ACME_PACKAGE: &str = "com.acme.package.Acme_AutoUpdate";
-    const ACME_PREFIX: &str = "Library/Application Support/Acme/AU2";
 
     fn package_app(layout: &Layout) -> InstalledApp {
         package_app_of(layout, ACME_PACKAGE)
@@ -2497,7 +2496,7 @@ mod plan_tests {
 #[cfg(test)]
 mod run_tests {
     use super::*;
-    use crate::core::apps::testing::{app, fake_app, sandbox};
+    use crate::core::apps::testing::{ACME_PACKAGE, ACME_PREFIX, app, fake_app, sandbox};
     use crate::core::host::fake::FakeHost;
     use crate::core::processes::PS;
     use crate::core::safety::FileIdentity;
@@ -2601,9 +2600,6 @@ mod run_tests {
     fn unlock_folder(path: &Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-
-    const ACME_PACKAGE: &str = "com.acme.package.Acme_AutoUpdate";
-    const ACME_PREFIX: &str = "Library/Application Support/Acme/AU2";
 
     fn package_plan(layout: &Layout) -> (UninstallPlan, PathBuf) {
         let path = layout.system(ACME_PREFIX).join("Acme AutoUpdate.app");
@@ -3924,6 +3920,31 @@ mod run_tests {
                 .unwrap()
                 .join("\n")
                 .contains("System Events")
+        );
+    }
+
+    #[test]
+    fn an_app_from_a_package_counts_as_a_copy_that_stays() {
+        let (_temp, layout) = sandbox();
+        let copy = installed(&layout, "Acme Copy", "com.acme.autoupdate2");
+        let cache = folder(layout.user("Library/Caches/com.acme.autoupdate2"));
+        let plan = plan_of(&copy, vec![leftover(&cache)]);
+        let package_path = crate::core::apps::testing::package_app(&layout);
+        let host = FakeHost::default();
+        crate::core::apps::testing::package_listing(&host);
+
+        let report = run(&plan, &host, &layout);
+
+        assert!(!copy.path.exists());
+        assert!(package_path.exists());
+        assert!(cache.exists());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("Acme AutoUpdate")),
+            "{:?}",
+            report.notes
         );
     }
 
