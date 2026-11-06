@@ -170,7 +170,7 @@ struct BrewCheck {
 impl App {
     pub fn new(ignore: IgnoreStore, config: Config) -> Self {
         Self {
-            theme: Theme::new(),
+            theme: Theme::from_config(&config),
             screen: Screen::Workspace(WorkspaceState::new()),
             back_stack: Vec::new(),
             ignore,
@@ -266,7 +266,7 @@ impl App {
 
     fn with_select_state(state: SelectState, ignore: IgnoreStore, config: Config) -> Self {
         Self {
-            theme: Theme::new(),
+            theme: Theme::from_config(&config),
             screen: Screen::Select(Box::new(state)),
             back_stack: Vec::new(),
             ignore,
@@ -292,7 +292,7 @@ impl App {
     pub fn with_analyze(path: std::path::PathBuf, ignore: IgnoreStore, config: Config) -> Self {
         let storage_cache = Arc::new(RwLock::new(StorageCache::new()));
         Self {
-            theme: Theme::new(),
+            theme: Theme::from_config(&config),
             screen: Screen::Analyze(Box::new(AnalyzeState::with_cache(
                 path,
                 ignore.clone(),
@@ -2235,6 +2235,33 @@ mod tests {
 
     fn new_app() -> App {
         offline(App::new(IgnoreStore::default(), Config::default()))
+    }
+
+    #[test]
+    fn app_uses_the_saved_appearance() {
+        use crate::ui::env::Appearance;
+        for (saved, want) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
+            let config = Config {
+                appearance: saved.to_string(),
+                ..Config::default()
+            };
+            let dir = tempdir().unwrap();
+            let apps = [
+                ("new", App::new(IgnoreStore::default(), config.clone())),
+                (
+                    "with_select",
+                    App::with_select(scan_with_id("x"), IgnoreStore::default(), config.clone()),
+                ),
+                (
+                    "with_analyze",
+                    App::with_analyze(dir.path().into(), IgnoreStore::default(), config.clone()),
+                ),
+            ];
+            for (name, app) in apps {
+                let app = offline(app);
+                assert_eq!(app.theme.env.appearance, want, "{name} {saved}");
+            }
+        }
     }
 
     #[test]

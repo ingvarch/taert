@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Saved appearance**: the interactive screen uses the appearance saved with `taert config --appearance`.
+
 ## [0.9.0] - 2026-11-05
 
 ### Added
