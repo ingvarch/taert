@@ -29,8 +29,12 @@ pub(crate) fn changed_since(path: &Path, cutoff: SystemTime) -> bool {
 
 /// Contract absolute paths starting with user's home directory to "~/..."
 pub fn prettify_path(path: &Path) -> String {
-    let home = Safety::home_dir();
-    if let Ok(rel) = path.strip_prefix(&home) {
+    prettify_path_in(path, &Safety::home_dir())
+}
+
+/// Like `prettify_path`, with `home` in place of the real home folder.
+pub fn prettify_path_in(path: &Path, home: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(home) {
         if rel.as_os_str().is_empty() {
             "~".to_string()
         } else {
@@ -166,6 +170,20 @@ mod tests {
         let home = Safety::home_dir();
         let target = home.join("Projects/demo");
         assert_eq!(prettify_path(&target), "~/Projects/demo");
+    }
+
+    #[test]
+    fn paths_in_the_home_folder_show_with_a_tilde() {
+        let home = Path::new("/Users/me");
+        assert_eq!(prettify_path_in(home, home), "~");
+        assert_eq!(
+            prettify_path_in(Path::new("/Users/me/.config/x"), home),
+            "~/.config/x"
+        );
+        assert_eq!(
+            prettify_path_in(Path::new("/opt/homebrew/bin/taert"), home),
+            "/opt/homebrew/bin/taert"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Settings screen: sections on the left, the rows of the highlighted section on the right.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crossterm::event::KeyCode;
 use ratatui::Frame;
@@ -25,10 +26,12 @@ use crate::core::catalog::Category;
 use crate::core::history::HistoryLog;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
+use crate::core::path_utils::prettify_path_in;
 use crate::core::schedule::{
-    LastRun, ScheduleFrequency, ScheduleStatus, format_reclaim_threshold, format_run_time,
-    normalize_categories, remove_schedule, schedule_status, set_schedule,
+    LastRun, ScheduleFrequency, ScheduleStatus, agent_plist_path, format_reclaim_threshold,
+    format_run_time, normalize_categories, remove_schedule, schedule_status, set_schedule,
 };
+use crate::core::startup::disabled_login_items_path;
 use crate::core::stores::{
     Config, IgnoreStore, ScheduleConfig, default_schedule_categories, default_schedule_min_reclaim,
 };
@@ -69,14 +72,16 @@ pub enum SettingsSection {
     ScheduledCleanup,
     ProtectedPaths,
     Appearance,
+    About,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ProjectCleanup,
         Self::ScheduledCleanup,
         Self::ProtectedPaths,
         Self::Appearance,
+        Self::About,
     ];
 
     pub fn title(self) -> &'static str {
@@ -85,6 +90,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => "Scheduled cleanup",
             Self::ProtectedPaths => "Protected paths",
             Self::Appearance => "Appearance",
+            Self::About => "About",
         }
     }
 
@@ -94,7 +100,7 @@ impl SettingsSection {
             Self::ProjectCleanup => &[PathListKind::ProjectFolders, PathListKind::ArtifactNames],
             Self::ScheduledCleanup => &[],
             Self::ProtectedPaths => &[PathListKind::ProtectedPaths],
-            Self::Appearance => &[],
+            Self::Appearance | Self::About => &[],
         }
     }
 
@@ -105,6 +111,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => &[SettingsRow::Run],
             Self::ProtectedPaths => &[],
             Self::Appearance => &[SettingsRow::Appearance],
+            Self::About => &[SettingsRow::Program],
         }
     }
 
@@ -114,6 +121,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => theme.g.icon_schedule,
             Self::ProtectedPaths => theme.g.icon_protected,
             Self::Appearance => theme.g.icon_appearance,
+            Self::About => theme.g.icon_about,
         }
     }
 }
@@ -128,6 +136,10 @@ pub enum SettingsRow {
     /// Loads the launch agent again.
     Reload,
     Appearance,
+    /// The program taert runs from.
+    Program,
+    /// The file at this place in `taert_files`.
+    File(usize),
     /// The path at this place in the first list of the section.
     Item(usize),
     Add,
@@ -144,7 +156,13 @@ impl SettingsRow {
             Self::MinReclaim => "Only when it frees at least",
             Self::Reload => "Load the schedule again",
             Self::Appearance => "Appearance",
-            Self::Category(_) | Self::Item(_) | Self::Add | Self::Name(_) | Self::AddName => "",
+            Self::Program => "Program",
+            Self::Category(_)
+            | Self::Item(_)
+            | Self::Add
+            | Self::Name(_)
+            | Self::AddName
+            | Self::File(_) => "",
         }
     }
 
@@ -201,11 +219,43 @@ pub struct SettingsState {
     pub folders: PathList,
     pub names: PathList,
     pub protected: PathList,
+    pub version: String,
+    /// The program being run, if the system says where it is.
+    pub program: Option<PathBuf>,
+    home: PathBuf,
+    files: Vec<AboutFile>,
     /// What the schedule does now, read when Settings opens and after each change.
     pub status: Option<ScheduleStatus>,
     pub save_notice: Option<&'static str>,
     pub error_notice: Option<String>,
     picker: Option<(SettingsRow, PickerState)>,
+}
+
+/// A file taert keeps, shown in About.
+struct AboutFile {
+    label: &'static str,
+    path: PathBuf,
+}
+
+impl AboutFile {
+    fn exists(&self) -> bool {
+        self.path.exists()
+    }
+}
+
+/// The files taert keeps, by name.
+pub fn taert_files(layout: &Layout) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("Settings", layout.config_path()),
+        ("Protected paths", layout.ignore_path()),
+        ("Project folders", layout.projects_path()),
+        ("History", layout.history_path()),
+        (
+            "Switched-off login items",
+            disabled_login_items_path(layout),
+        ),
+        ("Schedule agent", agent_plist_path(layout)),
+    ]
 }
 
 /// The presets with `current` added in order, so the saved value is always a choice.
@@ -266,6 +316,13 @@ impl SettingsState {
             folders: PathList::new(PathListKind::ProjectFolders, ignore, config, layout),
             names: PathList::new(PathListKind::ArtifactNames, ignore, config, layout),
             protected: PathList::new(PathListKind::ProtectedPaths, ignore, config, layout),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            program: std::env::current_exe().ok(),
+            home: layout.home.clone(),
+            files: taert_files(layout)
+                .into_iter()
+                .map(|(label, path)| AboutFile { label, path })
+                .collect(),
             status: None,
             save_notice: None,
             error_notice: None,
@@ -326,6 +383,9 @@ impl SettingsState {
                     rows.push(SettingsRow::Add);
                 }
             }
+        }
+        if self.section == SettingsSection::About {
+            rows.extend((0..self.files.len()).map(SettingsRow::File));
         }
         if self.section == SettingsSection::ScheduledCleanup && self.schedule.is_some() {
             rows.extend((0..CLEAN_CATEGORIES.len()).map(SettingsRow::Category));
@@ -479,7 +539,9 @@ impl SettingsState {
             | SettingsRow::Add
             | SettingsRow::Reload
             | SettingsRow::Name(_)
-            | SettingsRow::AddName => return,
+            | SettingsRow::AddName
+            | SettingsRow::Program
+            | SettingsRow::File(_) => return,
         };
         self.picker = Some((
             row,
@@ -522,7 +584,36 @@ impl SettingsState {
             | SettingsRow::Add
             | SettingsRow::Reload
             | SettingsRow::Name(_)
-            | SettingsRow::AddName => {}
+            | SettingsRow::AddName
+            | SettingsRow::Program
+            | SettingsRow::File(_) => {}
+        }
+    }
+
+    /// What Finder can show for the highlighted row.
+    fn reveal_path(&self) -> Option<&Path> {
+        match self.current_row() {
+            SettingsRow::Program => self.program.as_deref(),
+            SettingsRow::File(index) => {
+                Some(self.files[index].path.as_path()).filter(|p| p.exists())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the highlighted row names something that Finder can show.
+    pub fn can_reveal(&self) -> bool {
+        self.reveal_path().is_some()
+    }
+
+    /// Shows the program or the file of the highlighted row in Finder.
+    pub fn reveal(&self, host: &dyn Host) {
+        if let Some(path) = self.reveal_path() {
+            host.run(
+                "/usr/bin/open",
+                &["-R", &path.display().to_string()],
+                Duration::from_secs(5),
+            );
         }
     }
 
@@ -699,8 +790,29 @@ impl SettingsState {
             | SettingsRow::Add
             | SettingsRow::Reload
             | SettingsRow::Name(_)
-            | SettingsRow::AddName => String::new(),
+            | SettingsRow::AddName
+            | SettingsRow::Program
+            | SettingsRow::File(_) => String::new(),
         }
+    }
+}
+
+/// The primary action of the highlighted row.
+pub fn settings_primary<'a>(state: &SettingsState, enter: &'a str) -> Option<PrimaryAction<'a>> {
+    let row = state.current_row();
+    match row {
+        _ if state.focus != SettingsFocus::Rows => Some(PrimaryAction::new("Open", enter)),
+        _ if row.is_popup() => Some(PrimaryAction::new("Change", enter)),
+        _ if row.is_add() => Some(PrimaryAction::new("Add", enter)),
+        SettingsRow::Category(_) => Some(PrimaryAction::new("Toggle", enter)),
+        SettingsRow::Reload => Some(PrimaryAction::new("Load", enter)),
+        SettingsRow::Program | SettingsRow::File(_) if state.can_reveal() => {
+            Some(PrimaryAction::new("Show in Finder", enter))
+        }
+        SettingsRow::Program | SettingsRow::File(_) => {
+            Some(PrimaryAction::disabled("Show in Finder", enter))
+        }
+        _ => None,
     }
 }
 
@@ -718,14 +830,7 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
     }
 
     let row = state.current_row();
-    let primary = match row {
-        _ if !in_rows => Some(PrimaryAction::new("Open", theme.g.key_enter)),
-        _ if row.is_popup() => Some(PrimaryAction::new("Change", theme.g.key_enter)),
-        _ if row.is_add() => Some(PrimaryAction::new("Add", theme.g.key_enter)),
-        SettingsRow::Category(_) => Some(PrimaryAction::new("Toggle", theme.g.key_enter)),
-        SettingsRow::Reload => Some(PrimaryAction::new("Load", theme.g.key_enter)),
-        _ => None,
-    };
+    let primary = settings_primary(state, theme.g.key_enter);
     let in_list = in_rows && row.is_list_row();
     let mut hints = Vec::new();
     if in_list {
@@ -825,6 +930,8 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
         schedule_lines(state, inner, theme)
     } else if state.section == SettingsSection::Appearance {
         appearance_lines(state, inner, theme)
+    } else if state.section == SettingsSection::About {
+        about_lines(state, inner, theme)
     } else {
         list_lines(state, inner, theme)
     };
@@ -1047,6 +1154,54 @@ fn appearance_lines(
     (lines, 0)
 }
 
+/// The version, the program and the files taert keeps, and the line of the highlighted row.
+fn about_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
+    let in_rows = state.focus == SettingsFocus::Rows;
+    let mut lines = vec![
+        ListRow::new(vec![Span::styled("Version", theme.body())])
+            .detail(Span::styled(state.version.clone(), theme.callout()))
+            .render_line(width, theme),
+    ];
+    let mut focus = 0;
+    let mut entry = |lines: &mut Vec<Line<'static>>,
+                     at: usize,
+                     title: &str,
+                     path: Option<String>,
+                     present: bool| {
+        if in_rows && state.row == at {
+            focus = lines.len();
+        }
+        let mut title = ListRow::new(vec![Span::styled(title.to_string(), theme.body())])
+            .selected(in_rows && state.row == at);
+        if !present {
+            title = title.detail(Span::styled("Not created yet", theme.footnote()));
+        }
+        lines.push(title.render_line(width, theme));
+        if let Some(path) = path {
+            lines.extend(wrapped_lines(&path, theme.callout(), width, theme));
+        }
+    };
+    let program = state
+        .program
+        .as_ref()
+        .map(|path| prettify_path_in(path, &state.home));
+    entry(&mut lines, 0, "Program", program, true);
+    lines.push(Line::default());
+    lines.push(text_line("Files", theme.callout(), width, theme));
+    for (index, file) in state.files.iter().enumerate() {
+        let path = prettify_path_in(&file.path, &state.home);
+        entry(&mut lines, 1 + index, file.label, Some(path), file.exists());
+    }
+    (lines, focus)
+}
+
+/// The title line of an About row. `about_lines` adds its path under it.
+fn about_title(title: &str, selected: bool, width: usize, theme: &Theme) -> Line<'static> {
+    ListRow::new(vec![Span::styled(title.to_string(), theme.body())])
+        .selected(selected)
+        .render_line(width, theme)
+}
+
 /// A line of text that sits in the column of the row titles.
 fn text_line(text: &str, style: Style, width: usize, theme: &Theme) -> Line<'static> {
     ListRow::new(vec![Span::styled(text.to_string(), style)]).render_line(width, theme)
@@ -1134,6 +1289,11 @@ fn row_line(
                 .detail(Span::styled(detail, value_style))
                 .render_line(width, theme)
         }
+        SettingsRow::Program => about_title("Program", selected, width, theme),
+        SettingsRow::File(index) => {
+            let label = state.files.get(index).map_or("", |file| file.label);
+            about_title(label, selected, width, theme)
+        }
         SettingsRow::AgeThreshold | SettingsRow::Run | SettingsRow::Appearance => {
             let detail = format!("{} {}", state.row_value(row), theme.g.popup);
             ListRow::new(vec![Span::styled(row.title(), theme.body())])
@@ -1184,7 +1344,8 @@ mod tests {
                 "Project cleanup",
                 "Scheduled cleanup",
                 "Protected paths",
-                "Appearance"
+                "Appearance",
+                "About"
             ]
         );
         let (_temp, layout) = sandbox();
@@ -1207,6 +1368,58 @@ mod tests {
         assert_eq!(state.rows(), [SettingsRow::Add]);
         state.section = SettingsSection::Appearance;
         assert_eq!(state.rows(), [SettingsRow::Appearance]);
+        state.section = SettingsSection::About;
+        let mut expected = vec![SettingsRow::Program];
+        expected.extend((0..6).map(SettingsRow::File));
+        assert_eq!(state.rows(), expected);
+    }
+
+    #[test]
+    fn a_program_path_taert_cannot_read_is_not_called_missing() {
+        let (_temp, layout) = sandbox();
+        let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
+        state.section = SettingsSection::About;
+        state.focus = SettingsFocus::Rows;
+        state.program = None;
+        let theme = Theme::default();
+
+        let (lines, _) = about_lines(&state, 80, &theme);
+        let program_note: String = lines[1..3]
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect();
+
+        assert!(!program_note.contains("Not created yet"), "{program_note}");
+        assert!(!settings_primary(&state, "↵").unwrap().enabled);
+    }
+
+    #[test]
+    fn taert_files_are_six_paths_under_the_home_folder() {
+        let (_temp, layout) = sandbox();
+        let files = taert_files(&layout);
+        let labels: Vec<_> = files.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Settings",
+                "Protected paths",
+                "Project folders",
+                "History",
+                "Switched-off login items",
+                "Schedule agent"
+            ]
+        );
+        assert_eq!(files.len(), 6);
+        for (label, path) in &files {
+            assert!(
+                path.starts_with(&layout.home),
+                "{label}: {}",
+                path.display()
+            );
+        }
+        assert_eq!(files[0].1, layout.config_path());
+        assert_eq!(files[4].1, disabled_login_items_path(&layout));
+        assert_eq!(files[5].1, agent_plist_path(&layout));
     }
 
     #[test]

@@ -295,11 +295,16 @@ pub fn match_app(
     (None, None)
 }
 
+/// Where taert keeps the login items it switched off.
+pub fn disabled_login_items_path(layout: &Layout) -> PathBuf {
+    layout.user(".config/taert/disabled_login_items.json")
+}
+
 /// Loads disabled login items persisted in `~/.config/taert/disabled_login_items.json`.
 /// A missing file is an empty list. A file taert cannot read is an error that names it, so
 /// nothing writes over the paths it holds.
 pub fn load_disabled_login_items(layout: &Layout) -> Result<Vec<DisabledLoginItem>, String> {
-    let path = layout.user(".config/taert/disabled_login_items.json");
+    let path = disabled_login_items_path(layout);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -313,7 +318,7 @@ pub fn save_disabled_login_items(
     layout: &Layout,
     items: &[DisabledLoginItem],
 ) -> Result<(), std::io::Error> {
-    let path = layout.user(".config/taert/disabled_login_items.json");
+    let path = disabled_login_items_path(layout);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1395,6 +1400,18 @@ mod tests {
     use super::*;
     use crate::core::host::fake::FakeHost;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_disabled_login_items_file_lives_in_the_config_folder() {
+        let (_temp, layout) = crate::core::apps::testing::sandbox();
+        let path = disabled_login_items_path(&layout);
+        assert_eq!(
+            path,
+            layout.home.join(".config/taert/disabled_login_items.json")
+        );
+        save_disabled_login_items(&layout, &[]).unwrap();
+        assert!(path.exists());
+    }
 
     #[test]
     fn parses_print_disabled_fixture() {

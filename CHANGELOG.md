@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
 
 - **Appearance in Settings**: Settings › Appearance switches between auto, dark, and light, and applies at once.
+- **About in Settings**: Settings › About shows the version and where taert keeps its files, and shows them in Finder.
 
 ### Changed
 - **Folders found by a custom name start unselected**: a folder that Project cleanup lists only because its name is in `extra_artifacts` starts unselected, whatever its age, and `taert purge --force` leaves it. You can still select it. Folders found by the built-in names are unchanged.
