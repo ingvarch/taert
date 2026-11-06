@@ -933,6 +933,7 @@ mod tests {
             categories: vec!["dev".to_string()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         }
     }
 

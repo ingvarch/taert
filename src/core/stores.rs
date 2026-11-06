@@ -83,8 +83,43 @@ pub struct ScheduleConfig {
     pub categories: Vec<String>,
     #[serde(default = "default_schedule_min_reclaim")]
     pub min_reclaim: u64,
+    #[serde(default = "default_schedule_at")]
+    pub at: String,
+    #[serde(default = "default_schedule_days")]
+    pub days: Vec<String>,
+    #[serde(default = "default_schedule_day")]
+    pub day: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_hours: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_skip: Option<ScheduleSkip>,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            every: default_schedule_every(),
+            categories: default_schedule_categories(),
+            min_reclaim: default_schedule_min_reclaim(),
+            at: default_schedule_at(),
+            days: default_schedule_days(),
+            day: default_schedule_day(),
+            every_hours: None,
+            last_skip: None,
+        }
+    }
+}
+
+fn default_schedule_at() -> String {
+    "09:00".to_string()
+}
+
+fn default_schedule_days() -> Vec<String> {
+    vec!["mon".to_string()]
+}
+
+fn default_schedule_day() -> u32 {
+    1
 }
 
 fn default_schedule_every() -> ScheduleFrequency {

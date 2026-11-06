@@ -1477,15 +1477,20 @@ fn handle_schedule(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            match schedule::set_schedule(
-                host,
-                layout,
-                &mut config,
-                set_args.every,
-                categories,
-                set_args.min_reclaim,
-                None,
-            ) {
+            let result =
+                schedule::ScheduleRule::for_frequency(config.schedule.as_ref(), set_args.every)
+                    .and_then(|rule| {
+                        schedule::set_schedule(
+                            host,
+                            layout,
+                            &mut config,
+                            &rule,
+                            categories,
+                            set_args.min_reclaim,
+                            None,
+                        )
+                    });
+            match result {
                 Ok(()) => {
                     let history = HistoryLog::new(layout.history_path());
                     let text = schedule::show_schedule(host, layout, &config, &history);
@@ -3370,6 +3375,45 @@ mod tests {
         assert!(host.ran("/bin/launchctl bootout"));
         let saved = Config::load_from(&layout.config_path()).unwrap();
         assert!(saved.schedule.is_none());
+    }
+
+    #[test]
+    fn schedule_set_every_keeps_the_saved_time_days_and_repeat() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        let schedule_config = crate::core::stores::ScheduleConfig {
+            at: "21:30".into(),
+            days: vec!["thu".into()],
+            day: 15,
+            every_hours: Some(6),
+            ..Default::default()
+        };
+        Config {
+            schedule: Some(schedule_config),
+            ..Config::default()
+        }
+        .save_to(&layout.config_path())
+        .unwrap();
+
+        let set = schedule(&["schedule", "set", "--every", "month"], &host, &layout);
+
+        assert!(set.ok, "{}", set.err);
+        let saved = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(saved.every, schedule::ScheduleFrequency::Month);
+        assert_eq!(saved.at, "21:30");
+        assert_eq!(saved.days, ["thu"]);
+        assert_eq!(saved.day, 15);
+        assert_eq!(saved.every_hours, Some(6));
+        let bin = schedule::resolve_binary_path(&std::env::current_exe().unwrap());
+        let rule = schedule::ScheduleRule::from_config(&saved).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(schedule::agent_plist_path(&layout)).unwrap(),
+            schedule::generate_plist(&bin, &rule).unwrap()
+        );
     }
 
     #[test]

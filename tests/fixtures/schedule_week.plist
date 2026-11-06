@@ -17,13 +17,15 @@
 		<string>run</string>
 	</array>
 	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Hour</key>
-		<integer>9</integer>
-		<key>Minute</key>
-		<integer>0</integer>
-		<key>Weekday</key>
-		<integer>1</integer>
-	</dict>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+			<key>Weekday</key>
+			<integer>1</integer>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -3290,6 +3290,7 @@ mod tests {
             categories: vec!["dev".to_string()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         });
         let calls = host.calls.lock().unwrap().len();
 
@@ -3893,6 +3894,7 @@ mod tests {
             categories: categories.iter().map(|c| c.to_string()).collect(),
             min_reclaim,
             last_skip: None,
+            ..Default::default()
         });
         prepare(&layout, &mut app.config.schedule);
         press(
@@ -3925,6 +3927,75 @@ mod tests {
             1_000_000_000,
         );
         (host, temp, layout, app)
+    }
+
+    fn default_rule() -> crate::core::schedule::ScheduleRule {
+        crate::core::schedule::ScheduleRule::for_frequency(None, ScheduleFrequency::Week).unwrap()
+    }
+
+    /// The plist that Settings writes for `saved`.
+    fn plist_for(saved: &ScheduleConfig) -> String {
+        use crate::core::schedule::{ScheduleRule, generate_plist, resolve_binary_path};
+        let bin = resolve_binary_path(&std::env::current_exe().unwrap());
+        generate_plist(&bin, &ScheduleRule::from_config(saved).unwrap()).unwrap()
+    }
+
+    fn thursday_at_21_30_every_6_hours(_: &Layout, schedule: &mut Option<ScheduleConfig>) {
+        let schedule = schedule.as_mut().unwrap();
+        schedule.at = "21:30".into();
+        schedule.days = vec!["thu".into()];
+        schedule.day = 15;
+        schedule.every_hours = Some(6);
+    }
+
+    fn assert_keeps_thursday_at_21_30_every_6_hours(layout: &Layout, every: ScheduleFrequency) {
+        let saved = saved_schedule(layout);
+        assert_eq!(saved.every, every);
+        assert_eq!(saved.at, "21:30");
+        assert_eq!(saved.days, ["thu"]);
+        assert_eq!(saved.day, 15);
+        assert_eq!(saved.every_hours, Some(6));
+        let plist = crate::core::schedule::agent_plist_path(layout);
+        assert_eq!(std::fs::read_to_string(plist).unwrap(), plist_for(&saved));
+    }
+
+    #[test]
+    fn switching_the_frequency_keeps_the_time_the_days_and_the_repeat() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout, mut app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            thursday_at_21_30_every_6_hours,
+        );
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+        assert_keeps_thursday_at_21_30_every_6_hours(&layout, ScheduleFrequency::Month);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Up, KeyCode::Enter]);
+        assert_keeps_thursday_at_21_30_every_6_hours(&layout, ScheduleFrequency::Week);
+    }
+
+    #[test]
+    fn load_the_schedule_again_keeps_the_time_the_days_and_the_repeat() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, layout, mut app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Month),
+            &["dev"],
+            1_000_000_000,
+            thursday_at_21_30_every_6_hours,
+        );
+        host.reply("/bin/launchctl", "");
+        press(&mut app, &[KeyCode::Down; 6]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Reload);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(bootstraps(&host), 1);
+        assert_keeps_thursday_at_21_30_every_6_hours(&layout, ScheduleFrequency::Month);
     }
 
     fn saved_schedule(layout: &Layout) -> ScheduleConfig {
@@ -4018,6 +4089,7 @@ mod tests {
             categories: vec!["dev".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         });
 
         press(
@@ -4092,7 +4164,7 @@ mod tests {
         std::fs::create_dir_all(layout.user("Library/LaunchAgents")).unwrap();
         std::fs::write(
             crate::core::schedule::agent_plist_path(&layout),
-            crate::core::schedule::generate_plist(&bin, ScheduleFrequency::Week).unwrap(),
+            crate::core::schedule::generate_plist(&bin, &default_rule()).unwrap(),
         )
         .unwrap();
         let mut app = new_app();
@@ -4103,6 +4175,7 @@ mod tests {
             categories: vec!["dev".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         });
 
         press(
@@ -4126,7 +4199,7 @@ mod tests {
         std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
         std::fs::write(
             plist,
-            crate::core::schedule::generate_plist(program, ScheduleFrequency::Week).unwrap(),
+            crate::core::schedule::generate_plist(program, &default_rule()).unwrap(),
         )
         .unwrap();
     }
@@ -5235,6 +5308,7 @@ mod tests {
                 categories: vec!["dev".to_string()],
                 min_reclaim: 1_000_000_000,
                 last_skip: None,
+                ..Default::default()
             });
             write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert"));
             history_lines(
@@ -5279,6 +5353,7 @@ mod tests {
                 categories: vec!["dev".to_string()],
                 min_reclaim: 1_000_000_000,
                 last_skip: None,
+                ..Default::default()
             });
             write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert"));
         });

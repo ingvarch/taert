@@ -32,8 +32,9 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path_in;
 use crate::core::permissions::{FullDiskAccess, full_disk_access, open_full_disk_access};
 use crate::core::schedule::{
-    LastRun, ScheduleFrequency, ScheduleStatus, agent_plist_path, format_reclaim_threshold,
-    format_run_time, normalize_categories, remove_schedule, schedule_status, set_schedule,
+    LastRun, ScheduleFrequency, ScheduleRule, ScheduleStatus, agent_plist_path,
+    format_reclaim_threshold, format_run_time, normalize_categories, remove_schedule,
+    schedule_status, set_schedule,
 };
 use crate::core::startup::disabled_login_items_path;
 use crate::core::stores::{
@@ -692,15 +693,18 @@ impl SettingsState {
         let Some(freq) = self.schedule else {
             return;
         };
-        match set_schedule(
-            host,
-            layout,
-            config,
-            freq,
-            self.categories.clone(),
-            self.min_reclaim,
-            None,
-        ) {
+        let result = ScheduleRule::for_frequency(config.schedule.as_ref(), freq).and_then(|rule| {
+            set_schedule(
+                host,
+                layout,
+                config,
+                &rule,
+                self.categories.clone(),
+                self.min_reclaim,
+                None,
+            )
+        });
+        match result {
             Ok(()) => {
                 self.error_notice = None;
                 self.save_notice = Some("Loaded the schedule again");
@@ -809,15 +813,19 @@ impl SettingsState {
             return;
         }
         let result = match target {
-            Some(freq) => set_schedule(
-                host,
-                layout,
-                config,
-                freq,
-                self.categories.clone(),
-                self.min_reclaim,
-                None,
-            ),
+            Some(freq) => {
+                ScheduleRule::for_frequency(config.schedule.as_ref(), freq).and_then(|rule| {
+                    set_schedule(
+                        host,
+                        layout,
+                        config,
+                        &rule,
+                        self.categories.clone(),
+                        self.min_reclaim,
+                        None,
+                    )
+                })
+            }
             None => remove_schedule(host, layout, config),
         };
         match result {
@@ -1473,6 +1481,7 @@ mod tests {
                 categories: vec!["Dev".into(), "JUNK".into(), "dev".into()],
                 min_reclaim: 1_000_000_000,
                 last_skip: None,
+                ..Default::default()
             }),
             ..Config::default()
         };

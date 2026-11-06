@@ -25,7 +25,7 @@ The file is TOML. A `config.json` file is ignored.
 | `older_than_days` | integer | `7` | Project cleanup selects build artifacts at least this many days old |
 | `extra_artifacts` | array | `[]` | Folder names that Project cleanup also lists. A folder matches only when its name is exactly one of them; they are not patterns. A folder found only by one of these names starts unselected, whatever its age, so `taert purge --force` leaves it. You can still select it. Settings › Project cleanup edits the list |
 | `appearance` | string | `"auto"` | Terminal theme mode: `"auto"`, `"dark"`, or `"light"`. Settings › Appearance changes it |
-| `schedule` | object | `null` | Automatic background cleanup configuration: `every`, `categories`, and `min_reclaim` |
+| `schedule` | object | `null` | Automatic background cleanup configuration: `every`, `categories`, `min_reclaim`, `at`, `days`, `day`, and `every_hours`. `at` is the time of day as `"HH:MM"` (default `"09:00"`). `days` lists the weekdays for `every = "week"`, from `mon` to `sun` (default `["mon"]`). `day` is the day of the month for `every = "month"`, 1 to 28 (default `1`). `every_hours` is `2`, `3`, `4`, `6`, `8`, or `12` to run at `at` and every that many hours before and after it on the same day: `at = "21:30"` with `every_hours = 6` runs at 03:30, 09:30, 15:30, and 21:30. Leave it out to run once a day. A field that the frequency does not use stays saved |
 
 The folders that Project cleanup scans are not in `config.toml`. They are in the `projects` file, one folder per line. When the file is missing or empty, taert scans `~/Projects`, `~/Code`, `~/dev`, `~/GitHub`, `~/Workspace`, and `~/Repos`.
 
