@@ -8,8 +8,8 @@ expression: output
    │   ◇ Project cleanup          › │  │ ▌    Add path…                                                              │
    │   ◷ Scheduled cleanup        › │  │      Cleanup and project scans skip these paths.                            │
    │   ◈ Protected paths          › │  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ◐ Appearance               › │
    ╰────────────────────────────────╯
-
 
 
 

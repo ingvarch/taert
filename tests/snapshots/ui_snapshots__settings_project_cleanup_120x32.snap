@@ -8,8 +8,8 @@ expression: output
    │   ◇ Project cleanup          › │  │      Preselect artifacts older than                                7 days ⌄ │
    │   ◷ Scheduled cleanup        › │  │                                                                             │
    │   ◈ Protected paths          › │  │      Project folders                                                        │
-   ╰────────────────────────────────╯  │      ~/Code                                                                 │
-                                       │ ▌    /Volumes/Work/repos                                                    │
+   │   ◐ Appearance               › │  │      ~/Code                                                                 │
+   ╰────────────────────────────────╯  │ ▌    /Volumes/Work/repos                                                    │
                                        │      Add folder…                                                            │
                                        │      Project cleanup scans these folders.                                   │
                                        ╰─────────────────────────────────────────────────────────────────────────────╯

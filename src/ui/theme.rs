@@ -49,6 +49,7 @@ impl Theme {
     pub fn plain() -> Self {
         Self::with_env(UiEnv {
             appearance: Appearance::Dark,
+            forced_appearance: None,
             depth: ColorDepth::NoColor,
             ascii_glyphs: true,
             reduce_motion: false,
@@ -223,6 +224,7 @@ mod tests {
     fn color_theme() -> Theme {
         Theme::with_env(UiEnv {
             appearance: Appearance::Dark,
+            forced_appearance: None,
             depth: ColorDepth::TrueColor,
             ascii_glyphs: false,
             reduce_motion: false,

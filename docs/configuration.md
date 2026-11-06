@@ -22,10 +22,12 @@ The file is TOML. A `config.json` file is ignored.
 |---|---|---|---|
 | `older_than_days` | integer | `7` | Project cleanup selects build artifacts at least this many days old |
 | `extra_artifacts` | array | `[]` | Folder names that Project cleanup also lists. A folder matches only when its name is exactly one of them; they are not patterns |
-| `appearance` | string | `"auto"` | Terminal theme mode: `"auto"`, `"dark"`, or `"light"` |
+| `appearance` | string | `"auto"` | Terminal theme mode: `"auto"`, `"dark"`, or `"light"`. Settings › Appearance changes it |
 | `schedule` | object | `null` | Automatic background cleanup configuration: `every`, `categories`, and `min_reclaim` |
 
 The folders that Project cleanup scans are not in `config.toml`. They are in the `projects` file, one folder per line. When the file is missing or empty, taert scans `~/Projects`, `~/Code`, `~/dev`, `~/GitHub`, `~/Workspace`, and `~/Repos`.
+
+Any `appearance` value other than these three counts as `"auto"`. `"auto"` uses the background color the terminal reports, and dark when it reports none. `TAERT_APPEARANCE` decides the colors for a session whatever the file says, and Settings › Appearance then says so.
 
 Modify settings via the CLI:
 

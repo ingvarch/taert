@@ -827,6 +827,54 @@ fn snapshot_settings_schedule_status() {
     assert_snapshot!("settings_schedule_status_120x32", output);
 }
 
+#[test]
+fn snapshot_settings_appearance() {
+    let theme = snapshot_theme();
+    let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &no_layout());
+    state.section = SettingsSection::Appearance;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_appearance_120x32", output);
+}
+
+fn render_appearance_section(env: UiEnv) -> String {
+    let theme = Theme::with_env(env);
+    let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &no_layout());
+    state.section = SettingsSection::Appearance;
+    state.focus = SettingsFocus::Rows;
+    render_to_string(120, 32, |f| render_settings(f, &state, &theme))
+}
+
+#[test]
+fn settings_appearance_says_when_taert_appearance_decides_the_colors() {
+    use taert::ui::env::{Appearance, ColorDepth};
+    let output = render_appearance_section(UiEnv {
+        appearance: Appearance::Light,
+        forced_appearance: Some(Appearance::Light),
+        depth: ColorDepth::TrueColor,
+        ..UiEnv::default()
+    });
+
+    assert!(output.contains("TAERT_APPEARANCE is set, so this session stays light."));
+    assert!(!output.contains("This terminal shows no colors"));
+}
+
+#[test]
+fn settings_appearance_says_only_that_there_are_no_colors_without_colors() {
+    use taert::ui::env::{Appearance, ColorDepth};
+    let output = render_appearance_section(UiEnv {
+        appearance: Appearance::Light,
+        forced_appearance: Some(Appearance::Light),
+        depth: ColorDepth::NoColor,
+        ..UiEnv::default()
+    });
+
+    assert!(output.contains("This terminal shows no colors (NO_COLOR or TERM=dumb)."));
+    assert!(!output.contains("TAERT_APPEARANCE is set"));
+}
+
 const WIDE_WINDOW: (u16, u16) = (205, 60);
 
 // The rows between the title bar and the toolbar.
