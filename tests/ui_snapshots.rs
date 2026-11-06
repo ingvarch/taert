@@ -910,7 +910,10 @@ fn snapshot_settings_schedule_rule() {
 
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
-    let next = output.lines().find(|line| line.contains("Next run")).unwrap();
+    let next = output
+        .lines()
+        .find(|line| line.contains("Next run"))
+        .unwrap();
     assert!(next.contains("Thu 2026-11-12 21:30"), "{output}");
     assert!(output.contains("Mon, Thu"), "{output}");
     assert_snapshot!("settings_schedule_rule_120x32", output);
