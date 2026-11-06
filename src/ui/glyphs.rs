@@ -49,6 +49,7 @@ pub struct Glyphs {
     pub icon_prefs: &'static str,
     pub icon_schedule: &'static str,
     pub icon_protected: &'static str,
+    pub icon_history: &'static str,
 }
 
 impl Default for Glyphs {
@@ -107,6 +108,7 @@ impl Glyphs {
             icon_prefs: "⌥",
             icon_schedule: "◷",
             icon_protected: "◈",
+            icon_history: "↺",
         }
     }
 
@@ -159,6 +161,7 @@ impl Glyphs {
             icon_prefs: "O",
             icon_schedule: "R",
             icon_protected: "X",
+            icon_history: "H",
         }
     }
 }
@@ -172,6 +175,14 @@ mod tests {
     fn the_schedule_icon_takes_one_cell_and_has_an_ascii_letter() {
         assert_eq!(Glyphs::unicode().icon_schedule.width(), 1);
         let ascii = Glyphs::ascii().icon_schedule;
+        assert_eq!(ascii.len(), 1);
+        assert!(ascii.chars().all(|c| c.is_ascii_alphabetic()));
+    }
+
+    #[test]
+    fn the_history_icon_takes_one_cell_and_has_an_ascii_letter() {
+        assert_eq!(Glyphs::unicode().icon_history.width(), 1);
+        let ascii = Glyphs::ascii().icon_history;
         assert_eq!(ascii.len(), 1);
         assert!(ascii.chars().all(|c| c.is_ascii_alphabetic()));
     }

@@ -1327,7 +1327,7 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
 }
 
 /// Draws the notes at the bottom and returns the area left above them.
-fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) -> Rect {
+pub(super) fn render_notes(frame: &mut Frame, area: Rect, notes: &[String], theme: &Theme) -> Rect {
     let lines: Vec<Line> = notes
         .iter()
         .map(|note| Line::from(Span::styled(note.clone(), theme.callout())))

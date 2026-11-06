@@ -16,6 +16,7 @@ use super::analyze::{
     AnalyzeConfirmButton, AnalyzeOverlay, AnalyzeState, SortOrder, render_analyze,
 };
 use super::doctor::{DoctorActionConfirm, DoctorScreenState, render_doctor};
+use super::history::{HistoryState, render_history};
 use super::keys::is_removal_key;
 use super::progress::{ProgressState, render_progress};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
@@ -38,7 +39,7 @@ use crate::core::cleaner::{
 use crate::core::compress::{self, Compressor};
 use crate::core::docker;
 use crate::core::doctor;
-use crate::core::history::{HistoryLog, ItemOutcome, command_for_scan};
+use crate::core::history::{HistoryLog, ItemOutcome, command_for_scan, is_history_disabled};
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
@@ -64,6 +65,7 @@ pub enum Screen {
     Startup(StartupScreenState),
     Doctor(DoctorScreenState),
     Settings(Box<SettingsState>),
+    History(HistoryState),
 }
 
 pub enum ScanMessage {
@@ -480,9 +482,7 @@ impl App {
                 doctor.check_receiver();
             }
 
-            if let Screen::Workspace(ref mut workspace) = self.screen {
-                workspace.tick(&self.storage_cache);
-            }
+            self.tick_workspace();
 
             self.poll_removal();
 
@@ -498,6 +498,15 @@ impl App {
         Ok(())
     }
 
+    fn tick_workspace(&mut self) {
+        if let Screen::Workspace(ref mut workspace) = self.screen {
+            if workspace.history_pending() {
+                workspace.load_history(&HistoryLog::new(self.layout.history_path()));
+            }
+            workspace.tick(&self.storage_cache);
+        }
+    }
+
     fn render_screen(&self, frame: &mut Frame) {
         match &self.screen {
             Screen::Workspace(state) => render_workspace(frame, state, &self.theme),
@@ -508,6 +517,7 @@ impl App {
             Screen::Startup(state) => render_startup(frame, state, &self.theme),
             Screen::Doctor(state) => render_doctor(frame, state, &self.theme),
             Screen::Settings(state) => render_settings(frame, state, &self.theme),
+            Screen::History(state) => render_history(frame, state, &self.theme),
         }
     }
 
@@ -1303,6 +1313,26 @@ impl App {
                 }
             }
 
+            Screen::History(state) => match code {
+                KeyCode::Up | KeyCode::Char('k') => state.previous(),
+                KeyCode::Down | KeyCode::Char('j') => state.next(),
+                KeyCode::PageUp => state.page_up(),
+                KeyCode::PageDown => state.page_down(),
+                KeyCode::Home | KeyCode::Char('g') => state.move_to_start(),
+                KeyCode::End | KeyCode::Char('G') => state.move_to_end(),
+                KeyCode::Enter | KeyCode::Right if !state.is_open() => state.open_run(),
+                KeyCode::Left => {
+                    state.close_run();
+                }
+                KeyCode::Esc => {
+                    if !state.close_run() {
+                        self.go_back();
+                    }
+                }
+                KeyCode::Char('q') => self.go_back(),
+                _ => {}
+            },
+
             Screen::Settings(state) => {
                 if state.has_dialog() {
                     state.dialog_key(code, &mut self.ignore);
@@ -1485,6 +1515,15 @@ impl App {
                     Hint::new("r", "Recheck"),
                     navigate,
                     back,
+                ],
+            )],
+            Screen::History(_) => vec![HelpSection::new(
+                "History",
+                vec![
+                    Hint::new("↵", "Open run"),
+                    navigate,
+                    Hint::new("⎋", "Back"),
+                    Hint::new("q", "Main menu"),
                 ],
             )],
             Screen::Settings(_) => vec![
@@ -1881,6 +1920,13 @@ impl App {
             MainMenuChoice::LargeFiles => self.launch_large_scan(),
             MainMenuChoice::SystemStatus => {
                 self.open(Screen::SystemStatus(Box::default()));
+            }
+            MainMenuChoice::History => {
+                let log = HistoryLog::new(self.layout.history_path());
+                self.open(Screen::History(HistoryState::load(
+                    &log,
+                    is_history_disabled(),
+                )));
             }
             MainMenuChoice::Settings => {
                 self.open(Screen::Settings(Box::new(SettingsState::new(
@@ -2935,7 +2981,7 @@ mod tests {
         let Screen::Workspace(state) = &mut app.screen else {
             panic!("expected the workspace screen");
         };
-        state.selected_index = 12;
+        state.selected_index = 13;
         app.handle_key(KeyCode::Enter);
         assert!(matches!(app.screen, Screen::Settings(_)));
     }
@@ -2952,10 +2998,276 @@ mod tests {
 
         app.handle_key(KeyCode::End);
 
-        assert_main_menu(&app, 12);
+        assert_main_menu(&app, 13);
         assert!(!screen_text(&app).contains("Protected paths"));
         app.handle_key(KeyCode::Enter);
         assert!(matches!(app.screen, Screen::Settings(_)));
+    }
+
+    fn write_history_run(layout: &Layout, run: &str, at: &str, command: &str, failed: bool) {
+        let path = format!("/Users/test/{run}");
+        write_history_items(layout, run, at, command, &[(&path, failed)]);
+    }
+
+    /// Appends a finished run whose items are `(path, failed)`.
+    fn write_history_items(
+        layout: &Layout,
+        run: &str,
+        at: &str,
+        command: &str,
+        items: &[(&str, bool)],
+    ) {
+        use crate::core::history::{HistoryEvent, OutcomeKind};
+        use std::io::Write;
+        let path = layout.history_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let mut events = vec![HistoryEvent::Start {
+            run: run.into(),
+            at: at.into(),
+            command: command.into(),
+            mode: "force".into(),
+            version: "0.9.0".into(),
+            total: Some(items.len()),
+        }];
+        events.extend(items.iter().map(|&(item, failed)| HistoryEvent::Item {
+            run: run.into(),
+            path: item.into(),
+            bytes: 1024,
+            outcome: if failed {
+                OutcomeKind::Failed
+            } else {
+                OutcomeKind::Removed
+            },
+            error: failed.then(|| "Permission denied".to_string()),
+        }));
+        events.push(HistoryEvent::End {
+            run: run.into(),
+            at: at.into(),
+        });
+        for event in events {
+            writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+        }
+    }
+
+    fn open_history(app: &mut App) {
+        let Screen::Workspace(state) = &mut app.screen else {
+            panic!("expected the workspace screen");
+        };
+        state.selected_index = 12;
+        app.handle_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::History(_)));
+    }
+
+    fn history_app() -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout, app) = settings_app();
+        write_history_run(&layout, "r1", "first day", "clean dev", false);
+        write_history_run(&layout, "r2", "second day", "docker", true);
+        write_history_run(&layout, "r3", "third day", "purge", false);
+        (temp, layout, app)
+    }
+
+    fn history_state(app: &App) -> &HistoryState {
+        let Screen::History(state) = &app.screen else {
+            panic!("expected the history screen");
+        };
+        state
+    }
+
+    #[test]
+    fn the_history_row_opens_the_list_with_the_newest_run_first() {
+        let (_temp, _layout, mut app) = history_app();
+
+        open_history(&mut app);
+
+        let rows = screen_rows(&app, 120, 32);
+        let row_of = |text: &str| rows.iter().position(|row| row.contains(text)).unwrap();
+        assert!(row_of("third day") < row_of("second day"));
+        assert!(row_of("second day") < row_of("first day"));
+        assert!(rows.iter().any(|row| row.contains("taert › History")));
+    }
+
+    #[test]
+    fn enter_opens_a_run_and_escape_returns_to_the_same_run() {
+        let (_temp, _layout, mut app) = history_app();
+        open_history(&mut app);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        let text = screen_text(&app);
+        assert!(
+            text.contains("taert › History › second day docker"),
+            "{text}"
+        );
+        assert!(text.contains("/Users/test/r2"), "{text}");
+        assert!(text.contains("Permission denied"), "{text}");
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(matches!(app.screen, Screen::History(_)));
+        assert_eq!(history_state(&app).selected(), 1);
+        let rows = screen_rows(&app, 120, 32);
+        let selected = rows
+            .iter()
+            .find(|row| row.contains(&app.theme.g.selection_bar.to_string()))
+            .unwrap();
+        assert!(selected.contains("second day"), "{selected}");
+        assert!(!screen_text(&app).contains("/Users/test/r2"));
+    }
+
+    #[test]
+    fn right_opens_a_run_and_left_returns_to_the_same_run() {
+        let (_temp, _layout, mut app) = history_app();
+        open_history(&mut app);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Right]);
+        assert!(screen_text(&app).contains("taert › History › second day docker"));
+
+        app.handle_key(KeyCode::Left);
+
+        assert!(matches!(app.screen, Screen::History(_)));
+        assert_eq!(history_state(&app).selected(), 1);
+        assert!(!screen_text(&app).contains("/Users/test/r2"));
+    }
+
+    #[test]
+    fn escape_on_the_list_goes_back_to_the_history_row_of_the_menu() {
+        let (_temp, _layout, mut app) = history_app();
+        open_history(&mut app);
+
+        app.handle_key(KeyCode::Esc);
+
+        assert_main_menu(&app, 12);
+    }
+
+    fn recent_commands(app: &App) -> Vec<String> {
+        let Screen::Workspace(state) = &app.screen else {
+            panic!("expected the workspace screen");
+        };
+        let runs = state.recent_runs.as_ref().unwrap().as_ref().unwrap();
+        runs.iter().map(|run| run.command.clone()).collect()
+    }
+
+    #[test]
+    fn the_menu_reads_the_history_when_it_opens_and_not_on_each_frame() {
+        let (_temp, layout, mut app) = history_app();
+
+        app.tick_workspace();
+        assert_eq!(recent_commands(&app), ["purge", "docker", "clean dev"]);
+
+        write_history_run(&layout, "r4", "fourth day", "clean junk", false);
+        app.tick_workspace();
+        assert_eq!(recent_commands(&app), ["purge", "docker", "clean dev"]);
+
+        open_history(&mut app);
+        app.handle_key(KeyCode::Esc);
+        app.tick_workspace();
+        assert_eq!(recent_commands(&app), ["clean junk", "purge", "docker"]);
+    }
+
+    #[test]
+    fn the_history_list_moves_with_every_navigation_key() {
+        let (_temp, layout, mut app) = history_app();
+        for n in 4..=30 {
+            write_history_run(&layout, &format!("r{n}"), "later", "clean", false);
+        }
+        open_history(&mut app);
+
+        press(&mut app, &[KeyCode::Down]);
+        assert_eq!(history_state(&app).selected(), 1);
+        press(&mut app, &[KeyCode::Char('j')]);
+        assert_eq!(history_state(&app).selected(), 2);
+        press(&mut app, &[KeyCode::Char('k')]);
+        assert_eq!(history_state(&app).selected(), 1);
+        press(&mut app, &[KeyCode::Up]);
+        assert_eq!(history_state(&app).selected(), 0);
+        press(&mut app, &[KeyCode::End]);
+        assert_eq!(history_state(&app).selected(), 29);
+        press(&mut app, &[KeyCode::PageUp]);
+        assert_eq!(history_state(&app).selected(), 19);
+        press(&mut app, &[KeyCode::Home]);
+        assert_eq!(history_state(&app).selected(), 0);
+        press(&mut app, &[KeyCode::PageDown]);
+        assert_eq!(history_state(&app).selected(), 10);
+        press(&mut app, &[KeyCode::Char('G')]);
+        assert_eq!(history_state(&app).selected(), 29);
+        press(&mut app, &[KeyCode::Char('g')]);
+        assert_eq!(history_state(&app).selected(), 0);
+    }
+
+    #[test]
+    fn the_items_of_an_open_run_move_and_scroll_with_every_navigation_key() {
+        let (_temp, layout, mut app) = settings_app();
+        let paths: Vec<String> = (0..40).map(|n| format!("/Users/test/item{n:02}")).collect();
+        let items: Vec<(&str, bool)> = paths.iter().map(|path| (path.as_str(), false)).collect();
+        write_history_items(&layout, "r1", "first day", "clean dev", &items);
+        open_history(&mut app);
+        app.handle_key(KeyCode::Enter);
+        let highlighted = |app: &App| {
+            screen_rows(app, 120, 32)
+                .into_iter()
+                .find(|row| row.contains(app.theme.g.selection_bar))
+                .unwrap()
+        };
+
+        assert!(highlighted(&app).contains("item00"));
+        for (key, want) in [
+            (KeyCode::Down, "item01"),
+            (KeyCode::Char('j'), "item02"),
+            (KeyCode::Char('k'), "item01"),
+            (KeyCode::Up, "item00"),
+            (KeyCode::End, "item39"),
+            (KeyCode::PageUp, "item29"),
+            (KeyCode::Home, "item00"),
+            (KeyCode::PageDown, "item10"),
+            (KeyCode::Char('G'), "item39"),
+            (KeyCode::Char('g'), "item00"),
+        ] {
+            app.handle_key(key);
+            let row = highlighted(&app);
+            assert!(row.contains(want), "{key:?} {want}: {row}");
+        }
+        assert_eq!(history_state(&app).selected(), 0);
+    }
+
+    #[test]
+    fn d_and_space_remove_nothing_in_the_history() {
+        let (_temp, layout, mut app) = history_app();
+        let before = std::fs::read_to_string(layout.history_path()).unwrap();
+        open_history(&mut app);
+
+        press(&mut app, &[KeyCode::Char('d'), KeyCode::Char(' ')]);
+        press(
+            &mut app,
+            &[KeyCode::Enter, KeyCode::Char('d'), KeyCode::Char(' ')],
+        );
+
+        assert!(matches!(app.screen, Screen::History(_)));
+        assert_eq!(history_state(&app).selected(), 0);
+        assert_eq!(
+            std::fs::read_to_string(layout.history_path()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn the_history_help_lists_its_keys() {
+        let (_temp, _layout, mut app) = history_app();
+        open_history(&mut app);
+
+        let shortcuts: Vec<String> = app
+            .help_sections()
+            .iter()
+            .flat_map(|s| s.shortcuts.iter().map(|h| format!("{} {}", h.key, h.desc)))
+            .collect();
+
+        for want in ["↵ Open run", "⎋ Back", "q Main menu"] {
+            assert!(shortcuts.iter().any(|s| s == want), "{want}: {shortcuts:?}");
+        }
     }
 
     #[test]
@@ -3680,7 +3992,7 @@ mod tests {
         assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
 
         app.handle_key(KeyCode::Char('q'));
-        assert_main_menu(&app, 12);
+        assert_main_menu(&app, 13);
     }
 
     #[test]

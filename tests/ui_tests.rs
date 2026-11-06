@@ -1,8 +1,13 @@
 use std::path::PathBuf;
 
+mod support;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use taert::core::history::{HistoryLog, OutcomeKind};
+use taert::core::safety::Safety;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use taert::ui::history::{HistoryState, render_history};
 use taert::ui::select::{SelectState, render_select};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{WorkspaceState, render_workspace};
@@ -783,4 +788,312 @@ mod doctor {
         assert!(shown.contains("Stop Process"));
         assert!(!shown.contains("Force Quit"));
     }
+}
+
+fn screen(width: u16, height: u16, draw: impl FnOnce(&mut ratatui::Frame)) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(draw).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect()
+}
+
+fn row_of(rows: &[String], text: &str) -> usize {
+    rows.iter()
+        .position(|row| row.contains(text))
+        .unwrap_or_else(|| panic!("{text} is missing:\n{}", rows.join("\n")))
+}
+
+fn history_in(dir: &tempfile::TempDir) -> HistoryLog {
+    HistoryLog::new(dir.path().join("history.jsonl"))
+}
+
+#[test]
+fn the_history_screen_lists_runs_newest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_three_runs(&log.path);
+    let state = HistoryState::load(&log, false);
+    let theme = Theme::new();
+
+    let rows = screen(120, 32, |f| render_history(f, &state, &theme));
+
+    let newest = row_of(&rows, "2026-11-01 13:40");
+    let middle = row_of(&rows, "2026-10-31 18:20");
+    let oldest = row_of(&rows, "2026-10-30 09:00");
+    assert!(newest < middle && middle < oldest, "{}", rows.join("\n"));
+    assert!(rows[newest].contains("clean junk"));
+    assert!(rows[newest].contains("schedule"));
+    assert!(rows[newest].contains("removed 1, 4.0 MB, 1 failed"));
+    for title in ["DATE", "COMMAND", "MODE"] {
+        assert!(rows.iter().any(|row| row.contains(title)), "{title}");
+    }
+    assert!(rows.iter().any(|row| row.contains("3 runs")));
+}
+
+#[test]
+fn a_narrow_history_screen_hides_the_mode_column_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_three_runs(&log.path);
+    let state = HistoryState::load(&log, false);
+    let theme = Theme::new();
+
+    let rows = screen(80, 24, |f| render_history(f, &state, &theme));
+
+    let text = rows.join("\n");
+    assert!(!text.contains("MODE"), "{text}");
+    assert!(!text.contains("schedule"), "{text}");
+    assert!(text.contains("COMMAND"), "{text}");
+    assert!(text.contains("removed 1, 4.0 MB, 1 failed"), "{text}");
+}
+
+#[test]
+fn a_narrower_history_screen_hides_the_result_and_keeps_the_date_and_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_three_runs(&log.path);
+    let state = HistoryState::load(&log, false);
+    let theme = Theme::new();
+
+    for (width, height) in [(50, 16), (60, 20)] {
+        let rows = screen(width, height, |f| render_history(f, &state, &theme));
+
+        let text = rows.join("\n");
+        assert!(rows[row_of(&rows, "DATE")].contains("COMMAND"), "{text}");
+        for (date, command) in [
+            ("2026-11-01 13:40", "clean junk"),
+            ("2026-10-31 18:20", "docker"),
+            ("2026-10-30 09:00", "clean dev"),
+        ] {
+            assert!(rows[row_of(&rows, date)].contains(command), "{text}");
+        }
+        assert!(!text.contains("RESULT"), "{text}");
+        assert!(!text.contains("removed"), "{text}");
+    }
+}
+
+#[test]
+fn an_empty_history_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = HistoryState::load(&history_in(&dir), false);
+    let theme = Theme::new();
+
+    let text = screen(100, 30, |f| render_history(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("No history yet"), "{text}");
+    assert!(
+        text.contains("taert records each removal and change here."),
+        "{text}"
+    );
+    assert!(!text.contains("TAERT_NO_HISTORY"), "{text}");
+    assert!(text.contains("0 runs"), "{text}");
+}
+
+#[test]
+fn a_disabled_history_says_new_runs_are_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = HistoryState::load(&history_in(&dir), true);
+    let theme = Theme::new();
+
+    let text = screen(100, 30, |f| render_history(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("No history yet"), "{text}");
+    assert!(
+        text.contains("TAERT_NO_HISTORY is set, so new runs are not recorded."),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_history_file_that_cannot_be_read_shows_the_error_in_the_empty_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = HistoryState::load(&HistoryLog::new(dir.path().to_path_buf()), false);
+    let theme = Theme::new();
+
+    let text = screen(100, 30, |f| render_history(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("Could not read the history"), "{text}");
+    assert!(text.contains("Is a directory"), "{text}");
+    assert!(!text.contains("No history yet"), "{text}");
+}
+
+#[test]
+fn an_open_run_lists_its_items_and_the_error_of_a_failed_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_three_runs(&log.path);
+    let mut state = HistoryState::load(&log, false);
+    state.open_run();
+    let theme = Theme::new();
+
+    let rows = screen(120, 32, |f| render_history(f, &state, &theme));
+
+    let text = rows.join("\n");
+    let failed = row_of(&rows, "/Users/test/Library/Caches/locked");
+    assert!(rows[failed].contains("failed"), "{text}");
+    assert!(rows[failed].contains("9.0 MB"), "{text}");
+    assert!(
+        rows[failed + 1].contains("Permission denied (os error 13)"),
+        "{text}"
+    );
+    assert!(text.contains("/Users/test/Library/Logs/old.log"), "{text}");
+    assert!(!text.contains("docker image prune"), "{text}");
+    assert!(
+        text.contains("taert › History › 2026-11-01 13:40 clean junk"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_open_run_shows_a_path_in_the_home_folder_with_a_tilde() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    let path = Safety::home_dir().join("Library/Caches/demo");
+    let path = path.to_str().unwrap();
+    support::write_run(
+        &log.path,
+        "20261101-134000-dddd",
+        &support::local_time(2026, 11, 1, 13, 40),
+        "clean junk",
+        "force",
+        &[(path, 4_000_000, OutcomeKind::Removed, None)],
+    );
+    let mut state = HistoryState::load(&log, false);
+    state.open_run();
+    let theme = Theme::new();
+
+    let text = screen(120, 32, |f| render_history(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("~/Library/Caches/demo"), "{text}");
+    assert!(!text.contains(path), "{text}");
+}
+
+#[test]
+fn an_open_run_with_no_items_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_run(
+        &log.path,
+        "20261029-080000-zzzz",
+        &support::local_time(2026, 10, 29, 8, 0),
+        "purge",
+        "force",
+        &[],
+    );
+    let mut state = HistoryState::load(&log, false);
+    state.open_run();
+    let theme = Theme::new();
+
+    let text = screen(120, 32, |f| render_history(f, &state, &theme)).join("\n");
+
+    assert!(
+        text.contains("taert › History › 2026-10-29 08:00 purge"),
+        "{text}"
+    );
+    assert!(text.contains("No items recorded."), "{text}");
+    assert!(text.contains("0 items"), "{text}");
+}
+
+#[test]
+fn a_long_error_wraps_inside_the_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    let error =
+        "Homebrew could not clean up lib: Error: ".to_string() + &"very long reason ".repeat(8);
+    support::write_run(
+        &log.path,
+        "20261101-134000-bbbb",
+        &support::local_time(2026, 11, 1, 13, 40),
+        "clean",
+        "force",
+        &[(
+            "/Users/test/locked",
+            9_000_000,
+            OutcomeKind::Failed,
+            Some(error.as_str()),
+        )],
+    );
+    let mut state = HistoryState::load(&log, false);
+    state.open_run();
+    let theme = Theme::new();
+
+    let rows = screen(80, 24, |f| render_history(f, &state, &theme));
+
+    let failed = row_of(&rows, "/Users/test/locked");
+    for row in &rows[failed..failed + 4] {
+        assert!(row.trim_end().ends_with('│'), "{}", rows.join("\n"));
+    }
+    let column = |row: &str, text: &str| row[..row.find(text).unwrap()].chars().count();
+    assert_eq!(
+        column(&rows[failed], "/Users"),
+        column(&rows[failed + 1], "Homebrew")
+    );
+}
+
+#[test]
+fn the_menu_row_history_comes_right_before_settings_in_the_taert_group() {
+    let state = WorkspaceState::new();
+    let names: Vec<&str> = state.items.iter().map(|item| item.1).collect();
+    let last = names.len() - 1;
+    assert_eq!(&names[last - 1..], ["History", "Settings"]);
+    let history = &state.items[last - 1];
+    assert_eq!(history.2, "See what taert removed and changed");
+
+    let theme = Theme::new();
+    let rows = screen(100, 60, |f| render_workspace(f, &state, &theme));
+
+    let group = row_of(&rows, "╭─ taert");
+    let history_row = row_of(&rows, &format!("{} History", theme.g.icon_history));
+    let settings_row = row_of(&rows, &format!("{} Settings", theme.g.icon_prefs));
+    assert!(
+        group < history_row && history_row + 1 == settings_row,
+        "{}",
+        rows.join("\n")
+    );
+    assert!(!rows.iter().any(|row| row.contains("╭─ Settings")));
+}
+
+#[test]
+fn the_menu_detail_pane_shows_why_the_history_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = WorkspaceState::new();
+    state.load_history(&HistoryLog::new(dir.path().to_path_buf()));
+    state.selected_index = state.items.len() - 2;
+    let theme = Theme::new();
+
+    let text = screen(140, 40, |f| render_workspace(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("Could not read the history"), "{text}");
+    assert!(text.contains("Is a directory"), "{text}");
+    assert!(!text.contains("No history yet"), "{text}");
+}
+
+#[test]
+fn the_menu_detail_pane_for_history_shows_the_last_three_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    support::write_run(
+        &log.path,
+        "20261029-080000-zzzz",
+        &support::local_time(2026, 10, 29, 8, 0),
+        "purge",
+        "force",
+        &[],
+    );
+    support::write_three_runs(&log.path);
+    let mut state = WorkspaceState::new();
+    assert!(state.history_pending());
+    state.load_history(&log);
+    assert!(!state.history_pending());
+    state.selected_index = state.items.len() - 2;
+    let theme = Theme::new();
+
+    let text = screen(140, 40, |f| render_workspace(f, &state, &theme)).join("\n");
+
+    assert!(text.contains("2026-11-01 13:40"), "{text}");
+    assert!(text.contains("2026-10-31 18:20"), "{text}");
+    assert!(text.contains("2026-10-30 09:00"), "{text}");
+    assert!(!text.contains("2026-10-29 08:00"), "{text}");
 }

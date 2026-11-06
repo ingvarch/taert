@@ -202,6 +202,11 @@ impl RunRecord {
         }
     }
 
+    /// The start time as `2026-11-01 13:40`, or the stored text when it is not a date.
+    pub fn date_label(&self) -> String {
+        parse_rfc3339(&self.at).map_or_else(|| self.at.clone(), format_system_time)
+    }
+
     /// Formats the run as a fixed-column summary line for `taert history`.
     ///
     /// Columns align to exact widths:
@@ -210,14 +215,8 @@ impl RunRecord {
     /// - Mode (35..48)
     /// - Summary (48..)
     pub fn format_line(&self) -> String {
-        let date_str = if let Some(time) = parse_rfc3339(&self.at) {
-            format_system_time(time)
-        } else {
-            self.at.clone()
-        };
-
         // Command starts at 18, mode starts at 35 (width 17).
-        let mut line = format!("{date_str}  {}", self.command);
+        let mut line = format!("{}  {}", self.date_label(), self.command);
         if line.len() < 35 {
             line.push_str(&" ".repeat(35 - line.len()));
         } else {
@@ -1239,5 +1238,27 @@ another corrupted line!
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].items.len(), 1);
         assert_eq!(runs[0].items[0].path, "/test");
+    }
+
+    #[test]
+    fn the_date_label_starts_the_format_line() {
+        let run = |at: &str| RunRecord {
+            run: "1".into(),
+            at: at.into(),
+            command: "clean dev".into(),
+            mode: "force".into(),
+            version: "0.6.0".into(),
+            total: None,
+            completed: true,
+            ended_at: None,
+            items: Vec::new(),
+        };
+
+        let parsed = run("2026-11-01T13:40:00Z");
+        assert_eq!(parsed.date_label().len(), 16);
+        assert!(parsed.format_line().starts_with(&parsed.date_label()));
+
+        let unparsed = run("last Tuesday");
+        assert_eq!(unparsed.date_label(), "last Tuesday");
     }
 }

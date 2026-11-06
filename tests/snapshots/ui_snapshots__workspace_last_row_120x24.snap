@@ -4,13 +4,12 @@ expression: "home_screen(&state, w, h)"
 ---
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   1 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
-   │   ◇ Project cleanup          › │  │ Choose the folders Project cleanup scans, when scheduled                    │
-   │   ▦ Docker cleanup           › │  │ cleanup runs, and which paths taert never touches.                          │
-   │   ⌦ Uninstall apps           › │  │                                                                             │
-   │   ◆ Homebrew                 › │  │ ↵ Open                                                                      │
-   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
-   ╭─ Optimize ─────────────────────╮
+   2 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
+   │   ▦ Docker cleanup           › │  │ Choose the folders Project cleanup scans, when scheduled                    │
+   │   ⌦ Uninstall apps           › │  │ cleanup runs, and which paths taert never touches.                          │
+   │   ◆ Homebrew                 › │  │                                                                             │
+   ╰────────────────────────────────╯  │ ↵ Open                                                                      │
+   ╭─ Optimize ─────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
    │   ✚ Doctor                   › │
    │   ▲ Startup items            › │
    │   ⌦ Slim apps                › │
@@ -21,7 +20,8 @@ expression: "home_screen(&state, w, h)"
    │   ◔ Large files              › │
    │   ▤ System status            › │
    ╰────────────────────────────────╯
-   ╭─ Settings ─────────────────────╮
+   ╭─ taert ────────────────────────╮
+   │   ↺ History                  › │
    │ ▌ ⌥ Settings                 › │
    ╰────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

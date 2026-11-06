@@ -4,15 +4,15 @@ expression: "home_screen(&state, w, h)"
 ---
  taert              118.6 GB available · 24% free
 ──────────────────────────────────────────────────
-   8 more above
-   │   ✧ Compress                            › │
+   9 more above
    ╰───────────────────────────────────────────╯
    ╭─ Inspect ─────────────────────────────────╮
    │   ◔ Explore storage                     › │
    │   ◔ Large files                         › │
    │   ▤ System status                       › │
    ╰───────────────────────────────────────────╯
-   ╭─ Settings ────────────────────────────────╮
+   ╭─ taert ───────────────────────────────────╮
+   │   ↺ History                             › │
    │ ▌ ⌥ Settings                            › │
    │      Project folders, the schedule, and pro
    ╰───────────────────────────────────────────╯
