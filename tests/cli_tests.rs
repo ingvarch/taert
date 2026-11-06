@@ -491,3 +491,62 @@ fn config_with_dry_run_saves_nothing() {
             .exists()
     );
 }
+
+#[test]
+fn purge_force_leaves_a_folder_found_by_a_custom_name() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("Library/Application Support/taert");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "extra_artifacts = [\"out\"]\n",
+    )
+    .unwrap();
+    let project = home.path().join("code/app");
+    for name in ["out", "node_modules"] {
+        let dir = project.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), vec![1u8; 2048]).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
+        std::fs::File::open(&dir)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+
+    let listing = taert(&home)
+        .args(["purge", "--json"])
+        .arg(home.path().join("code"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listing: serde_json::Value = serde_json::from_slice(&listing).expect("valid JSON");
+    let selected_of = |name: &str| -> bool {
+        let suffix = format!("app/{name}");
+        let item = listing["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .flat_map(|group| group["items"].as_array().expect("items"))
+            .find(|item| {
+                item["path"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path).ends_with(&suffix))
+            })
+            .unwrap_or_else(|| panic!("{name} not listed: {listing}"));
+        item["selected"].as_bool().expect("a selected flag")
+    };
+    assert!(!selected_of("out"), "{listing}");
+    assert!(selected_of("node_modules"), "{listing}");
+
+    taert(&home)
+        .args(["purge", "--force", "--permanent"])
+        .arg(home.path().join("code"))
+        .assert()
+        .success();
+
+    assert!(project.join("out/file").exists());
+    assert!(!project.join("node_modules").exists());
+}

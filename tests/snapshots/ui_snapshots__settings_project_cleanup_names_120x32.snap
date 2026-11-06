@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Settings ─────────────────────╮  ╭─ ◇  Project cleanup ────────────────────────────────────────────────────────╮
+   │   ◇ Project cleanup          › │  │      Preselect artifacts older than                                7 days ⌄ │
+   │   ◷ Scheduled cleanup        › │  │                                                                             │
+   │   ◈ Protected paths          › │  │      Project folders                                                        │
+   │   ◐ Appearance               › │  │      /Volumes/Work/repos                                                    │
+   ╰────────────────────────────────╯  │      Add folder…                                                            │
+                                       │      Project cleanup scans these folders.                                   │
+                                       │                                                                             │
+                                       │      Also clean folders named                                               │
+                                       │      bazel-out                                                              │
+                                       │ ▌    out                                                                    │
+                                       │      Add name…                                                              │
+                                       │      Project cleanup lists folders with these names. You select them        │
+                                       │      yourself.                                                              │
+                                       ╰─────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  a  Add    d  Remove    ↑↓  Move    ←  Sections    ⎋  Back    ?  More

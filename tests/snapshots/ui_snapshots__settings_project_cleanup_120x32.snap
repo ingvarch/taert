@@ -12,12 +12,12 @@ expression: output
    ╰────────────────────────────────╯  │ ▌    /Volumes/Work/repos                                                    │
                                        │      Add folder…                                                            │
                                        │      Project cleanup scans these folders.                                   │
+                                       │                                                                             │
+                                       │      Also clean folders named                                               │
+                                       │      Add name…                                                              │
+                                       │      Project cleanup lists folders with these names. You select them        │
+                                       │      yourself.                                                              │
                                        ╰─────────────────────────────────────────────────────────────────────────────╯
-
-
-
-
-
 
 
 

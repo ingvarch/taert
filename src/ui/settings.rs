@@ -88,12 +88,13 @@ impl SettingsSection {
         }
     }
 
-    fn list_kind(self) -> Option<PathListKind> {
+    /// The lists of the section, in the order of their rows.
+    fn list_kinds(self) -> &'static [PathListKind] {
         match self {
-            Self::ProjectCleanup => Some(PathListKind::ProjectFolders),
-            Self::ScheduledCleanup => None,
-            Self::ProtectedPaths => Some(PathListKind::ProtectedPaths),
-            Self::Appearance => None,
+            Self::ProjectCleanup => &[PathListKind::ProjectFolders, PathListKind::ArtifactNames],
+            Self::ScheduledCleanup => &[],
+            Self::ProtectedPaths => &[PathListKind::ProtectedPaths],
+            Self::Appearance => &[],
         }
     }
 
@@ -127,9 +128,12 @@ pub enum SettingsRow {
     /// Loads the launch agent again.
     Reload,
     Appearance,
-    /// The path at this place in the list of the section.
+    /// The path at this place in the first list of the section.
     Item(usize),
     Add,
+    /// The custom folder name at this place in the names list.
+    Name(usize),
+    AddName,
 }
 
 impl SettingsRow {
@@ -140,8 +144,32 @@ impl SettingsRow {
             Self::MinReclaim => "Only when it frees at least",
             Self::Reload => "Load the schedule again",
             Self::Appearance => "Appearance",
-            Self::Category(_) | Self::Item(_) | Self::Add => "",
+            Self::Category(_) | Self::Item(_) | Self::Add | Self::Name(_) | Self::AddName => "",
         }
+    }
+
+    /// The list a row of a list belongs to.
+    fn list_kind(self, section: SettingsSection) -> Option<PathListKind> {
+        match self {
+            Self::Item(_) | Self::Add => section.list_kinds().first().copied(),
+            Self::Name(_) | Self::AddName => Some(PathListKind::ArtifactNames),
+            _ => None,
+        }
+    }
+
+    fn is_list_row(self) -> bool {
+        matches!(
+            self,
+            Self::Item(_) | Self::Add | Self::Name(_) | Self::AddName
+        )
+    }
+
+    fn is_item(self) -> bool {
+        matches!(self, Self::Item(_) | Self::Name(_))
+    }
+
+    fn is_add(self) -> bool {
+        matches!(self, Self::Add | Self::AddName)
     }
 
     /// A row that opens a picker.
@@ -171,6 +199,7 @@ pub struct SettingsState {
     /// One of `APPEARANCE_CHOICES`. A saved value outside them counts as `auto`.
     pub appearance: &'static str,
     pub folders: PathList,
+    pub names: PathList,
     pub protected: PathList,
     /// What the schedule does now, read when Settings opens and after each change.
     pub status: Option<ScheduleStatus>,
@@ -234,8 +263,9 @@ impl SettingsState {
                 .as_ref()
                 .map_or_else(default_schedule_min_reclaim, |s| s.min_reclaim),
             appearance: appearance_value(&config.appearance),
-            folders: PathList::new(PathListKind::ProjectFolders, ignore, layout),
-            protected: PathList::new(PathListKind::ProtectedPaths, ignore, layout),
+            folders: PathList::new(PathListKind::ProjectFolders, ignore, config, layout),
+            names: PathList::new(PathListKind::ArtifactNames, ignore, config, layout),
+            protected: PathList::new(PathListKind::ProtectedPaths, ignore, config, layout),
             status: None,
             save_notice: None,
             error_notice: None,
@@ -243,27 +273,59 @@ impl SettingsState {
         }
     }
 
-    /// The list of the section, if it has one.
-    pub fn list(&self) -> Option<&PathList> {
-        match self.section.list_kind()? {
-            PathListKind::ProjectFolders => Some(&self.folders),
-            PathListKind::ProtectedPaths => Some(&self.protected),
+    fn list_of(&self, kind: PathListKind) -> &PathList {
+        match kind {
+            PathListKind::ProjectFolders => &self.folders,
+            PathListKind::ArtifactNames => &self.names,
+            PathListKind::ProtectedPaths => &self.protected,
         }
     }
 
-    fn list_mut(&mut self) -> Option<&mut PathList> {
-        match self.section.list_kind()? {
-            PathListKind::ProjectFolders => Some(&mut self.folders),
-            PathListKind::ProtectedPaths => Some(&mut self.protected),
+    fn list_of_mut(&mut self, kind: PathListKind) -> &mut PathList {
+        match kind {
+            PathListKind::ProjectFolders => &mut self.folders,
+            PathListKind::ArtifactNames => &mut self.names,
+            PathListKind::ProtectedPaths => &mut self.protected,
         }
     }
 
-    /// The rows of the section: its fixed rows, then one per path and the `Add` row.
+    /// The list of the section that has a dialog open.
+    pub fn dialog_list(&self) -> Option<&PathList> {
+        self.section
+            .list_kinds()
+            .iter()
+            .map(|&kind| self.list_of(kind))
+            .find(|list| list.has_dialog())
+    }
+
+    /// The index of the first row of a list of the section.
+    fn list_start(&self, kind: PathListKind) -> usize {
+        let before: usize = self
+            .section
+            .list_kinds()
+            .iter()
+            .take_while(|&&k| k != kind)
+            .map(|&k| self.list_of(k).items.len() + 1)
+            .sum();
+        self.section.fixed_rows().len() + before
+    }
+
+    /// The rows of the section: its fixed rows, then for each list one row per item and the
+    /// add row.
     pub fn rows(&self) -> Vec<SettingsRow> {
         let mut rows = self.section.fixed_rows().to_vec();
-        if let Some(list) = self.list() {
-            rows.extend((0..list.items.len()).map(SettingsRow::Item));
-            rows.push(SettingsRow::Add);
+        for &kind in self.section.list_kinds() {
+            let count = self.list_of(kind).items.len();
+            match kind {
+                PathListKind::ArtifactNames => {
+                    rows.extend((0..count).map(SettingsRow::Name));
+                    rows.push(SettingsRow::AddName);
+                }
+                _ => {
+                    rows.extend((0..count).map(SettingsRow::Item));
+                    rows.push(SettingsRow::Add);
+                }
+            }
         }
         if self.section == SettingsSection::ScheduledCleanup && self.schedule.is_some() {
             rows.extend((0..CLEAN_CATEGORIES.len()).map(SettingsRow::Category));
@@ -305,41 +367,44 @@ impl SettingsState {
 
     /// A dialog of a list is open, so keys go to it.
     pub fn has_dialog(&self) -> bool {
-        self.list().is_some_and(PathList::has_dialog)
+        self.dialog_list().is_some()
     }
 
     /// Text goes into the path of the add dialog.
     pub fn is_typing(&self) -> bool {
-        self.list().is_some_and(PathList::is_adding)
+        self.dialog_list().is_some_and(PathList::is_adding)
     }
 
     /// Opens the add dialog when the focus is on a row of a list.
     pub fn start_adding(&mut self) {
-        if matches!(self.current_row(), SettingsRow::Item(_) | SettingsRow::Add)
-            && let Some(list) = self.list_mut()
+        let row = self.current_row();
+        if row.is_list_row()
+            && let Some(kind) = row.list_kind(self.section)
         {
-            list.start_adding();
+            self.list_of_mut(kind).start_adding();
         }
     }
 
-    /// Asks to remove the highlighted path.
+    /// Asks to remove the highlighted path or name.
     pub fn prompt_remove(&mut self) {
-        if let SettingsRow::Item(index) = self.current_row()
-            && let Some(list) = self.list_mut()
+        let row = self.current_row();
+        if let (SettingsRow::Item(index) | SettingsRow::Name(index), Some(kind)) =
+            (row, row.list_kind(self.section))
         {
-            list.prompt_remove(index);
+            self.list_of_mut(kind).prompt_remove(index);
         }
     }
 
-    /// Passes a key to the open dialog. The highlight follows an added path and stays in the
+    /// Passes a key to the open dialog. The highlight follows an added item and stays in the
     /// list after a removal.
-    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore) {
-        let first = self.section.fixed_rows().len();
-        let before = self.list().map_or(0, |list| list.items.len());
-        let Some(list) = self.list_mut() else {
+    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore, config: &mut Config) {
+        let Some(kind) = self.dialog_list().map(|list| list.kind) else {
             return;
         };
-        list.dialog_key(code, ignore);
+        let first = self.list_start(kind);
+        let before = self.list_of(kind).items.len();
+        let list = self.list_of_mut(kind);
+        list.dialog_key(code, ignore, config);
         let after = list.items.len();
         if after > before {
             self.row = first + after - 1;
@@ -412,7 +477,9 @@ impl SettingsState {
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
-            | SettingsRow::Reload => return,
+            | SettingsRow::Reload
+            | SettingsRow::Name(_)
+            | SettingsRow::AddName => return,
         };
         self.picker = Some((
             row,
@@ -453,7 +520,9 @@ impl SettingsState {
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
-            | SettingsRow::Reload => {}
+            | SettingsRow::Reload
+            | SettingsRow::Name(_)
+            | SettingsRow::AddName => {}
         }
     }
 
@@ -628,7 +697,9 @@ impl SettingsState {
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
-            | SettingsRow::Reload => String::new(),
+            | SettingsRow::Reload
+            | SettingsRow::Name(_)
+            | SettingsRow::AddName => String::new(),
         }
     }
 }
@@ -650,16 +721,16 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
     let primary = match row {
         _ if !in_rows => Some(PrimaryAction::new("Open", theme.g.key_enter)),
         _ if row.is_popup() => Some(PrimaryAction::new("Change", theme.g.key_enter)),
-        SettingsRow::Add => Some(PrimaryAction::new("Add", theme.g.key_enter)),
+        _ if row.is_add() => Some(PrimaryAction::new("Add", theme.g.key_enter)),
         SettingsRow::Category(_) => Some(PrimaryAction::new("Toggle", theme.g.key_enter)),
         SettingsRow::Reload => Some(PrimaryAction::new("Load", theme.g.key_enter)),
         _ => None,
     };
-    let in_list = in_rows && matches!(row, SettingsRow::Item(_) | SettingsRow::Add);
+    let in_list = in_rows && row.is_list_row();
     let mut hints = Vec::new();
     if in_list {
         hints.push(Hint::new("a", "Add"));
-        if matches!(row, SettingsRow::Item(_)) {
+        if row.is_item() {
             hints.push(Hint::new("d", "Remove"));
         }
     }
@@ -707,7 +778,7 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
     if let Some(picker) = state.picker_state() {
         render_picker(frame, frame.area(), picker, theme);
     }
-    if let Some(list) = state.list() {
+    if let Some(list) = state.dialog_list() {
         list.render_dialog(frame, theme);
     }
 }
@@ -854,28 +925,40 @@ fn wrapped_lines(text: &str, style: Style, width: usize, theme: &Theme) -> Vec<L
         .collect()
 }
 
-/// The rows of a section other than Scheduled cleanup and Appearance, and the line of the highlighted one.
+/// The rows of a section other than Scheduled cleanup and Appearance, and the line of the
+/// highlighted one. Each list has its heading above it and its footnote below it.
 fn list_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
-    let first_list_row = state.section.fixed_rows().len();
+    let rows = state.rows();
     let mut lines = Vec::new();
     let mut focus = 0;
-    for (i, row) in state.rows().into_iter().enumerate() {
-        let selected = state.focus == SettingsFocus::Rows && i == state.row;
-        if i == first_list_row
-            && let Some(heading) = state.list().and_then(PathList::heading)
-        {
-            lines.push(Line::default());
-            lines.push(text_line(heading, theme.callout(), width, theme));
+    let mut kind = None;
+    for (i, &row) in rows.iter().enumerate() {
+        let row_kind = row.list_kind(state.section);
+        if row_kind != kind {
+            if let Some(done) = kind {
+                lines.extend(footnote_lines(state.list_of(done), width, theme));
+            }
+            kind = row_kind;
+            if let Some(heading) = kind.and_then(|k| state.list_of(k).heading()) {
+                lines.push(Line::default());
+                lines.push(text_line(heading, theme.callout(), width, theme));
+            }
         }
+        let selected = state.focus == SettingsFocus::Rows && i == state.row;
         if selected {
             focus = lines.len();
         }
         lines.push(row_line(state, row, selected, width, theme));
     }
-    if let Some(list) = state.list() {
-        lines.push(text_line(list.footnote(), theme.footnote(), width, theme));
+    if let Some(done) = kind {
+        lines.extend(footnote_lines(state.list_of(done), width, theme));
     }
     (lines, focus)
+}
+
+/// The footnote of a list, broken into lines that fit the column of the row titles.
+fn footnote_lines(list: &PathList, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    wrapped_lines(list.footnote(), theme.footnote(), width, theme)
 }
 
 /// The rows of Scheduled cleanup and the line of the highlighted one. While `Run` is off, the
@@ -991,14 +1074,24 @@ fn row_line(
     };
     match row {
         SettingsRow::Item(index) => {
-            let path = state.list().map_or("", |list| list.items[index].as_str());
+            let path = row
+                .list_kind(state.section)
+                .map_or("", |kind| state.list_of(kind).items[index].as_str());
             let max_len = width.saturating_sub(8);
             ListRow::new(path_spans(Path::new(path), max_len, theme))
                 .selected(selected)
                 .render_line(width, theme)
         }
-        SettingsRow::Add => {
-            let label = state.list().map_or("", PathList::add_label);
+        SettingsRow::Name(index) => ListRow::new(vec![Span::styled(
+            state.names.items[index].clone(),
+            theme.body(),
+        )])
+        .selected(selected)
+        .render_line(width, theme),
+        SettingsRow::Add | SettingsRow::AddName => {
+            let label = row
+                .list_kind(state.section)
+                .map_or("", |kind| state.list_of(kind).add_label());
             ListRow::new(vec![Span::styled(label, theme.accent_text())])
                 .selected(selected)
                 .render_line(width, theme)
@@ -1104,7 +1197,8 @@ mod tests {
             [
                 SettingsRow::AgeThreshold,
                 SettingsRow::Item(0),
-                SettingsRow::Add
+                SettingsRow::Add,
+                SettingsRow::AddName
             ]
         );
         state.section = SettingsSection::ScheduledCleanup;
@@ -1141,7 +1235,8 @@ mod tests {
             [
                 SettingsRow::AgeThreshold,
                 SettingsRow::Item(0),
-                SettingsRow::Add
+                SettingsRow::Add,
+                SettingsRow::AddName
             ]
         );
     }
@@ -1168,5 +1263,105 @@ mod tests {
                 "width {width}: {shown}"
             );
         }
+    }
+
+    #[test]
+    fn a_wrapped_footnote_is_never_cut() {
+        let (_temp, _layout, mut state, _config) = name_state(&["out"]);
+        state.focus = SettingsFocus::Rows;
+        let theme = Theme::default();
+        for width in [50u16, 77, 87, 113, 123] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+            terminal
+                .draw(|f| render_settings(f, &state, &theme))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = (0..40u16)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let joined: String = text
+                .replace(['│', '▌'], " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for note in [
+                "Project cleanup scans these folders.",
+                "Project cleanup lists folders with these names. You select them yourself.",
+            ] {
+                assert!(joined.contains(note), "width {width}: {text}");
+            }
+        }
+    }
+
+    fn name_state(names: &[&str]) -> (tempfile::TempDir, Layout, SettingsState, Config) {
+        let (temp, layout) = sandbox();
+        ProjectFoldersStore::new(vec!["/nowhere/code".to_string()])
+            .save_to(&layout.projects_path())
+            .unwrap();
+        let config = Config {
+            extra_artifacts: names.iter().map(|n| n.to_string()).collect(),
+            ..Config::default()
+        };
+        let state = SettingsState::new(&config, &IgnoreStore::default(), &layout);
+        (temp, layout, state, config)
+    }
+
+    #[test]
+    fn project_cleanup_lists_the_folders_and_then_the_custom_names() {
+        let (_temp, _layout, state, _config) = name_state(&["out", "bazel-out"]);
+        assert_eq!(
+            state.rows(),
+            [
+                SettingsRow::AgeThreshold,
+                SettingsRow::Item(0),
+                SettingsRow::Add,
+                SettingsRow::Name(0),
+                SettingsRow::Name(1),
+                SettingsRow::AddName,
+            ]
+        );
+    }
+
+    #[test]
+    fn adding_a_name_moves_the_highlight_to_it_and_saves_it() {
+        let (_temp, layout, mut state, mut config) = name_state(&["out"]);
+        let mut ignore = IgnoreStore::default();
+        state.focus = SettingsFocus::Rows;
+        state.row = 4;
+        assert_eq!(state.current_row(), SettingsRow::AddName);
+
+        state.start_adding();
+        assert!(state.is_typing());
+        for c in "bazel-out".chars() {
+            state.dialog_key(KeyCode::Char(c), &mut ignore, &mut config);
+        }
+        state.dialog_key(KeyCode::Enter, &mut ignore, &mut config);
+
+        assert_eq!(state.current_row(), SettingsRow::Name(1));
+        assert_eq!(config.extra_artifacts, ["out", "bazel-out"]);
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.extra_artifacts, ["out", "bazel-out"]);
+        assert_eq!(state.folders.items, ["/nowhere/code"]);
+    }
+
+    #[test]
+    fn removing_a_name_keeps_the_highlight_in_the_names() {
+        let (_temp, _layout, mut state, mut config) = name_state(&["out", "bazel-out"]);
+        let mut ignore = IgnoreStore::default();
+        state.focus = SettingsFocus::Rows;
+        state.row = 4;
+        assert_eq!(state.current_row(), SettingsRow::Name(1));
+
+        state.prompt_remove();
+        state.dialog_key(KeyCode::Enter, &mut ignore, &mut config);
+
+        assert_eq!(config.extra_artifacts, ["out"]);
+        assert_eq!(state.current_row(), SettingsRow::Name(0));
     }
 }

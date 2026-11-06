@@ -120,7 +120,7 @@ taert/
 │       ├── folder_preview.rs   # Contents of the folder highlighted in Explore, measured in the background
 │       ├── history.rs          # History screen: runs newest first, and the items of one run
 │       ├── palette.rs          # Semantic color palette resolver for dark, light, and no-color
-│       ├── path_list.rs        # Path list behind Project folders and Protected paths: items, adding, removing, dialogs
+│       ├── path_list.rs        # Lists behind Project folders, Protected paths, and custom folder names: items, adding, removing, dialogs
 │       ├── progress.rs         # Scanning progress screen with live progress bars
 │       ├── select.rs           # Item selection screen with search filtering and modals
 │       ├── settings.rs         # Settings screen: sections, rows, and the pickers that change them

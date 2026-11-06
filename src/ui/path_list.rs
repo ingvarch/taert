@@ -1,5 +1,5 @@
-//! The list behind Project folders and Protected paths: its items, adding, removing, saving,
-//! and the two dialogs. Settings shows the items and passes the keys of the dialogs on.
+//! The lists behind Project folders, Protected paths, and the custom folder names: their items,
+//! adding, removing, saving, and the two dialogs. Settings shows the items and passes the keys of the dialogs on.
 
 use std::path::PathBuf;
 
@@ -13,7 +13,8 @@ use super::theme::Theme;
 use crate::core::layout::Layout as MacLayout;
 use crate::core::path_utils::{complete_path, prettify_path, standardize_path};
 use crate::core::projects_store::ProjectFoldersStore;
-use crate::core::stores::IgnoreStore;
+use crate::core::purger::Purger;
+use crate::core::stores::{Config, IgnoreStore};
 
 /// What the typed path is on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ const MATCHES_SHOWN: usize = 5;
 pub enum PathListKind {
     ProtectedPaths,
     ProjectFolders,
+    /// Folder names, not paths: no completion and no status line.
+    ArtifactNames,
 }
 
 pub enum PathListMode {
@@ -59,16 +62,23 @@ pub struct PathList {
     home: PathBuf,
     ignore_path: PathBuf,
     projects_path: PathBuf,
+    config_path: PathBuf,
 }
 
 impl PathList {
-    pub fn new(kind: PathListKind, ignore: &IgnoreStore, layout: &MacLayout) -> Self {
+    pub fn new(
+        kind: PathListKind,
+        ignore: &IgnoreStore,
+        config: &Config,
+        layout: &MacLayout,
+    ) -> Self {
         let projects_path = layout.projects_path();
         let items = match kind {
             PathListKind::ProtectedPaths => ignore.roots.clone(),
             PathListKind::ProjectFolders => {
                 ProjectFoldersStore::load_or_default_at(&projects_path).roots
             }
+            PathListKind::ArtifactNames => config.extra_artifacts.clone(),
         };
 
         Self {
@@ -81,6 +91,7 @@ impl PathList {
             home: layout.home.clone(),
             ignore_path: layout.ignore_path(),
             projects_path,
+            config_path: layout.config_path(),
         }
     }
 
@@ -88,6 +99,7 @@ impl PathList {
         match self.kind {
             PathListKind::ProtectedPaths => "Add path…",
             PathListKind::ProjectFolders => "Add folder…",
+            PathListKind::ArtifactNames => "Add name…",
         }
     }
 
@@ -96,6 +108,7 @@ impl PathList {
         match self.kind {
             PathListKind::ProtectedPaths => None,
             PathListKind::ProjectFolders => Some("Project folders"),
+            PathListKind::ArtifactNames => Some("Also clean folders named"),
         }
     }
 
@@ -103,6 +116,9 @@ impl PathList {
         match self.kind {
             PathListKind::ProtectedPaths => "Cleanup and project scans skip these paths.",
             PathListKind::ProjectFolders => "Project cleanup scans these folders.",
+            PathListKind::ArtifactNames => {
+                "Project cleanup lists folders with these names. You select them yourself."
+            }
         }
     }
 
@@ -121,7 +137,9 @@ impl PathList {
 
     fn refresh_status(&mut self) {
         self.status = match &self.mode {
-            PathListMode::Adding(input) if !input.trim().is_empty() => {
+            PathListMode::Adding(input)
+                if self.kind != PathListKind::ArtifactNames && !input.trim().is_empty() =>
+            {
                 Some(match standardize_path(input, &self.home).metadata() {
                     Err(_) => PathStatus::Missing,
                     Ok(meta) if meta.is_dir() => PathStatus::Folder,
@@ -152,7 +170,7 @@ impl PathList {
         }
     }
 
-    pub fn confirm_remove(&mut self, ignore: &mut IgnoreStore) {
+    pub fn confirm_remove(&mut self, ignore: &mut IgnoreStore, config: &mut Config) {
         if let PathListMode::ConfirmRemove(idx) = self.mode
             && idx < self.items.len()
         {
@@ -167,14 +185,23 @@ impl PathList {
                     store.remove(&removed_path);
                     let _ = store.save_to(&self.projects_path);
                 }
+                PathListKind::ArtifactNames => {
+                    config.extra_artifacts.retain(|name| *name != removed_path);
+                    let _ = config.save_to(&self.config_path);
+                }
             }
         }
         self.mode = PathListMode::Normal;
     }
 
-    pub fn commit_add(&mut self, ignore: &mut IgnoreStore) {
+    pub fn commit_add(&mut self, ignore: &mut IgnoreStore, config: &mut Config) {
         if let PathListMode::Adding(ref input) = self.mode {
             let trimmed = input.trim();
+            if self.kind == PathListKind::ArtifactNames {
+                let name = trimmed.to_string();
+                self.commit_name(name, ignore, config);
+                return;
+            }
             if trimmed.is_empty() {
                 self.error_message = Some("Path cannot be empty".to_string());
                 return;
@@ -192,27 +219,54 @@ impl PathList {
                 return;
             }
 
-            self.items.push(path_str.clone());
-            match self.kind {
-                PathListKind::ProtectedPaths => {
-                    ignore.add(path_str);
-                    let _ = ignore.save_to(&self.ignore_path);
-                }
-                PathListKind::ProjectFolders => {
-                    let mut store = ProjectFoldersStore::load_or_default_at(&self.projects_path);
-                    store.add(path_str);
-                    let _ = store.save_to(&self.projects_path);
-                }
-            }
-
-            self.mode = PathListMode::Normal;
-            self.error_message = None;
+            self.add_item(path_str, ignore, config);
         }
     }
 
-    /// Handles a key while a dialog is open. Everything typed goes into the path, and Tab
-    /// completes it.
-    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore) {
+    /// Adds a checked item, saves the list, and closes the dialog.
+    fn add_item(&mut self, item: String, ignore: &mut IgnoreStore, config: &mut Config) {
+        self.items.push(item.clone());
+        match self.kind {
+            PathListKind::ProtectedPaths => {
+                ignore.add(item);
+                let _ = ignore.save_to(&self.ignore_path);
+            }
+            PathListKind::ProjectFolders => {
+                let mut store = ProjectFoldersStore::load_or_default_at(&self.projects_path);
+                store.add(item);
+                let _ = store.save_to(&self.projects_path);
+            }
+            PathListKind::ArtifactNames => {
+                config.extra_artifacts.push(item);
+                let _ = config.save_to(&self.config_path);
+            }
+        }
+        self.mode = PathListMode::Normal;
+        self.error_message = None;
+    }
+
+    fn commit_name(&mut self, name: String, ignore: &mut IgnoreStore, config: &mut Config) {
+        let refusal = if matches!(name.as_str(), "" | "." | "..") {
+            Some("Type a folder name.".to_string())
+        } else if name.contains('/') {
+            Some("Type a name without /.".to_string())
+        } else if Purger::is_standard_name(&name) {
+            Some(format!("taert already cleans {name}."))
+        } else if self.items.contains(&name) {
+            Some("This name is already in the list.".to_string())
+        } else {
+            None
+        };
+        if refusal.is_some() {
+            self.error_message = refusal;
+            return;
+        }
+        self.add_item(name, ignore, config);
+    }
+
+    /// Handles a key while a dialog is open. What you type goes into the input, and Tab
+    /// completes a path.
+    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore, config: &mut Config) {
         if code != KeyCode::Tab {
             self.matches.clear();
         }
@@ -227,6 +281,7 @@ impl PathList {
                     input.push(c);
                     self.refresh_status();
                 }
+                KeyCode::Tab if self.kind == PathListKind::ArtifactNames => {}
                 KeyCode::Tab => {
                     let folders_only = self.kind == PathListKind::ProjectFolders;
                     let done = complete_path(input, &self.home, folders_only);
@@ -234,12 +289,12 @@ impl PathList {
                     self.matches = done.matches;
                     self.refresh_status();
                 }
-                KeyCode::Enter => self.commit_add(ignore),
+                KeyCode::Enter => self.commit_add(ignore, config),
                 _ => {}
             },
             PathListMode::ConfirmRemove(_) => match code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_remove(ignore);
+                    self.confirm_remove(ignore, config);
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.cancel_input(),
                 _ => {}
@@ -255,7 +310,7 @@ impl PathList {
             }
             PathListMode::ConfirmRemove(idx) => {
                 if let Some(target) = self.items.get(*idx) {
-                    render_remove_dialog(frame, target, theme);
+                    render_remove_dialog(frame, self.kind, target, theme);
                 }
             }
             PathListMode::Normal => {}
@@ -267,11 +322,16 @@ fn render_input_dialog(frame: &mut Frame, list: &PathList, input: &str, theme: &
     let title = match list.kind {
         PathListKind::ProtectedPaths => "Add Protected Path",
         PathListKind::ProjectFolders => "Add Project Folder",
+        PathListKind::ArtifactNames => "Add Folder Name",
+    };
+    let label = match list.kind {
+        PathListKind::ArtifactNames => "Name:  ",
+        _ => "Path:  ",
     };
     let cursor_char = "▏";
     let mut msg = vec![
         Line::from(vec![
-            Span::styled("Path:  ", theme.headline()),
+            Span::styled(label, theme.headline()),
             Span::styled(input, theme.body()),
             Span::styled(cursor_char, theme.accent_text()),
         ]),
@@ -312,10 +372,19 @@ fn render_input_dialog(frame: &mut Frame, list: &PathList, input: &str, theme: &
         .render(frame, frame.area(), theme);
 }
 
-fn render_remove_dialog(frame: &mut Frame, path_str: &str, theme: &Theme) {
-    let pretty = prettify_path(&PathBuf::from(path_str));
+fn render_remove_dialog(frame: &mut Frame, kind: PathListKind, item: &str, theme: &Theme) {
+    let (pretty, message) = match kind {
+        PathListKind::ArtifactNames => (
+            item.to_string(),
+            format!("Stop listing folders named {item}?"),
+        ),
+        _ => {
+            let pretty = prettify_path(&PathBuf::from(item));
+            let message = format!("Stop tracking {pretty}?");
+            (pretty, message)
+        }
+    };
     let title = format!("Remove {pretty}?");
-    let message = format!("Stop tracking {pretty}?");
 
     Modal::new(&title)
         .message(vec![Line::from(Span::styled(message, theme.body()))])
@@ -349,10 +418,15 @@ mod tests {
     fn the_status_is_checked_when_the_input_changes_not_on_each_draw() {
         let (temp, layout) = sandbox();
         let mut ignore = IgnoreStore::default();
-        let mut list = PathList::new(PathListKind::ProtectedPaths, &ignore, &layout);
+        let mut list = PathList::new(
+            PathListKind::ProtectedPaths,
+            &ignore,
+            &Config::default(),
+            &layout,
+        );
         list.start_adding();
         for c in "~/later".chars() {
-            list.dialog_key(KeyCode::Char(c), &mut ignore);
+            list.dialog_key(KeyCode::Char(c), &mut ignore, &mut Config::default());
         }
         assert_eq!(
             list.status(),
@@ -365,8 +439,8 @@ mod tests {
             Some("Nothing here yet. You can still add it.")
         );
 
-        list.dialog_key(KeyCode::Backspace, &mut ignore);
-        list.dialog_key(KeyCode::Char('r'), &mut ignore);
+        list.dialog_key(KeyCode::Backspace, &mut ignore, &mut Config::default());
+        list.dialog_key(KeyCode::Char('r'), &mut ignore, &mut Config::default());
         assert_eq!(list.status(), Some("Folder found"));
         drop(temp);
     }
@@ -375,17 +449,22 @@ mod tests {
     fn protected_paths_are_saved_in_the_layout() {
         let (temp, layout) = sandbox();
         let mut ignore = IgnoreStore::default();
-        let mut list = PathList::new(PathListKind::ProtectedPaths, &ignore, &layout);
+        let mut list = PathList::new(
+            PathListKind::ProtectedPaths,
+            &ignore,
+            &Config::default(),
+            &layout,
+        );
         let path = temp.path().canonicalize().unwrap().display().to_string();
 
         typed(&mut list, &path);
-        list.commit_add(&mut ignore);
+        list.commit_add(&mut ignore, &mut Config::default());
 
         let saved = IgnoreStore::load_from(&layout.ignore_path()).unwrap();
         assert_eq!(saved.roots, [path]);
 
         list.prompt_remove(0);
-        list.confirm_remove(&mut ignore);
+        list.confirm_remove(&mut ignore, &mut Config::default());
 
         assert!(
             IgnoreStore::load_from(&layout.ignore_path())
@@ -403,12 +482,17 @@ mod tests {
             .save_to(&layout.projects_path())
             .unwrap();
         let mut ignore = IgnoreStore::default();
-        let mut list = PathList::new(PathListKind::ProjectFolders, &ignore, &layout);
+        let mut list = PathList::new(
+            PathListKind::ProjectFolders,
+            &ignore,
+            &Config::default(),
+            &layout,
+        );
         assert_eq!(list.items, std::slice::from_ref(&first));
 
         let second = layout.home.display().to_string();
         typed(&mut list, &second);
-        list.commit_add(&mut ignore);
+        list.commit_add(&mut ignore, &mut Config::default());
 
         let saved = ProjectFoldersStore::load_from(&layout.projects_path()).unwrap();
         assert_eq!(saved.roots, [first, second]);
@@ -424,7 +508,10 @@ mod tests {
 
     fn list_in(layout: &MacLayout, kind: PathListKind) -> (PathList, IgnoreStore) {
         let ignore = IgnoreStore::default();
-        (PathList::new(kind, &ignore, layout), ignore)
+        (
+            PathList::new(kind, &ignore, &Config::default(), layout),
+            ignore,
+        )
     }
 
     #[test]
@@ -435,17 +522,17 @@ mod tests {
         let (mut list, mut ignore) = list_in(&layout, PathListKind::ProjectFolders);
 
         typed(&mut list, "~/Co");
-        list.dialog_key(KeyCode::Tab, &mut ignore);
+        list.dialog_key(KeyCode::Tab, &mut ignore, &mut Config::default());
         assert_eq!(input(&list), "~/Code/");
         assert!(list.matches.is_empty());
 
-        list.dialog_key(KeyCode::Char('a'), &mut ignore);
-        list.dialog_key(KeyCode::Char('l'), &mut ignore);
-        list.dialog_key(KeyCode::Tab, &mut ignore);
+        list.dialog_key(KeyCode::Char('a'), &mut ignore, &mut Config::default());
+        list.dialog_key(KeyCode::Char('l'), &mut ignore, &mut Config::default());
+        list.dialog_key(KeyCode::Tab, &mut ignore, &mut Config::default());
         assert_eq!(input(&list), "~/Code/alp");
         assert_eq!(list.matches, ["alpha", "alps"]);
 
-        list.dialog_key(KeyCode::Char('h'), &mut ignore);
+        list.dialog_key(KeyCode::Char('h'), &mut ignore, &mut Config::default());
         assert!(list.matches.is_empty());
     }
 
@@ -456,12 +543,12 @@ mod tests {
 
         let (mut protected, mut ignore) = list_in(&layout, PathListKind::ProtectedPaths);
         typed(&mut protected, "~/no");
-        protected.dialog_key(KeyCode::Tab, &mut ignore);
+        protected.dialog_key(KeyCode::Tab, &mut ignore, &mut Config::default());
         assert_eq!(input(&protected), "~/notes.txt");
 
         let (mut projects, mut ignore) = list_in(&layout, PathListKind::ProjectFolders);
         typed(&mut projects, "~/no");
-        projects.dialog_key(KeyCode::Tab, &mut ignore);
+        projects.dialog_key(KeyCode::Tab, &mut ignore, &mut Config::default());
         assert_eq!(input(&projects), "~/no");
     }
 
@@ -501,7 +588,7 @@ mod tests {
         let (mut projects, mut ignore) = list_in(&layout, PathListKind::ProjectFolders);
         let before = projects.items.clone();
         typed(&mut projects, "~/notes.txt");
-        projects.dialog_key(KeyCode::Enter, &mut ignore);
+        projects.dialog_key(KeyCode::Enter, &mut ignore, &mut Config::default());
         assert!(projects.is_adding());
         assert_eq!(projects.items, before);
         assert_eq!(
@@ -510,7 +597,7 @@ mod tests {
         );
 
         typed(&mut projects, "~/notes.txt/");
-        projects.dialog_key(KeyCode::Enter, &mut ignore);
+        projects.dialog_key(KeyCode::Enter, &mut ignore, &mut Config::default());
         assert!(projects.is_adding());
         assert_eq!(projects.items, before);
         assert_eq!(
@@ -520,7 +607,7 @@ mod tests {
 
         let (mut protected, mut ignore) = list_in(&layout, PathListKind::ProtectedPaths);
         typed(&mut protected, "~/notes.txt");
-        protected.dialog_key(KeyCode::Enter, &mut ignore);
+        protected.dialog_key(KeyCode::Enter, &mut ignore, &mut Config::default());
         assert_eq!(protected.items, [path]);
     }
 
@@ -534,7 +621,7 @@ mod tests {
             list.status(),
             Some("Nothing here yet. You can still add it.")
         );
-        list.dialog_key(KeyCode::Enter, &mut ignore);
+        list.dialog_key(KeyCode::Enter, &mut ignore, &mut Config::default());
 
         let expected = layout.home.join("later").display().to_string();
         assert_eq!(list.items.last(), Some(&expected));
@@ -547,11 +634,120 @@ mod tests {
         let mut list = PathList::new(
             PathListKind::ProtectedPaths,
             &IgnoreStore::default(),
+            &Config::default(),
             &layout,
         );
 
         list.prompt_remove(0);
 
         assert!(!list.has_dialog());
+    }
+
+    fn names_in(layout: &MacLayout) -> (PathList, IgnoreStore, Config) {
+        let ignore = IgnoreStore::default();
+        let config = Config::default();
+        let list = PathList::new(PathListKind::ArtifactNames, &ignore, &config, layout);
+        (list, ignore, config)
+    }
+
+    fn add_name(list: &mut PathList, ignore: &mut IgnoreStore, config: &mut Config, name: &str) {
+        list.start_adding();
+        for c in name.chars() {
+            list.dialog_key(KeyCode::Char(c), ignore, config);
+        }
+        list.dialog_key(KeyCode::Enter, ignore, config);
+    }
+
+    #[test]
+    fn a_custom_name_is_saved_in_the_config_of_the_layout() {
+        let (_temp, layout) = sandbox();
+        let (mut list, mut ignore, mut config) = names_in(&layout);
+
+        add_name(&mut list, &mut ignore, &mut config, "bazel-out");
+
+        assert_eq!(list.items, ["bazel-out"]);
+        assert_eq!(config.extra_artifacts, ["bazel-out"]);
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.extra_artifacts, ["bazel-out"]);
+        assert!(!layout.ignore_path().exists());
+        assert!(!layout.projects_path().exists());
+    }
+
+    #[test]
+    fn the_names_come_from_the_config_and_removing_one_saves() {
+        let (_temp, layout) = sandbox();
+        let config = Config {
+            extra_artifacts: vec!["out".into(), "bazel-out".into()],
+            ..Config::default()
+        };
+        let mut ignore = IgnoreStore::default();
+        let mut list = PathList::new(PathListKind::ArtifactNames, &ignore, &config, &layout);
+        let mut config = config;
+        assert_eq!(list.items, ["out", "bazel-out"]);
+
+        list.prompt_remove(0);
+        list.confirm_remove(&mut ignore, &mut config);
+
+        assert_eq!(list.items, ["bazel-out"]);
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.extra_artifacts, ["bazel-out"]);
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_a_folder_name_is_refused_with_a_message() {
+        let (_temp, layout) = sandbox();
+        let refused = [
+            ("", "Type a folder name."),
+            ("   ", "Type a folder name."),
+            (".", "Type a folder name."),
+            ("..", "Type a folder name."),
+            ("a/b", "Type a name without /."),
+            ("node_modules", "taert already cleans node_modules."),
+            (
+                "cmake-build-debug",
+                "taert already cleans cmake-build-debug.",
+            ),
+            ("out", "This name is already in the list."),
+        ];
+        for (name, message) in refused {
+            let (mut list, mut ignore, mut config) = names_in(&layout);
+            add_name(&mut list, &mut ignore, &mut config, "out");
+            add_name(&mut list, &mut ignore, &mut config, name);
+
+            assert!(list.is_adding(), "{name:?} closed the dialog");
+            assert_eq!(list.error_message.as_deref(), Some(message), "{name:?}");
+            assert_eq!(config.extra_artifacts, ["out"], "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_trimmed_and_the_error_clears_when_the_dialog_closes() {
+        let (_temp, layout) = sandbox();
+        let (mut list, mut ignore, mut config) = names_in(&layout);
+
+        add_name(&mut list, &mut ignore, &mut config, " out ");
+        assert_eq!(config.extra_artifacts, ["out"]);
+
+        add_name(&mut list, &mut ignore, &mut config, "..");
+        assert!(list.error_message.is_some());
+        list.dialog_key(KeyCode::Esc, &mut ignore, &mut config);
+        assert!(list.error_message.is_none());
+    }
+
+    #[test]
+    fn a_name_has_no_path_status_and_tab_does_not_complete_it() {
+        let (_temp, layout) = sandbox();
+        fs::create_dir_all(layout.home.join("Code")).unwrap();
+        let (mut list, mut ignore, mut config) = names_in(&layout);
+
+        list.start_adding();
+        for c in "~/Co".chars() {
+            list.dialog_key(KeyCode::Char(c), &mut ignore, &mut config);
+        }
+        list.dialog_key(KeyCode::Tab, &mut ignore, &mut config);
+
+        assert_eq!(input(&list), "~/Co");
+        assert!(list.matches.is_empty());
+        assert_eq!(list.status(), None);
     }
 }
