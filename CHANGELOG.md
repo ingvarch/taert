@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Appearance in Settings**: Settings › Appearance switches between auto, dark, and light, and applies at once.
 - **Permissions in Settings**: Settings › Permissions shows Full Disk Access and Touch ID for sudo, and opens System Settings at the matching page.
 - **About in Settings**: Settings › About shows the version and where taert keeps its files, and shows them in Finder.
+- **Settings with the comma key**: `,` opens Settings at the section of the current screen, and the menu shows a summary of the settings.
 
 ### Changed
 - **Folders found by a custom name start unselected**: a folder that Project cleanup lists only because its name is in `extra_artifacts` starts unselected, whatever its age, and `taert purge --force` leaves it. You can still select it. Folders found by the built-in names are unchanged.

@@ -300,7 +300,7 @@ fn appearance_value(saved: &str) -> &'static str {
         .unwrap_or("auto")
 }
 
-fn appearance_label(value: &str) -> String {
+pub(super) fn appearance_label(value: &str) -> String {
     let mut chars = value.chars();
     chars
         .next()

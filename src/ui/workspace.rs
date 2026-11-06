@@ -19,17 +19,32 @@ use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::ListRow;
 use super::components::modal::Modal;
+use super::components::text::fit_width;
 use super::env::ColorDepth;
 use super::folder_preview::folder_rows;
 use super::history::recent_runs_card;
+use super::settings::{SettingsState, appearance_label};
 use super::system_status::{SystemStatusState, load_summary, storage_summary};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cache::{FolderSnapshot, StorageCache};
 use crate::core::history::{HistoryLog, RunRecord};
+use crate::core::layout::Layout;
 use crate::core::profiler::SystemProfiler;
 use crate::core::safety::Safety;
+use crate::core::schedule::{
+    LastRun, format_reclaim_threshold, format_run_time, last_run, last_scheduled_run,
+};
+use crate::core::stores::{Config, IgnoreStore};
 use crate::core::sysinfo::SysInfo;
+
+/// The values the Settings row of the menu shows.
+pub struct SettingsSummary {
+    schedule: String,
+    folders: usize,
+    protected: usize,
+    appearance: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -106,6 +121,10 @@ pub struct WorkspaceState {
     /// The newest runs, newest first, for the History row's pane.
     /// The newest runs for the History pane, or why they could not be read. `None` until read.
     pub recent_runs: Option<Result<Vec<RunRecord>, String>>,
+    /// The newest scheduled run of the whole history, which the Settings pane tells about.
+    last_scheduled: Option<RunRecord>,
+    /// What the Settings pane shows. `None` until read.
+    pub settings: Option<SettingsSummary>,
     pane_visible: Cell<bool>,
 }
 
@@ -141,6 +160,8 @@ impl WorkspaceState {
             largest: None,
             home: Safety::home_dir(),
             recent_runs: None,
+            last_scheduled: None,
+            settings: None,
             pane_visible: Cell::new(false),
             items: vec![
                 (
@@ -224,8 +245,8 @@ impl WorkspaceState {
                 (
                     MainMenuChoice::Settings,
                     "Settings",
-                    "Project folders, the schedule, and protected paths",
-                    "Choose the folders Project cleanup scans, when scheduled\ncleanup runs, and which paths taert never touches.",
+                    "Project folders, the schedule, protection, and more",
+                    "Choose the folders Project cleanup scans, when scheduled\ncleanup runs, which paths taert never touches, and how\nit looks. Check permissions and find taert's files.",
                 ),
             ],
             clean_options: vec![
@@ -280,11 +301,57 @@ impl WorkspaceState {
     /// Reads the newest runs for the pane.
     pub fn load_history(&mut self, log: &HistoryLog) {
         let runs = log.load_runs().map_err(|error| error.to_string());
+        self.last_scheduled = runs
+            .as_ref()
+            .ok()
+            .and_then(|runs| last_scheduled_run(runs))
+            .cloned();
         self.recent_runs = Some(runs.map(|mut runs| {
             runs.reverse();
             runs.truncate(RECENT_RUNS);
             runs
         }));
+    }
+
+    /// True until `load_settings` has run for this menu.
+    pub fn settings_pending(&self) -> bool {
+        self.settings.is_none()
+    }
+
+    /// Reads the settings for the pane. Call it after `load_history`.
+    pub fn load_settings(&mut self, config: &Config, ignore: &IgnoreStore, layout: &Layout) {
+        let saved = SettingsState::new(config, ignore, layout);
+        let schedule = config.schedule.as_ref().map(|sched| {
+            let every = format!("Every {}", sched.every);
+            let last = match last_run(sched, self.last_scheduled.as_ref()) {
+                LastRun::Never => "has not run yet".to_string(),
+                LastRun::Ran { at, freed } => {
+                    format!(
+                        "last run {}, freed {}",
+                        format_run_time(&at),
+                        format_bytes(freed)
+                    )
+                }
+                LastRun::Skipped {
+                    at,
+                    found,
+                    threshold,
+                } => format!(
+                    "last run {}, skipped: found {}, below {}",
+                    format_run_time(&at),
+                    format_bytes(found),
+                    format_reclaim_threshold(threshold)
+                ),
+            };
+            format!("{every} · {last}")
+        });
+        let appearance = saved.appearance;
+        self.settings = Some(SettingsSummary {
+            schedule: schedule.unwrap_or_else(|| "Off".to_string()),
+            folders: saved.folders.items.len(),
+            protected: saved.protected.items.len(),
+            appearance: appearance_label(appearance),
+        });
     }
 
     pub fn submenu_row(&self) -> Option<usize> {
@@ -712,11 +779,46 @@ fn detail_data(
             .recent_runs
             .as_ref()
             .map_or_else(Vec::new, |runs| recent_runs_card(runs, width, theme)),
-        MainMenuChoice::DockerCleanup
-        | MainMenuChoice::Doctor
-        | MainMenuChoice::StartupItems
-        | MainMenuChoice::Settings => Vec::new(),
+        MainMenuChoice::Settings => state
+            .settings
+            .as_ref()
+            .map_or_else(Vec::new, |settings| settings_card(settings, width, theme)),
+        MainMenuChoice::DockerCleanup | MainMenuChoice::Doctor | MainMenuChoice::StartupItems => {
+            Vec::new()
+        }
     }
+}
+
+/// A frame with the settings, for the pane beside the main menu.
+fn settings_card(settings: &SettingsSummary, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let rows = [
+        ("Scheduled cleanup", settings.schedule.clone()),
+        ("Project folders", settings.folders.to_string()),
+        ("Protected paths", settings.protected.to_string()),
+        ("Appearance", settings.appearance.clone()),
+    ]
+    .into_iter()
+    .map(|(name, value)| {
+        let value = fit_width(&value, inner.saturating_sub(name.width() + 2));
+        let value = value.trim_end().to_string();
+        let gap = inner.saturating_sub(name.width() + value.width());
+        Line::from(vec![
+            Span::styled(name, theme.callout()),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(value, theme.body()),
+        ])
+    })
+    .collect::<Vec<_>>();
+    card(
+        "Settings",
+        Vec::new(),
+        rows,
+        width,
+        0,
+        theme.p.purple,
+        theme,
+    )
 }
 
 fn render_submenu_content(
@@ -816,4 +918,68 @@ fn render_start_confirmation(
             Span::styled(" back", theme.footnote()),
         ]))
         .render(frame, frame.area(), theme);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::apps::testing::sandbox;
+    use crate::core::schedule::ScheduleFrequency;
+    use crate::core::stores::{ScheduleConfig, ScheduleSkip};
+
+    fn weekly() -> ScheduleConfig {
+        ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".to_string()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        }
+    }
+
+    /// The schedule line of the Settings pane, with no run in the history.
+    fn schedule_summary(config: &Config) -> String {
+        let (_temp, layout) = sandbox();
+        let mut state = WorkspaceState::new();
+        state.load_history(&HistoryLog::new(layout.history_path()));
+        state.load_settings(config, &IgnoreStore::default(), &layout);
+        state.settings.expect("the settings").schedule
+    }
+
+    #[test]
+    fn the_settings_pane_says_off_without_a_schedule() {
+        assert_eq!(schedule_summary(&Config::default()), "Off");
+    }
+
+    #[test]
+    fn the_settings_pane_says_when_the_schedule_has_not_run() {
+        let config = Config {
+            schedule: Some(weekly()),
+            ..Config::default()
+        };
+
+        assert_eq!(schedule_summary(&config), "Every week · has not run yet");
+    }
+
+    #[test]
+    fn the_settings_pane_tells_about_a_skipped_run() {
+        let at = "2026-11-03T08:00:00Z";
+        let config = Config {
+            schedule: Some(ScheduleConfig {
+                last_skip: Some(ScheduleSkip {
+                    at: at.to_string(),
+                    bytes: 300_000_000,
+                }),
+                ..weekly()
+            }),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            schedule_summary(&config),
+            format!(
+                "Every week · last run {}, skipped: found 300.0 MB, below 1 GB",
+                format_run_time(at)
+            )
+        );
+    }
 }

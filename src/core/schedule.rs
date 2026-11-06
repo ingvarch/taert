@@ -16,7 +16,7 @@ use super::bytes::format_bytes;
 use super::catalog::{Catalog, Category};
 use super::cleaner::{Cleaner, RemovalMode};
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
-use super::history::{HistoryLog, ItemOutcome, OutcomeKind};
+use super::history::{HistoryLog, ItemOutcome, OutcomeKind, RunRecord};
 use super::host::Host;
 use super::layout::Layout;
 use super::scanner::{CategoryScanner, ScanContext, ScanItem};
@@ -26,6 +26,11 @@ use super::stores::{Config, IgnoreStore, ScheduleConfig, ScheduleSkip};
 const DEFAULT_PROGRAM: &str = "/opt/homebrew/bin/taert";
 pub const SCHEDULE_LABEL: &str = "io.github.ingvarch.taert.schedule";
 pub const SCHEDULE_PLIST_NAME: &str = "io.github.ingvarch.taert.schedule.plist";
+/// The newest run the schedule started.
+pub fn last_scheduled_run(runs: &[RunRecord]) -> Option<&RunRecord> {
+    runs.iter().rev().find(|run| run.mode == "schedule")
+}
+
 pub const VALID_CATEGORIES: &[&str] = &[
     Category::Dev.id(),
     Category::Junk.id(),
@@ -412,6 +417,41 @@ pub struct ScheduleStatus {
     pub needs_full_disk_access: Option<PathBuf>,
 }
 
+/// The result of the last scheduled run: the newest scheduled `record` of the history, or a
+/// skip recorded after it.
+pub fn last_run(sched: &ScheduleConfig, record: Option<&RunRecord>) -> LastRun {
+    let newer_skip = sched.last_skip.as_ref().filter(|skip| {
+        let Some(run) = record else {
+            return true;
+        };
+        match (parse_rfc3339(&run.at), parse_rfc3339(&skip.at)) {
+            (Some(run_at), Some(skip_at)) => skip_at > run_at,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    });
+    if let Some(skip) = newer_skip {
+        LastRun::Skipped {
+            at: skip.at.clone(),
+            found: skip.bytes,
+            threshold: sched.min_reclaim,
+        }
+    } else if let Some(run) = record {
+        let freed = run
+            .items
+            .iter()
+            .filter(|i| i.outcome == OutcomeKind::Removed || i.outcome == OutcomeKind::Trashed)
+            .map(|i| i.bytes)
+            .sum();
+        LastRun::Ran {
+            at: run.at.clone(),
+            freed,
+        }
+    } else {
+        LastRun::Never
+    }
+}
+
 /// Gathers the facts about the schedule. Asks launchd once, and only when the plist exists.
 pub fn schedule_status(
     host: &dyn Host,
@@ -432,42 +472,9 @@ pub fn schedule_status(
         };
     };
 
-    let last_run_record = history
-        .load_runs()
-        .unwrap_or_default()
-        .into_iter()
-        .rev()
-        .find(|r| r.mode == "schedule");
-    let newer_skip = sched.last_skip.as_ref().filter(|skip| {
-        let Some(run) = &last_run_record else {
-            return true;
-        };
-        match (parse_rfc3339(&run.at), parse_rfc3339(&skip.at)) {
-            (Some(run_at), Some(skip_at)) => skip_at > run_at,
-            (None, Some(_)) => true,
-            _ => false,
-        }
-    });
-    let last_run = if let Some(skip) = newer_skip {
-        LastRun::Skipped {
-            at: skip.at.clone(),
-            found: skip.bytes,
-            threshold: sched.min_reclaim,
-        }
-    } else if let Some(run) = &last_run_record {
-        let freed = run
-            .items
-            .iter()
-            .filter(|i| i.outcome == OutcomeKind::Removed || i.outcome == OutcomeKind::Trashed)
-            .map(|i| i.bytes)
-            .sum();
-        LastRun::Ran {
-            at: run.at.clone(),
-            freed,
-        }
-    } else {
-        LastRun::Never
-    };
+    let runs = history.load_runs().unwrap_or_default();
+    let last_run_record = last_scheduled_run(&runs);
+    let last_run = last_run(sched, last_run_record);
 
     let program = plist_exists
         .then(|| plist::Value::from_file(&plist_path).ok())
@@ -482,7 +489,7 @@ pub fn schedule_status(
     let missing_program = program.clone().filter(|bin| !bin.exists());
     let agent_loaded = plist_exists.then(|| is_agent_loaded(host, host.uid()));
 
-    let permission_failed = last_run_record.as_ref().is_some_and(|r| {
+    let permission_failed = last_run_record.is_some_and(|r| {
         r.items
             .iter()
             .any(|i| i.outcome == OutcomeKind::Failed && is_permission_error(i.error.as_deref()))
