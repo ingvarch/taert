@@ -257,6 +257,106 @@ pub fn touch_id_hint(host: &dyn Host, layout: &Layout) -> Option<&'static str> {
     (touch_id_status(host, layout) == TouchId::Off).then(|| touch_id_tip(layout))
 }
 
+const SUDO_LOCAL_TEMPLATE: &str = concat!(
+    "# sudo_local: local config file which survives system update and is included for sudo\n",
+    "# uncomment following line to enable Touch ID for sudo\n",
+    "#auth       sufficient     pam_tid.so\n"
+);
+const SUDO_LOCAL_ON: &str = concat!(
+    "# sudo_local: local config file which survives system update and is included for sudo\n",
+    "# uncomment following line to enable Touch ID for sudo\n",
+    "auth       sufficient     pam_tid.so\n"
+);
+const NO_SUDO_LOCAL: &str =
+    "This macOS has no /etc/pam.d/sudo_local. Turn on Touch ID for sudo by hand.";
+const OWN_CHANGES: &str = "/etc/pam.d/sudo_local has your own changes, so taert leaves it alone.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchIdChange {
+    TurnOn,
+    TurnOff,
+}
+
+impl TouchIdChange {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::TurnOn => "turn on Touch ID for sudo",
+            Self::TurnOff => "turn off Touch ID for sudo",
+        }
+    }
+}
+
+/// What Enter on the Touch ID row does: a change to offer, nothing, or a refusal that says why.
+pub fn touch_id_change(
+    layout: &Layout,
+    status: TouchId,
+) -> Result<Option<TouchIdChange>, &'static str> {
+    if status == TouchId::NoFingerprints {
+        return Ok(None);
+    }
+    let sudo = std::fs::read_to_string(layout.system("etc/pam.d/sudo")).unwrap_or_default();
+    let local_path = layout.system("etc/pam.d/sudo_local");
+    let local = match local_path.symlink_metadata() {
+        Err(_) => None,
+        Ok(meta) if meta.is_file() => {
+            Some(std::fs::read_to_string(&local_path).unwrap_or_default())
+        }
+        Ok(_) => return Err(OWN_CHANGES),
+    };
+    match status {
+        TouchId::NoFingerprints => Ok(None),
+        TouchId::On => match local.as_deref() {
+            None | Some(SUDO_LOCAL_TEMPLATE) => Ok(None),
+            Some(SUDO_LOCAL_ON) if enables_touch_id(&sudo) => Ok(None),
+            Some(SUDO_LOCAL_ON) => Ok(Some(TouchIdChange::TurnOff)),
+            Some(_) => Err(OWN_CHANGES),
+        },
+        TouchId::Off => {
+            if !includes_sudo_local(&sudo) {
+                Err(NO_SUDO_LOCAL)
+            } else if matches!(local.as_deref(), None | Some(SUDO_LOCAL_TEMPLATE)) {
+                Ok(Some(TouchIdChange::TurnOn))
+            } else {
+                Err(OWN_CHANGES)
+            }
+        }
+    }
+}
+
+fn includes_sudo_local(sudo: &str) -> bool {
+    sudo.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("auth")
+            && words.next() == Some("include")
+            && words.next() == Some("sudo_local")
+    })
+}
+
+/// Writes `sudo_local` as root: the "on" text or the template. Leaves a file with other text alone.
+pub fn set_touch_id(host: &dyn Host, layout: &Layout, change: TouchIdChange) -> Result<(), String> {
+    let path = layout.system("etc/pam.d/sudo_local");
+    let target = quoted(&path)?;
+    let temp = quoted(&path.with_file_name("sudo_local.taert-tmp"))?;
+    let text = match change {
+        TouchIdChange::TurnOn => SUDO_LOCAL_ON,
+        TouchIdChange::TurnOff => SUDO_LOCAL_TEMPLATE,
+    };
+    let (template, on) = (shell_quote(SUDO_LOCAL_TEMPLATE), shell_quote(SUDO_LOCAL_ON));
+    // The paths in the script are the layout's, so the message names none.
+    let own_changes = shell_quote("sudo_local has your own changes, so taert leaves it alone.");
+    let text = shell_quote(text);
+    let script = format!(
+        "{HELPER_PATH}\n\
+         export PATH\n\
+         if [ -L {target} ] || {{ [ -e {target} ] && ! printf '%s' {template} | cmp -s - {target} && ! printf '%s' {on} | cmp -s - {target}; }}; then\n\
+         echo {own_changes} >&2\n\
+         exit 1\n\
+         fi\n\
+         {{ printf '%s' {text} > {temp} && chown root:wheel {temp} && chmod 0444 {temp} && mv -f {temp} {target}; }} || {{ rm -f {temp}; exit 1; }}\n"
+    );
+    host.run_admin(&script, &format!("taert wants to {}", change.reason()))
+}
+
 fn enables_touch_id(pam: &str) -> bool {
     pam.lines().any(|line| {
         line.find("pam_tid.so")
@@ -810,6 +910,229 @@ mod tests {
         host.reply(BIOUTIL, "User 501:\t0 biometric template(s)\n");
 
         assert_eq!(touch_id_status(&host, &layout), TouchId::NoFingerprints);
+    }
+
+    const INCLUDE_SUDO: &str =
+        "auth       include      sudo_local\nauth       required     pam_opendirectory.so\n";
+    const TEMPLATE: &str = "# sudo_local: local config file which survives system update and is included for sudo\n# uncomment following line to enable Touch ID for sudo\n#auth       sufficient     pam_tid.so\n";
+    const ON_TEXT: &str = "# sudo_local: local config file which survives system update and is included for sudo\n# uncomment following line to enable Touch ID for sudo\nauth       sufficient     pam_tid.so\n";
+    const OWN_CHANGES_TEXT: &str =
+        "/etc/pam.d/sudo_local has your own changes, so taert leaves it alone.";
+
+    #[test]
+    fn touch_id_turns_on_without_sudo_local_or_with_the_template() {
+        for local in [None, Some(TEMPLATE)] {
+            let mut files = vec![("sudo", INCLUDE_SUDO)];
+            files.extend(local.map(|text| ("sudo_local", text)));
+            let (_dir, layout) = pam_sandbox(&files);
+
+            assert_eq!(
+                touch_id_change(&layout, TouchId::Off),
+                Ok(Some(TouchIdChange::TurnOn))
+            );
+        }
+    }
+
+    #[test]
+    fn touch_id_turns_off_only_from_the_on_text() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("sudo_local", ON_TEXT)]);
+
+        assert_eq!(
+            touch_id_change(&layout, TouchId::On),
+            Ok(Some(TouchIdChange::TurnOff))
+        );
+    }
+
+    #[test]
+    fn touch_id_refuses_a_sudo_local_with_other_text() {
+        let own = "auth sufficient pam_tid.so\nauth required pam_foo.so\n";
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("sudo_local", own)]);
+
+        for status in [TouchId::Off, TouchId::On] {
+            assert_eq!(touch_id_change(&layout, status), Err(OWN_CHANGES_TEXT));
+        }
+    }
+
+    #[test]
+    fn touch_id_refuses_a_symlinked_sudo_local() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("elsewhere", TEMPLATE)]);
+        let dir = layout.system("etc/pam.d");
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("sudo_local")).unwrap();
+
+        assert_eq!(
+            touch_id_change(&layout, TouchId::Off),
+            Err(OWN_CHANGES_TEXT)
+        );
+    }
+
+    #[test]
+    fn touch_id_without_fingerprints_ignores_a_linked_sudo_local() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("elsewhere", TEMPLATE)]);
+        let dir = layout.system("etc/pam.d");
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("sudo_local")).unwrap();
+
+        assert_eq!(touch_id_change(&layout, TouchId::NoFingerprints), Ok(None));
+    }
+
+    #[test]
+    fn touch_id_has_nothing_to_turn_off_when_sudo_itself_enables_it() {
+        let sudo = "auth sufficient pam_tid.so\nauth include sudo_local\n";
+        for local in [TEMPLATE, ON_TEXT] {
+            let (_dir, layout) = pam_sandbox(&[("sudo", sudo), ("sudo_local", local)]);
+
+            assert_eq!(touch_id_change(&layout, TouchId::On), Ok(None));
+        }
+    }
+
+    #[test]
+    fn touch_id_refuses_when_sudo_does_not_include_sudo_local() {
+        for sudo in [
+            "auth required pam_opendirectory.so\n",
+            "#auth include sudo_local\n",
+        ] {
+            let (_dir, layout) = pam_sandbox(&[("sudo", sudo)]);
+
+            assert_eq!(
+                touch_id_change(&layout, TouchId::Off),
+                Err("This macOS has no /etc/pam.d/sudo_local. Turn on Touch ID for sudo by hand.")
+            );
+        }
+        let (_dir, layout) = pam_sandbox(&[]);
+        assert!(touch_id_change(&layout, TouchId::Off).is_err());
+    }
+
+    #[test]
+    fn touch_id_has_nothing_to_change_without_fingerprints_or_a_file_to_turn_off() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO)]);
+
+        assert_eq!(touch_id_change(&layout, TouchId::NoFingerprints), Ok(None));
+        assert_eq!(touch_id_change(&layout, TouchId::On), Ok(None));
+    }
+
+    #[test]
+    fn the_turn_on_script_guards_then_writes_and_renames_the_file() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO)]);
+        let host = FakeHost::default();
+
+        set_touch_id(&host, &layout, TouchIdChange::TurnOn).unwrap();
+
+        let scripts = host.admin_scripts.lock().unwrap();
+        let [script] = scripts.as_slice() else {
+            panic!("expected one admin script, got {scripts:?}");
+        };
+        let local = layout.system("etc/pam.d/sudo_local");
+        let local = local.to_str().unwrap();
+        assert!(
+            script.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"),
+            "{script}"
+        );
+        assert!(script.contains("cmp -s"), "{script}");
+        assert!(script.contains("0444"), "{script}");
+        assert!(script.contains("root:wheel"), "{script}");
+        assert!(
+            script.contains(&format!("mv -f '{local}.taert-tmp' '{local}'")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("printf '%s' '{ON_TEXT}' > '{local}.taert-tmp'")),
+            "{script}"
+        );
+        assert!(
+            !script.replace(local, "").contains("etc/pam.d/sudo"),
+            "{script}"
+        );
+        let root_etc = format!("{}/etc/", layout.root.display());
+        assert!(!script.replace(&root_etc, "").contains("/etc/"), "{script}");
+        assert_eq!(
+            host.admin_prompts.lock().unwrap().as_slice(),
+            ["taert wants to turn on Touch ID for sudo"]
+        );
+    }
+
+    #[test]
+    fn the_turn_off_script_writes_the_template_text() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("sudo_local", ON_TEXT)]);
+        let host = FakeHost::default();
+
+        set_touch_id(&host, &layout, TouchIdChange::TurnOff).unwrap();
+
+        let scripts = host.admin_scripts.lock().unwrap();
+        assert!(
+            scripts[0].contains(&format!("printf '%s' '{TEMPLATE}' >")),
+            "{}",
+            scripts[0]
+        );
+        assert!(!scripts[0].contains(&format!("printf '%s' '{ON_TEXT}' >")));
+    }
+
+    #[test]
+    fn the_script_error_comes_back() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO)]);
+        let host = FakeHost::default();
+        *host.admin_result.lock().unwrap() = Some("exit 1".to_string());
+
+        assert_eq!(
+            set_touch_id(&host, &layout, TouchIdChange::TurnOn),
+            Err("exit 1".to_string())
+        );
+    }
+
+    const GUARD_ERROR: &str = "sudo_local has your own changes, so taert leaves it alone.\n";
+
+    fn run_touch_id_script(layout: &Layout, change: TouchIdChange) -> std::process::Output {
+        let host = FakeHost::default();
+        set_touch_id(&host, layout, change).unwrap();
+        let script = host.admin_scripts.lock().unwrap().remove(0);
+        std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_script_stops_at_other_text_and_leaves_it_alone() {
+        let own = "auth sufficient pam_tid.so\nauth required pam_foo.so\n";
+        for change in [TouchIdChange::TurnOn, TouchIdChange::TurnOff] {
+            let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("sudo_local", own)]);
+
+            let output = run_touch_id_script(&layout, change);
+
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(String::from_utf8_lossy(&output.stderr), GUARD_ERROR);
+            let local = layout.system("etc/pam.d/sudo_local");
+            assert_eq!(std::fs::read_to_string(local).unwrap(), own);
+        }
+    }
+
+    #[test]
+    fn the_script_stops_at_a_link_and_leaves_it_alone() {
+        for change in [TouchIdChange::TurnOn, TouchIdChange::TurnOff] {
+            let (_dir, layout) = pam_sandbox(&[("sudo", INCLUDE_SUDO), ("elsewhere", TEMPLATE)]);
+            let dir = layout.system("etc/pam.d");
+            std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("sudo_local")).unwrap();
+
+            let output = run_touch_id_script(&layout, change);
+
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(String::from_utf8_lossy(&output.stderr), GUARD_ERROR);
+            let local = dir.join("sudo_local");
+            assert!(local.symlink_metadata().unwrap().is_symlink());
+            assert_eq!(std::fs::read_to_string(local).unwrap(), TEMPLATE);
+        }
+    }
+
+    #[test]
+    fn the_script_goes_past_its_check_with_no_file_the_template_or_the_on_text() {
+        for local in [None, Some(TEMPLATE), Some(ON_TEXT)] {
+            let mut files = vec![("sudo", INCLUDE_SUDO)];
+            files.extend(local.map(|text| ("sudo_local", text)));
+            let (_dir, layout) = pam_sandbox(&files);
+
+            let output = run_touch_id_script(&layout, TouchIdChange::TurnOn);
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stderr.contains(GUARD_ERROR), "{local:?}: {stderr}");
+        }
     }
 
     #[test]

@@ -40,6 +40,7 @@ fn dark_theme() -> Theme {
         depth: ColorDepth::TrueColor,
         ascii_glyphs: false,
         reduce_motion: false,
+        multiplexer: false,
     })
 }
 

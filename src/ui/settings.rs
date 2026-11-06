@@ -21,9 +21,10 @@ use super::components::text::{plural, wrap_line};
 use super::components::toast::Toast;
 use super::env::{Appearance, ColorDepth};
 use super::path_list::{PathList, PathListKind};
+use super::terminal::AdminGate;
 use super::theme::Theme;
 use super::workspace::CleanSubcategory;
-use crate::core::admin::{TouchId, touch_id_status, touch_id_tip};
+use crate::core::admin::{TouchId, TouchIdChange, set_touch_id, touch_id_change, touch_id_status};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
 use crate::core::history::HistoryLog;
@@ -249,8 +250,21 @@ pub struct SettingsState {
     pub save_notice: Option<&'static str>,
     pub error_notice: Option<String>,
     picker: Option<(SettingsRow, PickerState)>,
-    /// The tip on Touch ID for sudo that a dialog shows.
-    touch_id_tip: Option<&'static str>,
+    /// What Enter on the Touch ID row does, found when the checks ran.
+    touch_id_next: Result<Option<TouchIdChange>, &'static str>,
+    touch_id_dialog: Option<TouchIdDialog>,
+    /// Under tmux or screen, a footnote warns that Touch ID needs `pam_reattach`.
+    pub in_multiplexer: bool,
+}
+
+/// A dialog on the Touch ID row.
+#[derive(Clone, Copy)]
+enum TouchIdDialog {
+    Confirm {
+        change: TouchIdChange,
+        cancel_focused: bool,
+    },
+    Refusal(&'static str),
 }
 
 /// A file taert keeps, shown in About.
@@ -351,7 +365,9 @@ impl SettingsState {
             save_notice: None,
             error_notice: None,
             picker: None,
-            touch_id_tip: None,
+            touch_id_next: Ok(None),
+            touch_id_dialog: None,
+            in_multiplexer: false,
         }
     }
 
@@ -455,7 +471,7 @@ impl SettingsState {
 
     /// A dialog is open, so keys go to it.
     pub fn has_dialog(&self) -> bool {
-        self.touch_id_tip.is_some() || self.dialog_list().is_some()
+        self.touch_id_dialog.is_some() || self.dialog_list().is_some()
     }
 
     /// Text goes into the path of the add dialog.
@@ -485,16 +501,36 @@ impl SettingsState {
 
     /// Passes a key to the open dialog. The highlight follows an added item and stays in the
     /// list after a removal.
-    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore, config: &mut Config) {
-        if self.touch_id_tip.is_some() {
-            if matches!(code, KeyCode::Enter | KeyCode::Esc) {
-                self.touch_id_tip = None;
+    /// Returns the Touch ID change the person confirmed.
+    pub fn dialog_key(
+        &mut self,
+        code: KeyCode,
+        ignore: &mut IgnoreStore,
+        config: &mut Config,
+    ) -> Option<TouchIdChange> {
+        if let Some(dialog) = &mut self.touch_id_dialog {
+            if let (
+                TouchIdDialog::Confirm { cancel_focused, .. },
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right,
+            ) = (&mut *dialog, code)
+            {
+                *cancel_focused = !*cancel_focused;
+            } else if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                let dialog = self.touch_id_dialog.take();
+                if let (
+                    Some(TouchIdDialog::Confirm {
+                        change,
+                        cancel_focused: false,
+                    }),
+                    KeyCode::Enter,
+                ) = (dialog, code)
+                {
+                    return Some(change);
+                }
             }
-            return;
+            return None;
         }
-        let Some(kind) = self.dialog_list().map(|list| list.kind) else {
-            return;
-        };
+        let kind = self.dialog_list().map(|list| list.kind)?;
         let first = self.list_start(kind);
         let before = self.list_of(kind).items.len();
         let list = self.list_of_mut(kind);
@@ -505,6 +541,7 @@ impl SettingsState {
         } else if after < before {
             self.row = self.row.min(first + after.saturating_sub(1));
         }
+        None
     }
 
     fn move_section(&mut self, step: usize) {
@@ -672,17 +709,56 @@ impl SettingsState {
     /// Runs the checks of the Permissions section again.
     pub fn refresh_permissions(&mut self, host: &dyn Host, layout: &Layout) {
         self.full_disk_access = full_disk_access(layout);
-        self.touch_id = Some(touch_id_status(host, layout));
+        let status = touch_id_status(host, layout);
+        self.touch_id = Some(status);
+        self.touch_id_next = touch_id_change(layout, status);
     }
 
-    /// Opens the Full Disk Access page, or shows the tip when Touch ID for sudo is off.
-    pub fn open_permission(&mut self, host: &dyn Host, layout: &Layout) {
+    /// Changes Touch ID for sudo as root, then checks again. A failure shows in the toast.
+    pub fn apply_touch_id(
+        &mut self,
+        change: TouchIdChange,
+        admin: &mut AdminGate,
+        host: &dyn Host,
+        layout: &Layout,
+    ) {
+        let result = admin
+            .ask(host, change.reason())
+            .and_then(|()| set_touch_id(host, layout, change));
+        self.refresh_permissions(host, layout);
+        match result {
+            Ok(()) => {
+                admin.forget_hint();
+                self.error_notice = None;
+                self.save_notice = Some(match change {
+                    TouchIdChange::TurnOn => {
+                        "Touch ID for sudo is on. It works from the next sudo prompt."
+                    }
+                    TouchIdChange::TurnOff => "Touch ID for sudo is off.",
+                });
+            }
+            Err(message) => {
+                self.save_notice = None;
+                self.error_notice = Some(message);
+            }
+        }
+    }
+
+    /// Opens the Full Disk Access page, or asks about Touch ID for sudo.
+    pub fn open_permission(&mut self, host: &dyn Host) {
         match self.current_row() {
             SettingsRow::FullDiskAccess | SettingsRow::ScheduledFullDiskAccess => {
                 open_full_disk_access(host);
             }
-            SettingsRow::TouchId if self.touch_id == Some(TouchId::Off) => {
-                self.touch_id_tip = Some(touch_id_tip(layout));
+            SettingsRow::TouchId => {
+                self.touch_id_dialog = match self.touch_id_next {
+                    Ok(Some(change)) => Some(TouchIdDialog::Confirm {
+                        change,
+                        cancel_focused: false,
+                    }),
+                    Ok(None) => None,
+                    Err(why) => Some(TouchIdDialog::Refusal(why)),
+                };
             }
             _ => {}
         }
@@ -900,9 +976,12 @@ pub fn settings_primary<'a>(state: &SettingsState, enter: &'a str) -> Option<Pri
         SettingsRow::FullDiskAccess | SettingsRow::ScheduledFullDiskAccess => {
             Some(PrimaryAction::new("Open", enter))
         }
-        SettingsRow::TouchId if state.touch_id == Some(TouchId::Off) => {
-            Some(PrimaryAction::new("Show tip", enter))
-        }
+        SettingsRow::TouchId => match state.touch_id_next {
+            Ok(Some(TouchIdChange::TurnOn)) => Some(PrimaryAction::new("Turn on", enter)),
+            Ok(Some(TouchIdChange::TurnOff)) => Some(PrimaryAction::new("Turn off", enter)),
+            Ok(None) => None,
+            Err(_) => Some(PrimaryAction::new("Show why", enter)),
+        },
         _ => None,
     }
 }
@@ -980,19 +1059,65 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
     if let Some(list) = state.dialog_list() {
         list.render_dialog(frame, theme);
     }
-    if let Some(tip) = state.touch_id_tip {
-        Modal::new("Touch ID for sudo")
-            .message(vec![Line::from(Span::styled(tip, theme.body()))])
-            .buttons(vec![Button::primary("Done").focused(true)])
-            .hints(Line::from(vec![
-                Span::styled(
-                    format!("{}/{}", theme.g.key_enter, theme.g.key_esc),
-                    theme.callout(),
-                ),
-                Span::styled(" Close", theme.footnote()),
-            ]))
-            .render(frame, frame.area(), theme);
+    if let Some(dialog) = state.touch_id_dialog {
+        render_touch_id_dialog(frame, dialog, theme);
     }
+}
+
+fn render_touch_id_dialog(frame: &mut Frame, dialog: TouchIdDialog, theme: &Theme) {
+    let (title, text, buttons, action) = match dialog {
+        TouchIdDialog::Confirm {
+            change,
+            cancel_focused,
+        } => {
+            let (title, text, label) = match change {
+                TouchIdChange::TurnOn => (
+                    "Turn on Touch ID for sudo?",
+                    "taert writes /etc/pam.d/sudo_local from Apple's template, with the Touch ID line turned on. It asks for your administrator password first.",
+                    "Turn On",
+                ),
+                TouchIdChange::TurnOff => (
+                    "Turn off Touch ID for sudo?",
+                    "taert writes /etc/pam.d/sudo_local back to Apple's template, with the Touch ID line turned off. It asks for your administrator password first.",
+                    "Turn Off",
+                ),
+            };
+            let buttons = vec![
+                Button::new("Cancel").focused(cancel_focused),
+                Button::primary(label).focused(!cancel_focused),
+            ];
+            (
+                title,
+                text,
+                buttons,
+                if cancel_focused { "Cancel" } else { label },
+            )
+        }
+        TouchIdDialog::Refusal(why) => (
+            "Touch ID for sudo",
+            why,
+            vec![Button::primary("Done").focused(true)],
+            "Close",
+        ),
+    };
+    let keys = match dialog {
+        TouchIdDialog::Confirm { .. } => theme.g.key_enter.to_string(),
+        TouchIdDialog::Refusal(_) => format!("{}/{}", theme.g.key_enter, theme.g.key_esc),
+    };
+    let mut hints = vec![
+        Span::styled(keys, theme.callout()),
+        Span::styled(format!(" {action}"), theme.footnote()),
+    ];
+    if matches!(dialog, TouchIdDialog::Confirm { .. }) {
+        hints.push(Span::styled("   ", theme.footnote()));
+        hints.push(Span::styled(theme.g.key_esc, theme.callout()));
+        hints.push(Span::styled(" Cancel", theme.footnote()));
+    }
+    Modal::new(title)
+        .message(vec![Line::from(Span::styled(text, theme.body()))])
+        .buttons(buttons)
+        .hints(Line::from(hints))
+        .render(frame, frame.area(), theme);
 }
 
 fn render_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
@@ -1318,13 +1443,17 @@ fn permissions_lines(
             focus = lines.len();
         }
         lines.push(row_line(state, row, selected, width, theme));
-        if row == SettingsRow::FullDiskAccess {
-            lines.extend(wrapped_lines(
+        let note = match row {
+            SettingsRow::FullDiskAccess => Some(
                 "macOS gives it to the terminal app. Quit and reopen the terminal after you change it.",
-                theme.footnote(),
-                width,
-                theme,
-            ));
+            ),
+            SettingsRow::TouchId if state.in_multiplexer => Some(
+                "Inside tmux or screen, Touch ID prompts need pam_reattach, which taert does not install.",
+            ),
+            _ => None,
+        };
+        if let Some(note) = note {
+            lines.extend(wrapped_lines(note, theme.footnote(), width, theme));
         }
     }
     (lines, focus)
@@ -1532,6 +1661,27 @@ mod tests {
         let mut expected = vec![SettingsRow::Program];
         expected.extend((0..6).map(SettingsRow::File));
         assert_eq!(state.rows(), expected);
+    }
+
+    fn permissions_text(state: &SettingsState) -> String {
+        let (lines, _) = permissions_lines(state, 120, &Theme::default());
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_footnote_on_pam_reattach_shows_only_inside_tmux_or_screen() {
+        let (_temp, layout) = sandbox();
+        let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
+        state.section = SettingsSection::Permissions;
+        let note = "Inside tmux or screen, Touch ID prompts need pam_reattach, which taert does not install.";
+
+        assert!(!permissions_text(&state).contains(note));
+        state.in_multiplexer = true;
+        assert!(permissions_text(&state).contains(note));
     }
 
     #[test]
