@@ -1368,7 +1368,10 @@ impl App {
                             | SettingsRow::MinReclaim => state.open_picker(),
                             SettingsRow::Add => state.start_adding(),
                             SettingsRow::Category(_) => {
-                                state.toggle_category(&mut self.config, &self.layout);
+                                state.toggle_category(&mut self.config, &*self.host, &self.layout);
+                            }
+                            SettingsRow::Reload => {
+                                state.reload_schedule(&mut self.config, &*self.host, &self.layout);
                             }
                             SettingsRow::Item(_) => {}
                         }
@@ -1929,11 +1932,9 @@ impl App {
                 )));
             }
             MainMenuChoice::Settings => {
-                self.open(Screen::Settings(Box::new(SettingsState::new(
-                    &self.config,
-                    &self.ignore,
-                    &self.layout,
-                ))));
+                let mut state = SettingsState::new(&self.config, &self.ignore, &self.layout);
+                state.refresh_status(&self.config, &*self.host, &self.layout);
+                self.open(Screen::Settings(Box::new(state)));
             }
         }
     }
@@ -3530,6 +3531,17 @@ mod tests {
         categories: &[&str],
         min_reclaim: u64,
     ) -> (tempfile::TempDir, Layout, App) {
+        schedule_app_prepared(host, schedule, categories, min_reclaim, |_, _| {})
+    }
+
+    /// Like `schedule_app_with`, and `prepare` sets up the sandbox before Settings opens.
+    fn schedule_app_prepared(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+        schedule: Option<ScheduleFrequency>,
+        categories: &[&str],
+        min_reclaim: u64,
+        prepare: impl FnOnce(&Layout, &mut Option<ScheduleConfig>),
+    ) -> (tempfile::TempDir, Layout, App) {
         let (temp, layout) = crate::core::apps::testing::sandbox();
         let mut app = new_app();
         app.layout = layout.clone();
@@ -3540,6 +3552,7 @@ mod tests {
             min_reclaim,
             last_skip: None,
         });
+        prepare(&layout, &mut app.config.schedule);
         press(
             &mut app,
             &[KeyCode::End, KeyCode::Enter, KeyCode::Down, KeyCode::Right],
@@ -3632,6 +3645,328 @@ mod tests {
         assert!(text.contains("Choose at least one category"), "{text}");
         assert!(!layout.config_path().exists());
         assert_eq!(app.config.schedule.clone().unwrap().categories, ["junk"]);
+    }
+
+    fn write_plist(layout: &Layout) {
+        let plist = crate::core::schedule::agent_plist_path(layout);
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, "plist").unwrap();
+    }
+
+    fn launchctl_prints(host: &crate::core::host::fake::FakeHost) -> usize {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("/bin/launchctl print"))
+            .count()
+    }
+
+    #[test]
+    fn opening_settings_reads_the_agent_once_and_moving_does_not() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout) = crate::core::apps::testing::sandbox();
+        write_plist(&layout);
+        let mut app = new_app();
+        app.layout = layout;
+        app.host = host.clone();
+        app.config.schedule = Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        });
+
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Enter, KeyCode::Down, KeyCode::Right],
+        );
+        assert_eq!(launchctl_prints(&host), 1);
+
+        press(
+            &mut app,
+            &[KeyCode::Down, KeyCode::Down, KeyCode::Up, KeyCode::Down],
+        );
+        let _ = screen_text(&app);
+        assert_eq!(launchctl_prints(&host), 1);
+    }
+
+    #[test]
+    fn enter_on_load_the_schedule_again_bootstraps_with_the_saved_values() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, layout, mut app) = schedule_app_with(
+            &host,
+            Some(ScheduleFrequency::Month),
+            &["ai", "trash"],
+            5_000_000_000,
+        );
+        host.reply("/bin/launchctl", "");
+        assert!(!crate::core::schedule::agent_plist_path(&layout).exists());
+        assert!(screen_text(&app).contains("The launch agent file is missing."));
+        press(&mut app, &[KeyCode::Down; 6]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Reload);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(bootstraps(&host), 1);
+        assert!(crate::core::schedule::agent_plist_path(&layout).exists());
+        let saved = saved_schedule(&layout);
+        assert_eq!(saved.every, ScheduleFrequency::Month);
+        assert_eq!(saved.categories, ["ai", "trash"]);
+        assert_eq!(saved.min_reclaim, 5_000_000_000);
+        let plist =
+            std::fs::read_to_string(crate::core::schedule::agent_plist_path(&layout)).unwrap();
+        assert!(plist.contains("<key>Day</key>"), "{plist}");
+        assert!(!plist.contains("<key>Weekday</key>"), "{plist}");
+        let text = screen_text(&app);
+        assert!(!text.contains("Load the schedule again"), "{text}");
+        assert!(
+            !text.contains("The launch agent file is missing."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_shows_the_error_and_keeps_the_row() {
+        let (host, _temp, _layout, mut app) = weekly_dev_junk_app();
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+        press(&mut app, &[KeyCode::Down; 6]);
+
+        app.handle_key(KeyCode::Enter);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Bootstrap failed: 5"), "{text}");
+        assert!(text.contains("Load the schedule again"), "{text}");
+    }
+
+    #[test]
+    fn a_loaded_agent_has_no_problem_lines_and_no_load_row() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout) = crate::core::apps::testing::sandbox();
+        let bin = layout.user("taert");
+        std::fs::write(&bin, b"bin").unwrap();
+        std::fs::create_dir_all(layout.user("Library/LaunchAgents")).unwrap();
+        std::fs::write(
+            crate::core::schedule::agent_plist_path(&layout),
+            crate::core::schedule::generate_plist(&bin, ScheduleFrequency::Week).unwrap(),
+        )
+        .unwrap();
+        let mut app = new_app();
+        app.layout = layout;
+        app.host = host;
+        app.config.schedule = Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        });
+
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Enter, KeyCode::Down, KeyCode::Right],
+        );
+
+        let text = screen_text(&app);
+        assert!(text.contains("Has not run yet"), "{text}");
+        assert!(!text.contains("Load the schedule again"), "{text}");
+        assert!(!text.contains("launch agent"), "{text}");
+    }
+
+    fn history_lines(layout: &Layout, lines: &[&str]) {
+        std::fs::create_dir_all(layout.history_path().parent().unwrap()).unwrap();
+        std::fs::write(layout.history_path(), lines.join("\n") + "\n").unwrap();
+    }
+
+    fn write_plist_for(layout: &Layout, program: &std::path::Path) {
+        let plist = crate::core::schedule::agent_plist_path(layout);
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(
+            plist,
+            crate::core::schedule::generate_plist(program, ScheduleFrequency::Week).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn wide_screen(app: &App) -> String {
+        screen_rows(app, 220, 40).join("\n")
+    }
+
+    #[test]
+    fn a_new_minimum_is_read_into_the_last_run_card() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, mut app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            |layout, schedule| {
+                write_plist(layout);
+                schedule.as_mut().unwrap().last_skip = Some(crate::core::stores::ScheduleSkip {
+                    at: "2026-02-01T00:00:00Z".into(),
+                    bytes: 2048,
+                });
+            },
+        );
+
+        press(
+            &mut app,
+            &[KeyCode::Up, KeyCode::Enter, KeyCode::Down, KeyCode::Enter],
+        );
+
+        assert_eq!(
+            app.config.schedule.as_ref().unwrap().min_reclaim,
+            2_000_000_000
+        );
+        let text = wide_screen(&app);
+        assert!(text.contains("found 2.0 KB, below 2 GB"), "{text}");
+    }
+
+    #[test]
+    fn a_category_change_reads_the_agent_once_more() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, mut app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev", "junk"],
+            1_000_000_000,
+            |layout, _| write_plist(layout),
+        );
+        let before = launchctl_prints(&host);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+
+        assert_eq!(app.config.schedule.as_ref().unwrap().categories, ["junk"]);
+        assert_eq!(launchctl_prints(&host), before + 1);
+    }
+
+    #[test]
+    fn a_newer_skip_shows_in_the_last_run_card() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            |layout, schedule| {
+                write_plist(layout);
+                schedule.as_mut().unwrap().last_skip = Some(crate::core::stores::ScheduleSkip {
+                    at: "2026-02-01T00:00:00Z".into(),
+                    bytes: 2048,
+                });
+            },
+        );
+
+        let text = wide_screen(&app);
+
+        assert!(
+            text.contains(&format!(
+                "Skipped {}: found 2.0 KB, below 1 GB",
+                crate::core::schedule::format_run_time("2026-02-01T00:00:00Z")
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_missing_program_is_named_in_a_warning_line() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (temp, _layout, app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            |layout, _| write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert")),
+        );
+        let _keep = temp;
+
+        let sentence = "The program /nowhere/bin/taert in the launch agent is missing.";
+
+        assert!(wide_screen(&app).contains(sentence));
+        assert_eq!(fg_of(&app, sentence), app_theme_fg(|t| t.warning()));
+    }
+
+    #[test]
+    fn an_agent_launchd_has_not_loaded_gets_a_warning_and_a_load_row() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.fail("/bin/launchctl print", "Could not find service");
+        let (temp, _layout, app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            |layout, _| {
+                let bin = layout.user("taert");
+                std::fs::write(&bin, b"bin").unwrap();
+                write_plist_for(layout, &bin);
+            },
+        );
+        let _keep = temp;
+
+        let text = wide_screen(&app);
+
+        assert!(
+            text.contains("launchd has not loaded the agent. It may be switched off in System Settings › General › Login Items & Extensions."),
+            "{text}"
+        );
+        assert!(text.contains("Load the schedule again"), "{text}");
+        assert_eq!(
+            fg_of(&app, "launchd has not loaded the agent."),
+            app_theme_fg(|t| t.warning())
+        );
+    }
+
+    #[test]
+    fn a_permission_failure_in_the_last_run_names_the_program() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (temp, _layout, app) = schedule_app_prepared(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev"],
+            1_000_000_000,
+            |layout, _| {
+                write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert"));
+                history_lines(
+                    layout,
+                    &[
+                        r#"{"event":"start","run":"r1","at":"2026-01-01T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
+                        r#"{"event":"item","run":"r1","path":"/a","bytes":10,"outcome":"failed","error":"Operation not permitted (os error 1)"}"#,
+                        r#"{"event":"end","run":"r1","at":"2026-01-01T00:00:00Z"}"#,
+                    ],
+                );
+            },
+        );
+        let _keep = temp;
+
+        let text = wide_screen(&app);
+
+        assert!(
+            text.contains(
+                "The last run could not remove some files. Give /nowhere/bin/taert Full Disk Access in System Settings › Privacy & Security."
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            fg_of(&app, "The last run could not remove"),
+            app_theme_fg(|t| t.warning())
+        );
+    }
+
+    #[test]
+    fn with_run_off_there_is_no_last_run_card() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, app) = schedule_app(&host, None);
+
+        let text = screen_text(&app);
+
+        assert!(!text.contains("Last run"), "{text}");
+        assert!(!text.contains("Has not run yet"), "{text}");
     }
 
     #[test]
