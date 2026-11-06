@@ -7,23 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- **Path completion**: `Tab` completes paths when you add a project folder or a protected path, and the dialog says whether the path exists.
-- **Custom artifact names in Settings**: Settings › Project cleanup lists the folder names from `extra_artifacts` under `Also clean folders named`, and `Add name…` adds one. taert refuses an empty name, a name with `/`, a name it already cleans, and a name already in the list.
-- **Scheduled cleanup in Settings**: Settings › Scheduled cleanup chooses what the schedule cleans and how much it must free.
-- **History in the menu**: History lists what taert removed and changed, run by run. `↵` on a run shows its items, and a failed item shows its error. The last three runs show beside the row on a wide window. The last menu group is now titled `taert`.
-- **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
+## [0.10.0] - 2026-11-06
 
+### Added
+- **Scheduled cleanup in Settings**: Settings › Scheduled cleanup chooses what the schedule cleans and how much it must free.
+- **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
+- **Custom artifact names in Settings**: Settings › Project cleanup lists the folder names from `extra_artifacts` under `Also clean folders named`, and `Add name…` adds one. taert refuses an empty name, a name with `/`, a name it already cleans, and a name already in the list.
+- **Path completion**: `Tab` completes paths when you add a project folder or a protected path, and the dialog says whether the path exists.
 - **Appearance in Settings**: Settings › Appearance switches between auto, dark, and light, and applies at once.
 - **Permissions in Settings**: Settings › Permissions shows Full Disk Access and Touch ID for sudo, and opens System Settings at the matching page.
 - **About in Settings**: Settings › About shows the version and where taert keeps its files, and shows them in Finder.
 - **Settings with the comma key**: `,` opens Settings at the section of the current screen, and the menu shows a summary of the settings.
+- **History in the menu**: History lists what taert removed and changed, run by run. `↵` on a run shows its items, and a failed item shows its error. The last three runs show beside the row on a wide window. The last menu group is now titled `taert`.
 
 ### Changed
-- **History names the formulas a Homebrew removal took**: a row reads `brew uninstall terraform` instead of `brew uninstall`, also for runs logged before. A command too long for the column ends with `…`.
-- **Folders found by a custom name start unselected**: a folder that Project cleanup lists only because its name is in `extra_artifacts` starts unselected, whatever its age, and `taert purge --force` leaves it. You can still select it. Folders found by the built-in names are unchanged.
-- **Project folders and protected paths**: Settings edits both lists in place, under Project cleanup and in Protected paths, and `a` adds a path from any row of a list. The separate screen and the Protected paths row of the main menu are gone.
 - **Settings**: Preferences is now Settings, with the sections on the left and their rows on the right. `↵` opens a list of choices, and the choice saves at once. `←` and `→` no longer change a value. Below 100 columns the screen shows one section at a time.
+- **Project folders and protected paths**: Settings edits both lists in place, under Project cleanup and in Protected paths, and `a` adds a path from any row of a list. The separate screen and the Protected paths row of the main menu are gone.
+- **Folders found by a custom name start unselected**: a folder that Project cleanup lists only because its name is in `extra_artifacts` starts unselected, whatever its age, and `taert purge --force` leaves it. You can still select it. Folders found by the built-in names are unchanged.
+- **History names the formulas a Homebrew removal took**: a row reads `brew uninstall terraform` instead of `brew uninstall`, also for runs logged before. A command too long for the column ends with `…`.
 
 ### Fixed
 - **Saved appearance**: the interactive screen uses the appearance saved with `taert config --appearance`.
