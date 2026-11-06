@@ -20,9 +20,11 @@ use super::keys::is_removal_key;
 use super::path_list_editor::{
     PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
 };
-use super::preferences::{PreferencesFocus, PreferencesState, render_preferences};
 use super::progress::{ProgressState, render_progress};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
+use super::settings::{
+    SettingsFocus, SettingsRow, SettingsSection, SettingsState, render_settings,
+};
 use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
 use super::terminal::{AdminGate, enter_tui, leave_tui};
@@ -66,7 +68,7 @@ pub enum Screen {
     SystemStatus(Box<SystemStatusState>),
     Startup(StartupScreenState),
     Doctor(DoctorScreenState),
-    Preferences(PreferencesState),
+    Settings(SettingsState),
     PathListEditor(PathListEditorState),
 }
 
@@ -97,7 +99,7 @@ enum ReturnPoint {
         row: usize,
         submenu_row: Option<usize>,
     },
-    Preferences(PreferencesFocus),
+    Settings(SettingsSection, usize),
     AppList(Box<SelectState>),
 }
 
@@ -512,7 +514,7 @@ impl App {
             Screen::SystemStatus(state) => render_system_status(frame, state, &self.theme),
             Screen::Startup(state) => render_startup(frame, state, &self.theme),
             Screen::Doctor(state) => render_doctor(frame, state, &self.theme),
-            Screen::Preferences(state) => render_preferences(frame, state, &self.theme),
+            Screen::Settings(state) => render_settings(frame, state, &self.theme),
             Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
         }
     }
@@ -523,8 +525,9 @@ impl App {
                 row: state.selected_index,
                 submenu_row: state.submenu_row(),
             }),
-            Screen::Preferences(state) => {
-                self.back_stack.push(ReturnPoint::Preferences(state.focus));
+            Screen::Settings(state) => {
+                self.back_stack
+                    .push(ReturnPoint::Settings(state.section, state.row));
             }
             Screen::Select(state) if state.scan.id == apps::LIST_ID => {
                 self.back_stack.push(ReturnPoint::AppList(state));
@@ -539,11 +542,9 @@ impl App {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
             }
-            Some(ReturnPoint::Preferences(focus)) => {
-                let mut state = PreferencesState::new(&self.config, &self.ignore, &self.layout);
-                state.focus = focus;
-                Screen::Preferences(state)
-            }
+            Some(ReturnPoint::Settings(section, row)) => Screen::Settings(
+                SettingsState::new(&self.config, &self.ignore, &self.layout).at(section, row),
+            ),
             Some(ReturnPoint::AppList(state)) => Screen::Select(state),
             None => Screen::Workspace(WorkspaceState::new()),
         };
@@ -1317,42 +1318,50 @@ impl App {
                 }
             }
 
-            Screen::Preferences(state) => match code {
-                KeyCode::Up | KeyCode::Char('k') => state.previous(),
-                KeyCode::Down | KeyCode::Char('j') => state.next(),
-                KeyCode::Left => {
-                    state.step_age_left(&mut self.config, &self.layout);
-                    state.step_schedule_left();
-                }
-                KeyCode::Right => {
-                    state.step_age_right(&mut self.config, &self.layout);
-                    state.step_schedule_right();
-                }
-                KeyCode::Enter => match state.focus {
-                    PreferencesFocus::AgeThreshold => {}
-                    PreferencesFocus::ScheduledCleanup => {
-                        state.apply_schedule(&mut self.config, &*self.host, &self.layout);
+            Screen::Settings(state) => {
+                if let Some(picker) = state.picker_mut() {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') => picker.previous(),
+                        KeyCode::Down | KeyCode::Char('j') => picker.next(),
+                        KeyCode::Home | KeyCode::Char('g') => picker.first(),
+                        KeyCode::End | KeyCode::Char('G') => picker.last(),
+                        KeyCode::Enter => {
+                            state.pick(&mut self.config, &*self.host, &self.layout);
+                        }
+                        KeyCode::Esc => state.close_picker(),
+                        _ => {}
                     }
-                    PreferencesFocus::ProjectFolders => {
+                    return;
+                }
+                match (state.focus, code) {
+                    (_, KeyCode::Up | KeyCode::Char('k')) => state.previous(),
+                    (_, KeyCode::Down | KeyCode::Char('j')) => state.next(),
+                    (SettingsFocus::Sections, KeyCode::Right | KeyCode::Enter) => {
+                        state.enter_rows();
+                    }
+                    (SettingsFocus::Sections, KeyCode::Esc | KeyCode::Char('q')) => {
+                        self.go_back();
+                    }
+                    (SettingsFocus::Rows, KeyCode::Enter | KeyCode::Char(' ')) => {
+                        let kind = match state.current_row() {
+                            SettingsRow::AgeThreshold | SettingsRow::Run => {
+                                state.open_picker();
+                                return;
+                            }
+                            SettingsRow::ProjectFolders => PathListKind::ProjectFolders,
+                            SettingsRow::ProtectedPaths => PathListKind::ProtectedPaths,
+                        };
                         self.open(Screen::PathListEditor(PathListEditorState::new(
-                            PathListKind::ProjectFolders,
+                            kind,
                             &self.ignore,
                             &self.layout,
                         )));
                     }
-                    PreferencesFocus::ProtectedPaths => {
-                        self.open(Screen::PathListEditor(PathListEditorState::new(
-                            PathListKind::ProtectedPaths,
-                            &self.ignore,
-                            &self.layout,
-                        )));
-                    }
-                },
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.go_back();
+                    (SettingsFocus::Rows, KeyCode::Left | KeyCode::Esc) => state.leave_rows(),
+                    (SettingsFocus::Rows, KeyCode::Char('q')) => self.go_back(),
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
 
             Screen::PathListEditor(state) => match &mut state.mode {
                 PathListMode::Adding(input) => match code {
@@ -1527,12 +1536,22 @@ impl App {
                     back,
                 ],
             )],
-            Screen::Preferences(_) => vec![
+            Screen::Settings(_) => vec![
                 HelpSection::new(
-                    "Preferences",
+                    "Settings",
                     vec![
-                        Hint::new("←→", "Change threshold"),
-                        Hint::new("↵", "Edit list"),
+                        Hint::new("→ / ↵", "Open section"),
+                        Hint::new("↵ / ␣", "Change or open"),
+                        Hint::new("← / ⎋", "Sections"),
+                        Hint::new("q", "Main menu"),
+                    ],
+                ),
+                HelpSection::new(
+                    "List of choices",
+                    vec![
+                        Hint::new("↑↓ / jk", "Move"),
+                        Hint::new("↵", "Choose"),
+                        Hint::new("⎋", "Cancel"),
                     ],
                 ),
                 general(vec![navigate, back]),
@@ -1915,8 +1934,8 @@ impl App {
             MainMenuChoice::SystemStatus => {
                 self.open(Screen::SystemStatus(Box::default()));
             }
-            MainMenuChoice::Preferences => {
-                self.open(Screen::Preferences(PreferencesState::new(
+            MainMenuChoice::Settings => {
+                self.open(Screen::Settings(SettingsState::new(
                     &self.config,
                     &self.ignore,
                     &self.layout,
@@ -2213,7 +2232,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::core::scanner::{ScanItem, ToolGroup};
+    use crate::core::schedule::ScheduleFrequency;
     use crate::core::startup::StartupKind;
+    use crate::core::stores::ScheduleConfig;
     use crate::ui::analyze::SortOrder;
     use crate::ui::terminal::testing::{counting_release, gate_with, releases};
     use ratatui::backend::TestBackend;
@@ -2708,7 +2729,38 @@ mod tests {
     }
 
     #[test]
-    fn esc_from_a_list_opened_in_preferences_keeps_the_row_and_refreshes_counts() {
+    fn esc_from_the_project_folders_list_returns_to_the_row_with_the_new_count() {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Right],
+        );
+        assert_ne!(settings(&app).folder_count, 1);
+        app.handle_key(KeyCode::Enter);
+        let folder = temp.path().canonicalize().unwrap().display().to_string();
+        ProjectFoldersStore::new(vec![folder])
+            .save_to(&layout.projects_path())
+            .unwrap();
+
+        app.handle_key(KeyCode::Esc);
+
+        let state = settings(&app);
+        assert_eq!(state.section, SettingsSection::ProjectCleanup);
+        assert_eq!(state.focus, SettingsFocus::Rows);
+        assert_eq!(state.current_row(), SettingsRow::ProjectFolders);
+        assert_eq!(state.folder_count, 1);
+        assert!(screen_text(&app).contains("1 folder"));
+
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(settings(&app).focus, SettingsFocus::Sections);
+        app.handle_key(KeyCode::Esc);
+        assert_main_menu(&app, 12);
+    }
+
+    #[test]
+    fn esc_from_the_protected_paths_list_keeps_the_section_and_refreshes_counts() {
         let mut app = new_app();
 
         press(
@@ -2719,21 +2771,17 @@ mod tests {
                 KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
-                KeyCode::Down,
+                KeyCode::Right,
                 KeyCode::Enter,
             ],
         );
         app.ignore.roots.push("/nowhere/protected".to_string());
         app.handle_key(KeyCode::Esc);
 
-        let Screen::Preferences(state) = &app.screen else {
-            panic!("expected the preferences screen");
-        };
-        assert_eq!(state.focus, PreferencesFocus::ProtectedPaths);
+        let state = settings(&app);
+        assert_eq!(state.section, SettingsSection::ProtectedPaths);
+        assert_eq!(state.current_row(), SettingsRow::ProtectedPaths);
         assert_eq!(state.path_count, app.ignore.roots.len());
-
-        app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 12);
     }
 
     #[test]
@@ -2957,12 +3005,23 @@ mod tests {
             .collect()
     }
 
+    fn settings(app: &App) -> &SettingsState {
+        let Screen::Settings(state) = &app.screen else {
+            panic!("expected the settings screen");
+        };
+        state
+    }
+
+    fn picker_choices(app: &App) -> Vec<String> {
+        settings(app).picker_state().unwrap().choices.clone()
+    }
+
     #[test]
-    fn protected_paths_name_preferences_only_when_opened_there() {
+    fn protected_paths_name_settings_only_when_opened_there() {
         let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Enter]);
-        assert!(!screen_text(&app).contains("Preferences"));
+        assert!(!screen_text(&app).contains("Settings"));
 
         press(
             &mut app,
@@ -2973,39 +3032,158 @@ mod tests {
                 KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
-                KeyCode::Down,
+                KeyCode::Right,
                 KeyCode::Enter,
             ],
         );
-        assert!(screen_text(&app).contains("Preferences"));
+        assert!(screen_text(&app).contains("Settings"));
+    }
+
+    fn age_app(older_than_days: u64) -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        app.config.older_than_days = older_than_days;
+        press(
+            &mut app,
+            &[
+                KeyCode::End,
+                KeyCode::Up,
+                KeyCode::Enter,
+                KeyCode::Right,
+                KeyCode::Down,
+            ],
+        );
+        (temp, layout, app)
     }
 
     #[test]
-    fn the_age_threshold_set_in_preferences_is_saved_in_the_layout() {
-        let (_temp, layout) = crate::core::apps::testing::sandbox();
-        let mut app = new_app();
-        app.layout = layout.clone();
+    fn picking_an_age_saves_it_in_the_layout() {
+        let (_temp, layout, mut app) = age_app(7);
 
         press(
             &mut app,
-            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Right],
+            &[KeyCode::Enter, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
         );
 
         let saved = Config::load_from(&layout.config_path()).unwrap();
-        assert_eq!(saved.older_than_days, app.config.older_than_days);
-        assert_ne!(saved.older_than_days, Config::default().older_than_days);
+        assert_eq!(saved.older_than_days, 30);
+        assert_eq!(app.config.older_than_days, 30);
+        let text = screen_text(&app);
+        assert!(text.contains("Saved age threshold"), "{text}");
+        assert!(text.contains("30 days"), "{text}");
+        assert!(settings(&app).picker_state().is_none());
+    }
+
+    #[test]
+    fn the_age_picker_lists_the_presets_and_marks_the_saved_one() {
+        let (_temp, _layout, mut app) = age_app(7);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(
+            picker_choices(&app),
+            [
+                "1 day", "3 days", "7 days", "14 days", "30 days", "60 days", "90 days",
+                "180 days", "365 days"
+            ]
+        );
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(2));
+    }
+
+    #[test]
+    fn a_saved_age_outside_the_presets_is_listed_in_order_and_marked() {
+        let (_temp, _layout, mut app) = age_app(10);
+
+        app.handle_key(KeyCode::Enter);
+
+        let choices = picker_choices(&app);
+        let at = choices.iter().position(|c| c == "10 days").unwrap();
+        assert_eq!(choices[at - 1], "7 days");
+        assert_eq!(choices[at + 1], "14 days");
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(at));
+    }
+
+    #[test]
+    fn esc_closes_the_picker_without_a_change() {
+        let (_temp, layout, mut app) = age_app(7);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Esc]);
+
+        assert!(settings(&app).picker_state().is_none());
+        assert_eq!(app.config.older_than_days, 7);
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn j_and_k_move_in_the_picker() {
+        let (_temp, _layout, mut app) = age_app(7);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Char('j')]);
+        assert_eq!(settings(&app).picker_state().unwrap().highlighted, 3);
+
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(settings(&app).picker_state().unwrap().highlighted, 2);
+    }
+
+    #[test]
+    fn the_picker_ignores_keys_it_does_not_list() {
+        let (_temp, layout, mut app) = age_app(7);
+        app.handle_key(KeyCode::Enter);
+
+        press(
+            &mut app,
+            &[KeyCode::Left, KeyCode::Right, KeyCode::Char('q')],
+        );
+
+        assert_eq!(settings(&app).picker_state().unwrap().highlighted, 2);
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends_of_the_picker() {
+        let (_temp, _layout, mut app) = age_app(7);
+        app.handle_key(KeyCode::Enter);
+        let last = settings(&app).picker_state().unwrap().choices.len() - 1;
+
+        for (key, want) in [
+            (KeyCode::End, last),
+            (KeyCode::Home, 0),
+            (KeyCode::Char('G'), last),
+            (KeyCode::Char('g'), 0),
+        ] {
+            app.handle_key(key);
+            assert_eq!(
+                settings(&app).picker_state().unwrap().highlighted,
+                want,
+                "{key:?}"
+            );
+        }
     }
 
     fn schedule_app(
         host: &Arc<crate::core::host::fake::FakeHost>,
+        schedule: Option<ScheduleFrequency>,
     ) -> (tempfile::TempDir, Layout, App) {
         let (temp, layout) = crate::core::apps::testing::sandbox();
         let mut app = new_app();
         app.layout = layout.clone();
         app.host = host.clone();
+        app.config.schedule = schedule.map(|every| ScheduleConfig {
+            every,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        });
         press(
             &mut app,
-            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Down],
+            &[
+                KeyCode::End,
+                KeyCode::Up,
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Right,
+            ],
         );
         (temp, layout, app)
     }
@@ -3020,93 +3198,80 @@ mod tests {
     }
 
     #[test]
-    fn arrows_on_the_schedule_row_do_not_run_launchctl() {
+    fn the_run_picker_marks_the_weekly_schedule() {
         let host = Arc::new(crate::core::host::fake::FakeHost::idle());
-        let (_temp, layout, mut app) = schedule_app(&host);
+        let (_temp, _layout, mut app) = schedule_app(&host, Some(ScheduleFrequency::Week));
 
-        press(&mut app, &[KeyCode::Right]);
+        app.handle_key(KeyCode::Enter);
 
-        let text = screen_text(&app);
-        assert!(text.contains("Every day"));
-        assert!(text.contains("Apply"));
-        assert!(!host.ran("/bin/launchctl"));
-        assert!(app.config.schedule.is_none());
-        assert!(!crate::core::schedule::agent_plist_path(&layout).exists());
+        assert_eq!(
+            picker_choices(&app),
+            ["Off", "Every day", "Every week", "Every month"]
+        );
+        let picker = settings(&app).picker_state().unwrap();
+        assert_eq!(picker.current, Some(2));
+        assert_eq!(picker.highlighted, 2);
     }
 
     #[test]
-    fn enter_applies_the_schedule_once() {
+    fn picking_a_schedule_applies_it_once() {
         let host = Arc::new(crate::core::host::fake::FakeHost::idle());
         host.reply("/bin/launchctl", "");
-        let (_temp, _layout, mut app) = schedule_app(&host);
+        let (_temp, layout, mut app) = schedule_app(&host, None);
 
-        press(&mut app, &[KeyCode::Right]);
-
-        assert_eq!(bootstraps(&host), 0);
-
-        press(&mut app, &[KeyCode::Enter]);
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
 
         assert_eq!(bootstraps(&host), 1);
-        let schedule = app.config.schedule.clone().unwrap();
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.schedule.unwrap().every, ScheduleFrequency::Day);
         assert_eq!(
-            schedule.every,
-            crate::core::schedule::ScheduleFrequency::Day
+            app.config.schedule.clone().unwrap().every,
+            ScheduleFrequency::Day
         );
-        assert!(screen_text(&app).contains("Enabled scheduled cleanup"));
+        let text = screen_text(&app);
+        assert!(text.contains("Enabled scheduled cleanup"), "{text}");
+        assert!(text.contains("Every day"), "{text}");
+        let toml = std::fs::read_to_string(layout.config_path()).unwrap();
+        assert!(toml.contains("every = \"day\""), "{toml}");
+    }
+
+    #[test]
+    fn picking_the_current_schedule_runs_nothing() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, mut app) = schedule_app(&host, Some(ScheduleFrequency::Week));
         let calls = host.calls.lock().unwrap().len();
 
-        press(&mut app, &[KeyCode::Enter]);
+        press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
 
         assert_eq!(host.calls.lock().unwrap().len(), calls);
+        assert!(settings(&app).picker_state().is_none());
+        assert!(!screen_text(&app).contains("Enabled"));
     }
 
     #[test]
     fn a_failed_load_shows_the_error_and_keeps_the_old_value() {
         let host = Arc::new(crate::core::host::fake::FakeHost::idle());
         host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
-        let (_temp, layout, mut app) = schedule_app(&host);
+        let (_temp, layout, mut app) = schedule_app(&host, None);
 
-        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
 
         let text = screen_text(&app);
         assert!(text.contains("Bootstrap failed: 5"), "{text}");
-        assert!(!text.contains("Enabled"));
-        let Screen::Preferences(prefs) = &app.screen else {
-            panic!("expected the preferences screen");
-        };
-        assert_eq!(prefs.schedule, None);
-        assert_eq!(prefs.applied_schedule, None);
+        assert!(!text.contains("Enabled"), "{text}");
+        assert!(text.contains("Off ⌄"), "{text}");
+        assert_eq!(settings(&app).schedule, None);
         assert!(app.config.schedule.is_none());
         assert!(!layout.config_path().exists());
-        let calls = host.calls.lock().unwrap().len();
-
-        press(&mut app, &[KeyCode::Right]);
-
-        assert_eq!(host.calls.lock().unwrap().len(), calls);
     }
 
     #[test]
-    fn stepping_the_age_after_a_failed_apply_shows_the_new_save() {
-        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
-        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
-        let (_temp, _layout, mut app) = schedule_app(&host);
-
-        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
-        assert!(screen_text(&app).contains("Bootstrap failed: 5"));
-
-        press(&mut app, &[KeyCode::Up, KeyCode::Right]);
-
-        let text = screen_text(&app);
-        assert!(text.contains("Saved age threshold"), "{text}");
-        assert!(!text.contains("Bootstrap failed: 5"), "{text}");
-    }
-
-    #[test]
-    fn enter_on_off_removes_the_schedule() {
+    fn picking_off_removes_the_schedule() {
         let host = Arc::new(crate::core::host::fake::FakeHost::idle());
         host.reply("/bin/launchctl", "");
-        let (_temp, layout, mut app) = schedule_app(&host);
-        press(&mut app, &[KeyCode::Right, KeyCode::Enter]);
+        let (_temp, layout, mut app) = schedule_app(&host, None);
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
         assert!(app.config.schedule.is_some());
         let plist = crate::core::schedule::agent_plist_path(&layout);
         assert!(plist.exists());
@@ -3120,17 +3285,164 @@ mod tests {
         };
         let before = bootouts(&host);
 
-        press(&mut app, &[KeyCode::Left]);
-
-        assert!(screen_text(&app).contains("Off"));
-        assert_eq!(bootouts(&host), before);
-
-        press(&mut app, &[KeyCode::Enter]);
+        press(&mut app, &[KeyCode::Enter, KeyCode::Up, KeyCode::Enter]);
 
         assert_eq!(bootouts(&host), before + 1);
         assert!(screen_text(&app).contains("Disabled scheduled cleanup"));
         assert!(app.config.schedule.is_none());
         assert!(!plist.exists());
+    }
+
+    #[test]
+    fn left_and_right_change_no_value_and_run_no_launchctl() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, mut app) = schedule_app(&host, Some(ScheduleFrequency::Week));
+        let calls = host.calls.lock().unwrap().len();
+
+        app.handle_key(KeyCode::Right);
+
+        assert_eq!(settings(&app).focus, SettingsFocus::Rows);
+        assert_eq!(settings(&app).schedule, Some(ScheduleFrequency::Week));
+
+        app.handle_key(KeyCode::Left);
+
+        assert_eq!(settings(&app).focus, SettingsFocus::Sections);
+        assert_eq!(settings(&app).schedule, Some(ScheduleFrequency::Week));
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+
+        let (_temp, layout, mut app) = age_app(7);
+        press(&mut app, &[KeyCode::Right, KeyCode::Left]);
+        assert_eq!(app.config.older_than_days, 7);
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn saving_the_age_after_a_failed_apply_shows_the_new_save() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+        let (_temp, _layout, mut app) = schedule_app(&host, None);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+        assert!(screen_text(&app).contains("Bootstrap failed: 5"));
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Left,
+                KeyCode::Up,
+                KeyCode::Right,
+                KeyCode::Down,
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+            ],
+        );
+
+        let text = screen_text(&app);
+        assert!(text.contains("Saved age threshold"), "{text}");
+        assert!(!text.contains("Bootstrap failed: 5"), "{text}");
+    }
+
+    #[test]
+    fn space_on_a_row_opens_its_picker_or_list() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, mut app) = schedule_app(&host, None);
+
+        app.handle_key(KeyCode::Char(' '));
+        assert!(settings(&app).picker_state().is_some());
+
+        press(
+            &mut app,
+            &[KeyCode::Esc, KeyCode::Left, KeyCode::Up, KeyCode::Right],
+        );
+        app.handle_key(KeyCode::Char(' '));
+        assert!(matches!(app.screen, Screen::PathListEditor(_)));
+    }
+
+    #[test]
+    fn the_split_view_shows_one_selection_bar_on_the_focused_row() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        let bars = |app: &App| -> Vec<String> {
+            screen_rows(app, 120, 32)
+                .into_iter()
+                .filter(|r| r.contains('▌'))
+                .collect()
+        };
+        let on_sections = bars(&app);
+        assert_eq!(on_sections.len(), 1, "{on_sections:?}");
+        assert!(on_sections[0].contains("Project cleanup"));
+
+        app.handle_key(KeyCode::Right);
+
+        let on_rows = bars(&app);
+        assert_eq!(on_rows.len(), 1, "{on_rows:?}");
+        assert!(on_rows[0].contains("Project folders"), "{on_rows:?}");
+        let bar = on_rows[0].find('▌').unwrap();
+        assert!(
+            bar > on_rows[0].find("Project cleanup").unwrap(),
+            "{on_rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_window_opens_one_section_with_its_own_breadcrumb() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        let list = screen_rows(&app, 80, 24).join("\n");
+        assert!(list.contains("Scheduled cleanup"), "{list}");
+        assert!(!list.contains("Preselect"), "{list}");
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        let rows = screen_rows(&app, 80, 24);
+        assert!(
+            rows[0].contains("taert › Settings › Scheduled cleanup"),
+            "{rows:?}"
+        );
+        assert!(rows.join("\n").contains("Run"), "{rows:?}");
+
+        app.handle_key(KeyCode::Esc);
+
+        let state = settings(&app);
+        assert_eq!(state.focus, SettingsFocus::Sections);
+        assert_eq!(state.section, SettingsSection::ScheduledCleanup);
+        let rows = screen_rows(&app, 80, 24);
+        assert!(!rows[0].contains("Scheduled cleanup"), "{rows:?}");
+        let bar = app.theme.g.selection_bar;
+        let selected = rows.iter().find(|row| row.contains(bar)).unwrap();
+        assert!(selected.contains("Scheduled cleanup"), "{rows:?}");
+    }
+
+    #[test]
+    fn the_section_list_wraps_and_q_goes_back_to_the_menu() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+
+        app.handle_key(KeyCode::Up);
+        assert_eq!(settings(&app).section, SettingsSection::ProtectedPaths);
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(settings(&app).section, SettingsSection::ProjectCleanup);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Char('k')]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(settings(&app).current_row(), SettingsRow::ProjectFolders);
+
+        app.handle_key(KeyCode::Char('q'));
+        assert_main_menu(&app, 12);
+    }
+
+    #[test]
+    fn the_age_threshold_row_shows_its_value_and_the_popup_mark() {
+        let (_temp, _layout, app) = age_app(7);
+
+        let text = screen_text(&app);
+
+        assert!(text.contains("Preselect artifacts older than"), "{text}");
+        assert!(text.contains("7 days ⌄"), "{text}");
+        assert!(text.contains("folders ›"), "{text}");
     }
 
     #[test]
@@ -3378,16 +3690,57 @@ mod tests {
     }
 
     #[test]
-    fn preferences_show_the_arrows_only_on_the_threshold_row() {
+    fn the_settings_footer_follows_the_focus() {
         let mut app = new_app();
 
         press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
-        assert_footer(&app, &["←→  Adjust", "⎋  Back"], &[]);
+        assert_footer(
+            &app,
+            &["↑↓  Move", "→  Open", "⎋  Back", "?  More", "Open  ↵"],
+            &["Sections", "Change"],
+        );
 
-        // Moving to project folders (a list link) removes the adjust arrows
-        app.handle_key(KeyCode::Down);
-        app.handle_key(KeyCode::Down);
-        assert_footer(&app, &["⎋  Back"], &["Adjust"]);
+        press(&mut app, &[KeyCode::Right, KeyCode::Down]);
+        assert_footer(
+            &app,
+            &["↑↓  Move", "←  Sections", "⎋  Back", "?  More", "Change  ↵"],
+            &["→", "Open"],
+        );
+
+        app.handle_key(KeyCode::Up);
+        assert_footer(
+            &app,
+            &["↑↓  Move", "←  Sections", "⎋  Back", "Open  ↵"],
+            &["Change"],
+        );
+    }
+
+    #[test]
+    fn the_settings_help_lists_the_keys_of_the_sections_rows_and_picker() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+
+        let sections: Vec<String> = app
+            .help_sections()
+            .iter()
+            .flat_map(|s| s.shortcuts.iter().map(|h| format!("{} {}", h.key, h.desc)))
+            .collect();
+
+        for want in [
+            "→ / ↵ Open section",
+            "↵ / ␣ Change or open",
+            "← / ⎋ Sections",
+            "q Main menu",
+            "↑↓ / jk Move",
+            "↵ Choose",
+            "⎋ Cancel",
+        ] {
+            assert!(sections.iter().any(|s| s == want), "{want}: {sections:?}");
+        }
+        assert!(
+            sections.iter().all(|s| !s.contains("threshold")),
+            "{sections:?}"
+        );
     }
 
     #[test]

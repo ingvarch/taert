@@ -23,7 +23,7 @@ expression: output
    │   ▤ System status       │                                    Enter select   Esc back │
    ╰─────────────────────────╰────────────────────────────────────────────────────────────╯
    ╭─ Settings ─────────────────────╮
-   │   ⌥ Preferences              › │
+   │   ⌥ Settings                 › │
    │   ◈ Protected paths          › │
    ╰────────────────────────────────╯
 

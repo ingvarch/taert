@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::components::button::Button;
-use super::components::chrome::AppChrome;
+use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH};
 use super::components::empty::EmptyState;
 use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
@@ -22,7 +22,6 @@ use crate::core::bytes::format_bytes;
 use crate::core::path_utils::prettify_path;
 use crate::core::startup::{Btm, StartupItem, StartupKind, StartupScan, StartupState};
 
-const SPLIT_MIN_WIDTH: u16 = 100;
 const MAX_NOTE_ROWS: usize = 3;
 
 /// The note a daemon switch shows before the password prompt.

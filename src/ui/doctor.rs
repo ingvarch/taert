@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::components::button::Button;
-use super::components::chrome::AppChrome;
+use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH};
 use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::Hint;
 use super::components::list::ListRow;
@@ -22,7 +22,6 @@ use crate::core::doctor::{DoctorReport, Finding, FindingAction, FindingSeverity}
 use crate::core::startup::StartupItem;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const SPLIT_MIN_WIDTH: u16 = 100;
 const NARROW_LIST_ROWS: usize = 5;
 
 #[derive(Debug, Clone)]

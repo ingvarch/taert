@@ -47,6 +47,7 @@ pub struct Glyphs {
     pub icon_doctor: &'static str,
     pub icon_startup: &'static str,
     pub icon_prefs: &'static str,
+    pub icon_schedule: &'static str,
     pub icon_protected: &'static str,
 }
 
@@ -104,6 +105,7 @@ impl Glyphs {
             icon_doctor: "✚",
             icon_startup: "▲",
             icon_prefs: "⌥",
+            icon_schedule: "◷",
             icon_protected: "◈",
         }
     }
@@ -155,7 +157,22 @@ impl Glyphs {
             icon_doctor: "+",
             icon_startup: "T",
             icon_prefs: "O",
+            icon_schedule: "R",
             icon_protected: "X",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn the_schedule_icon_takes_one_cell_and_has_an_ascii_letter() {
+        assert_eq!(Glyphs::unicode().icon_schedule.width(), 1);
+        let ascii = Glyphs::ascii().icon_schedule;
+        assert_eq!(ascii.len(), 1);
+        assert!(ascii.chars().all(|c| c.is_ascii_alphabetic()));
     }
 }

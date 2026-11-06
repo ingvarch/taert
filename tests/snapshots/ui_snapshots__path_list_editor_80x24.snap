@@ -2,7 +2,7 @@
 source: tests/ui_snapshots.rs
 expression: output
 ---
- taert › Preferences › Protected paths                             2 configured
+ taert › Settings › Protected paths                                2 configured
 ────────────────────────────────────────────────────────────────────────────────
    Paths excluded from all cleaning and purge scans
 

@@ -1,0 +1,20 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ Settings
+──────────────────────────────────────────────────
+   ╭─ Settings ────────────────────────────────╮
+   │ ▌ ◇ Project cleanup                     › │
+   │   ◷ Scheduled cleanup                   › │
+   │   ◈ Protected paths                     › │
+   ╰───────────────────────────────────────────╯
+
+
+
+
+
+
+
+──────────────────────────────────────────────────
+  ↑↓  Move    →  Open    ?  More         Open  ↵
