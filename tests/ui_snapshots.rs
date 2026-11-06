@@ -14,6 +14,7 @@ use taert::core::apps;
 use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalProgress, RemovalReport};
 use taert::core::compress;
+use taert::core::date_utils::format_rfc3339;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::history::HistoryLog;
@@ -26,7 +27,7 @@ use taert::core::profiler::{
 };
 use taert::core::projects_store::ProjectFoldersStore;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
-use taert::core::schedule::ScheduleFrequency;
+use taert::core::schedule::{LastRun, ScheduleFrequency, ScheduleSettings, ScheduleStatus};
 use taert::core::slim;
 use taert::core::startup::{StartupItem, StartupKind, StartupState};
 use taert::core::stores::{Config, IgnoreStore, ScheduleConfig};
@@ -772,6 +773,58 @@ fn snapshot_settings_schedule() {
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
     assert_snapshot!("settings_schedule_120x32", output);
+}
+
+/// 9:00 on 3 November 2026 in the local time zone, as the history writes it.
+fn local_nine_oclock() -> String {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 10;
+    tm.tm_mday = 3;
+    tm.tm_hour = 9;
+    tm.tm_isdst = -1;
+    let secs = unsafe { libc::mktime(&mut tm) };
+    format_rfc3339(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
+}
+
+#[test]
+fn snapshot_settings_schedule_status() {
+    let theme = snapshot_theme();
+    let config = Config {
+        schedule: Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into(), "junk".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        }),
+        ..Config::default()
+    };
+    let mut state = SettingsState::new(&config, &IgnoreStore::default(), &no_layout());
+    state.status = Some(ScheduleStatus {
+        settings: ScheduleSettings::On {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into(), "junk".into()],
+            min_reclaim: 1_000_000_000,
+        },
+        last_run: LastRun::Ran {
+            at: local_nine_oclock(),
+            freed: 2_100_000_000,
+        },
+        plist_missing: false,
+        missing_program: None,
+        agent_loaded: Some(true),
+        needs_full_disk_access: None,
+    });
+    state.section = SettingsSection::ScheduledCleanup;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert!(
+        output.contains("2026-11-03 09:00 · freed 2.1 GB"),
+        "{output}"
+    );
+    assert_snapshot!("settings_schedule_status_120x32", output);
 }
 
 const WIDE_WINDOW: (u16, u16) = (205, 60);

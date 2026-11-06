@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Path completion**: `Tab` completes paths when you add a project folder or a protected path, and the dialog says whether the path exists.
 - **Scheduled cleanup in Settings**: Settings › Scheduled cleanup chooses what the schedule cleans and how much it must free.
 - **History in the menu**: History lists what taert removed and changed, run by run. `↵` on a run shows its items, and a failed item shows its error. The last three runs show beside the row on a wide window. The last menu group is now titled `taert`.
+- **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
 
 ### Changed
 - **Project folders and protected paths**: Settings edits both lists in place, under Project cleanup and in Protected paths, and `a` adds a path from any row of a list. The separate screen and the Protected paths row of the main menu are gone.

@@ -16,12 +16,14 @@ use super::bytes::format_bytes;
 use super::catalog::{Catalog, Category};
 use super::cleaner::{Cleaner, RemovalMode};
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
-use super::history::{HistoryLog, ItemOutcome, OutcomeKind, RunRecord};
+use super::history::{HistoryLog, ItemOutcome, OutcomeKind};
 use super::host::Host;
 use super::layout::Layout;
 use super::scanner::{CategoryScanner, ScanContext, ScanItem};
 use super::stores::{Config, IgnoreStore, ScheduleConfig, ScheduleSkip};
 
+/// The program a launch agent runs when taert cannot tell its own path.
+const DEFAULT_PROGRAM: &str = "/opt/homebrew/bin/taert";
 pub const SCHEDULE_LABEL: &str = "io.github.ingvarch.taert.schedule";
 pub const SCHEDULE_PLIST_NAME: &str = "io.github.ingvarch.taert.schedule.plist";
 pub const VALID_CATEGORIES: &[&str] = &[
@@ -276,8 +278,7 @@ pub fn set_schedule(
     }
 
     // Resolve binary path
-    let default_exe =
-        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/opt/homebrew/bin/taert"));
+    let default_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(DEFAULT_PROGRAM));
     let exe = current_exe.unwrap_or(&default_exe);
     let bin_path = resolve_binary_path(exe);
 
@@ -370,6 +371,215 @@ fn is_permission_error(error: Option<&str>) -> bool {
         || err.contains("os error 1")
 }
 
+/// What the schedule is set to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleSettings {
+    Off {
+        plist_exists: bool,
+    },
+    On {
+        every: ScheduleFrequency,
+        categories: Vec<String>,
+        min_reclaim: u64,
+    },
+}
+
+/// The result of the last scheduled run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastRun {
+    Never,
+    Ran {
+        at: String,
+        freed: u64,
+    },
+    Skipped {
+        at: String,
+        found: u64,
+        threshold: u64,
+    },
+}
+
+/// Everything `taert schedule show` and Settings tell about the schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleStatus {
+    pub settings: ScheduleSettings,
+    pub last_run: LastRun,
+    pub plist_missing: bool,
+    pub missing_program: Option<PathBuf>,
+    /// `None` when the plist is missing, so launchd was not asked.
+    pub agent_loaded: Option<bool>,
+    /// The program the last run needed Full Disk Access for.
+    pub needs_full_disk_access: Option<PathBuf>,
+}
+
+/// Gathers the facts about the schedule. Asks launchd once, and only when the plist exists.
+pub fn schedule_status(
+    host: &dyn Host,
+    layout: &Layout,
+    config: &Config,
+    history: &HistoryLog,
+) -> ScheduleStatus {
+    let plist_path = agent_plist_path(layout);
+    let plist_exists = plist_path.exists();
+    let Some(sched) = &config.schedule else {
+        return ScheduleStatus {
+            settings: ScheduleSettings::Off { plist_exists },
+            last_run: LastRun::Never,
+            plist_missing: false,
+            missing_program: None,
+            agent_loaded: None,
+            needs_full_disk_access: None,
+        };
+    };
+
+    let last_run_record = history
+        .load_runs()
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .find(|r| r.mode == "schedule");
+    let newer_skip = sched.last_skip.as_ref().filter(|skip| {
+        let Some(run) = &last_run_record else {
+            return true;
+        };
+        match (parse_rfc3339(&run.at), parse_rfc3339(&skip.at)) {
+            (Some(run_at), Some(skip_at)) => skip_at > run_at,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    });
+    let last_run = if let Some(skip) = newer_skip {
+        LastRun::Skipped {
+            at: skip.at.clone(),
+            found: skip.bytes,
+            threshold: sched.min_reclaim,
+        }
+    } else if let Some(run) = &last_run_record {
+        let freed = run
+            .items
+            .iter()
+            .filter(|i| i.outcome == OutcomeKind::Removed || i.outcome == OutcomeKind::Trashed)
+            .map(|i| i.bytes)
+            .sum();
+        LastRun::Ran {
+            at: run.at.clone(),
+            freed,
+        }
+    } else {
+        LastRun::Never
+    };
+
+    let program = plist_exists
+        .then(|| plist::Value::from_file(&plist_path).ok())
+        .flatten()
+        .and_then(|val| val.into_dictionary())
+        .and_then(|dict| {
+            dict.get("ProgramArguments")
+                .and_then(plist::Value::as_array)
+                .and_then(|args| args.first().and_then(plist::Value::as_string))
+                .map(PathBuf::from)
+        });
+    let missing_program = program.clone().filter(|bin| !bin.exists());
+    let agent_loaded = plist_exists.then(|| is_agent_loaded(host, host.uid()));
+
+    let permission_failed = last_run_record.as_ref().is_some_and(|r| {
+        r.items
+            .iter()
+            .any(|i| i.outcome == OutcomeKind::Failed && is_permission_error(i.error.as_deref()))
+    });
+    let needs_full_disk_access =
+        permission_failed.then(|| program.unwrap_or_else(|| PathBuf::from(DEFAULT_PROGRAM)));
+
+    ScheduleStatus {
+        settings: ScheduleSettings::On {
+            every: sched.every,
+            categories: sched.categories.clone(),
+            min_reclaim: sched.min_reclaim,
+        },
+        last_run,
+        plist_missing: !plist_exists,
+        missing_program,
+        agent_loaded,
+        needs_full_disk_access,
+    }
+}
+
+/// Formats a time of the history or the config, or the text itself when it is not a date.
+pub fn format_run_time(at: &str) -> String {
+    parse_rfc3339(at).map_or_else(|| at.to_string(), format_system_time)
+}
+
+/// Writes the status as the text of `taert schedule show`.
+pub fn format_schedule_status(status: &ScheduleStatus) -> String {
+    let ScheduleSettings::On {
+        every,
+        categories,
+        min_reclaim,
+    } = &status.settings
+    else {
+        return match status.settings {
+            ScheduleSettings::Off { plist_exists: true } => {
+                "Scheduled cleanup is off (config disabled, but LaunchAgent plist exists).\n"
+            }
+            _ => "Scheduled cleanup is off.\n",
+        }
+        .to_string();
+    };
+
+    let threshold_str = format_reclaim_threshold(*min_reclaim);
+    let mut out = format!(
+        "Every {every}: {}, when at least {threshold_str} can be freed.\n",
+        categories.join(", ")
+    );
+
+    match &status.last_run {
+        LastRun::Skipped {
+            at,
+            found,
+            threshold,
+        } => out.push_str(&format!(
+            "Last run: skipped on {} ({} found, below {} threshold).\n",
+            format_run_time(at),
+            format_bytes(*found),
+            format_reclaim_threshold(*threshold)
+        )),
+        LastRun::Ran { at, freed } => out.push_str(&format!(
+            "Last run: {}, freed {}.\n",
+            format_run_time(at),
+            format_bytes(*freed)
+        )),
+        LastRun::Never => out.push_str("Last run: never.\n"),
+    }
+
+    if status.plist_missing {
+        out.push_str(&format!(
+            "\nWarning: The launch agent file is missing. A Homebrew upgrade can remove it. Load it again with:\n  taert schedule set --every {every} --categories {} --min-reclaim {min_reclaim}\n",
+            categories.join(",")
+        ));
+    } else {
+        if let Some(bin) = &status.missing_program {
+            out.push_str(&format!(
+                "\nWarning: Binary '{}' configured in LaunchAgent does not exist.\n",
+                bin.display()
+            ));
+        }
+        if status.agent_loaded == Some(false) {
+            out.push_str(
+                "\nWarning: Launch agent is not loaded in launchd. It may have been disabled in System Settings > General > Login Items & Extensions.\n"
+            );
+        }
+    }
+
+    if let Some(program) = &status.needs_full_disk_access {
+        out.push_str(&format!(
+            "\nScheduled cleanup failed to remove some files due to missing permissions.\nTo grant taert Full Disk Access:\n  1. Open System Settings > Privacy & Security > Full Disk Access\n  2. Add and enable: {}\n",
+            program.display()
+        ));
+    }
+
+    out
+}
+
 /// Formats the output for `taert schedule show`.
 pub fn show_schedule(
     host: &dyn Host,
@@ -377,138 +587,7 @@ pub fn show_schedule(
     config: &Config,
     history: &HistoryLog,
 ) -> String {
-    let mut out = String::new();
-
-    let plist_path = agent_plist_path(layout);
-    let uid = host.uid();
-
-    // 1. Current settings
-    let Some(sched) = &config.schedule else {
-        if !plist_path.exists() {
-            return "Scheduled cleanup is off.\n".to_string();
-        }
-        out.push_str("Scheduled cleanup is off (config disabled, but LaunchAgent plist exists).\n");
-        return out;
-    };
-
-    let categories_str = sched.categories.join(", ");
-    let threshold_str = format_reclaim_threshold(sched.min_reclaim);
-    out.push_str(&format!(
-        "Every {}: {}, when at least {} can be freed.\n",
-        sched.every, categories_str, threshold_str
-    ));
-
-    // 2. Last run details from history
-    let scheduled_runs: Vec<RunRecord> = history
-        .load_runs()
-        .unwrap_or_default()
-        .into_iter()
-        .rev()
-        .filter(|r| r.mode == "schedule")
-        .collect();
-
-    let last_run = scheduled_runs.first();
-    let newer_skip = sched.last_skip.as_ref().filter(|skip| {
-        let Some(run) = last_run else { return true };
-        match (parse_rfc3339(&run.at), parse_rfc3339(&skip.at)) {
-            (Some(run_at), Some(skip_at)) => skip_at > run_at,
-            (None, Some(_)) => true,
-            _ => false,
-        }
-    });
-    if let Some(skip) = newer_skip {
-        let date_str = if let Some(t) = parse_rfc3339(&skip.at) {
-            format_system_time(t)
-        } else {
-            skip.at.clone()
-        };
-        out.push_str(&format!(
-            "Last run: skipped on {} ({} found, below {} threshold).\n",
-            date_str,
-            format_bytes(skip.bytes),
-            threshold_str
-        ));
-    } else if let Some(run) = last_run {
-        let date_str = if let Some(t) = parse_rfc3339(&run.at) {
-            format_system_time(t)
-        } else {
-            run.at.clone()
-        };
-        let freed_bytes: u64 = run
-            .items
-            .iter()
-            .filter(|i| i.outcome == OutcomeKind::Removed || i.outcome == OutcomeKind::Trashed)
-            .map(|i| i.bytes)
-            .sum();
-        out.push_str(&format!(
-            "Last run: {}, freed {}.\n",
-            date_str,
-            format_bytes(freed_bytes)
-        ));
-    } else {
-        out.push_str("Last run: never.\n");
-    }
-
-    // 3. Inspect plist binary path
-    let plist_exists = plist_path.exists();
-    let plist_binary = if plist_exists {
-        plist::Value::from_file(&plist_path)
-            .ok()
-            .and_then(|val| val.into_dictionary())
-            .and_then(|dict| {
-                dict.get("ProgramArguments")
-                    .and_then(plist::Value::as_array)
-                    .and_then(|args| args.first().and_then(plist::Value::as_string))
-                    .map(PathBuf::from)
-            })
-    } else {
-        None
-    };
-
-    if !plist_exists {
-        out.push_str(&format!(
-            "\nWarning: The launch agent file is missing. A Homebrew upgrade can remove it. Load it again with:\n  taert schedule set --every {} --categories {} --min-reclaim {}\n",
-            sched.every,
-            sched.categories.join(","),
-            sched.min_reclaim
-        ));
-    } else {
-        if let Some(ref bin) = plist_binary
-            && !bin.exists()
-        {
-            out.push_str(&format!(
-                "\nWarning: Binary '{}' configured in LaunchAgent does not exist.\n",
-                bin.display()
-            ));
-        }
-
-        // 4. Check if agent is loaded
-        if !is_agent_loaded(host, uid) {
-            out.push_str(
-                "\nWarning: Launch agent is not loaded in launchd. It may have been disabled in System Settings > General > Login Items & Extensions.\n"
-            );
-        }
-    }
-
-    // 5. Check if Full Disk Access is needed
-    let fda_failed = last_run.is_some_and(|r| {
-        r.items
-            .iter()
-            .any(|i| i.outcome == OutcomeKind::Failed && is_permission_error(i.error.as_deref()))
-    });
-
-    if fda_failed {
-        let bin_display = plist_binary
-            .as_deref()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_else(|| "/opt/homebrew/bin/taert".into());
-        out.push_str(&format!(
-            "\nScheduled cleanup failed to remove some files due to missing permissions.\nTo grant taert Full Disk Access:\n  1. Open System Settings > Privacy & Security > Full Disk Access\n  2. Add and enable: {}\n",
-            bin_display
-        ));
-    }
-
-    out
+    format_schedule_status(&schedule_status(host, layout, config, history))
 }
 
 /// Unattended background cleanup execution (`taert schedule run`).
@@ -1333,5 +1412,320 @@ mod tests {
         assert!(!layout.history_path().exists());
         assert!(config.schedule.unwrap().last_skip.is_none());
         assert!(!layout.config_path().exists());
+    }
+
+    fn history_with_items(layout: &Layout, at: &str, items: &[(&str, u64, &str, Option<&str>)]) {
+        let mut lines = vec![format!(
+            r#"{{"event":"start","run":"r1","at":"{at}","command":"schedule run","mode":"schedule","version":"0"}}"#
+        )];
+        for (path, bytes, outcome, error) in items {
+            let error = error.map_or("null".to_string(), |e| format!("\"{e}\""));
+            lines.push(format!(
+                r#"{{"event":"item","run":"r1","path":"{path}","bytes":{bytes},"outcome":"{outcome}","error":{error}}}"#
+            ));
+        }
+        lines.push(format!(r#"{{"event":"end","run":"r1","at":"{at}"}}"#));
+        fs::create_dir_all(layout.history_path().parent().unwrap()).unwrap();
+        fs::write(layout.history_path(), lines.join("\n") + "\n").unwrap();
+    }
+
+    fn loaded_plist(layout: &Layout, bin: &Path) -> FakeHost {
+        let plist_file = agent_plist_path(layout);
+        fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
+        fs::write(
+            &plist_file,
+            generate_plist(bin, ScheduleFrequency::Week).unwrap(),
+        )
+        .unwrap();
+        let host = FakeHost::default();
+        let uid = unsafe { libc::getuid() };
+        host.set_uid(uid);
+        host.reply(
+            &format!("/bin/launchctl print gui/{uid}/{SCHEDULE_LABEL}"),
+            "state = waiting",
+        );
+        host
+    }
+
+    fn status_of(host: &FakeHost, layout: &Layout, config: &Config) -> ScheduleStatus {
+        let history = HistoryLog::new(layout.history_path());
+        schedule_status(host, layout, config, &history)
+    }
+
+    #[test]
+    fn status_before_any_run_is_never() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert_eq!(
+            status.settings,
+            ScheduleSettings::On {
+                every: ScheduleFrequency::Week,
+                categories: vec!["dev".into(), "junk".into()],
+                min_reclaim: 1_000_000_000,
+            }
+        );
+        assert_eq!(status.last_run, LastRun::Never);
+        assert!(!status.plist_missing);
+        assert_eq!(status.missing_program, None);
+        assert_eq!(status.agent_loaded, Some(true));
+        assert_eq!(status.needs_full_disk_access, None);
+    }
+
+    #[test]
+    fn status_adds_up_what_the_last_run_freed() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_items(
+            &layout,
+            "2026-01-01T00:00:00Z",
+            &[
+                ("/a", 1000, "removed", None),
+                ("/b", 500, "trashed", None),
+                ("/c", 70, "failed", Some("busy")),
+            ],
+        );
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert_eq!(
+            status.last_run,
+            LastRun::Ran {
+                at: "2026-01-01T00:00:00Z".into(),
+                freed: 1500
+            }
+        );
+    }
+
+    #[test]
+    fn status_reports_a_skip_newer_than_the_last_run() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_a_run_at(&layout, "2026-01-01T00:00:00Z");
+        let mut config = week_config();
+        config.schedule.as_mut().unwrap().last_skip = Some(ScheduleSkip {
+            at: "2026-02-01T00:00:00Z".into(),
+            bytes: 2048,
+        });
+
+        let status = status_of(&host, &layout, &config);
+
+        assert_eq!(
+            status.last_run,
+            LastRun::Skipped {
+                at: "2026-02-01T00:00:00Z".into(),
+                found: 2048,
+                threshold: 1_000_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn status_keeps_a_run_newer_than_the_skip() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_a_run_at(&layout, "2026-03-01T00:00:00Z");
+        let mut config = week_config();
+        config.schedule.as_mut().unwrap().last_skip = Some(ScheduleSkip {
+            at: "2026-02-01T00:00:00Z".into(),
+            bytes: 2048,
+        });
+
+        let status = status_of(&host, &layout, &config);
+
+        assert!(matches!(status.last_run, LastRun::Ran { .. }));
+    }
+
+    #[test]
+    fn status_with_no_plist_does_not_ask_launchd() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert!(status.plist_missing);
+        assert_eq!(status.agent_loaded, None);
+        assert_eq!(status.missing_program, None);
+        assert!(!host.ran("/bin/launchctl"));
+    }
+
+    #[test]
+    fn status_says_launchd_has_not_loaded_the_agent() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        loaded_plist(&layout, &bin);
+        let host = FakeHost::default();
+        host.fail("/bin/launchctl print", "Could not find service");
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert!(!status.plist_missing);
+        assert_eq!(status.agent_loaded, Some(false));
+    }
+
+    #[test]
+    fn status_names_a_program_that_is_missing() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("gone");
+        let host = loaded_plist(&layout, &bin);
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert_eq!(status.missing_program, Some(bin));
+    }
+
+    #[test]
+    fn status_names_the_program_that_needs_full_disk_access() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_items(
+            &layout,
+            "2026-01-01T00:00:00Z",
+            &[(
+                "/a",
+                10,
+                "failed",
+                Some("Operation not permitted (os error 1)"),
+            )],
+        );
+
+        let status = status_of(&host, &layout, &week_config());
+
+        assert_eq!(status.needs_full_disk_access, Some(bin));
+    }
+
+    #[test]
+    fn status_of_an_off_schedule_says_whether_a_plist_is_left() {
+        let (temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let off = status_of(&host, &layout, &Config::default());
+        assert_eq!(
+            off.settings,
+            ScheduleSettings::Off {
+                plist_exists: false
+            }
+        );
+
+        let bin = temp.path().join("taert");
+        loaded_plist(&layout, &bin);
+        let left = status_of(&host, &layout, &Config::default());
+        assert_eq!(left.settings, ScheduleSettings::Off { plist_exists: true });
+    }
+
+    #[test]
+    fn the_text_of_an_off_schedule_is_unchanged() {
+        let (temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let status = status_of(&host, &layout, &Config::default());
+        assert_eq!(
+            format_schedule_status(&status),
+            "Scheduled cleanup is off.\n"
+        );
+
+        loaded_plist(&layout, &temp.path().join("taert"));
+        let status = status_of(&host, &layout, &Config::default());
+        assert_eq!(
+            format_schedule_status(&status),
+            "Scheduled cleanup is off (config disabled, but LaunchAgent plist exists).\n"
+        );
+    }
+
+    #[test]
+    fn the_text_of_a_run_that_freed_bytes_is_unchanged() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_items(
+            &layout,
+            "2026-01-01T00:00:00Z",
+            &[("/a", 1_500_000, "removed", None)],
+        );
+
+        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+
+        assert!(
+            text.starts_with("Every week: dev, junk, when at least 1 GB can be freed.\nLast run: "),
+            "{text}"
+        );
+        assert!(text.ends_with(", freed 1.5 MB.\n"), "{text}");
+    }
+
+    #[test]
+    fn the_text_of_a_run_that_never_happened_is_unchanged() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+
+        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+
+        assert_eq!(
+            text,
+            "Every week: dev, junk, when at least 1 GB can be freed.\nLast run: never.\n"
+        );
+    }
+
+    #[test]
+    fn the_text_of_a_skip_is_unchanged() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        let mut config = week_config();
+        config.schedule.as_mut().unwrap().last_skip = Some(ScheduleSkip {
+            at: "2026-02-01T00:00:00Z".into(),
+            bytes: 2048,
+        });
+
+        let text = format_schedule_status(&status_of(&host, &layout, &config));
+
+        let line = format!(
+            "Last run: skipped on {} (2.0 KB found, below 1 GB threshold).\n",
+            format_run_time("2026-02-01T00:00:00Z")
+        );
+        assert_eq!(
+            text,
+            format!("Every week: dev, junk, when at least 1 GB can be freed.\n{line}")
+        );
+    }
+
+    #[test]
+    fn the_text_of_a_permission_failure_names_the_program_of_the_plist() {
+        let (temp, layout) = sandbox();
+        let bin = temp.path().join("taert");
+        fs::write(&bin, b"bin").unwrap();
+        let host = loaded_plist(&layout, &bin);
+        history_with_items(
+            &layout,
+            "2026-01-01T00:00:00Z",
+            &[(
+                "/a",
+                10,
+                "failed",
+                Some("Operation not permitted (os error 1)"),
+            )],
+        );
+
+        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+
+        let block = format!(
+            "\nScheduled cleanup failed to remove some files due to missing permissions.\nTo grant taert Full Disk Access:\n  1. Open System Settings > Privacy & Security > Full Disk Access\n  2. Add and enable: {}\n",
+            bin.display()
+        );
+        assert!(text.ends_with(&block), "{text}");
     }
 }

@@ -14,6 +14,10 @@ use crate::ui::theme::Theme;
 
 pub const SIZE_W: usize = 9;
 const BAR_MIN_ROW_WIDTH: usize = 100;
+/// The selection bar and its space.
+const BAR_WIDTH: usize = 2;
+/// The blank cell of a row with no leading cell.
+const NO_LEADING_WIDTH: usize = 3;
 const BAR_MIN_WIDTH: usize = 8;
 
 // The bar takes most of the extra width and so leads the eye from the name to the size.
@@ -128,6 +132,11 @@ impl<'a> ListRow<'a> {
         self
     }
 
+    /// Columns left for the title of a row with no detail, meta, bar or columns.
+    pub fn plain_title_room(width: usize) -> usize {
+        width.saturating_sub(BAR_WIDTH + NO_LEADING_WIDTH + 1)
+    }
+
     pub fn render_line(&self, width: usize, theme: &Theme) -> Line<'static> {
         let mut spans = Vec::new();
 
@@ -193,8 +202,11 @@ impl<'a> ListRow<'a> {
         let right_total =
             chevron_width + detail_width + bar_total_width + meta_width + columns_width;
 
-        let leading_width = self.leading.as_ref().map_or(3, |l| l.content.width() + 1);
-        let left_fixed = 2 + leading_width;
+        let leading_width = self
+            .leading
+            .as_ref()
+            .map_or(NO_LEADING_WIDTH, |l| l.content.width() + 1);
+        let left_fixed = BAR_WIDTH + leading_width;
         let avail_for_title = width.saturating_sub(left_fixed + right_total + 1);
 
         // 3. Title spans with truncation if needed
