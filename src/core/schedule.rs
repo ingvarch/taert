@@ -357,7 +357,7 @@ pub fn remove_schedule(
     Ok(())
 }
 
-fn format_reclaim_threshold(bytes: u64) -> String {
+pub fn format_reclaim_threshold(bytes: u64) -> String {
     let s = format_bytes(bytes);
     s.replace(".0 ", " ")
 }

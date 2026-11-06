@@ -63,7 +63,7 @@ pub enum Screen {
     SystemStatus(Box<SystemStatusState>),
     Startup(StartupScreenState),
     Doctor(DoctorScreenState),
-    Settings(SettingsState),
+    Settings(Box<SettingsState>),
 }
 
 pub enum ScanMessage {
@@ -1333,8 +1333,13 @@ impl App {
                     }
                     (SettingsFocus::Rows, KeyCode::Enter | KeyCode::Char(' ')) => {
                         match state.current_row() {
-                            SettingsRow::AgeThreshold | SettingsRow::Run => state.open_picker(),
+                            SettingsRow::AgeThreshold
+                            | SettingsRow::Run
+                            | SettingsRow::MinReclaim => state.open_picker(),
                             SettingsRow::Add => state.start_adding(),
+                            SettingsRow::Category(_) => {
+                                state.toggle_category(&mut self.config, &self.layout);
+                            }
                             SettingsRow::Item(_) => {}
                         }
                     }
@@ -1878,11 +1883,11 @@ impl App {
                 self.open(Screen::SystemStatus(Box::default()));
             }
             MainMenuChoice::Settings => {
-                self.open(Screen::Settings(SettingsState::new(
+                self.open(Screen::Settings(Box::new(SettingsState::new(
                     &self.config,
                     &self.ignore,
                     &self.layout,
-                )));
+                ))));
             }
         }
     }
@@ -2875,6 +2880,39 @@ mod tests {
             .collect()
     }
 
+    /// The foreground color of the first cell of `text` on screen.
+    fn fg_of(app: &App, text: &str) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| app.render_screen(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..32u16).find_map(|y| {
+            let row: String = (0..120u16).map(|x| buffer[(x, y)].symbol()).collect();
+            let column = row.find(text).map(|at| row[..at].chars().count() as u16)?;
+            buffer[(column, y)].fg.into()
+        })
+    }
+
+    #[test]
+    fn the_schedule_rows_are_dimmed_while_run_is_off() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let footnote = app_theme_fg(|t| t.footnote());
+        let body = app_theme_fg(|t| t.body());
+        assert_ne!(footnote, body);
+
+        let (_temp, _layout, off) = schedule_app(&host, None);
+        let (_temp2, _layout2, on) = schedule_app(&host, Some(ScheduleFrequency::Week));
+        for title in ["Developer caches", "Only when it frees at least"] {
+            assert_eq!(fg_of(&off, title), footnote, "{title} off");
+            assert_eq!(fg_of(&on, title), body, "{title} on");
+        }
+    }
+
+    fn app_theme_fg(
+        style: impl Fn(&Theme) -> ratatui::style::Style,
+    ) -> Option<ratatui::style::Color> {
+        style(&new_app().theme).fg
+    }
+
     fn settings(app: &App) -> &SettingsState {
         let Screen::Settings(state) = &app.screen else {
             panic!("expected the settings screen");
@@ -3171,14 +3209,23 @@ mod tests {
         host: &Arc<crate::core::host::fake::FakeHost>,
         schedule: Option<ScheduleFrequency>,
     ) -> (tempfile::TempDir, Layout, App) {
+        schedule_app_with(host, schedule, &["dev"], 1_000_000_000)
+    }
+
+    fn schedule_app_with(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+        schedule: Option<ScheduleFrequency>,
+        categories: &[&str],
+        min_reclaim: u64,
+    ) -> (tempfile::TempDir, Layout, App) {
         let (temp, layout) = crate::core::apps::testing::sandbox();
         let mut app = new_app();
         app.layout = layout.clone();
         app.host = host.clone();
         app.config.schedule = schedule.map(|every| ScheduleConfig {
             every,
-            categories: vec!["dev".into()],
-            min_reclaim: 1_000_000_000,
+            categories: categories.iter().map(|c| c.to_string()).collect(),
+            min_reclaim,
             last_skip: None,
         });
         press(
@@ -3195,6 +3242,203 @@ mod tests {
             .iter()
             .filter(|c| c.starts_with("/bin/launchctl bootstrap"))
             .count()
+    }
+
+    fn weekly_dev_junk_app() -> (
+        Arc<crate::core::host::fake::FakeHost>,
+        tempfile::TempDir,
+        Layout,
+        App,
+    ) {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (temp, layout, app) = schedule_app_with(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev", "junk"],
+            1_000_000_000,
+        );
+        (host, temp, layout, app)
+    }
+
+    fn saved_schedule(layout: &Layout) -> ScheduleConfig {
+        Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap()
+    }
+
+    #[test]
+    fn space_on_a_category_saves_it_without_launchctl() {
+        let (host, _temp, layout, mut app) = weekly_dev_junk_app();
+        let calls = host.calls.lock().unwrap().len();
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Char(' '),
+            ],
+        );
+
+        assert_eq!(saved_schedule(&layout).categories, ["dev", "junk", "ai"]);
+        assert_eq!(
+            app.config.schedule.clone().unwrap().categories,
+            ["dev", "junk", "ai"]
+        );
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Category(2));
+    }
+
+    #[test]
+    fn enter_unchecks_a_category_and_keeps_the_rest_of_the_schedule() {
+        let (_host, _temp, layout, mut app) = weekly_dev_junk_app();
+        app.config.schedule.as_mut().unwrap().last_skip = Some(crate::core::stores::ScheduleSkip {
+            at: "2026-11-01".into(),
+            bytes: 5,
+        });
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        let saved = saved_schedule(&layout);
+        assert_eq!(saved.categories, ["junk"]);
+        assert_eq!(saved.every, ScheduleFrequency::Week);
+        assert_eq!(saved.min_reclaim, 1_000_000_000);
+        assert!(saved.last_skip.is_some());
+    }
+
+    #[test]
+    fn the_last_checked_category_stays_checked() {
+        let (_host, _temp, layout, mut app) = weekly_dev_junk_app();
+        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+        std::fs::remove_file(layout.config_path()).unwrap();
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Choose at least one category"), "{text}");
+        assert!(!layout.config_path().exists());
+        assert_eq!(app.config.schedule.clone().unwrap().categories, ["junk"]);
+    }
+
+    #[test]
+    fn picking_a_minimum_saves_it_without_launchctl() {
+        let (host, _temp, layout, mut app) = weekly_dev_junk_app();
+        let calls = host.calls.lock().unwrap().len();
+        press(&mut app, &[KeyCode::Down; 5]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::MinReclaim);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(
+            picker_choices(&app),
+            ["100 MB", "500 MB", "1 GB", "2 GB", "5 GB", "10 GB"]
+        );
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        assert_eq!(saved_schedule(&layout).min_reclaim, 5_000_000_000);
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+        assert!(screen_text(&app).contains("5 GB ⌄"));
+    }
+
+    #[test]
+    fn a_saved_minimum_outside_the_list_is_added_in_order_and_marked() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, mut app) = schedule_app_with(
+            &host,
+            Some(ScheduleFrequency::Week),
+            &["dev", "junk"],
+            3_000_000_000,
+        );
+        press(&mut app, &[KeyCode::Down; 5]);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(
+            picker_choices(&app),
+            ["100 MB", "500 MB", "1 GB", "2 GB", "3 GB", "5 GB", "10 GB"]
+        );
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(4));
+    }
+
+    #[test]
+    fn with_run_off_the_highlight_stays_on_run_and_the_rows_show_the_defaults() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, mut app) = schedule_app(&host, None);
+
+        app.handle_key(KeyCode::Down);
+
+        assert_eq!(settings(&app).current_row(), SettingsRow::Run);
+        let text = screen_text(&app);
+        assert!(
+            text.contains("Turn on Run to choose what it cleans."),
+            "{text}"
+        );
+        assert!(text.contains("1 GB ⌄"), "{text}");
+        let g = app.theme.g;
+        let rows = screen_rows(&app, 100, 30);
+        for (title, mark) in [
+            ("Developer caches", g.check_on),
+            ("User junk", g.check_on),
+            ("AI tools", g.check_off),
+            ("Trash", g.check_off),
+        ] {
+            let row = rows.iter().find(|row| row.contains(title));
+            let row = row.unwrap_or_else(|| panic!("{title}: {rows:?}"));
+            assert!(row.contains(&format!("{mark} {title}")), "{row}");
+        }
+    }
+
+    #[test]
+    fn turning_run_on_uses_the_rows_that_are_shown() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout, mut app) = schedule_app(&host, None);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+
+        let saved = saved_schedule(&layout);
+        assert_eq!(saved.categories, ["dev", "junk"]);
+        assert_eq!(saved.min_reclaim, 1_000_000_000);
+        let text = screen_text(&app);
+        assert!(!text.contains("Turn on Run"), "{text}");
+    }
+
+    #[test]
+    fn turning_run_on_after_off_shows_the_defaults_again() {
+        let (_host, _temp, layout, mut app) = weekly_dev_junk_app();
+        host_reply_ok(&_host);
+        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+        app.handle_key(KeyCode::Up);
+
+        press(
+            &mut app,
+            &[KeyCode::Enter, KeyCode::Up, KeyCode::Up, KeyCode::Enter],
+        );
+        assert!(app.config.schedule.is_none());
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(saved_schedule(&layout).categories, ["dev", "junk"]);
+    }
+
+    fn host_reply_ok(host: &crate::core::host::fake::FakeHost) {
+        host.reply("/bin/launchctl", "");
+    }
+
+    #[test]
+    fn the_schedule_rows_use_the_names_of_the_clean_caches_menu() {
+        let (_host, _temp, _layout, app) = weekly_dev_junk_app();
+        let text = screen_text(&app);
+        let menu = WorkspaceState::new();
+        for sub in [
+            CleanSubcategory::Developer,
+            CleanSubcategory::UserJunk,
+            CleanSubcategory::AiTools,
+            CleanSubcategory::Trash,
+        ] {
+            let (_, title, _) = menu.clean_options.iter().find(|o| o.0 == sub).unwrap();
+            assert!(text.contains(title), "{title}: {text}");
+        }
     }
 
     #[test]
@@ -9080,8 +9324,11 @@ mod tests {
             let mut app = new_app();
             app.layout = layout;
             app.ignore.roots.push("/nowhere/protected".to_string());
-            app.screen =
-                Screen::Settings(SettingsState::new(&app.config, &app.ignore, &app.layout));
+            app.screen = Screen::Settings(Box::new(SettingsState::new(
+                &app.config,
+                &app.ignore,
+                &app.layout,
+            )));
             press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
             (temp, app)
         }
