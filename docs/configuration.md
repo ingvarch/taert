@@ -4,11 +4,11 @@ Settings, persistent ignore lists, and environment overrides. For command usage,
 
 ## Configuration Files
 
-taert stores user settings in standard macOS configuration directories:
+taert keeps its files in these places:
 
 - **Settings**: `~/Library/Application Support/taert/config.toml`
-- **Protected Paths (Ignore List)**: `~/.config/taert/ignore.json`
-- **Project Folder Roots**: `~/.config/taert/project_folders.json`
+- **Protected Paths (Ignore List)**: `~/Library/Application Support/taert/ignore.toml`
+- **Project Folder Roots**: `~/Library/Application Support/taert/projects`
 - **History Log**: `~/.config/taert/history.jsonl` (mode `0600`)
 - **Switched-off Login Items**: `~/.config/taert/disabled_login_items.json`
 - **LaunchAgent Plist**: `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`
@@ -20,11 +20,12 @@ The file is TOML. A `config.json` file is ignored.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `older_than_days` | integer | `30` | Minimum age in days for project build artifacts to be targeted by default |
-| `project_folders` | array | `["~/Projects", "~/Development", "~/Repos", "~/Code"]` | Root folders scanned for project repositories |
-| `extra_artifacts` | array | `[]` | Custom directory or file patterns treated as disposable build artifacts |
+| `older_than_days` | integer | `7` | Project cleanup selects build artifacts at least this many days old |
+| `extra_artifacts` | array | `[]` | Folder names that Project cleanup also lists. A folder matches only when its name is exactly one of them; they are not patterns |
 | `appearance` | string | `"auto"` | Terminal theme mode: `"auto"`, `"dark"`, or `"light"` |
 | `schedule` | object | `null` | Automatic background cleanup configuration: `every`, `categories`, and `min_reclaim` |
+
+The folders that Project cleanup scans are not in `config.toml`. They are in the `projects` file, one folder per line. When the file is missing or empty, taert scans `~/Projects`, `~/Code`, `~/dev`, `~/GitHub`, `~/Workspace`, and `~/Repos`.
 
 Modify settings via the CLI:
 
@@ -34,10 +35,9 @@ taert config
 
 # Change appearance mode
 taert config --appearance dark
-
-# Set project artifact age threshold to 14 days
-taert config --older-than 14
 ```
+
+`taert config` changes only the appearance. To change the age threshold for one run, pass `--older-than` to `taert purge`.
 
 Or adjust them interactively via the **Preferences** screen in the TUI workspace.
 
