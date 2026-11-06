@@ -28,7 +28,11 @@ impl Default for Theme {
 
 impl Theme {
     pub fn new() -> Self {
-        Self::with_env(UiEnv::detect(&Config::default()))
+        Self::from_config(&Config::default())
+    }
+
+    pub fn from_config(config: &Config) -> Self {
+        Self::with_env(UiEnv::detect(config))
     }
 
     pub fn with_env(env: UiEnv) -> Self {
