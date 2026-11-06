@@ -1,4 +1,4 @@
-//! A dialog that picks one value from a short list.
+//! A dialog that picks one value, or checks several, from a short list.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,6 +25,8 @@ pub struct PickerState {
     pub choices: Vec<String>,
     pub current: Option<usize>,
     pub highlighted: usize,
+    /// The checkboxes of a picker that checks several choices.
+    checked: Option<Vec<bool>>,
 }
 
 impl PickerState {
@@ -34,7 +36,42 @@ impl PickerState {
             choices,
             current,
             highlighted: current.unwrap_or(0),
+            checked: None,
         }
+    }
+
+    pub fn multi(title: String, choices: Vec<String>, checked: Vec<bool>) -> Self {
+        debug_assert_eq!(checked.len(), choices.len());
+        let highlighted = checked.iter().position(|&on| on).unwrap_or(0);
+        Self {
+            title,
+            choices,
+            current: None,
+            highlighted,
+            checked: Some(checked),
+        }
+    }
+
+    fn is_multi(&self) -> bool {
+        self.checked.is_some()
+    }
+
+    pub fn checked(&self) -> &[bool] {
+        self.checked.as_deref().unwrap_or(&[])
+    }
+
+    /// Flips the highlighted choice. Returns `false` when it is the last
+    /// checked one, which stays checked.
+    pub fn toggle(&mut self) -> bool {
+        let Some(checked) = self.checked.as_mut() else {
+            return false;
+        };
+        let on = checked[self.highlighted];
+        if on && checked.iter().filter(|&&c| c).count() == 1 {
+            return false;
+        }
+        checked[self.highlighted] = !on;
+        true
     }
 
     pub fn next(&mut self) {
@@ -60,12 +97,20 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
     }
     dim_backdrop(frame.buffer_mut(), area);
 
-    let hints = vec![
+    let mut hints = Vec::new();
+    let enter_label = if state.is_multi() {
+        hints.push(Span::styled(theme.g.key_space, theme.callout()));
+        hints.push(Span::styled(" Check   ", theme.footnote()));
+        " Done   "
+    } else {
+        " Choose   "
+    };
+    hints.extend([
         Span::styled(theme.g.key_enter, theme.callout()),
-        Span::styled(" Choose   ", theme.footnote()),
+        Span::styled(enter_label, theme.footnote()),
         Span::styled(theme.g.key_esc, theme.callout()),
         Span::styled(" Cancel", theme.footnote()),
-    ];
+    ]);
     let hints_w: usize = hints.iter().map(|s| s.content.width()).sum();
 
     let longest = state.choices.iter().map(|c| c.width()).max().unwrap_or(0);
@@ -108,7 +153,13 @@ pub fn render_picker(frame: &mut Frame, area: Rect, state: &PickerState, theme: 
         Line::from(""),
     ];
     for (i, choice) in state.choices.iter().enumerate().skip(offset).take(visible) {
-        let leading = if state.current == Some(i) {
+        let leading = if let Some(&on) = state.checked().get(i) {
+            if on {
+                Span::styled(theme.g.check_on, theme.accent_text())
+            } else {
+                Span::styled(theme.g.check_off, theme.footnote())
+            }
+        } else if state.current == Some(i) {
             Span::styled(theme.g.success, theme.success())
         } else {
             Span::raw(" ")
@@ -172,6 +223,41 @@ mod tests {
     fn it_highlights_the_current_choice_or_the_first() {
         assert_eq!(picker(Some(2)).highlighted, 2);
         assert_eq!(picker(None).highlighted, 0);
+    }
+
+    fn weekdays(checked: [bool; 3]) -> PickerState {
+        let choices = ["a", "b", "c"].map(String::from).to_vec();
+        PickerState::multi("Days".into(), choices, checked.to_vec())
+    }
+
+    #[test]
+    fn a_multi_picker_highlights_the_first_checked_choice() {
+        assert_eq!(weekdays([false, true, true]).highlighted, 1);
+        assert_eq!(weekdays([false, false, false]).highlighted, 0);
+    }
+
+    #[test]
+    fn toggle_checks_and_unchecks_the_highlighted_choice() {
+        let mut state = weekdays([true, false, false]);
+        state.next();
+        assert!(state.toggle());
+        assert_eq!(state.checked(), [true, true, false]);
+        assert!(state.toggle());
+        assert_eq!(state.checked(), [true, false, false]);
+    }
+
+    #[test]
+    fn toggle_refuses_to_uncheck_the_last_checked_choice() {
+        let mut state = weekdays([false, true, false]);
+        assert!(!state.toggle());
+        assert_eq!(state.checked(), [false, true, false]);
+    }
+
+    #[test]
+    fn a_single_picker_has_no_checked_flags() {
+        let mut state = picker(Some(1));
+        assert!(state.checked().is_empty());
+        assert!(!state.toggle());
     }
 
     #[test]

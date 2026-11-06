@@ -178,6 +178,29 @@ fn snapshot_component_picker() {
 }
 
 #[test]
+fn snapshot_component_picker_multi() {
+    for (name, theme) in [("dark", dark_theme()), ("nocolor", nocolor_theme())] {
+        let state = PickerState::multi(
+            "Days".into(),
+            [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ]
+            .map(String::from)
+            .to_vec(),
+            vec![false, true, false, false, true, false, false],
+        );
+        let output = render_to_string(50, 16, |f| render_picker(f, f.area(), &state, &theme));
+        assert_snapshot!(format!("picker_multi_{name}"), output);
+    }
+}
+
+#[test]
 fn snapshot_component_picker_scrolled() {
     let choices = (1..=9).map(|n| format!("Choice {n}")).collect();
     let mut state = PickerState::new("Older than".into(), choices, Some(0));

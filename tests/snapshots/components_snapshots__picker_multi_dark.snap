@@ -1,0 +1,18 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+         ╭─────────────────────────────╮
+         │ Days                        │
+         │                             │
+         │   ○ Monday                  │
+         │ ▌ ● Tuesday                 │
+         │   ○ Wednesday               │
+         │   ○ Thursday                │
+         │   ● Friday                  │
+         │   ○ Saturday                │
+         │   ○ Sunday                  │
+         │                             │
+         │ ␣ Check   ↵ Done   ⎋ Cancel │
+         ╰─────────────────────────────╯
