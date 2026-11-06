@@ -120,9 +120,9 @@ taert/
 │       ├── folder_preview.rs   # Contents of the folder highlighted in Explore, measured in the background
 │       ├── palette.rs          # Semantic color palette resolver for dark, light, and no-color
 │       ├── path_list_editor.rs # Path list manager for protected paths and project folders
-│       ├── preferences.rs      # Settings and age threshold configuration screen
 │       ├── progress.rs         # Scanning progress screen with live progress bars
 │       ├── select.rs           # Item selection screen with search filtering and modals
+│       ├── settings.rs         # Settings screen: sections, rows, and the pickers that change them
 │       ├── system_status.rs    # Live system overview with panels and history graphs
 │       ├── theme.rs            # Design tokens, typography styles, and symbols
 │       ├── workspace.rs        # Workspace home screen with clean submenus and actions
@@ -151,7 +151,7 @@ taert/
 │   └── build-universal.sh      # Universal binary build script
 ├── docs/                       # Guides and technical documentation
 │   ├── architecture.md         # Safety engine, APFS accounting, and smart cache
-│   ├── configuration.md        # Preferences, environment flags, and ignore list
+│   ├── configuration.md        # Settings, environment flags, and ignore list
 │   ├── development.md          # This guide
 │   ├── releasing.md            # Release workflow and its secrets
 │   └── usage.md                # Interactive workspace, CLI commands, keybindings

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
-use super::components::chrome::AppChrome;
+use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH, split_panes};
 use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::ListRow;
@@ -28,10 +28,6 @@ use crate::core::cache::{FolderSnapshot, StorageCache};
 use crate::core::profiler::SystemProfiler;
 use crate::core::safety::Safety;
 use crate::core::sysinfo::SysInfo;
-
-const SPLIT_MIN_WIDTH: u16 = 100;
-const SIDEBAR_WIDTH: u16 = 34;
-const PANE_GAP: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainMenuChoice {
@@ -47,7 +43,7 @@ pub enum MainMenuChoice {
     ExploreStorage, // 0
     LargeFiles,     // no number key
     SystemStatus,
-    Preferences,
+    Settings,
     ProtectedPaths,
 }
 
@@ -199,10 +195,10 @@ impl WorkspaceState {
                     "Live macOS hardware, memory pressure, and APFS\nstorage telemetry with visual breakdown.",
                 ),
                 (
-                    MainMenuChoice::Preferences,
-                    "Preferences",
-                    "Change cleanup age, project folders, and protection",
-                    "Configure artifact age threshold presets and shortcuts\nto project folders and protected paths.",
+                    MainMenuChoice::Settings,
+                    "Settings",
+                    "Project folders, the schedule, and protected paths",
+                    "Choose the folders Project cleanup scans, when scheduled\ncleanup runs, and which paths taert never touches.",
                 ),
                 (
                     MainMenuChoice::ProtectedPaths,
@@ -426,7 +422,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::LargeFiles => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
-        MainMenuChoice::Preferences => theme.g.icon_prefs,
+        MainMenuChoice::Settings => theme.g.icon_prefs,
         MainMenuChoice::ProtectedPaths => theme.g.icon_protected,
     }
 }
@@ -587,16 +583,9 @@ fn render_desc_line(desc: &str, width: usize, theme: &Theme) -> Line<'static> {
 }
 
 fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(SIDEBAR_WIDTH),
-            Constraint::Length(PANE_GAP),
-            Constraint::Min(40),
-        ])
-        .split(area);
+    let (sidebar_area, pane) = split_panes(area);
 
-    let width = chunks[0].width as usize;
+    let width = sidebar_area.width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
     let mut sidebar = MenuLines::new();
     let mut detail_color = theme.p.accent;
@@ -610,8 +599,8 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
             .collect();
         sidebar.frame(title, rows, width, theme, state.selected_index);
     }
-    let sidebar = sidebar.window(chunks[0].height as usize, theme);
-    frame.render_widget(Paragraph::new(sidebar), chunks[0]);
+    let sidebar = sidebar.window(sidebar_area.height as usize, theme);
+    frame.render_widget(Paragraph::new(sidebar), sidebar_area);
 
     let (choice, title, _, long_desc) = &state.items[state.selected_index];
 
@@ -625,7 +614,6 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
         theme.headline(),
     )));
 
-    let pane = chunks[2];
     let pane_w = pane.width as usize;
     let heading = format!("{}  {title}", menu_icon(*choice, theme));
     let mut lines = card(&heading, Vec::new(), about, pane_w, 0, detail_color, theme);
@@ -687,7 +675,7 @@ fn detail_data(
         MainMenuChoice::DockerCleanup
         | MainMenuChoice::Doctor
         | MainMenuChoice::StartupItems
-        | MainMenuChoice::Preferences
+        | MainMenuChoice::Settings
         | MainMenuChoice::ProtectedPaths => Vec::new(),
     }
 }

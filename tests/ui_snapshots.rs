@@ -33,9 +33,9 @@ use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::doctor::{DoctorScreenState, render_doctor};
 use taert::ui::env::UiEnv;
 use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
-use taert::ui::preferences::{PreferencesState, render_preferences};
 use taert::ui::progress::{ProgressState, render_progress};
 use taert::ui::select::{ModalOverlay, SelectState, render_select};
+use taert::ui::settings::{SettingsState, render_settings};
 use taert::ui::startup::{StartupScreenState, render_startup};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
 use taert::ui::theme::Theme;
@@ -643,14 +643,14 @@ fn snapshot_homebrew_loading_card_while_measuring() {
 }
 
 #[test]
-fn snapshot_preferences() {
+fn snapshot_settings() {
     let theme = snapshot_theme();
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore, &no_layout());
+    let state = SettingsState::new(&config, &ignore, &no_layout());
     for &(w, h, label) in SIZES {
-        let output = render_to_string(w, h, |f| render_preferences(f, &state, &theme));
-        assert_snapshot!(format!("preferences_{label}"), output);
+        let output = render_to_string(w, h, |f| render_settings(f, &state, &theme));
+        assert_snapshot!(format!("settings_{label}"), output);
     }
 }
 
@@ -736,14 +736,27 @@ fn the_home_menu_starts_at_the_left_edge_of_a_wide_window() {
 }
 
 #[test]
-fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
+fn settings_fill_a_wide_window_like_the_main_menu() {
     let theme = snapshot_theme();
     let (w, h) = WIDE_WINDOW;
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore, &no_layout());
+    let state = SettingsState::new(&config, &ignore, &no_layout());
 
-    let output = render_to_string(w, h, |f| render_preferences(f, &state, &theme));
+    let output = render_to_string(w, h, |f| render_settings(f, &state, &theme));
+
+    assert!(right_edge(&output) > 190, "{output}");
+    assert!(left_edge(&output) < 10, "{output}");
+}
+
+#[test]
+fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
+    let theme = snapshot_theme();
+    let (w, h) = WIDE_WINDOW;
+    let ignore = IgnoreStore::default();
+    let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
+
+    let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));
 
     assert!(right_edge(&output) <= 113, "{output}");
     assert!(left_edge(&output) < 10, "{output}");
@@ -774,7 +787,7 @@ const _COMPRESS: usize = 8;
 const EXPLORE_STORAGE: usize = 9;
 const _LARGE_FILES: usize = 10;
 const SYSTEM_STATUS: usize = 11;
-const PREFERENCES: usize = 12;
+const SETTINGS: usize = 12;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -828,7 +841,7 @@ fn the_explore_row_lists_the_largest_items_once_home_is_measured() {
 
 #[test]
 fn other_rows_keep_only_their_description() {
-    let output = home_screen(&home_state(PREFERENCES), 120, 32);
+    let output = home_screen(&home_state(SETTINGS), 120, 32);
 
     assert!(!output.contains("Storage"), "{output}");
     assert!(!output.contains("CPU"), "{output}");
@@ -2343,16 +2356,16 @@ fn the_sorted_column_of_explore_carries_an_arrow() {
 }
 
 #[test]
-fn preferences_sit_in_frames() {
+fn settings_sit_in_frames() {
     let theme = snapshot_theme();
     let config = Config::default();
     let ignore = IgnoreStore::default();
-    let state = PreferencesState::new(&config, &ignore, &no_layout());
+    let state = SettingsState::new(&config, &ignore, &no_layout());
 
-    let output = render_to_string(120, 32, |f| render_preferences(f, &state, &theme));
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
-    assert!(output.contains("╭─ Cleanup"), "{output}");
-    assert!(output.contains("╭─ Locations"), "{output}");
+    assert!(output.contains("╭─ Settings"), "{output}");
+    assert!(output.contains("╭─ ◇  Project cleanup"), "{output}");
 }
 
 #[test]

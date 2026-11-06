@@ -52,7 +52,9 @@ fn test_render_workspace_screen() {
     assert!(rendered_text.contains("Project cleanup"));
     assert!(rendered_text.contains("Explore storage"));
     assert!(rendered_text.contains("System status"));
-    assert!(rendered_text.contains("Preferences"));
+    let settings_row = format!("{} Settings", theme.g.icon_prefs);
+    assert!(rendered_text.contains(&settings_row), "{rendered_text}");
+    assert!(!rendered_text.contains("Preferences"), "{rendered_text}");
     assert!(rendered_text.contains("Protected paths"));
 }
 

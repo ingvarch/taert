@@ -1,7 +1,7 @@
 //! Application Window Chrome (Header, Breadcrumbs, Separators, Toolbar).
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -14,6 +14,23 @@ pub const PAD_LEFT: u16 = 3;
 pub const PAD_RIGHT: u16 = 2;
 pub const MAX_CONTENT_WIDTH: u16 = 110;
 const TOOLBAR_MARGINS: usize = 2;
+pub const SPLIT_MIN_WIDTH: u16 = 100;
+const SIDEBAR_WIDTH: u16 = 34;
+const PANE_GAP: u16 = 2;
+const PANE_MIN_WIDTH: u16 = 40;
+
+/// The list on the left and the pane on the right of a split screen.
+pub fn split_panes(area: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(SIDEBAR_WIDTH),
+            Constraint::Length(PANE_GAP),
+            Constraint::Min(PANE_MIN_WIDTH),
+        ])
+        .split(area);
+    (chunks[0], chunks[2])
+}
 
 pub struct AppChrome<'a> {
     pub crumbs: Vec<&'a str>,

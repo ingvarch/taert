@@ -39,7 +39,7 @@ taert config --appearance dark
 
 `taert config` changes only the appearance. To change the age threshold for one run, pass `--older-than` to `taert purge`.
 
-Or adjust them interactively via the **Preferences** screen in the TUI workspace.
+Or adjust them interactively via the **Settings** screen in the TUI workspace.
 
 ## Protected Paths (Ignore List)
 
@@ -56,7 +56,7 @@ taert ignore list
 taert ignore remove ~/Projects/mission-critical
 ```
 
-The ignore list can also be edited interactively inside the TUI workspace under **Preferences** → **Protected Paths**.
+The ignore list can also be edited interactively inside the TUI workspace under **Settings** → **Protected paths**.
 
 ## Scheduled Cleanup
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Settings**: Preferences is now Settings, with the sections on the left and their rows on the right. `↵` opens a list of choices, and the choice saves at once. `←` and `→` no longer change a value. Below 100 columns the screen shows one section at a time.
+
 ### Fixed
 - **Saved appearance**: the interactive screen uses the appearance saved with `taert config --appearance`.
 

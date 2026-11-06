@@ -14,8 +14,8 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, Preferences, and Protected Paths. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
-- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, System Status, Explore Storage, Startup Items, and item selection fill the window. Preferences, Review, and Scanning keep a readable width at the left edge. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, Settings, and Protected Paths. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
+- **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, Settings, System Status, Explore Storage, Startup Items, and item selection fill the window.. Settings shows its sections on the left and the rows of the highlighted section on the right. Below 100 columns it shows the sections first, and `↵` or `→` opens one section by itself. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), Orphaned App Files, or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
 - **Docker Cleanup**: Lists images, volumes, and networks that no container refers to, stopped containers included, and the build cache. Each kind sits in its own framed, colored table with name, age, share, and size, and the age reads like `docker images`. The age column appears from 85 columns. `⇧S`, `⇧N`, and `⇧T` sort each table by size, name, or date. Only untagged images and unused networks start selected. Tagged images may be the only copy, the build cache takes time to rebuild, and volumes can hold real data, so you choose those yourself. The confirmation names any selected volumes, and a volume's data can't be recovered. taert talks to the same daemon as the `docker` command, and Docker refuses to remove anything still in use.
@@ -41,6 +41,8 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `↵` (Enter) | Slim / Compress | Open the question for the selection |
 | `↵` (Enter) | Question dialogs | Press the highlighted button |
 | `↵` / `→` | Explore Storage | Enter selected folder |
+| `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices or its path list; `←` or `⎋` moves back to the sections; `q` returns to the main menu |
+| `↵` / `⎋` | List of choices | Choose the highlighted choice / cancel without a change |
 | `↵` / `→` / `←` | Homebrew | Open a row with dependencies / close it; `←` on a closed row moves to its parent |
 | `⎋` (Esc) / `←` | Explore Storage | Go up one directory level; from the top folder, leave Explore Storage |
 | `q` | Explore Storage | Leave Explore Storage from any folder |
@@ -703,9 +705,11 @@ Scheduled cleanup installs a user launch agent into `~/Library/LaunchAgents/io.g
 
 A `brew upgrade` does not touch the launch agent. Run `taert schedule off` before `brew uninstall taert`, or use `brew uninstall --zap taert`, which also removes the agent. If the agent file is missing, `taert schedule show` prints the `taert schedule set` command that loads it again.
 
-#### Interactive Preferences
+#### Interactive Settings
 
-You can also switch on and adjust scheduled cleanup in the TUI workspace under **Preferences** → **Scheduled cleanup**. Use `←` and `→` to cycle between `Off`, `Every day`, `Every week`, and `Every month`, then press `Enter` to apply the choice. If the agent cannot be loaded, the error shows and the row goes back to its old value.
+You can also switch on and adjust scheduled cleanup in the TUI workspace under **Settings** → **Scheduled cleanup**. Press `↵` on the **Run** row to open a list with `Off`, `Every day`, `Every week`, and `Every month`, and pick one. The choice applies at once. If the agent cannot be loaded, the error shows and the row keeps its old value. Picking the value that is already set does nothing.
+
+The **Project cleanup** section holds the project folders and the age that Project cleanup preselects (`1 day` to `365 days`). Picking an age saves it at once. **Protected paths** opens the ignore list.
 
 ### Shell Completion (`taert completion`)
 
@@ -740,4 +744,4 @@ By default, taert moves personal files and user apps to macOS Trash instead of d
 - **Caches, Build Artifacts & Docker**: Caches (`taert clean`), project artifacts (`taert purge`), Docker items (`taert docker`), Homebrew cleanup and uninstall (`taert brew cleanup`, `taert brew uninstall`, and `d` on the Homebrew list, removed by Homebrew), and emptying the Trash are always permanently removed.
 - **`--permanent` flag**: Global CLI flag (`taert --permanent ...`) that skips Trash and deletes files and apps permanently.
 
-For configuration and preferences, see [configuration.md](configuration.md).
+For configuration and settings, see [configuration.md](configuration.md).
