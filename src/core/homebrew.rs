@@ -582,6 +582,11 @@ pub fn label_name(label: &str) -> &str {
     label.split_once(" · ").map_or(label, |(name, _)| name)
 }
 
+/// The formula name a label starts with, without its version.
+pub fn formula_name(label: &str) -> &str {
+    label.split_whitespace().next().unwrap_or(label)
+}
+
 /// The kind of package the rows of the list group `tool` hold.
 pub fn group_kind(tool: &str) -> PackageKind {
     if tool == GROUP_CASKS {

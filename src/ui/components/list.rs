@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::core::path_utils::{middle_truncate, prettify_path};
 use crate::ui::analyze::SortOrder;
-use crate::ui::components::text::plural;
+use crate::ui::components::text::{fit_width, plural};
 use crate::ui::env::ColorDepth;
 use crate::ui::theme::Theme;
 
@@ -61,6 +61,7 @@ pub struct ListRow<'a> {
     pub chevron: bool,
     pub reserve_chevron: bool,
     pub selected: bool,
+    pub cut_title_at_end: bool,
 }
 
 impl<'a> ListRow<'a> {
@@ -77,6 +78,7 @@ impl<'a> ListRow<'a> {
             chevron: false,
             reserve_chevron: false,
             selected: false,
+            cut_title_at_end: false,
         }
     }
 
@@ -124,6 +126,12 @@ impl<'a> ListRow<'a> {
 
     pub fn reserve_chevron(mut self, reserve: bool) -> Self {
         self.reserve_chevron = reserve;
+        self
+    }
+
+    /// Cuts a title that does not fit at its end with `…`, instead of in the middle.
+    pub fn cut_title_at_end(mut self) -> Self {
+        self.cut_title_at_end = true;
         self
     }
 
@@ -219,7 +227,11 @@ impl<'a> ListRow<'a> {
             } else {
                 let remaining = avail_for_title.saturating_sub(current_title_w);
                 if remaining > 0 {
-                    let truncated = middle_truncate(&s.content, remaining);
+                    let truncated = if self.cut_title_at_end {
+                        fit_width(&s.content, remaining)
+                    } else {
+                        middle_truncate(&s.content, remaining)
+                    };
                     spans.push(Span::styled(truncated, s.style));
                     current_title_w += remaining;
                 }
