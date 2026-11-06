@@ -6,11 +6,11 @@ expression: "home_screen(&state, w, h)"
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    2 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
    │   ▦ Docker cleanup           › │  │ Choose the folders Project cleanup scans, when scheduled                    │
-   │   ⌦ Uninstall apps           › │  │ cleanup runs, and which paths taert never touches.                          │
-   │   ◆ Homebrew                 › │  │                                                                             │
-   ╰────────────────────────────────╯  │ ↵ Open                                                                      │
-   ╭─ Optimize ─────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
-   │   ✚ Doctor                   › │
+   │   ⌦ Uninstall apps           › │  │ cleanup runs, which paths taert never touches, and how                      │
+   │   ◆ Homebrew                 › │  │ it looks. Check permissions and find taert's files.                         │
+   ╰────────────────────────────────╯  │                                                                             │
+   ╭─ Optimize ─────────────────────╮  │ ↵ Open                                                                      │
+   │   ✚ Doctor                   › │  ╰─────────────────────────────────────────────────────────────────────────────╯
    │   ▲ Startup items            › │
    │   ⌦ Slim apps                › │
    │   ✧ Compress                 › │

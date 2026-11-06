@@ -18,7 +18,7 @@ use taert::core::compress;
 use taert::core::date_utils::format_rfc3339;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
-use taert::core::history::HistoryLog;
+use taert::core::history::{HistoryLog, OutcomeKind};
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, ScanStep};
 use taert::core::large_files;
 use taert::core::layout::Layout;
@@ -2798,6 +2798,57 @@ fn snapshot_workspace_last_row() {
             home_screen(&state, w, h)
         );
     }
+}
+
+#[test]
+fn snapshot_workspace_settings_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: dir.path().to_path_buf(),
+        root: dir.path().to_path_buf(),
+        user_cache: None,
+    };
+    ProjectFoldersStore::new(vec!["/Users/test/Code".into(), "/Users/test/Work".into()])
+        .save_to(&layout.projects_path())
+        .unwrap();
+    let log = HistoryLog::new(dir.path().join("history.jsonl"));
+    support::write_run(
+        &log.path,
+        "20261103-090000-dddd",
+        &local_nine_oclock(),
+        "clean dev",
+        "schedule",
+        &[(
+            "/Users/test/.npm/_cacache",
+            2_100_000_000,
+            OutcomeKind::Removed,
+            None,
+        )],
+    );
+    let config = Config {
+        schedule: Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        }),
+        appearance: "dark".into(),
+        ..Config::default()
+    };
+    let ignore = IgnoreStore::new(vec!["/Users/test/Keep".into()]);
+    let mut state = home_state(SETTINGS);
+    state.load_history(&log);
+    assert!(state.settings_pending());
+    state.load_settings(&config, &ignore, &layout);
+    assert!(!state.settings_pending());
+
+    let output = home_screen(&state, 120, 32);
+
+    assert!(
+        output.contains("Every week · last run 2026-11-03 09:00, freed 2.1 GB"),
+        "{output}"
+    );
+    assert_snapshot!("workspace_settings_120x32", output);
 }
 
 fn three_runs_state() -> (tempfile::TempDir, HistoryState) {

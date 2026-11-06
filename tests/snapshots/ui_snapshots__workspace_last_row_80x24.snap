@@ -22,7 +22,7 @@ expression: "home_screen(&state, w, h)"
    ╭─ taert ─────────────────────────────────────────────────────────────────╮
    │   ↺ History                                                           › │
    │ ▌ ⌥ Settings                                                          › │
-   │      Project folders, the schedule, and protected paths                 │
+   │      Project folders, the schedule, protection, and more                │
    ╰─────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More                                       Open  ↵

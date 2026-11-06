@@ -42,7 +42,7 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `↵` (Enter) | Slim / Compress | Open the question for the selection |
 | `↵` (Enter) | Question dialogs | Press the highlighted button |
 | `↵` / `→` | Explore Storage | Enter selected folder |
-| `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices, on `Add folder…`, `Add path…`, or `Add name…` opens the add dialog, and on an About row shows the program or file in Finder; `←` or `⎋` moves back to the sections; `q` returns to the main menu |
+| `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices, on `Add folder…`, `Add path…`, or `Add name…` opens the add dialog, and on an About row shows the program or file in Finder; `←` or `⎋` moves back to the sections; `q` returns to the screen Settings was opened from |
 | `↵` / `→` / `←` / `⎋` / `q` | History | `↵` or `→` opens the highlighted run; `←` or `⎋` returns to the list, and `⎋` on the list returns to the main menu; `q` returns to the main menu |
 | `a` | Settings | In Project folders, Also clean folders named, and Protected paths: add a folder, a name, or a path, from any row of the list |
 | `r` | Settings | In Permissions: run the checks again |
@@ -54,6 +54,7 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `O` | Explore Storage / Select | Reveal selected item in Finder (`open -R`) |
 | `/` | Select / Search | Live search filter |
 | `?` | All screens | Toggle keyboard shortcuts help sheet |
+| `,` | Main menu, Clean caches, item lists | Open Settings at the section that fits the screen; `⎋` returns. While a search is typed, `,` goes into the search, and while a dialog is open it does nothing |
 | `⎋` (Esc) / `q` | All screens | Cancel dialog / Go back to the previous screen, on the row you left / Quit from the main menu |
 
 The bottom row lists the keys that work right now. In a narrow window the less important ones drop off, and `?` still lists every key of the screen. A letter marked `⇧` needs Shift, and a letter without it doesn't.

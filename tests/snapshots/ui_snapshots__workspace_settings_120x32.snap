@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert                                                                                    118.6 GB available · 24% free
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Cleanup ──────────────────────╮  ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
+   │   ✧ Clean caches             › │  │ Choose the folders Project cleanup scans, when scheduled                    │
+   │   ◇ Project cleanup          › │  │ cleanup runs, which paths taert never touches, and how                      │
+   │   ▦ Docker cleanup           › │  │ it looks. Check permissions and find taert's files.                         │
+   │   ⌦ Uninstall apps           › │  │                                                                             │
+   │   ◆ Homebrew                 › │  │ ↵ Open                                                                      │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╭─ Optimize ─────────────────────╮
+   │   ✚ Doctor                   › │  ╭─ Settings ──────────────────────────────────────────────────────────────────╮
+   │   ▲ Startup items            › │  │ Scheduled cleanup      Every week · last run 2026-11-03 09:00, freed 2.1 GB │
+   │   ⌦ Slim apps                › │  │ Project folders                                                           2 │
+   │   ✧ Compress                 › │  │ Protected paths                                                           1 │
+   ╰────────────────────────────────╯  │ Appearance                                                             Dark │
+   ╭─ Inspect ──────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ◔ Explore storage          › │
+   │   ◔ Large files              › │
+   │   ▤ System status            › │
+   ╰────────────────────────────────╯
+   ╭─ taert ────────────────────────╮
+   │   ↺ History                  › │
+   │ ▌ ⌥ Settings                 › │
+   ╰────────────────────────────────╯
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ⎋  Quit    ?  More                                                                               Open  ↵

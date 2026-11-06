@@ -53,6 +53,7 @@ use crate::core::safety::SYSTEM_OWNER;
 use crate::core::scanner::{
     CategoryScan, CategoryScanner, ScanContext, ScanItem, ScanProgressEvent, scan_all_categories,
 };
+use crate::core::schedule::VALID_CATEGORIES;
 use crate::core::slim;
 use crate::core::startup;
 use crate::core::stores::{Config, IgnoreStore};
@@ -91,13 +92,14 @@ pub enum RemovalMessage {
 }
 
 /// A screen Esc can return to. It is rebuilt on return, so disk space and counts stay
-/// fresh. The app list comes back as it was, because a search takes a while.
+/// fresh. A list comes back as it was: the app list because a search takes a while, and
+/// any list that Settings was opened from.
 enum ReturnPoint {
     Workspace {
         row: usize,
         submenu_row: Option<usize>,
     },
-    AppList(Box<SelectState>),
+    Select(Box<SelectState>),
 }
 
 /// Passes scan progress on to the screen. Join the handle after dropping the sender.
@@ -405,7 +407,7 @@ impl App {
 
     /// The list on the way back is out of date once an app is gone.
     fn show_fresh_app_list(&mut self) {
-        if matches!(self.back_stack.last(), Some(ReturnPoint::AppList(_))) {
+        if matches!(self.back_stack.last(), Some(ReturnPoint::Select(_))) {
             self.back_stack.pop();
         }
         self.launch_app_scan();
@@ -505,6 +507,9 @@ impl App {
             if workspace.history_pending() {
                 workspace.load_history(&HistoryLog::new(self.layout.history_path()));
             }
+            if workspace.settings_pending() {
+                workspace.load_settings(&self.config, &self.ignore, &self.layout);
+            }
             workspace.tick(&self.storage_cache);
         }
     }
@@ -530,21 +535,42 @@ impl App {
                 submenu_row: state.submenu_row(),
             }),
             Screen::Select(state) if state.scan.id == apps::LIST_ID => {
-                self.back_stack.push(ReturnPoint::AppList(state));
+                self.back_stack.push(ReturnPoint::Select(state));
             }
             _ => {}
         }
     }
 
     fn go_back(&mut self) {
-        self.brew_refresh = None;
         self.screen = match self.back_stack.pop() {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
+                self.brew_refresh = None;
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
             }
-            Some(ReturnPoint::AppList(state)) => Screen::Select(state),
-            None => Screen::Workspace(WorkspaceState::new()),
+            Some(ReturnPoint::Select(state)) => {
+                if state.scan.id != homebrew::SCAN_ID {
+                    self.brew_refresh = None;
+                }
+                Screen::Select(state)
+            }
+            None => {
+                self.brew_refresh = None;
+                Screen::Workspace(WorkspaceState::new())
+            }
         };
+    }
+
+    /// The Homebrew list, on screen or waiting under Settings.
+    fn brew_list_mut(&mut self) -> Option<&mut SelectState> {
+        match &mut self.screen {
+            Screen::Select(select) => Some(&mut **select),
+            Screen::Settings(_) => match self.back_stack.last_mut() {
+                Some(ReturnPoint::Select(select)) => Some(&mut **select),
+                _ => None,
+            },
+            _ => None,
+        }
+        .filter(|select| select.scan.id == homebrew::SCAN_ID)
     }
 
     fn poll_removal(&mut self) {
@@ -645,9 +671,7 @@ impl App {
             Err(mpsc::TryRecvError::Disconnected) => None,
         };
         self.brew_check = None;
-        if let Screen::Select(select) = &mut self.screen
-            && select.scan.id == homebrew::SCAN_ID
-        {
+        if let Some(select) = self.brew_list_mut() {
             match check {
                 Some(check) => select.finish_update_check(check.update_error, check.latest),
                 None => select.checking_updates = false,
@@ -680,9 +704,7 @@ impl App {
             Err(mpsc::TryRecvError::Disconnected) => Err("the read stopped".to_string()),
         };
         self.brew_refresh = None;
-        if let Screen::Select(select) = &mut self.screen
-            && select.scan.id == homebrew::SCAN_ID
-        {
+        if let Some(select) = self.brew_list_mut() {
             match read {
                 Ok(inventory) => select.finish_refresh(&inventory),
                 Err(error) => select.fail_refresh(&error),
@@ -769,6 +791,13 @@ impl App {
         };
         if !is_typing && code == KeyCode::Char('?') {
             self.help_open = true;
+            return;
+        }
+
+        if code == KeyCode::Char(',')
+            && let Some(section) = self.comma_section()
+        {
+            self.open_settings(section);
             return;
         }
 
@@ -1414,6 +1443,7 @@ impl App {
         let navigate = Hint::new("↑↓ / jk", "Navigate");
         let scroll = Hint::new("↑↓ / jk", "Scroll");
         let back = Hint::new("⎋ / q", "Back");
+        let settings_hint = Hint::new(",", "Settings");
         let general = |mut hints: Vec<Hint<'static>>| {
             hints.push(Hint::new("?", "Toggle help"));
             HelpSection::new("General", hints)
@@ -1446,6 +1476,7 @@ impl App {
                         } else {
                             Hint::new("⎋ / q", "Quit")
                         },
+                        settings_hint,
                     ]),
                 ]
             }
@@ -1473,7 +1504,7 @@ impl App {
                 if has_rows {
                     sections.push(sort_section("Date installed"));
                 }
-                sections.push(general(vec![navigate, back]));
+                sections.push(general(vec![navigate, back, settings_hint]));
                 sections
             }
             Screen::Select(state) => {
@@ -1496,7 +1527,7 @@ impl App {
                 if state.sort_order.is_some() {
                     sections.push(sort_section("Date created"));
                 }
-                sections.push(general(vec![navigate, back]));
+                sections.push(general(vec![navigate, back, settings_hint]));
                 sections
             }
             Screen::Analyze(_) => vec![
@@ -1557,7 +1588,7 @@ impl App {
                         Hint::new("→ / ↵", "Open section"),
                         Hint::new("↵ / ␣", "Change or open"),
                         Hint::new("← / ⎋", "Sections"),
-                        Hint::new("q", "Main menu"),
+                        Hint::new("q", "Leave Settings"),
                     ],
                 ),
                 HelpSection::new(
@@ -1953,12 +1984,43 @@ impl App {
                     is_history_disabled(),
                 )));
             }
-            MainMenuChoice::Settings => {
-                let mut state = SettingsState::new(&self.config, &self.ignore, &self.layout);
-                state.refresh_status(&self.config, &*self.host, &self.layout);
-                state.refresh_permissions(&*self.host, &self.layout);
-                self.open(Screen::Settings(Box::new(state)));
+            MainMenuChoice::Settings => self.open_settings(SettingsSection::ProjectCleanup),
+        }
+    }
+
+    fn open_settings(&mut self, section: SettingsSection) {
+        let mut state = SettingsState::new(&self.config, &self.ignore, &self.layout);
+        state.section = section;
+        state.refresh_status(&self.config, &*self.host, &self.layout);
+        state.refresh_permissions(&*self.host, &self.layout);
+        let settings = Screen::Settings(Box::new(state));
+        if matches!(self.screen, Screen::Select(_)) {
+            if let Screen::Select(list) = std::mem::replace(&mut self.screen, settings) {
+                self.back_stack.push(ReturnPoint::Select(list));
             }
+        } else {
+            self.open(settings);
+        }
+    }
+
+    /// The section the comma key opens for the current screen, or none when it does nothing.
+    fn comma_section(&self) -> Option<SettingsSection> {
+        match &self.screen {
+            Screen::Workspace(state) => match state.view {
+                WorkspaceView::MainMenu => Some(SettingsSection::ProjectCleanup),
+                WorkspaceView::CleanSubmenu { .. } => Some(SettingsSection::ScheduledCleanup),
+                WorkspaceView::Confirm(..) => None,
+            },
+            Screen::Select(select)
+                if matches!(select.overlay, ModalOverlay::None) && !select.is_searching =>
+            {
+                Some(match select.scan.id.as_str() {
+                    purger::SCAN_ID => SettingsSection::ProjectCleanup,
+                    id if VALID_CATEGORIES.contains(&id) => SettingsSection::ScheduledCleanup,
+                    _ => SettingsSection::ALL[0],
+                })
+            }
+            _ => None,
         }
     }
 
@@ -3191,6 +3253,197 @@ mod tests {
         app.handle_key(KeyCode::Esc);
         app.tick_workspace();
         assert_eq!(recent_commands(&app), ["clean junk", "purge", "docker"]);
+    }
+
+    fn settings_section(app: &App) -> SettingsSection {
+        settings(app).section
+    }
+
+    #[test]
+    fn the_menu_reads_the_settings_when_it_opens_and_runs_no_program() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, layout, mut app) = settings_app();
+        app.host = host.clone();
+        write_plist_for(&layout, std::path::Path::new("/nowhere/bin/taert"));
+        history_lines(
+            &layout,
+            &[
+                r#"{"event":"start","run":"r1","at":"2026-01-01T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
+                r#"{"event":"item","run":"r1","path":"/a","bytes":2000000000,"outcome":"removed"}"#,
+                r#"{"event":"end","run":"r1","at":"2026-01-01T00:00:00Z"}"#,
+            ],
+        );
+        app.config.schedule = Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".to_string()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        });
+        let calls = host.calls.lock().unwrap().len();
+
+        app.tick_workspace();
+
+        let Screen::Workspace(state) = &app.screen else {
+            panic!("expected the workspace screen");
+        };
+        assert!(!state.settings_pending());
+        assert_eq!(host.calls.lock().unwrap().len(), calls);
+        let Screen::Workspace(state) = &mut app.screen else {
+            panic!("expected the workspace screen");
+        };
+        state.selected_index = 13;
+        let text = wide_screen(&app);
+        assert!(text.contains("Every week · last run"), "{text}");
+        assert!(text.contains("freed"), "{text}");
+    }
+
+    #[test]
+    fn comma_on_the_menu_opens_settings_at_project_cleanup() {
+        let mut app = new_app();
+
+        app.handle_key(KeyCode::Char(','));
+
+        assert_eq!(settings_section(&app), SettingsSection::ProjectCleanup);
+    }
+
+    #[test]
+    fn comma_in_the_clean_caches_submenu_opens_scheduled_cleanup() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::Enter]);
+
+        app.handle_key(KeyCode::Char(','));
+
+        assert_eq!(settings_section(&app), SettingsSection::ScheduledCleanup);
+    }
+
+    #[test]
+    fn comma_in_a_list_opens_the_section_that_fits_it() {
+        for (id, want) in [
+            (purger::SCAN_ID, SettingsSection::ProjectCleanup),
+            ("dev", SettingsSection::ScheduledCleanup),
+            ("junk", SettingsSection::ScheduledCleanup),
+            ("ai", SettingsSection::ScheduledCleanup),
+            ("trash", SettingsSection::ScheduledCleanup),
+            (docker::SCAN_ID, SettingsSection::ProjectCleanup),
+        ] {
+            let mut app = select_app(scan_with_id(id));
+
+            app.handle_key(KeyCode::Char(','));
+
+            assert_eq!(settings_section(&app), want, "{id}");
+        }
+    }
+
+    #[test]
+    fn comma_goes_into_the_search_of_a_list() {
+        let mut app = select_app(scan_with_id("dev"));
+
+        press(&mut app, &[KeyCode::Char('/'), KeyCode::Char(',')]);
+
+        assert_eq!(select(&app).search_query, ",");
+    }
+
+    #[test]
+    fn comma_is_ignored_while_a_list_asks_to_confirm() {
+        let mut app = select_app(scan_with_id("dev"));
+        press(&mut app, &[KeyCode::Char('d')]);
+        assert!(matches!(select(&app).overlay, ModalOverlay::Confirm(_)));
+
+        app.handle_key(KeyCode::Char(','));
+
+        assert!(matches!(app.screen, Screen::Select(_)));
+    }
+
+    #[test]
+    fn comma_is_ignored_on_other_screens() {
+        let mut app = new_app();
+        app.screen = Screen::History(HistoryState::load(
+            &HistoryLog::new(app.layout.history_path()),
+            false,
+        ));
+
+        app.handle_key(KeyCode::Char(','));
+
+        assert!(matches!(app.screen, Screen::History(_)));
+    }
+
+    #[test]
+    fn escape_after_comma_returns_to_the_list_as_it_was() {
+        let mut scan = scan_with_id("dev");
+        for name in ["b", "c"] {
+            let mut item = ScanItem::new(format!("/nowhere/{name}").into(), 1, false, false);
+            item.modified = None;
+            scan.groups[0].items.push(item);
+        }
+        let mut app = select_app(scan);
+        press(
+            &mut app,
+            &[KeyCode::Down, KeyCode::Char(' '), KeyCode::Down],
+        );
+        let focused = select(&app).focused_index;
+        let selected = select(&app).scan.selected_items().len();
+
+        app.handle_key(KeyCode::Char(','));
+        app.handle_key(KeyCode::Esc);
+
+        assert_eq!(select(&app).focused_index, focused);
+        assert_eq!(select(&app).scan.selected_items().len(), selected);
+        assert_eq!(select(&app).scan.id, "dev");
+    }
+
+    #[test]
+    fn escape_after_comma_returns_to_the_menu_row() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::Down, KeyCode::Down]);
+
+        app.handle_key(KeyCode::Char(','));
+        assert!(matches!(app.screen, Screen::Settings(_)));
+        app.handle_key(KeyCode::Esc);
+
+        assert!(!app.should_quit);
+        assert_main_menu(&app, 2);
+    }
+
+    #[test]
+    fn escape_after_comma_returns_to_the_clean_caches_row() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::Enter, KeyCode::Down]);
+
+        press(&mut app, &[KeyCode::Char(','), KeyCode::Esc]);
+
+        assert_clean_submenu(&app, 1);
+    }
+
+    #[test]
+    fn comma_is_ignored_while_the_menu_asks_to_start() {
+        let mut app = new_app();
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        app.handle_key(KeyCode::Char(','));
+
+        let Screen::Workspace(state) = &app.screen else {
+            panic!("expected the workspace screen");
+        };
+        assert!(matches!(
+            state.view,
+            WorkspaceView::Confirm(StartConfirmKind::ProjectCleanup(_), _)
+        ));
+    }
+
+    #[test]
+    fn help_lists_comma_for_settings_where_it_works() {
+        let mut submenu = new_app();
+        submenu.handle_key(KeyCode::Enter);
+        for app in [new_app(), submenu, select_app(scan_with_id("dev"))] {
+            let sections = app.help_sections();
+            let general = sections.iter().find(|s| s.title == "General").unwrap();
+            assert!(
+                general
+                    .shortcuts
+                    .iter()
+                    .any(|hint| hint.key == "," && hint.desc == "Settings")
+            );
+        }
     }
 
     #[test]
@@ -5136,7 +5389,7 @@ mod tests {
             "→ / ↵ Open section",
             "↵ / ␣ Change or open",
             "← / ⎋ Sections",
-            "q Main menu",
+            "q Leave Settings",
             "↑↓ / jk Move",
             "↵ Choose",
             "⎋ Cancel",
@@ -7146,6 +7399,78 @@ mod tests {
             assert!(!screen_text(&app).contains("Checking for updates"));
             assert_eq!(ran_times(&host, &brew, "update"), 1);
             assert_eq!(ran_times(&host, &brew, "info"), 1);
+        }
+
+        #[test]
+        fn a_check_that_ends_under_settings_reaches_the_list() {
+            let (_temp, mut app, _host, _brew) = check_mac();
+            open_the_list(&mut app);
+            assert!(select(&app).checking_updates);
+
+            app.handle_key(KeyCode::Char(','));
+            assert!(matches!(app.screen, Screen::Settings(_)));
+            for _ in 0..400 {
+                app.poll_brew_check();
+                if app.brew_check.is_none() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            app.handle_key(KeyCode::Esc);
+
+            assert!(!select(&app).checking_updates);
+            assert!(row_on_screen(&app, "bun 1.4.2").contains("↑ 1.4.4_1"));
+        }
+
+        /// The Homebrew list waiting for the read after an upgrade, and the sender of that read.
+        fn refreshing_app() -> (App, mpsc::Sender<Result<Inventory, String>>) {
+            let mut app = brew_app();
+            let (tx, rx) = mpsc::channel();
+            app.brew_refresh = Some(rx);
+            let Screen::Select(state) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            state.refreshing = true;
+            (app, tx)
+        }
+
+        fn read_with_rg() -> Inventory {
+            Inventory {
+                packages: vec![
+                    package(PackageKind::Formula, "fd", 3_000),
+                    package(PackageKind::Formula, "rg", 4_000),
+                ],
+                brew: Some("/fake/bin/brew".into()),
+                ..Inventory::default()
+            }
+        }
+
+        #[test]
+        fn a_refresh_that_ends_after_settings_reaches_the_list() {
+            let (mut app, tx) = refreshing_app();
+
+            press(&mut app, &[KeyCode::Char(','), KeyCode::Esc]);
+            tx.send(Ok(read_with_rg()))
+                .expect("the read is still awaited");
+            app.poll_brew_refresh();
+
+            assert!(!select(&app).refreshing);
+            assert!(row_labels(&app).contains(&"rg 1.0".to_string()));
+        }
+
+        #[test]
+        fn a_refresh_that_ends_under_settings_reaches_the_list() {
+            let (mut app, tx) = refreshing_app();
+
+            app.handle_key(KeyCode::Char(','));
+            assert!(matches!(app.screen, Screen::Settings(_)));
+            tx.send(Ok(read_with_rg()))
+                .expect("the read is still awaited");
+            app.poll_brew_refresh();
+            app.handle_key(KeyCode::Esc);
+
+            assert!(!select(&app).refreshing);
+            assert!(row_labels(&app).contains(&"rg 1.0".to_string()));
         }
 
         #[test]
