@@ -91,11 +91,11 @@ fn default_schedule_every() -> ScheduleFrequency {
     ScheduleFrequency::Week
 }
 
-fn default_schedule_categories() -> Vec<String> {
+pub fn default_schedule_categories() -> Vec<String> {
     vec!["dev".to_string(), "junk".to_string()]
 }
 
-fn default_schedule_min_reclaim() -> u64 {
+pub fn default_schedule_min_reclaim() -> u64 {
     1_000_000_000
 }
 

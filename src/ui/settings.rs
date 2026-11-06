@@ -18,10 +18,17 @@ use super::components::text::plural;
 use super::components::toast::Toast;
 use super::path_list::{PathList, PathListKind};
 use super::theme::Theme;
+use super::workspace::CleanSubcategory;
+use crate::core::catalog::Category;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
-use crate::core::schedule::{ScheduleFrequency, remove_schedule, set_schedule};
-use crate::core::stores::{Config, IgnoreStore};
+use crate::core::schedule::{
+    ScheduleFrequency, format_reclaim_threshold, normalize_categories, remove_schedule,
+    set_schedule,
+};
+use crate::core::stores::{
+    Config, IgnoreStore, ScheduleConfig, default_schedule_categories, default_schedule_min_reclaim,
+};
 
 pub const AGE_PRESETS: &[u64] = &[1, 3, 7, 14, 30, 60, 90, 180, 365];
 
@@ -30,6 +37,24 @@ const SCHEDULE_CHOICES: [Option<ScheduleFrequency>; 4] = [
     Some(ScheduleFrequency::Day),
     Some(ScheduleFrequency::Week),
     Some(ScheduleFrequency::Month),
+];
+
+/// Presets of the minimum to free, in decimal units like `parse_size`.
+const RECLAIM_PRESETS: [u64; 6] = [
+    100_000_000,
+    500_000_000,
+    1_000_000_000,
+    2_000_000_000,
+    5_000_000_000,
+    10_000_000_000,
+];
+
+/// The categories a schedule can clean, in the order of the rows.
+const CLEAN_CATEGORIES: [(Category, CleanSubcategory); 4] = [
+    (Category::Dev, CleanSubcategory::Developer),
+    (Category::Junk, CleanSubcategory::UserJunk),
+    (Category::Ai, CleanSubcategory::AiTools),
+    (Category::Trash, CleanSubcategory::Trash),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +109,9 @@ impl SettingsSection {
 pub enum SettingsRow {
     AgeThreshold,
     Run,
+    /// The category at this place in `CLEAN_CATEGORIES`.
+    Category(usize),
+    MinReclaim,
     /// The path at this place in the list of the section.
     Item(usize),
     Add,
@@ -94,13 +122,14 @@ impl SettingsRow {
         match self {
             Self::AgeThreshold => "Preselect artifacts older than",
             Self::Run => "Run",
-            Self::Item(_) | Self::Add => "",
+            Self::MinReclaim => "Only when it frees at least",
+            Self::Category(_) | Self::Item(_) | Self::Add => "",
         }
     }
 
     /// A row that opens a picker.
     pub fn is_popup(self) -> bool {
-        matches!(self, Self::AgeThreshold | Self::Run)
+        matches!(self, Self::AgeThreshold | Self::Run | Self::MinReclaim)
     }
 }
 
@@ -116,6 +145,9 @@ pub struct SettingsState {
     pub row: usize,
     pub older_than_days: u64,
     pub schedule: Option<ScheduleFrequency>,
+    /// What the schedule cleans, or what a new schedule would clean.
+    pub categories: Vec<String>,
+    pub min_reclaim: u64,
     pub folders: PathList,
     pub protected: PathList,
     pub save_notice: Option<&'static str>,
@@ -123,12 +155,13 @@ pub struct SettingsState {
     picker: Option<(SettingsRow, PickerState)>,
 }
 
-fn age_choices(current: u64) -> Vec<u64> {
-    let mut days = AGE_PRESETS.to_vec();
-    if let Err(at) = days.binary_search(&current) {
-        days.insert(at, current);
+/// The presets with `current` added in order, so the saved value is always a choice.
+fn with_current(presets: &[u64], current: u64) -> Vec<u64> {
+    let mut choices = presets.to_vec();
+    if let Err(at) = choices.binary_search(&current) {
+        choices.insert(at, current);
     }
-    days
+    choices
 }
 
 fn age_label(days: u64) -> String {
@@ -150,6 +183,16 @@ impl SettingsState {
             row: 0,
             older_than_days: config.older_than_days,
             schedule: config.schedule.as_ref().map(|s| s.every),
+            categories: config
+                .schedule
+                .as_ref()
+                .map_or_else(default_schedule_categories, |s| {
+                    normalize_categories(&s.categories)
+                }),
+            min_reclaim: config
+                .schedule
+                .as_ref()
+                .map_or_else(default_schedule_min_reclaim, |s| s.min_reclaim),
             folders: PathList::new(PathListKind::ProjectFolders, ignore, layout),
             protected: PathList::new(PathListKind::ProtectedPaths, ignore, layout),
             save_notice: None,
@@ -179,6 +222,10 @@ impl SettingsState {
         if let Some(list) = self.list() {
             rows.extend((0..list.items.len()).map(SettingsRow::Item));
             rows.push(SettingsRow::Add);
+        }
+        if self.section == SettingsSection::ScheduledCleanup && self.schedule.is_some() {
+            rows.extend((0..CLEAN_CATEGORIES.len()).map(SettingsRow::Category));
+            rows.push(SettingsRow::MinReclaim);
         }
         rows
     }
@@ -284,7 +331,7 @@ impl SettingsState {
         let row = self.current_row();
         let (choices, current) = match row {
             SettingsRow::AgeThreshold => {
-                let days = age_choices(self.older_than_days);
+                let days = with_current(AGE_PRESETS, self.older_than_days);
                 let current = days.iter().position(|&d| d == self.older_than_days);
                 (days.into_iter().map(age_label).collect(), current)
             }
@@ -296,7 +343,15 @@ impl SettingsState {
                     .collect(),
                 SCHEDULE_CHOICES.iter().position(|&c| c == self.schedule),
             ),
-            SettingsRow::Item(_) | SettingsRow::Add => return,
+            SettingsRow::MinReclaim => {
+                let bytes = with_current(&RECLAIM_PRESETS, self.min_reclaim);
+                let current = bytes.iter().position(|&b| b == self.min_reclaim);
+                (
+                    bytes.into_iter().map(format_reclaim_threshold).collect(),
+                    current,
+                )
+            }
+            SettingsRow::Category(_) | SettingsRow::Item(_) | SettingsRow::Add => return,
         };
         self.picker = Some((
             row,
@@ -311,7 +366,9 @@ impl SettingsState {
         };
         match row {
             SettingsRow::AgeThreshold => {
-                if let Some(&days) = age_choices(self.older_than_days).get(picker.highlighted) {
+                if let Some(&days) =
+                    with_current(AGE_PRESETS, self.older_than_days).get(picker.highlighted)
+                {
                     self.set_age(days, config, layout);
                 }
             }
@@ -320,7 +377,14 @@ impl SettingsState {
                     self.apply_schedule(target, config, host, layout);
                 }
             }
-            SettingsRow::Item(_) | SettingsRow::Add => {}
+            SettingsRow::MinReclaim => {
+                if let Some(&bytes) =
+                    with_current(&RECLAIM_PRESETS, self.min_reclaim).get(picker.highlighted)
+                {
+                    self.set_min_reclaim(bytes, config, layout);
+                }
+            }
+            SettingsRow::Category(_) | SettingsRow::Item(_) | SettingsRow::Add => {}
         }
     }
 
@@ -335,6 +399,60 @@ impl SettingsState {
         self.save_notice = Some("Saved age threshold");
     }
 
+    /// Checks or unchecks the highlighted category. The last checked one stays checked.
+    pub fn toggle_category(&mut self, config: &mut Config, layout: &Layout) {
+        let SettingsRow::Category(index) = self.current_row() else {
+            return;
+        };
+        let id = CLEAN_CATEGORIES[index].0.id();
+        let mut categories = self.categories.clone();
+        if let Some(at) = categories.iter().position(|c| c == id) {
+            let checked = CLEAN_CATEGORIES
+                .iter()
+                .filter(|(category, _)| categories.iter().any(|c| c == category.id()))
+                .count();
+            if checked == 1 {
+                self.save_notice = None;
+                self.error_notice = Some("Choose at least one category".to_string());
+                return;
+            }
+            categories.remove(at);
+        } else {
+            categories.push(id.to_string());
+        }
+        let categories = normalize_categories(&categories);
+        self.categories = categories.clone();
+        self.save_schedule(config, layout, "Saved categories", |s| {
+            s.categories = categories;
+        });
+    }
+
+    fn set_min_reclaim(&mut self, bytes: u64, config: &mut Config, layout: &Layout) {
+        if bytes == self.min_reclaim {
+            return;
+        }
+        self.min_reclaim = bytes;
+        self.save_schedule(config, layout, "Saved minimum to free", |s| {
+            s.min_reclaim = bytes;
+        });
+    }
+
+    fn save_schedule(
+        &mut self,
+        config: &mut Config,
+        layout: &Layout,
+        notice: &'static str,
+        edit: impl FnOnce(&mut ScheduleConfig),
+    ) {
+        let Some(schedule) = config.schedule.as_mut() else {
+            return;
+        };
+        edit(schedule);
+        let _ = config.save_to(&layout.config_path());
+        self.error_notice = None;
+        self.save_notice = Some(notice);
+    }
+
     /// Sends `target` to launchd and the config. On failure the old value stays.
     fn apply_schedule(
         &mut self,
@@ -347,24 +465,24 @@ impl SettingsState {
             return;
         }
         let result = match target {
-            Some(freq) => {
-                let categories = config
-                    .schedule
-                    .as_ref()
-                    .map(|s| s.categories.clone())
-                    .unwrap_or_else(|| vec!["dev".into(), "junk".into()]);
-                let min_reclaim = config
-                    .schedule
-                    .as_ref()
-                    .map(|s| s.min_reclaim)
-                    .unwrap_or(1_000_000_000);
-                set_schedule(host, layout, config, freq, categories, min_reclaim, None)
-            }
+            Some(freq) => set_schedule(
+                host,
+                layout,
+                config,
+                freq,
+                self.categories.clone(),
+                self.min_reclaim,
+                None,
+            ),
             None => remove_schedule(host, layout, config),
         };
         match result {
             Ok(()) => {
                 self.schedule = target;
+                if target.is_none() {
+                    self.categories = default_schedule_categories();
+                    self.min_reclaim = default_schedule_min_reclaim();
+                }
                 self.error_notice = None;
                 self.save_notice = Some(if target.is_some() {
                     "Enabled scheduled cleanup"
@@ -383,7 +501,8 @@ impl SettingsState {
         match row {
             SettingsRow::AgeThreshold => age_label(self.older_than_days),
             SettingsRow::Run => schedule_label(self.schedule),
-            SettingsRow::Item(_) | SettingsRow::Add => String::new(),
+            SettingsRow::MinReclaim => format_reclaim_threshold(self.min_reclaim),
+            SettingsRow::Category(_) | SettingsRow::Item(_) | SettingsRow::Add => String::new(),
         }
     }
 }
@@ -406,9 +525,10 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
         _ if !in_rows => Some(PrimaryAction::new("Open", theme.g.key_enter)),
         _ if row.is_popup() => Some(PrimaryAction::new("Change", theme.g.key_enter)),
         SettingsRow::Add => Some(PrimaryAction::new("Add", theme.g.key_enter)),
+        SettingsRow::Category(_) => Some(PrimaryAction::new("Toggle", theme.g.key_enter)),
         _ => None,
     };
-    let in_list = in_rows && !row.is_popup();
+    let in_list = in_rows && matches!(row, SettingsRow::Item(_) | SettingsRow::Add);
     let mut hints = Vec::new();
     if in_list {
         hints.push(Hint::new("a", "Add"));
@@ -502,25 +622,11 @@ fn sections_card(state: &SettingsState, width: u16, theme: &Theme) -> Vec<Line<'
 fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> Vec<Line<'static>> {
     let width = width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
-    let first_list_row = state.section.fixed_rows().len();
-    let mut lines = Vec::new();
-    let mut focus = 0;
-    for (i, row) in state.rows().into_iter().enumerate() {
-        let selected = state.focus == SettingsFocus::Rows && i == state.row;
-        if i == first_list_row
-            && let Some(heading) = state.list().and_then(PathList::heading)
-        {
-            lines.push(Line::default());
-            lines.push(text_line(heading, theme.callout(), inner, theme));
-        }
-        if selected {
-            focus = lines.len();
-        }
-        lines.push(row_line(state, row, selected, inner, theme));
-    }
-    if let Some(list) = state.list() {
-        lines.push(text_line(list.footnote(), theme.footnote(), inner, theme));
-    }
+    let (lines, focus) = if state.section == SettingsSection::ScheduledCleanup {
+        schedule_lines(state, inner, theme)
+    } else {
+        list_lines(state, inner, theme)
+    };
     let (start, end) = visible_window(
         lines.len(),
         focus,
@@ -538,9 +644,80 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
     )
 }
 
+/// The rows of a section other than Scheduled cleanup and the line of the highlighted one.
+fn list_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
+    let first_list_row = state.section.fixed_rows().len();
+    let mut lines = Vec::new();
+    let mut focus = 0;
+    for (i, row) in state.rows().into_iter().enumerate() {
+        let selected = state.focus == SettingsFocus::Rows && i == state.row;
+        if i == first_list_row
+            && let Some(heading) = state.list().and_then(PathList::heading)
+        {
+            lines.push(Line::default());
+            lines.push(text_line(heading, theme.callout(), width, theme));
+        }
+        if selected {
+            focus = lines.len();
+        }
+        lines.push(row_line(state, row, selected, width, theme));
+    }
+    if let Some(list) = state.list() {
+        lines.push(text_line(list.footnote(), theme.footnote(), width, theme));
+    }
+    (lines, focus)
+}
+
+/// The rows of Scheduled cleanup and the line of the highlighted one. While `Run` is off, the
+/// rows below it are dimmed and out of reach.
+fn schedule_lines(
+    state: &SettingsState,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let in_rows = state.focus == SettingsFocus::Rows;
+    let mut lines = Vec::new();
+    let mut focus = 0;
+    let mut push = |lines: &mut Vec<Line<'static>>, at: usize, row: SettingsRow| {
+        let selected = in_rows && state.row == at;
+        if selected {
+            focus = lines.len();
+        }
+        lines.push(row_line(state, row, selected, width, theme));
+    };
+    push(&mut lines, 0, SettingsRow::Run);
+    lines.push(Line::default());
+    lines.push(text_line("Clean", theme.callout(), width, theme));
+    for index in 0..CLEAN_CATEGORIES.len() {
+        push(&mut lines, 1 + index, SettingsRow::Category(index));
+    }
+    push(
+        &mut lines,
+        1 + CLEAN_CATEGORIES.len(),
+        SettingsRow::MinReclaim,
+    );
+    if state.schedule.is_none() {
+        lines.push(text_line(
+            "Turn on Run to choose what it cleans.",
+            theme.footnote(),
+            width,
+            theme,
+        ));
+    }
+    (lines, focus)
+}
+
 /// A line of text that sits in the column of the row titles.
 fn text_line(text: &str, style: Style, width: usize, theme: &Theme) -> Line<'static> {
     ListRow::new(vec![Span::styled(text.to_string(), style)]).render_line(width, theme)
+}
+
+fn title_style(state: &SettingsState, theme: &Theme) -> Style {
+    if state.schedule.is_some() {
+        theme.body()
+    } else {
+        theme.footnote()
+    }
 }
 
 fn row_line(
@@ -569,6 +746,41 @@ fn row_line(
                 .selected(selected)
                 .render_line(width, theme)
         }
+        SettingsRow::Category(index) => {
+            let (category, subcategory) = CLEAN_CATEGORIES[index];
+            let checked = state.categories.iter().any(|c| c == category.id());
+            let glyph = if checked {
+                theme.g.check_on
+            } else {
+                theme.g.check_off
+            };
+            let glyph_style = if state.schedule.is_none() {
+                theme.footnote()
+            } else if checked {
+                theme.accent_text()
+            } else {
+                theme.callout()
+            };
+            ListRow::new(vec![
+                Span::styled(glyph, glyph_style),
+                Span::raw(" "),
+                Span::styled(subcategory.title(), title_style(state, theme)),
+            ])
+            .selected(selected)
+            .render_line(width, theme)
+        }
+        SettingsRow::MinReclaim => {
+            let detail = format!("{} {}", state.row_value(row), theme.g.popup);
+            let value_style = if state.schedule.is_none() {
+                theme.footnote()
+            } else {
+                value_style
+            };
+            ListRow::new(vec![Span::styled(row.title(), title_style(state, theme))])
+                .selected(selected)
+                .detail(Span::styled(detail, value_style))
+                .render_line(width, theme)
+        }
         SettingsRow::AgeThreshold | SettingsRow::Run => {
             let detail = format!("{} {}", state.row_value(row), theme.g.popup);
             ListRow::new(vec![Span::styled(row.title(), theme.body())])
@@ -593,6 +805,22 @@ mod tests {
     use super::*;
     use crate::core::apps::testing::sandbox;
     use crate::core::projects_store::ProjectFoldersStore;
+
+    #[test]
+    fn categories_typed_by_hand_show_as_the_names_scheduled_cleanup_reads() {
+        let (_temp, layout) = sandbox();
+        let config = Config {
+            schedule: Some(crate::core::stores::ScheduleConfig {
+                every: ScheduleFrequency::Week,
+                categories: vec!["Dev".into(), "JUNK".into(), "dev".into()],
+                min_reclaim: 1_000_000_000,
+                last_skip: None,
+            }),
+            ..Config::default()
+        };
+        let state = SettingsState::new(&config, &IgnoreStore::default(), &layout);
+        assert_eq!(state.categories, ["dev", "junk"]);
+    }
 
     #[test]
     fn the_sections_come_in_order_with_their_rows() {
@@ -622,9 +850,12 @@ mod tests {
 
     #[test]
     fn a_saved_age_outside_the_presets_is_added_in_order() {
-        assert_eq!(age_choices(7), AGE_PRESETS);
-        assert_eq!(age_choices(10), [1, 3, 7, 10, 14, 30, 60, 90, 180, 365]);
-        assert_eq!(age_choices(400).last(), Some(&400));
+        assert_eq!(with_current(AGE_PRESETS, 7), AGE_PRESETS);
+        assert_eq!(
+            with_current(AGE_PRESETS, 10),
+            [1, 3, 7, 10, 14, 30, 60, 90, 180, 365]
+        );
+        assert_eq!(with_current(AGE_PRESETS, 400).last(), Some(&400));
     }
 
     #[test]

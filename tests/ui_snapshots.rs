@@ -23,9 +23,10 @@ use taert::core::profiler::{
 };
 use taert::core::projects_store::ProjectFoldersStore;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
+use taert::core::schedule::ScheduleFrequency;
 use taert::core::slim;
 use taert::core::startup::{StartupItem, StartupKind, StartupState};
-use taert::core::stores::{Config, IgnoreStore};
+use taert::core::stores::{Config, IgnoreStore, ScheduleConfig};
 use taert::core::telemetry::{
     CpuStatus, DiskIo, GpuStatus, InterfaceAddress, LiveStatus, NetworkStatus, PowerSource,
     PowerStatus, ProcessStatus, VolumeStatus,
@@ -746,6 +747,27 @@ fn the_add_dialog_lists_five_matches_and_counts_the_rest() {
     assert!(output.contains("repo5"));
     assert!(!output.contains("repo6"));
     assert!(output.contains("+2 more"));
+}
+
+#[test]
+fn snapshot_settings_schedule() {
+    let theme = snapshot_theme();
+    let config = Config {
+        schedule: Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into(), "junk".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        }),
+        ..Config::default()
+    };
+    let mut state = SettingsState::new(&config, &IgnoreStore::default(), &no_layout());
+    state.section = SettingsSection::ScheduledCleanup;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_schedule_120x32", output);
 }
 
 const WIDE_WINDOW: (u16, u16) = (205, 60);

@@ -63,6 +63,19 @@ pub enum CleanSubcategory {
     Trash,
 }
 
+impl CleanSubcategory {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::All => "All categories",
+            Self::Developer => "Developer caches",
+            Self::UserJunk => "User junk",
+            Self::AiTools => "AI tools",
+            Self::Orphans => "Orphaned files",
+            Self::Trash => "Trash",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartConfirmKind {
     ExploreHome,
@@ -203,32 +216,32 @@ impl WorkspaceState {
             clean_options: vec![
                 (
                     CleanSubcategory::All,
-                    "All categories",
+                    CleanSubcategory::All.title(),
                     "Developer caches, user junk, AI tools, orphaned files, and Trash",
                 ),
                 (
                     CleanSubcategory::Developer,
-                    "Developer caches",
+                    CleanSubcategory::Developer.title(),
                     "Package managers and build tools",
                 ),
                 (
                     CleanSubcategory::UserJunk,
-                    "User junk",
+                    CleanSubcategory::UserJunk.title(),
                     "Logs, Xcode files, app and browser caches",
                 ),
                 (
                     CleanSubcategory::AiTools,
-                    "AI tools",
+                    CleanSubcategory::AiTools.title(),
                     "Caches and logs from local AI tools",
                 ),
                 (
                     CleanSubcategory::Orphans,
-                    "Orphaned files",
+                    CleanSubcategory::Orphans.title(),
                     "Leftovers of apps that are gone",
                 ),
                 (
                     CleanSubcategory::Trash,
-                    "Trash",
+                    CleanSubcategory::Trash.title(),
                     "Review items already in the Trash",
                 ),
             ],
