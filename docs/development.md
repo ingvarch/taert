@@ -100,7 +100,7 @@ taert/
 │   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
 │   │   ├── layout.rs           # Where a Mac keeps apps and their files
 │   │   ├── leftovers.rs        # What an app leaves on disk, and how sure that is
-│   │   ├── path_utils.rs       # Path prettifying, tilde expansion, truncation, 30-day change check
+│   │   ├── path_utils.rs       # Path prettifying, tilde expansion, path completion, truncation, 30-day change check
 │   │   ├── processes.rs        # Process table from ps and the running-app check
 │   │   ├── profiler.rs         # Disk space and system profile analyzers
 │   │   ├── projects_store.rs   # Persistent store for scanned project folders

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
+use crossterm::event::KeyCode;
 use insta::assert_snapshot;
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -689,6 +690,62 @@ fn snapshot_settings_protected_paths_empty() {
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
     assert_snapshot!("settings_protected_paths_empty_120x32", output);
+}
+
+#[test]
+fn snapshot_settings_add_path_matches() {
+    let theme = snapshot_theme();
+    let temp = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: temp.path().canonicalize().unwrap(),
+        root: temp.path().to_path_buf(),
+        user_cache: None,
+    };
+    for name in ["Code/alpha", "Code/alps"] {
+        std::fs::create_dir_all(layout.home.join(name)).unwrap();
+    }
+    let mut ignore = IgnoreStore::default();
+    let mut state = SettingsState::new(&Config::default(), &ignore, &layout);
+    state.section = SettingsSection::ProtectedPaths;
+    state.focus = SettingsFocus::Rows;
+    state.start_adding();
+    for c in "~/Code/a".chars() {
+        state.dialog_key(KeyCode::Char(c), &mut ignore);
+    }
+    state.dialog_key(KeyCode::Tab, &mut ignore);
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_add_path_matches_120x32", output);
+}
+
+#[test]
+fn the_add_dialog_lists_five_matches_and_counts_the_rest() {
+    let theme = snapshot_theme();
+    let temp = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: temp.path().canonicalize().unwrap(),
+        root: temp.path().to_path_buf(),
+        user_cache: None,
+    };
+    for n in 1..=7 {
+        std::fs::create_dir_all(layout.home.join(format!("repo{n}"))).unwrap();
+    }
+    let mut ignore = IgnoreStore::default();
+    let mut state = SettingsState::new(&Config::default(), &ignore, &layout);
+    state.section = SettingsSection::ProtectedPaths;
+    state.focus = SettingsFocus::Rows;
+    state.start_adding();
+    for c in "~/re".chars() {
+        state.dialog_key(KeyCode::Char(c), &mut ignore);
+    }
+    state.dialog_key(KeyCode::Tab, &mut ignore);
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert!(output.contains("repo5"));
+    assert!(!output.contains("repo6"));
+    assert!(output.contains("+2 more"));
 }
 
 const WIDE_WINDOW: (u16, u16) = (205, 60);
