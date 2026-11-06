@@ -6,7 +6,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ struct SchedulePlist {
     nice: i32,
     process_type: String,
     program_arguments: Vec<String>,
-    start_calendar_interval: CalendarInterval,
+    start_calendar_interval: Vec<CalendarInterval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,33 +87,217 @@ struct CalendarInterval {
     weekday: Option<u32>,
 }
 
-impl CalendarInterval {
-    fn for_frequency(freq: ScheduleFrequency) -> Self {
-        match freq {
-            ScheduleFrequency::Day => Self {
-                day: None,
-                hour: 9,
-                minute: 0,
-                weekday: None,
-            },
-            ScheduleFrequency::Week => Self {
-                day: None,
-                hour: 9,
-                minute: 0,
-                weekday: Some(1), // Monday
-            },
-            ScheduleFrequency::Month => Self {
-                day: Some(1), // 1st of month
-                hour: 9,
-                minute: 0,
-                weekday: None,
-            },
+/// A time of day, `00:00` to `23:59`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TimeOfDay {
+    hour: u32,
+    minute: u32,
+}
+
+impl TimeOfDay {
+    fn parse(text: &str) -> Option<Self> {
+        let bytes = text.as_bytes();
+        let digits = [0, 1, 3, 4];
+        if bytes.len() != 5
+            || bytes[2] != b':'
+            || !digits.iter().all(|&i| bytes[i].is_ascii_digit())
+        {
+            return None;
         }
+        let number = |from: usize| text[from..from + 2].parse::<u32>().ok();
+        let (hour, minute) = (number(0)?, number(3)?);
+        (hour <= 23 && minute <= 59).then_some(Self { hour, minute })
+    }
+}
+
+impl std::fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02}:{:02}", self.hour, self.minute)
+    }
+}
+
+/// Config name, display name, and launchd number of each weekday, Monday first.
+const WEEKDAYS: [(&str, &str, i32); 7] = [
+    ("mon", "Mon", 1),
+    ("tue", "Tue", 2),
+    ("wed", "Wed", 3),
+    ("thu", "Thu", 4),
+    ("fri", "Fri", 5),
+    ("sat", "Sat", 6),
+    ("sun", "Sun", 0),
+];
+const REPEAT_HOURS: [u32; 6] = [2, 3, 4, 6, 8, 12];
+const MAX_MONTH_DAY: u32 = 28;
+/// A month rule matches within 31 days; two months leave room to spare.
+const SEARCH_DAYS: i32 = 62;
+
+/// When the schedule runs. Built from the config, so every value is checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleRule {
+    every: ScheduleFrequency,
+    at: TimeOfDay,
+    days: Vec<usize>,
+    day: u32,
+    every_hours: Option<u32>,
+}
+
+impl ScheduleRule {
+    pub fn from_config(config: &ScheduleConfig) -> Result<Self, String> {
+        let at = TimeOfDay::parse(&config.at)
+            .ok_or_else(|| format!("Time {} is not HH:MM between 00:00 and 23:59.", config.at))?;
+        let names = WEEKDAYS.map(|(name, _, _)| name).join(", ");
+        if config.days.is_empty() {
+            return Err(format!("Weekdays are empty. Use {names}."));
+        }
+        let mut days = Vec::new();
+        for name in &config.days {
+            let index = WEEKDAYS
+                .iter()
+                .position(|(known, _, _)| known == name)
+                .ok_or_else(|| format!("Weekday {name} is not one of {names}."))?;
+            days.push(index);
+        }
+        days.sort_unstable();
+        days.dedup();
+        if !(1..=MAX_MONTH_DAY).contains(&config.day) {
+            return Err(format!(
+                "Day {} is not between 1 and {MAX_MONTH_DAY}.",
+                config.day
+            ));
+        }
+        if let Some(hours) = config.every_hours
+            && !REPEAT_HOURS.contains(&hours)
+        {
+            let list = REPEAT_HOURS.map(|h| h.to_string()).join(", ");
+            return Err(format!("Repeat every {hours} hours is not one of {list}."));
+        }
+        Ok(Self {
+            every: config.every,
+            at,
+            days,
+            day: config.day,
+            every_hours: config.every_hours,
+        })
+    }
+
+    /// The rule of the saved schedule with another frequency. Without a saved schedule, the defaults.
+    pub fn for_frequency(
+        saved: Option<&ScheduleConfig>,
+        every: ScheduleFrequency,
+    ) -> Result<Self, String> {
+        let mut config = saved.cloned().unwrap_or_default();
+        config.every = every;
+        Self::from_config(&config)
+    }
+
+    pub fn times_of_day(&self) -> Vec<TimeOfDay> {
+        let step = self.every_hours.unwrap_or(24);
+        let mut times: Vec<TimeOfDay> = (0..24 / step)
+            .map(|k| TimeOfDay {
+                hour: (self.at.hour + k * step) % 24,
+                minute: self.at.minute,
+            })
+            .collect();
+        times.sort();
+        times
+    }
+
+    pub fn describe(&self) -> String {
+        let head = match self.every {
+            ScheduleFrequency::Day => "Every day".to_string(),
+            ScheduleFrequency::Week => {
+                let names: Vec<&str> = self.days.iter().map(|&i| WEEKDAYS[i].1).collect();
+                format!("Every week on {}", names.join(", "))
+            }
+            ScheduleFrequency::Month => format!("Every month on day {}", self.day),
+        };
+        match self.every_hours {
+            None => format!("{head} at {}", self.at),
+            Some(hours) => format!(
+                "{head}, every {hours} hours from {}",
+                self.times_of_day()[0]
+            ),
+        }
+    }
+
+    /// The first time after `now` that launchd starts the job, in the local time zone.
+    pub fn next_run(&self, now: SystemTime) -> SystemTime {
+        let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+        let mut today: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::localtime_r(&secs, &mut today);
+        }
+        let times = self.times_of_day();
+        for offset in 0..=SEARCH_DAYS {
+            let mut date = today;
+            date.tm_mday += offset;
+            (date.tm_hour, date.tm_min, date.tm_sec, date.tm_isdst) = (12, 0, 0, -1);
+            unsafe {
+                libc::mktime(&mut date);
+            }
+            if !self.matches_date(&date) {
+                continue;
+            }
+            let first = times
+                .iter()
+                .filter_map(|time| {
+                    let mut moment = date;
+                    (moment.tm_hour, moment.tm_min, moment.tm_isdst) =
+                        (time.hour as i32, time.minute as i32, -1);
+                    let found = unsafe { libc::mktime(&mut moment) };
+                    (found > secs).then_some(found)
+                })
+                .min();
+            if let Some(found) = first {
+                return UNIX_EPOCH + Duration::from_secs(found as u64);
+            }
+        }
+        now
+    }
+
+    fn matches_date(&self, date: &libc::tm) -> bool {
+        match self.every {
+            ScheduleFrequency::Day => true,
+            ScheduleFrequency::Week => self.days.iter().any(|&i| WEEKDAYS[i].2 == date.tm_wday),
+            ScheduleFrequency::Month => date.tm_mday as u32 == self.day,
+        }
+    }
+
+    fn calendar_entries(&self) -> Vec<CalendarInterval> {
+        let times = self.times_of_day();
+        let entry = |time: &TimeOfDay, day: Option<u32>, weekday: Option<u32>| CalendarInterval {
+            day,
+            hour: time.hour,
+            minute: time.minute,
+            weekday,
+        };
+        match self.every {
+            ScheduleFrequency::Day => times.iter().map(|t| entry(t, None, None)).collect(),
+            ScheduleFrequency::Week => self
+                .days
+                .iter()
+                .flat_map(|&i| {
+                    let weekday = WEEKDAYS[i].2 as u32;
+                    times.iter().map(move |t| entry(t, None, Some(weekday)))
+                })
+                .collect(),
+            ScheduleFrequency::Month => times
+                .iter()
+                .map(|t| entry(t, Some(self.day), None))
+                .collect(),
+        }
+    }
+
+    fn day_names(&self) -> Vec<String> {
+        self.days
+            .iter()
+            .map(|&i| WEEKDAYS[i].0.to_string())
+            .collect()
     }
 }
 
 /// Generates launchd plist XML content for the schedule job.
-pub fn generate_plist(binary: &Path, freq: ScheduleFrequency) -> Result<String, String> {
+pub fn generate_plist(binary: &Path, rule: &ScheduleRule) -> Result<String, String> {
     let plist = SchedulePlist {
         label: SCHEDULE_LABEL.to_string(),
         low_priority_io: true,
@@ -124,7 +308,7 @@ pub fn generate_plist(binary: &Path, freq: ScheduleFrequency) -> Result<String, 
             "schedule".to_string(),
             "run".to_string(),
         ],
-        start_calendar_interval: CalendarInterval::for_frequency(freq),
+        start_calendar_interval: rule.calendar_entries(),
     };
 
     let mut buf = Vec::new();
@@ -256,7 +440,7 @@ pub fn set_schedule(
     host: &dyn Host,
     layout: &Layout,
     config: &mut Config,
-    every: ScheduleFrequency,
+    rule: &ScheduleRule,
     categories: Vec<String>,
     min_reclaim: u64,
     current_exe: Option<&Path>,
@@ -288,7 +472,7 @@ pub fn set_schedule(
     let bin_path = resolve_binary_path(exe);
 
     // Generate and write plist
-    let xml = generate_plist(&bin_path, every)?;
+    let xml = generate_plist(&bin_path, rule)?;
     if let Some(parent) = plist_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create LaunchAgents folder: {e}"))?;
@@ -324,9 +508,13 @@ pub fn set_schedule(
 
     // Update config
     config.schedule = Some(ScheduleConfig {
-        every,
+        every: rule.every,
         categories,
         min_reclaim,
+        at: rule.at.to_string(),
+        days: rule.day_names(),
+        day: rule.day,
+        every_hours: rule.every_hours,
         last_skip: None,
     });
     let _ = config.save_to(&layout.config_path());
@@ -712,28 +900,6 @@ mod tests {
     }
 
     #[test]
-    fn the_plist_matches_the_stored_example() {
-        let bin = Path::new("/opt/homebrew/bin/taert");
-        let examples = [
-            (
-                ScheduleFrequency::Day,
-                include_str!("../../tests/fixtures/schedule_day.plist"),
-            ),
-            (
-                ScheduleFrequency::Week,
-                include_str!("../../tests/fixtures/schedule_week.plist"),
-            ),
-            (
-                ScheduleFrequency::Month,
-                include_str!("../../tests/fixtures/schedule_month.plist"),
-            ),
-        ];
-        for (freq, example) in examples {
-            assert_eq!(generate_plist(bin, freq).unwrap(), example, "{freq}");
-        }
-    }
-
-    #[test]
     fn uninstall_and_orphans_cannot_be_scheduled() {
         for name in ["uninstall", "orphans", "clean orphans", "Orphans"] {
             let err = validate_categories(&[name.to_string()]).unwrap_err();
@@ -801,7 +967,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".to_string()],
             1_000_000_000,
             Some(&bin),
@@ -834,7 +1000,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".to_string()],
             1_000_000,
             Some(&bin),
@@ -870,7 +1036,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".to_string()],
             1_000_000,
             Some(&bin),
@@ -933,7 +1099,7 @@ mod tests {
         let missing_bin = temp.path().join("does_not_exist_binary");
         let plist_file = agent_plist_path(&layout);
         fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
-        let xml = generate_plist(&missing_bin, ScheduleFrequency::Week).unwrap();
+        let xml = generate_plist(&missing_bin, &default_rule(ScheduleFrequency::Week)).unwrap();
         fs::write(&plist_file, xml).unwrap();
 
         let config = Config {
@@ -942,6 +1108,7 @@ mod tests {
                 categories: vec!["dev".to_string(), "junk".to_string()],
                 min_reclaim: 1_000_000_000,
                 last_skip: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -983,6 +1150,7 @@ mod tests {
                 categories: vec!["dev".to_string()],
                 min_reclaim: 1_000_000, // 1 MB limit, we only have 2 KB
                 last_skip: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1045,6 +1213,7 @@ mod tests {
                 categories: vec!["dev".to_string()],
                 min_reclaim: 1024,
                 last_skip: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -1075,6 +1244,7 @@ mod tests {
                 categories: categories.iter().map(|c| c.to_string()).collect(),
                 min_reclaim,
                 last_skip: None,
+                ..Default::default()
             }),
             ..Default::default()
         }
@@ -1111,7 +1281,7 @@ mod tests {
         fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
         fs::write(
             &plist_file,
-            generate_plist(&bin, ScheduleFrequency::Week).unwrap(),
+            generate_plist(&bin, &default_rule(ScheduleFrequency::Week)).unwrap(),
         )
         .unwrap();
         let host = FakeHost::default();
@@ -1141,7 +1311,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["DEV".into(), " dev ".into(), "junk".into()],
             1024,
             Some(&layout.user("taert")),
@@ -1225,7 +1395,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".into()],
             1024,
             Some(&bin),
@@ -1262,7 +1432,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".into()],
             1024,
             Some(&layout.user("taert")),
@@ -1373,7 +1543,7 @@ mod tests {
             &host,
             &layout,
             &mut config,
-            ScheduleFrequency::Week,
+            &default_rule(ScheduleFrequency::Week),
             vec!["dev".into()],
             1024,
             Some(&layout.user("taert")),
@@ -1441,7 +1611,7 @@ mod tests {
         fs::create_dir_all(plist_file.parent().unwrap()).unwrap();
         fs::write(
             &plist_file,
-            generate_plist(bin, ScheduleFrequency::Week).unwrap(),
+            generate_plist(bin, &default_rule(ScheduleFrequency::Week)).unwrap(),
         )
         .unwrap();
         let host = FakeHost::default();
@@ -1734,5 +1904,414 @@ mod tests {
             bin.display()
         );
         assert!(text.ends_with(&block), "{text}");
+    }
+
+    fn config_with(
+        every: ScheduleFrequency,
+        at: &str,
+        days: &[&str],
+        day: u32,
+        every_hours: Option<u32>,
+    ) -> ScheduleConfig {
+        ScheduleConfig {
+            every,
+            at: at.to_string(),
+            days: days.iter().map(|d| d.to_string()).collect(),
+            day,
+            every_hours,
+            ..ScheduleConfig::default()
+        }
+    }
+
+    fn rule_of(
+        every: ScheduleFrequency,
+        at: &str,
+        days: &[&str],
+        day: u32,
+        every_hours: Option<u32>,
+    ) -> ScheduleRule {
+        ScheduleRule::from_config(&config_with(every, at, days, day, every_hours)).unwrap()
+    }
+
+    fn default_rule(every: ScheduleFrequency) -> ScheduleRule {
+        ScheduleRule::for_frequency(None, every).unwrap()
+    }
+
+    fn local(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> SystemTime {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_isdst = -1;
+        let secs = unsafe { libc::mktime(&mut tm) };
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64)
+    }
+
+    #[test]
+    fn a_config_without_the_new_fields_is_todays_schedule() {
+        let config: ScheduleConfig = toml::from_str("every = \"week\"").unwrap();
+        assert_eq!(config.at, "09:00");
+        assert_eq!(config.days, vec!["mon".to_string()]);
+        assert_eq!(config.day, 1);
+        assert_eq!(config.every_hours, None);
+
+        let bin = Path::new("/opt/homebrew/bin/taert");
+        for (freq, example) in [
+            (
+                ScheduleFrequency::Day,
+                include_str!("../../tests/fixtures/schedule_day.plist"),
+            ),
+            (
+                ScheduleFrequency::Week,
+                include_str!("../../tests/fixtures/schedule_week.plist"),
+            ),
+            (
+                ScheduleFrequency::Month,
+                include_str!("../../tests/fixtures/schedule_month.plist"),
+            ),
+        ] {
+            let config: ScheduleConfig = toml::from_str(&format!("every = \"{freq}\"")).unwrap();
+            let rule = ScheduleRule::from_config(&config).unwrap();
+            assert_eq!(generate_plist(bin, &rule).unwrap(), example, "{freq}");
+        }
+    }
+
+    #[test]
+    fn the_unused_fields_of_the_config_are_saved_and_a_missing_repeat_is_left_out() {
+        let config = config_with(ScheduleFrequency::Day, "21:30", &["mon", "thu"], 15, None);
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("at = \"21:30\""), "{text}");
+        let reread: ScheduleConfig = toml::from_str(&text).unwrap();
+        assert_eq!(reread.days, ["mon", "thu"]);
+        assert!(text.contains("day = 15"), "{text}");
+        assert!(!text.contains("every_hours"), "{text}");
+    }
+
+    #[test]
+    fn a_bad_value_is_refused_with_its_field_and_value() {
+        let day = ScheduleFrequency::Day;
+        let cases = [
+            (
+                config_with(day, "25:00", &["mon"], 1, None),
+                "Time 25:00 is not HH:MM between 00:00 and 23:59.",
+            ),
+            (
+                config_with(day, "9:5", &["mon"], 1, None),
+                "Time 9:5 is not HH:MM between 00:00 and 23:59.",
+            ),
+            (
+                config_with(day, "09:60", &["mon"], 1, None),
+                "Time 09:60 is not HH:MM between 00:00 and 23:59.",
+            ),
+            (
+                config_with(day, "09:00", &[], 1, None),
+                "Weekdays are empty. Use mon, tue, wed, thu, fri, sat, sun.",
+            ),
+            (
+                config_with(day, "09:00", &["mon", "fri2"], 1, None),
+                "Weekday fri2 is not one of mon, tue, wed, thu, fri, sat, sun.",
+            ),
+            (
+                config_with(day, "09:00", &["mon"], 0, None),
+                "Day 0 is not between 1 and 28.",
+            ),
+            (
+                config_with(day, "09:00", &["mon"], 29, None),
+                "Day 29 is not between 1 and 28.",
+            ),
+            (
+                config_with(day, "09:00", &["mon"], 31, None),
+                "Day 31 is not between 1 and 28.",
+            ),
+            (
+                config_with(day, "09:00", &["mon"], 1, Some(5)),
+                "Repeat every 5 hours is not one of 2, 3, 4, 6, 8, 12.",
+            ),
+        ];
+        for (config, message) in cases {
+            assert_eq!(ScheduleRule::from_config(&config).unwrap_err(), message);
+        }
+    }
+
+    #[test]
+    fn times_of_day_run_around_the_clock_from_the_first_time() {
+        let day = ScheduleFrequency::Day;
+        let times = |at, hours| {
+            rule_of(day, at, &["mon"], 1, hours)
+                .times_of_day()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(times("09:00", None), ["09:00"]);
+        assert_eq!(
+            times("03:30", Some(6)),
+            ["03:30", "09:30", "15:30", "21:30"]
+        );
+        assert_eq!(times("23:00", Some(12)), ["11:00", "23:00"]);
+        assert_eq!(times("00:15", Some(2)).len(), 12);
+    }
+
+    #[test]
+    fn describe_names_the_frequency_the_days_and_the_repeat() {
+        let d =
+            |every, at, days: &[&str], day, hours| rule_of(every, at, days, day, hours).describe();
+        use ScheduleFrequency::{Day, Month, Week};
+        assert_eq!(d(Day, "09:00", &["mon"], 1, None), "Every day at 09:00");
+        assert_eq!(
+            d(Week, "21:30", &["thu", "mon"], 1, None),
+            "Every week on Mon, Thu at 21:30"
+        );
+        assert_eq!(
+            d(Month, "09:00", &["mon"], 15, None),
+            "Every month on day 15 at 09:00"
+        );
+        assert_eq!(
+            d(Day, "03:30", &["mon"], 1, Some(6)),
+            "Every day, every 6 hours from 03:30"
+        );
+        assert_eq!(
+            d(Week, "03:30", &["mon", "thu"], 1, Some(6)),
+            "Every week on Mon, Thu, every 6 hours from 03:30"
+        );
+        assert_eq!(
+            d(Month, "03:30", &["mon"], 15, Some(12)),
+            "Every month on day 15, every 12 hours from 03:30"
+        );
+        assert_eq!(
+            d(Day, "21:30", &["mon"], 1, Some(6)),
+            "Every day, every 6 hours from 03:30"
+        );
+        assert_eq!(
+            d(Day, "23:00", &["mon"], 1, Some(12)),
+            "Every day, every 12 hours from 11:00"
+        );
+    }
+
+    #[test]
+    fn each_plist_matches_its_stored_example() {
+        let bin = Path::new("/opt/homebrew/bin/taert");
+        use ScheduleFrequency::{Day, Month, Week};
+        let examples = [
+            (
+                default_rule(Day),
+                include_str!("../../tests/fixtures/schedule_day.plist"),
+            ),
+            (
+                default_rule(Week),
+                include_str!("../../tests/fixtures/schedule_week.plist"),
+            ),
+            (
+                default_rule(Month),
+                include_str!("../../tests/fixtures/schedule_month.plist"),
+            ),
+            (
+                rule_of(Week, "21:30", &["mon", "thu"], 1, None),
+                include_str!("../../tests/fixtures/schedule_week_two_days.plist"),
+            ),
+            (
+                rule_of(Month, "09:00", &["mon"], 15, None),
+                include_str!("../../tests/fixtures/schedule_month_day15.plist"),
+            ),
+            (
+                rule_of(Day, "03:30", &["mon"], 1, Some(6)),
+                include_str!("../../tests/fixtures/schedule_day_every_6_hours.plist"),
+            ),
+        ];
+        for (rule, example) in examples {
+            assert_eq!(
+                generate_plist(bin, &rule).unwrap(),
+                example,
+                "{}",
+                rule.describe()
+            );
+        }
+    }
+
+    #[test]
+    fn sunday_is_weekday_zero_and_comes_last() {
+        let rule = rule_of(ScheduleFrequency::Week, "09:00", &["sun", "sat"], 1, None);
+        let xml = generate_plist(Path::new("/bin/taert"), &rule).unwrap();
+        let weekdays: Vec<&str> = xml
+            .split("<key>Weekday</key>")
+            .skip(1)
+            .map(|part| part.split("</integer>").next().unwrap().trim())
+            .collect();
+        assert_eq!(weekdays, ["<integer>6", "<integer>0"]);
+    }
+
+    #[test]
+    fn a_weekday_named_twice_runs_once() {
+        let rule = rule_of(ScheduleFrequency::Week, "09:00", &["mon", "mon"], 1, None);
+        let xml = generate_plist(Path::new("/bin/taert"), &rule).unwrap();
+        assert_eq!(xml.matches("<key>Weekday</key>").count(), 1);
+        assert_eq!(
+            rule,
+            rule_of(ScheduleFrequency::Week, "09:00", &["mon"], 1, None)
+        );
+    }
+
+    #[test]
+    fn a_saved_rule_keeps_the_fields_the_frequency_does_not_use() {
+        let saved = config_with(
+            ScheduleFrequency::Week,
+            "21:30",
+            &["mon", "thu"],
+            15,
+            Some(6),
+        );
+        let rule = ScheduleRule::for_frequency(Some(&saved), ScheduleFrequency::Month).unwrap();
+        assert_eq!(
+            rule.describe(),
+            "Every month on day 15, every 6 hours from 03:30"
+        );
+        let broken = config_with(ScheduleFrequency::Week, "25:00", &["mon"], 1, None);
+        assert_eq!(
+            ScheduleRule::for_frequency(Some(&broken), ScheduleFrequency::Day).unwrap_err(),
+            "Time 25:00 is not HH:MM between 00:00 and 23:59."
+        );
+    }
+
+    #[test]
+    fn set_saves_the_four_values_of_the_rule() {
+        let (temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        let mut config = Config::default();
+        let rule = rule_of(
+            ScheduleFrequency::Week,
+            "21:30",
+            &["thu", "mon"],
+            15,
+            Some(3),
+        );
+        let bin = temp.path().join("taert");
+        set_schedule(
+            &host,
+            &layout,
+            &mut config,
+            &rule,
+            vec!["dev".to_string()],
+            1,
+            Some(&bin),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(agent_plist_path(&layout)).unwrap(),
+            generate_plist(&bin, &rule).unwrap()
+        );
+        let on_disk = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(on_disk.at, "21:30");
+        assert_eq!(on_disk.days, ["mon", "thu"]);
+        assert_eq!(on_disk.day, 15);
+        assert_eq!(on_disk.every_hours, Some(3));
+        let saved = config.schedule.unwrap();
+        assert_eq!(saved.every, ScheduleFrequency::Week);
+        assert_eq!(saved.at, "21:30");
+        assert_eq!(saved.days, ["mon", "thu"]);
+        assert_eq!(saved.day, 15);
+        assert_eq!(saved.every_hours, Some(3));
+        assert_eq!(ScheduleRule::from_config(&saved).unwrap(), rule);
+    }
+
+    #[test]
+    fn next_run_of_a_day_rule_crosses_the_day_the_month_and_the_year() {
+        let rule = rule_of(ScheduleFrequency::Day, "09:00", &["mon"], 1, None);
+        assert_eq!(
+            rule.next_run(local(2026, 11, 6, 8, 0)),
+            local(2026, 11, 6, 9, 0)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 6, 9, 0)),
+            local(2026, 11, 7, 9, 0)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 30, 10, 0)),
+            local(2026, 12, 1, 9, 0)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 12, 31, 23, 59)),
+            local(2027, 1, 1, 9, 0)
+        );
+    }
+
+    #[test]
+    fn next_run_of_a_week_rule_crosses_the_end_of_the_week() {
+        // 2026-11-05 is a Thursday.
+        let rule = rule_of(ScheduleFrequency::Week, "21:30", &["mon", "thu"], 1, None);
+        assert_eq!(
+            rule.next_run(local(2026, 11, 5, 20, 0)),
+            local(2026, 11, 5, 21, 30)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 5, 22, 0)),
+            local(2026, 11, 9, 21, 30)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 8, 23, 0)),
+            local(2026, 11, 9, 21, 30)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 9, 22, 0)),
+            local(2026, 11, 12, 21, 30)
+        );
+        let sunday = rule_of(ScheduleFrequency::Week, "09:00", &["sun"], 1, None);
+        assert_eq!(
+            sunday.next_run(local(2026, 11, 7, 12, 0)),
+            local(2026, 11, 8, 9, 0)
+        );
+        assert_eq!(
+            sunday.next_run(local(2026, 11, 8, 9, 0)),
+            local(2026, 11, 15, 9, 0)
+        );
+    }
+
+    #[test]
+    fn next_run_of_a_month_rule_crosses_the_month_and_the_year() {
+        let rule = rule_of(ScheduleFrequency::Month, "09:00", &["mon"], 15, None);
+        assert_eq!(
+            rule.next_run(local(2026, 11, 15, 8, 0)),
+            local(2026, 11, 15, 9, 0)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 15, 10, 0)),
+            local(2026, 12, 15, 9, 0)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 12, 20, 10, 0)),
+            local(2027, 1, 15, 9, 0)
+        );
+        let last = rule_of(ScheduleFrequency::Month, "09:00", &["mon"], 28, None);
+        assert_eq!(
+            last.next_run(local(2027, 2, 28, 10, 0)),
+            local(2027, 3, 28, 9, 0)
+        );
+    }
+
+    #[test]
+    fn next_run_of_a_repeating_rule_goes_to_the_next_time_of_the_day() {
+        let rule = rule_of(ScheduleFrequency::Day, "03:30", &["mon"], 1, Some(6));
+        assert_eq!(
+            rule.next_run(local(2026, 11, 6, 10, 0)),
+            local(2026, 11, 6, 15, 30)
+        );
+        assert_eq!(
+            rule.next_run(local(2026, 11, 6, 22, 0)),
+            local(2026, 11, 7, 3, 30)
+        );
+        let week = rule_of(ScheduleFrequency::Week, "21:30", &["fri"], 1, Some(12));
+        assert_eq!(
+            week.next_run(local(2026, 11, 6, 10, 0)),
+            local(2026, 11, 6, 21, 30)
+        );
+        assert_eq!(
+            week.next_run(local(2026, 11, 6, 22, 0)),
+            local(2026, 11, 13, 9, 30)
+        );
     }
 }

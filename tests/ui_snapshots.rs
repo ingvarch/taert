@@ -792,6 +792,7 @@ fn snapshot_settings_schedule() {
             categories: vec!["dev".into(), "junk".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         }),
         ..Config::default()
     };
@@ -825,6 +826,7 @@ fn snapshot_settings_schedule_status() {
             categories: vec!["dev".into(), "junk".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         }),
         ..Config::default()
     };
@@ -901,6 +903,7 @@ fn snapshot_settings_permissions() {
             categories: vec!["dev".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         }),
         ..Config::default()
     };
@@ -2831,6 +2834,7 @@ fn snapshot_workspace_settings_summary() {
             categories: vec!["dev".into()],
             min_reclaim: 1_000_000_000,
             last_skip: None,
+            ..Default::default()
         }),
         appearance: "dark".into(),
         ..Config::default()
