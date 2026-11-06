@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -14,6 +16,7 @@ use taert::core::cleaner::{RemovalFailure, RemovalProgress, RemovalReport};
 use taert::core::compress;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
+use taert::core::history::HistoryLog;
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, ScanStep};
 use taert::core::large_files;
 use taert::core::layout::Layout;
@@ -35,6 +38,7 @@ use taert::core::uninstaller::{self, Route};
 use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::doctor::{DoctorScreenState, render_doctor};
 use taert::ui::env::UiEnv;
+use taert::ui::history::{HistoryState, render_history};
 use taert::ui::progress::{ProgressState, render_progress};
 use taert::ui::select::{ModalOverlay, SelectState, render_select};
 use taert::ui::settings::{SettingsFocus, SettingsSection, SettingsState, render_settings};
@@ -874,7 +878,8 @@ const _COMPRESS: usize = 8;
 const EXPLORE_STORAGE: usize = 9;
 const _LARGE_FILES: usize = 10;
 const SYSTEM_STATUS: usize = 11;
-const SETTINGS: usize = 12;
+const _HISTORY: usize = 12;
+const SETTINGS: usize = 13;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -2459,7 +2464,7 @@ fn settings_sit_in_frames() {
 fn the_main_menu_sits_in_frames_on_every_width() {
     for (width, height) in [(205, 60), (120, 32), (80, 40)] {
         let output = home_screen(&home_state(CLEAN_CACHES), width, height);
-        for section in ["╭─ Cleanup", "╭─ Inspect", "╭─ Settings"] {
+        for section in ["╭─ Cleanup", "╭─ Inspect", "╭─ taert"] {
             assert!(output.contains(section), "{section} at {width}:\n{output}");
         }
     }
@@ -2568,14 +2573,14 @@ fn a_long_menu_says_how_many_rows_are_hidden() {
             "{lines:#?}"
         );
     };
-    check(80, 24, 0, None, Some("2 more below"));
-    check(80, 24, 12, Some("2 more above"), Some("╰"));
-    check(50, 16, 0, None, Some("8 more below"));
-    check(50, 16, 12, Some("8 more above"), Some("╰"));
-    check(50, 16, 4, None, Some("7 more below"));
-    check(50, 16, 9, Some("6 more above"), Some("1 more below"));
-    check(120, 24, 0, None, Some("1 more below"));
-    check(120, 24, 12, Some("1 more above"), Some("╰"));
+    check(80, 24, 0, None, Some("3 more below"));
+    check(80, 24, 13, Some("3 more above"), Some("╰"));
+    check(50, 16, 0, None, Some("9 more below"));
+    check(50, 16, 13, Some("9 more above"), Some("╰"));
+    check(50, 16, 4, None, Some("8 more below"));
+    check(50, 16, 9, Some("6 more above"), Some("2 more below"));
+    check(120, 24, 0, None, Some("2 more below"));
+    check(120, 24, 13, Some("2 more above"), Some("╰"));
 }
 
 #[test]
@@ -2593,11 +2598,38 @@ fn a_menu_that_fits_has_no_hint() {
 
 #[test]
 fn snapshot_workspace_last_row() {
-    let state = home_state(12);
+    let state = home_state(SETTINGS);
     for (w, h, label) in [(80, 24, "80x24"), (50, 16, "50x16"), (120, 24, "120x24")] {
         assert_snapshot!(
             format!("workspace_last_row_{label}"),
             home_screen(&state, w, h)
         );
     }
+}
+
+fn three_runs_state() -> (tempfile::TempDir, HistoryState) {
+    let dir = tempfile::tempdir().unwrap();
+    let log = HistoryLog::new(dir.path().join("history.jsonl"));
+    support::write_three_runs(&log.path);
+    let state = HistoryState::load(&log, false);
+    (dir, state)
+}
+
+#[test]
+fn snapshot_history() {
+    let (_dir, state) = three_runs_state();
+    let theme = snapshot_theme();
+    for (w, h, label) in [(120, 32, "120x32"), (80, 24, "80x24")] {
+        let output = render_to_string(w, h, |f| render_history(f, &state, &theme));
+        assert_snapshot!(format!("history_{label}"), output);
+    }
+}
+
+#[test]
+fn snapshot_history_run() {
+    let (_dir, mut state) = three_runs_state();
+    state.open_run();
+    let theme = snapshot_theme();
+    let output = render_to_string(120, 32, |f| render_history(f, &state, &theme));
+    assert_snapshot!("history_run_120x32", output);
 }

@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod env;
 pub mod folder_preview;
 pub mod glyphs;
+pub mod history;
 pub mod keys;
 pub mod palette;
 pub mod path_list;

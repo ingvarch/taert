@@ -118,6 +118,7 @@ taert/
 │       ├── app.rs              # Ratatui application state machine, event loop, key router
 │       ├── env.rs              # Terminal capability, appearance, and accessibility detection
 │       ├── folder_preview.rs   # Contents of the folder highlighted in Explore, measured in the background
+│       ├── history.rs          # History screen: runs newest first, and the items of one run
 │       ├── palette.rs          # Semantic color palette resolver for dark, light, and no-color
 │       ├── path_list.rs        # Path list behind Project folders and Protected paths: items, adding, removing, dialogs
 │       ├── progress.rs         # Scanning progress screen with live progress bars

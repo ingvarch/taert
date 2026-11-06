@@ -21,10 +21,12 @@ use super::components::list::ListRow;
 use super::components::modal::Modal;
 use super::env::ColorDepth;
 use super::folder_preview::folder_rows;
+use super::history::recent_runs_card;
 use super::system_status::{SystemStatusState, load_summary, storage_summary};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cache::{FolderSnapshot, StorageCache};
+use crate::core::history::{HistoryLog, RunRecord};
 use crate::core::profiler::SystemProfiler;
 use crate::core::safety::Safety;
 use crate::core::sysinfo::SysInfo;
@@ -43,14 +45,17 @@ pub enum MainMenuChoice {
     ExploreStorage, // 0
     LargeFiles,     // no number key
     SystemStatus,
+    History,
     Settings,
 }
+
+const RECENT_RUNS: usize = 3;
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3, 4]),
     ("Optimize", &[5, 6, 7, 8]),
     ("Inspect", &[9, 10, 11]),
-    ("Settings", &[12]),
+    ("taert", &[12, 13]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +103,9 @@ pub struct WorkspaceState {
     pub largest: Option<FolderSnapshot>,
     /// The folder the Explore Storage row reports on.
     pub home: PathBuf,
+    /// The newest runs, newest first, for the History row's pane.
+    /// The newest runs for the History pane, or why they could not be read. `None` until read.
+    pub recent_runs: Option<Result<Vec<RunRecord>, String>>,
     pane_visible: Cell<bool>,
 }
 
@@ -132,6 +140,7 @@ impl WorkspaceState {
             ))),
             largest: None,
             home: Safety::home_dir(),
+            recent_runs: None,
             pane_visible: Cell::new(false),
             items: vec![
                 (
@@ -207,6 +216,12 @@ impl WorkspaceState {
                     "Live macOS hardware, memory pressure, and APFS\nstorage telemetry with visual breakdown.",
                 ),
                 (
+                    MainMenuChoice::History,
+                    "History",
+                    "See what taert removed and changed",
+                    "Every removal and change taert made, run by run.\nOpen a run to see each path, what happened to it,\nand how much space it took.",
+                ),
+                (
                     MainMenuChoice::Settings,
                     "Settings",
                     "Project folders, the schedule, and protected paths",
@@ -255,6 +270,21 @@ impl WorkspaceState {
             state.view = WorkspaceView::CleanSubmenu { selected };
         }
         state
+    }
+
+    /// True until `load_history` has run for this menu.
+    pub fn history_pending(&self) -> bool {
+        self.recent_runs.is_none()
+    }
+
+    /// Reads the newest runs for the pane.
+    pub fn load_history(&mut self, log: &HistoryLog) {
+        let runs = log.load_runs().map_err(|error| error.to_string());
+        self.recent_runs = Some(runs.map(|mut runs| {
+            runs.reverse();
+            runs.truncate(RECENT_RUNS);
+            runs
+        }));
     }
 
     pub fn submenu_row(&self) -> Option<usize> {
@@ -428,6 +458,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::LargeFiles => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
+        MainMenuChoice::History => theme.g.icon_history,
         MainMenuChoice::Settings => theme.g.icon_prefs,
     }
 }
@@ -677,6 +708,10 @@ fn detail_data(
             lines
         }
         MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
+        MainMenuChoice::History => state
+            .recent_runs
+            .as_ref()
+            .map_or_else(Vec::new, |runs| recent_runs_card(runs, width, theme)),
         MainMenuChoice::DockerCleanup
         | MainMenuChoice::Doctor
         | MainMenuChoice::StartupItems

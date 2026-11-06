@@ -19,7 +19,7 @@ use crate::core::apps::{self, InstalledApp, Matching};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
 use crate::core::cleaner::{RemovalMode, RemovalReport, item_removal_mode};
-use crate::core::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
+use crate::core::date_utils::format_rfc3339;
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
 use crate::core::history::{HistoryLog, ItemOutcome};
@@ -1391,12 +1391,7 @@ fn handle_history(
             }
         } else {
             let _ = writeln!(out, "Run:     {}", run_record.run);
-            let date_str = if let Some(time) = parse_rfc3339(&run_record.at) {
-                format_system_time(time)
-            } else {
-                run_record.at.clone()
-            };
-            let _ = writeln!(out, "Date:    {date_str}");
+            let _ = writeln!(out, "Date:    {}", run_record.date_label());
             let _ = writeln!(out, "Command: {}", run_record.command);
             let _ = writeln!(out, "Mode:    {}", run_record.mode);
             let status = if run_record.is_interrupted() {
