@@ -20,6 +20,7 @@ pub mod layout;
 pub mod leftovers;
 pub mod orphans;
 pub mod path_utils;
+pub mod permissions;
 pub mod processes;
 pub mod profiler;
 pub mod projects_store;

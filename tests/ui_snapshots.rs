@@ -10,6 +10,7 @@ use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
+use taert::core::admin::TouchId;
 use taert::core::apps;
 use taert::core::cache::StorageCache;
 use taert::core::cleaner::{RemovalFailure, RemovalProgress, RemovalReport};
@@ -22,6 +23,7 @@ use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, Sca
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
+use taert::core::permissions::FullDiskAccess;
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
@@ -888,6 +890,45 @@ fn snapshot_settings_about() {
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
     assert_snapshot!("settings_about_120x32", output);
+}
+
+#[test]
+fn snapshot_settings_permissions() {
+    let theme = snapshot_theme();
+    let config = Config {
+        schedule: Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+            last_skip: None,
+        }),
+        ..Config::default()
+    };
+    let mut state = SettingsState::new(&config, &IgnoreStore::default(), &no_layout());
+    state.status = Some(ScheduleStatus {
+        settings: ScheduleSettings::On {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into()],
+            min_reclaim: 1_000_000_000,
+        },
+        last_run: LastRun::Never,
+        plist_missing: false,
+        missing_program: None,
+        agent_loaded: Some(true),
+        needs_full_disk_access: Some("/opt/homebrew/bin/taert".into()),
+    });
+    state.full_disk_access = FullDiskAccess::Off;
+    state.touch_id = Some(TouchId::Off);
+    state.section = SettingsSection::Permissions;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert!(
+        output.contains("/opt/homebrew/bin/taert needs Full Disk Access"),
+        "{output}"
+    );
+    assert_snapshot!("settings_permissions_120x32", output);
 }
 
 fn render_appearance_section(env: UiEnv) -> String {

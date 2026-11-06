@@ -9,9 +9,9 @@ expression: output
    │   ◷ Scheduled cleanup        › │  │                                                                             │
    │   ◈ Protected paths          › │  │      Project folders                                                        │
    │   ◐ Appearance               › │  │      ~/Code                                                                 │
-   │   ⓘ About                    › │  │ ▌    /Volumes/Work/repos                                                    │
-   ╰────────────────────────────────╯  │      Add folder…                                                            │
-                                       │      Project cleanup scans these folders.                                   │
+   │   ◉ Permissions              › │  │ ▌    /Volumes/Work/repos                                                    │
+   │   ⓘ About                    › │  │      Add folder…                                                            │
+   ╰────────────────────────────────╯  │      Project cleanup scans these folders.                                   │
                                        │                                                                             │
                                        │      Also clean folders named                                               │
                                        │      Add name…                                                              │

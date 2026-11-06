@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
 
 - **Appearance in Settings**: Settings › Appearance switches between auto, dark, and light, and applies at once.
+- **Permissions in Settings**: Settings › Permissions shows Full Disk Access and Touch ID for sudo, and opens System Settings at the matching page.
 - **About in Settings**: Settings › About shows the version and where taert keeps its files, and shows them in Finder.
 
 ### Changed

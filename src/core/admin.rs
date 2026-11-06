@@ -215,26 +215,46 @@ const BIOUTIL_TIMEOUT: Duration = Duration::from_secs(5);
 const COPY_TEMPLATE_HINT: &str = "Tip: sudo can use Touch ID. Copy /etc/pam.d/sudo_local.template to /etc/pam.d/sudo_local and remove the # before pam_tid.so.";
 const ADD_LINE_HINT: &str = "Tip: sudo can use Touch ID. Add the line auth sufficient pam_tid.so at the top of /etc/pam.d/sudo_local.";
 
-/// A tip for turning on Touch ID for sudo, when fingerprints are enrolled and PAM does not use them.
-pub fn touch_id_hint(host: &dyn Host, layout: &Layout) -> Option<&'static str> {
-    let local_path = layout.system("etc/pam.d/sudo_local");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchId {
+    On,
+    Off,
+    NoFingerprints,
+}
+
+/// Whether sudo asks for a fingerprint: PAM uses it, or it could but PAM does not.
+pub fn touch_id_status(host: &dyn Host, layout: &Layout) -> TouchId {
     let read = |path| std::fs::read(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    let local = read(&local_path);
-    let sudo = read(&layout.system("etc/pam.d/sudo"));
+    let local = read(layout.system("etc/pam.d/sudo_local"));
+    let sudo = read(layout.system("etc/pam.d/sudo"));
     if [&local, &sudo]
         .into_iter()
         .any(|text| text.as_ref().is_ok_and(|text| enables_touch_id(text)))
     {
-        return None;
+        TouchId::On
+    } else if has_fingerprints(host) {
+        TouchId::Off
+    } else {
+        TouchId::NoFingerprints
     }
-    if !has_fingerprints(host) {
-        return None;
-    }
-    Some(if local_path.symlink_metadata().is_ok() {
+}
+
+/// How to turn on Touch ID for sudo.
+pub fn touch_id_tip(layout: &Layout) -> &'static str {
+    if layout
+        .system("etc/pam.d/sudo_local")
+        .symlink_metadata()
+        .is_ok()
+    {
         ADD_LINE_HINT
     } else {
         COPY_TEMPLATE_HINT
-    })
+    }
+}
+
+/// A tip for turning on Touch ID for sudo, when fingerprints are enrolled and PAM does not use them.
+pub fn touch_id_hint(host: &dyn Host, layout: &Layout) -> Option<&'static str> {
+    (touch_id_status(host, layout) == TouchId::Off).then(|| touch_id_tip(layout))
 }
 
 fn enables_touch_id(pam: &str) -> bool {
@@ -761,6 +781,35 @@ mod tests {
         let other_text = FakeHost::default();
         other_text.reply(BIOUTIL, "Biometrics are not available\n");
         assert_eq!(touch_id_hint(&other_text, &layout), None);
+    }
+
+    #[test]
+    fn touch_id_is_on_when_pam_enables_it() {
+        let (_dir, layout) =
+            pam_sandbox(&[("sudo_local", "auth       sufficient     pam_tid.so\n")]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_status(&host, &layout), TouchId::On);
+        assert_eq!(host.count("/usr/bin/bioutil"), 0);
+    }
+
+    #[test]
+    fn touch_id_is_off_with_fingerprints_and_no_pam_line() {
+        let (_dir, layout) = pam_sandbox(&[("sudo", "auth required pam_opendirectory.so\n")]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, ENROLLED);
+
+        assert_eq!(touch_id_status(&host, &layout), TouchId::Off);
+    }
+
+    #[test]
+    fn touch_id_has_no_fingerprints_to_use() {
+        let (_dir, layout) = pam_sandbox(&[]);
+        let host = FakeHost::default();
+        host.reply(BIOUTIL, "User 501:\t0 biometric template(s)\n");
+
+        assert_eq!(touch_id_status(&host, &layout), TouchId::NoFingerprints);
     }
 
     #[test]
