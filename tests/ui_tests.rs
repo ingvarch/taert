@@ -55,7 +55,10 @@ fn test_render_workspace_screen() {
     let settings_row = format!("{} Settings", theme.g.icon_prefs);
     assert!(rendered_text.contains(&settings_row), "{rendered_text}");
     assert!(!rendered_text.contains("Preferences"), "{rendered_text}");
-    assert!(rendered_text.contains("Protected paths"));
+    assert!(
+        !rendered_text.contains("Protected paths"),
+        "{rendered_text}"
+    );
 }
 
 #[test]

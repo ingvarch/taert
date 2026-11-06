@@ -4,7 +4,8 @@ expression: "home_screen(&state, w, h)"
 ---
  taert                                            118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────
-   3 more above
+   2 more above
+   │   ▦ Docker cleanup                                                    › │
    │   ⌦ Uninstall apps                                                    › │
    │   ◆ Homebrew                                                          › │
    ╰─────────────────────────────────────────────────────────────────────────╯
@@ -20,9 +21,8 @@ expression: "home_screen(&state, w, h)"
    │   ▤ System status                                                     › │
    ╰─────────────────────────────────────────────────────────────────────────╯
    ╭─ Settings ──────────────────────────────────────────────────────────────╮
-   │   ⌥ Settings                                                          › │
-   │ ▌ ◈ Protected paths                                                   › │
-   │      Choose paths excluded from cleanup                                 │
+   │ ▌ ⌥ Settings                                                          › │
+   │      Project folders, the schedule, and protected paths                 │
    ╰─────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More                                       Open  ↵

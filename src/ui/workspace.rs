@@ -44,14 +44,13 @@ pub enum MainMenuChoice {
     LargeFiles,     // no number key
     SystemStatus,
     Settings,
-    ProtectedPaths,
 }
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3, 4]),
     ("Optimize", &[5, 6, 7, 8]),
     ("Inspect", &[9, 10, 11]),
-    ("Settings", &[12, 13]),
+    ("Settings", &[12]),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,12 +198,6 @@ impl WorkspaceState {
                     "Settings",
                     "Project folders, the schedule, and protected paths",
                     "Choose the folders Project cleanup scans, when scheduled\ncleanup runs, and which paths taert never touches.",
-                ),
-                (
-                    MainMenuChoice::ProtectedPaths,
-                    "Protected paths",
-                    "Choose paths excluded from cleanup",
-                    "Manage directories and files permanently protected from\nall automated cleanup and purge operations.",
                 ),
             ],
             clean_options: vec![
@@ -423,7 +416,6 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::LargeFiles => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
         MainMenuChoice::Settings => theme.g.icon_prefs,
-        MainMenuChoice::ProtectedPaths => theme.g.icon_protected,
     }
 }
 
@@ -675,8 +667,7 @@ fn detail_data(
         MainMenuChoice::DockerCleanup
         | MainMenuChoice::Doctor
         | MainMenuChoice::StartupItems
-        | MainMenuChoice::Settings
-        | MainMenuChoice::ProtectedPaths => Vec::new(),
+        | MainMenuChoice::Settings => Vec::new(),
     }
 }
 

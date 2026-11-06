@@ -7,7 +7,7 @@ pub mod folder_preview;
 pub mod glyphs;
 pub mod keys;
 pub mod palette;
-pub mod path_list_editor;
+pub mod path_list;
 pub mod progress;
 pub mod select;
 pub mod settings;

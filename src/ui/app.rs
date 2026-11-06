@@ -17,14 +17,9 @@ use super::analyze::{
 };
 use super::doctor::{DoctorActionConfirm, DoctorScreenState, render_doctor};
 use super::keys::is_removal_key;
-use super::path_list_editor::{
-    PathListEditorState, PathListKind, PathListMode, render_path_list_editor,
-};
 use super::progress::{ProgressState, render_progress};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
-use super::settings::{
-    SettingsFocus, SettingsRow, SettingsSection, SettingsState, render_settings,
-};
+use super::settings::{SettingsFocus, SettingsRow, SettingsState, render_settings};
 use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
 use super::terminal::{AdminGate, enter_tui, leave_tui};
@@ -69,7 +64,6 @@ pub enum Screen {
     Startup(StartupScreenState),
     Doctor(DoctorScreenState),
     Settings(SettingsState),
-    PathListEditor(PathListEditorState),
 }
 
 pub enum ScanMessage {
@@ -99,7 +93,6 @@ enum ReturnPoint {
         row: usize,
         submenu_row: Option<usize>,
     },
-    Settings(SettingsSection, usize),
     AppList(Box<SelectState>),
 }
 
@@ -515,7 +508,6 @@ impl App {
             Screen::Startup(state) => render_startup(frame, state, &self.theme),
             Screen::Doctor(state) => render_doctor(frame, state, &self.theme),
             Screen::Settings(state) => render_settings(frame, state, &self.theme),
-            Screen::PathListEditor(state) => render_path_list_editor(frame, state, &self.theme),
         }
     }
 
@@ -525,10 +517,6 @@ impl App {
                 row: state.selected_index,
                 submenu_row: state.submenu_row(),
             }),
-            Screen::Settings(state) => {
-                self.back_stack
-                    .push(ReturnPoint::Settings(state.section, state.row));
-            }
             Screen::Select(state) if state.scan.id == apps::LIST_ID => {
                 self.back_stack.push(ReturnPoint::AppList(state));
             }
@@ -542,9 +530,6 @@ impl App {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
             }
-            Some(ReturnPoint::Settings(section, row)) => Screen::Settings(
-                SettingsState::new(&self.config, &self.ignore, &self.layout).at(section, row),
-            ),
             Some(ReturnPoint::AppList(state)) => Screen::Select(state),
             None => Screen::Workspace(WorkspaceState::new()),
         };
@@ -767,7 +752,7 @@ impl App {
 
         let is_typing = match &self.screen {
             Screen::Select(select) => select.is_searching,
-            Screen::PathListEditor(editor) => matches!(editor.mode, PathListMode::Adding(_)),
+            Screen::Settings(state) => state.is_typing(),
             _ => false,
         };
         if !is_typing && code == KeyCode::Char('?') {
@@ -1319,6 +1304,10 @@ impl App {
             }
 
             Screen::Settings(state) => {
+                if state.has_dialog() {
+                    state.dialog_key(code, &mut self.ignore);
+                    return;
+                }
                 if let Some(picker) = state.picker_mut() {
                     match code {
                         KeyCode::Up | KeyCode::Char('k') => picker.previous(),
@@ -1343,62 +1332,19 @@ impl App {
                         self.go_back();
                     }
                     (SettingsFocus::Rows, KeyCode::Enter | KeyCode::Char(' ')) => {
-                        let kind = match state.current_row() {
-                            SettingsRow::AgeThreshold | SettingsRow::Run => {
-                                state.open_picker();
-                                return;
-                            }
-                            SettingsRow::ProjectFolders => PathListKind::ProjectFolders,
-                            SettingsRow::ProtectedPaths => PathListKind::ProtectedPaths,
-                        };
-                        self.open(Screen::PathListEditor(PathListEditorState::new(
-                            kind,
-                            &self.ignore,
-                            &self.layout,
-                        )));
+                        match state.current_row() {
+                            SettingsRow::AgeThreshold | SettingsRow::Run => state.open_picker(),
+                            SettingsRow::Add => state.start_adding(),
+                            SettingsRow::Item(_) => {}
+                        }
                     }
+                    (SettingsFocus::Rows, KeyCode::Char('a')) => state.start_adding(),
+                    (SettingsFocus::Rows, code) if is_removal_key(code) => state.prompt_remove(),
                     (SettingsFocus::Rows, KeyCode::Left | KeyCode::Esc) => state.leave_rows(),
                     (SettingsFocus::Rows, KeyCode::Char('q')) => self.go_back(),
                     _ => {}
                 }
             }
-
-            Screen::PathListEditor(state) => match &mut state.mode {
-                PathListMode::Adding(input) => match code {
-                    KeyCode::Esc => state.cancel_input(),
-                    KeyCode::Backspace => {
-                        input.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        input.push(c);
-                    }
-                    KeyCode::Enter => {
-                        state.commit_add(&mut self.ignore);
-                    }
-                    _ => {}
-                },
-                PathListMode::ConfirmRemove(_) => match code {
-                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        state.confirm_remove(&mut self.ignore);
-                    }
-                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        state.cancel_input();
-                    }
-                    _ => {}
-                },
-                PathListMode::Normal => match code {
-                    KeyCode::Up | KeyCode::Char('k') => state.previous(),
-                    KeyCode::Down | KeyCode::Char('j') => state.next(),
-                    KeyCode::PageUp => state.page_up(),
-                    KeyCode::PageDown => state.page_down(),
-                    KeyCode::Home => state.move_to_start(),
-                    KeyCode::End => state.move_to_end(),
-                    KeyCode::Char('a') | KeyCode::Char('A') => state.start_adding(),
-                    code if is_removal_key(code) => state.prompt_remove(),
-                    KeyCode::Esc | KeyCode::Char('q') => self.go_back(),
-                    _ => {}
-                },
-            },
         }
     }
 
@@ -1547,19 +1493,16 @@ impl App {
                     ],
                 ),
                 HelpSection::new(
+                    "Lists of paths",
+                    vec![Hint::new("a", "Add"), Hint::new("d", "Remove")],
+                ),
+                HelpSection::new(
                     "List of choices",
                     vec![
                         Hint::new("↑↓ / jk", "Move"),
                         Hint::new("↵", "Choose"),
                         Hint::new("⎋", "Cancel"),
                     ],
-                ),
-                general(vec![navigate, back]),
-            ],
-            Screen::PathListEditor(_) => vec![
-                HelpSection::new(
-                    "Path list",
-                    vec![Hint::new("A", "Add path"), Hint::new("d", "Remove path")],
                 ),
                 general(vec![navigate, back]),
             ],
@@ -1941,16 +1884,6 @@ impl App {
                     &self.layout,
                 )));
             }
-            MainMenuChoice::ProtectedPaths => {
-                self.open(Screen::PathListEditor(
-                    PathListEditorState::new(
-                        PathListKind::ProtectedPaths,
-                        &self.ignore,
-                        &self.layout,
-                    )
-                    .top_level(),
-                ));
-            }
         }
     }
 
@@ -2236,6 +2169,8 @@ mod tests {
     use crate::core::startup::StartupKind;
     use crate::core::stores::ScheduleConfig;
     use crate::ui::analyze::SortOrder;
+    use crate::ui::path_list::PathListMode;
+    use crate::ui::settings::SettingsSection;
     use crate::ui::terminal::testing::{counting_release, gate_with, releases};
     use ratatui::backend::TestBackend;
     use std::path::Path;
@@ -2720,71 +2655,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_from_protected_paths_opened_in_the_menu_returns_to_the_menu() {
-        let mut app = new_app();
-
-        press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Esc]);
-
-        assert_main_menu(&app, 13);
-    }
-
-    #[test]
-    fn esc_from_the_project_folders_list_returns_to_the_row_with_the_new_count() {
-        let (temp, layout) = crate::core::apps::testing::sandbox();
-        let mut app = new_app();
-        app.layout = layout.clone();
-        press(
-            &mut app,
-            &[KeyCode::End, KeyCode::Up, KeyCode::Enter, KeyCode::Right],
-        );
-        assert_ne!(settings(&app).folder_count, 1);
-        app.handle_key(KeyCode::Enter);
-        let folder = temp.path().canonicalize().unwrap().display().to_string();
-        ProjectFoldersStore::new(vec![folder])
-            .save_to(&layout.projects_path())
-            .unwrap();
-
-        app.handle_key(KeyCode::Esc);
-
-        let state = settings(&app);
-        assert_eq!(state.section, SettingsSection::ProjectCleanup);
-        assert_eq!(state.focus, SettingsFocus::Rows);
-        assert_eq!(state.current_row(), SettingsRow::ProjectFolders);
-        assert_eq!(state.folder_count, 1);
-        assert!(screen_text(&app).contains("1 folder"));
-
-        app.handle_key(KeyCode::Esc);
-        assert_eq!(settings(&app).focus, SettingsFocus::Sections);
-        app.handle_key(KeyCode::Esc);
-        assert_main_menu(&app, 12);
-    }
-
-    #[test]
-    fn esc_from_the_protected_paths_list_keeps_the_section_and_refreshes_counts() {
-        let mut app = new_app();
-
-        press(
-            &mut app,
-            &[
-                KeyCode::End,
-                KeyCode::Up,
-                KeyCode::Enter,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Right,
-                KeyCode::Enter,
-            ],
-        );
-        app.ignore.roots.push("/nowhere/protected".to_string());
-        app.handle_key(KeyCode::Esc);
-
-        let state = settings(&app);
-        assert_eq!(state.section, SettingsSection::ProtectedPaths);
-        assert_eq!(state.current_row(), SettingsRow::ProtectedPaths);
-        assert_eq!(state.path_count, app.ignore.roots.len());
-    }
-
-    #[test]
     fn esc_on_a_list_opened_from_the_command_line_opens_the_main_menu() {
         let mut app = offline(App::with_select(
             empty_scan(),
@@ -3016,27 +2886,172 @@ mod tests {
         settings(app).picker_state().unwrap().choices.clone()
     }
 
+    fn settings_app() -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        (temp, layout, app)
+    }
+
+    fn open_settings(app: &mut App) {
+        let Screen::Workspace(state) = &mut app.screen else {
+            panic!("expected the workspace screen");
+        };
+        state.selected_index = 12;
+        app.handle_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::Settings(_)));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for letter in text.chars() {
+            app.handle_key(KeyCode::Char(letter));
+        }
+    }
+
     #[test]
-    fn protected_paths_name_settings_only_when_opened_there() {
+    fn the_main_menu_ends_with_settings_and_has_no_protected_paths_row() {
         let mut app = new_app();
 
-        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
-        assert!(!screen_text(&app).contains("Settings"));
+        app.handle_key(KeyCode::End);
+
+        assert_main_menu(&app, 12);
+        assert!(!screen_text(&app).contains("Protected paths"));
+        app.handle_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::Settings(_)));
+    }
+
+    #[test]
+    fn adding_a_folder_in_project_cleanup_saves_and_shows_it() {
+        let (temp, layout, mut app) = settings_app();
+        let folder = temp.path().canonicalize().unwrap();
+        let name = folder.file_name().unwrap().to_string_lossy().to_string();
+        open_settings(&mut app);
+
+        press(&mut app, &[KeyCode::Right, KeyCode::Up, KeyCode::Enter]);
+        type_text(&mut app, &folder.display().to_string());
+        app.handle_key(KeyCode::Enter);
+
+        let saved = ProjectFoldersStore::load_from(&layout.projects_path()).unwrap();
+        assert_eq!(saved.roots.last(), Some(&folder.display().to_string()));
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains(&name), "{text}");
+        assert!(text.contains("Project folders"), "{text}");
+        assert!(text.contains("Add folder…"), "{text}");
+        assert!(
+            text.contains("Project cleanup scans these folders."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn d_then_enter_removes_a_protected_path_from_the_list_and_the_file() {
+        let (_temp, layout, mut app) = settings_app();
+        app.ignore.roots.push("/nowhere/protected".to_string());
+        app.ignore.save_to(&layout.ignore_path()).unwrap();
+        open_settings(&mut app);
 
         press(
             &mut app,
             &[
-                KeyCode::Esc,
-                KeyCode::End,
-                KeyCode::Up,
-                KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
                 KeyCode::Right,
-                KeyCode::Enter,
+                KeyCode::Char('d'),
             ],
         );
-        assert!(screen_text(&app).contains("Settings"));
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("Remove /nowhere/protected?"), "{text}");
+        app.handle_key(KeyCode::Enter);
+
+        assert!(
+            IgnoreStore::load_from(&layout.ignore_path())
+                .unwrap()
+                .roots
+                .is_empty()
+        );
+        assert!(app.ignore.roots.is_empty());
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(!text.contains("/nowhere/protected"), "{text}");
+        assert!(text.contains("Add path…"), "{text}");
+        assert!(
+            text.contains("Cleanup and project scans skip these paths."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_question_mark_typed_in_the_add_dialog_goes_into_the_path() {
+        let (_temp, _layout, mut app) = settings_app();
+        open_settings(&mut app);
+
+        press(
+            &mut app,
+            &[KeyCode::Right, KeyCode::Down, KeyCode::Char('a')],
+        );
+        type_text(&mut app, "/a?q");
+
+        assert!(!app.help_open);
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("/a?q"), "{text}");
+        assert!(matches!(app.screen, Screen::Settings(_)));
+    }
+
+    #[test]
+    fn a_adds_from_any_row_of_a_list_and_not_from_other_rows() {
+        let (_temp, _layout, mut app) = settings_app();
+        open_settings(&mut app);
+        app.handle_key(KeyCode::Right);
+
+        app.handle_key(KeyCode::Char('a'));
+        assert!(!screen_rows(&app, 160, 40).join("\n").contains("Path:"));
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Char('a')]);
+        assert!(screen_rows(&app, 160, 40).join("\n").contains("Path:"));
+    }
+
+    #[test]
+    fn the_lists_show_their_keys_in_the_bar_and_the_help_sheet() {
+        let (_temp, _layout, mut app) = settings_app();
+        open_settings(&mut app);
+        press(&mut app, &[KeyCode::Right, KeyCode::Down]);
+
+        assert_footer(
+            &app,
+            &[
+                "a  Add",
+                "d  Remove",
+                "↑↓  Move",
+                "←  Sections",
+                "⎋  Back",
+                "?  More",
+            ],
+            &["A  Add"],
+        );
+        assert_eq!(help_row(&app, "Add"), Some("a"));
+        assert_eq!(help_row(&app, "Remove"), Some("d"));
+    }
+
+    #[test]
+    fn a_long_list_scrolls_with_the_highlighted_row() {
+        let (_temp, _layout, mut app) = settings_app();
+        for i in 0..30 {
+            app.ignore.roots.push(format!("/nowhere/protected{i:02}"));
+        }
+        open_settings(&mut app);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        assert!(
+            screen_rows(&app, 120, 20)
+                .join("\n")
+                .contains("protected00")
+        );
+
+        for _ in 0..30 {
+            app.handle_key(KeyCode::Down);
+        }
+
+        let text = screen_rows(&app, 120, 20).join("\n");
+        assert!(text.contains("Add path…"), "{text}");
+        assert!(!text.contains("protected00"), "{text}");
     }
 
     fn age_app(older_than_days: u64) -> (tempfile::TempDir, Layout, App) {
@@ -3044,16 +3059,7 @@ mod tests {
         let mut app = new_app();
         app.layout = layout.clone();
         app.config.older_than_days = older_than_days;
-        press(
-            &mut app,
-            &[
-                KeyCode::End,
-                KeyCode::Up,
-                KeyCode::Enter,
-                KeyCode::Right,
-                KeyCode::Down,
-            ],
-        );
+        press(&mut app, &[KeyCode::End, KeyCode::Enter, KeyCode::Right]);
         (temp, layout, app)
     }
 
@@ -3177,13 +3183,7 @@ mod tests {
         });
         press(
             &mut app,
-            &[
-                KeyCode::End,
-                KeyCode::Up,
-                KeyCode::Enter,
-                KeyCode::Down,
-                KeyCode::Right,
-            ],
+            &[KeyCode::End, KeyCode::Enter, KeyCode::Down, KeyCode::Right],
         );
         (temp, layout, app)
     }
@@ -3331,7 +3331,6 @@ mod tests {
                 KeyCode::Left,
                 KeyCode::Up,
                 KeyCode::Right,
-                KeyCode::Down,
                 KeyCode::Enter,
                 KeyCode::Down,
                 KeyCode::Down,
@@ -3354,16 +3353,22 @@ mod tests {
 
         press(
             &mut app,
-            &[KeyCode::Esc, KeyCode::Left, KeyCode::Up, KeyCode::Right],
+            &[
+                KeyCode::Esc,
+                KeyCode::Left,
+                KeyCode::Up,
+                KeyCode::Right,
+                KeyCode::Up,
+            ],
         );
         app.handle_key(KeyCode::Char(' '));
-        assert!(matches!(app.screen, Screen::PathListEditor(_)));
+        assert!(settings(&app).has_dialog());
     }
 
     #[test]
     fn the_split_view_shows_one_selection_bar_on_the_focused_row() {
         let mut app = new_app();
-        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         let bars = |app: &App| -> Vec<String> {
             screen_rows(app, 120, 32)
                 .into_iter()
@@ -3378,7 +3383,7 @@ mod tests {
 
         let on_rows = bars(&app);
         assert_eq!(on_rows.len(), 1, "{on_rows:?}");
-        assert!(on_rows[0].contains("Project folders"), "{on_rows:?}");
+        assert!(on_rows[0].contains("Preselect artifacts"), "{on_rows:?}");
         let bar = on_rows[0].find('▌').unwrap();
         assert!(
             bar > on_rows[0].find("Project cleanup").unwrap(),
@@ -3389,7 +3394,7 @@ mod tests {
     #[test]
     fn a_narrow_window_opens_one_section_with_its_own_breadcrumb() {
         let mut app = new_app();
-        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         let list = screen_rows(&app, 80, 24).join("\n");
         assert!(list.contains("Scheduled cleanup"), "{list}");
         assert!(!list.contains("Preselect"), "{list}");
@@ -3418,7 +3423,7 @@ mod tests {
     #[test]
     fn the_section_list_wraps_and_q_goes_back_to_the_menu() {
         let mut app = new_app();
-        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
 
         app.handle_key(KeyCode::Up);
         assert_eq!(settings(&app).section, SettingsSection::ProtectedPaths);
@@ -3426,9 +3431,9 @@ mod tests {
         assert_eq!(settings(&app).section, SettingsSection::ProjectCleanup);
 
         press(&mut app, &[KeyCode::Enter, KeyCode::Char('k')]);
-        assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Add);
         app.handle_key(KeyCode::Char('j'));
-        assert_eq!(settings(&app).current_row(), SettingsRow::ProjectFolders);
+        assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
 
         app.handle_key(KeyCode::Char('q'));
         assert_main_menu(&app, 12);
@@ -3442,7 +3447,6 @@ mod tests {
 
         assert!(text.contains("Preselect artifacts older than"), "{text}");
         assert!(text.contains("7 days ⌄"), "{text}");
-        assert!(text.contains("folders ›"), "{text}");
     }
 
     #[test]
@@ -3693,32 +3697,73 @@ mod tests {
     fn the_settings_footer_follows_the_focus() {
         let mut app = new_app();
 
-        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
         assert_footer(
             &app,
             &["↑↓  Move", "→  Open", "⎋  Back", "?  More", "Open  ↵"],
             &["Sections", "Change"],
         );
 
-        press(&mut app, &[KeyCode::Right, KeyCode::Down]);
+        app.handle_key(KeyCode::Right);
         assert_footer(
             &app,
             &["↑↓  Move", "←  Sections", "⎋  Back", "?  More", "Change  ↵"],
-            &["→", "Open"],
+            &["→", "Open", "Add"],
+        );
+
+        app.handle_key(KeyCode::Down);
+        assert_footer(
+            &app,
+            &["a  Add", "d  Remove", "↑↓  Move", "←  Sections", "⎋  Back"],
+            &["Change", "Open"],
         );
 
         app.handle_key(KeyCode::Up);
-        assert_footer(
-            &app,
-            &["↑↓  Move", "←  Sections", "⎋  Back", "Open  ↵"],
-            &["Change"],
-        );
+        app.handle_key(KeyCode::Up);
+        assert_footer(&app, &["Add  ↵"], &["Change", "Open"]);
+    }
+
+    #[test]
+    fn a_path_list_offers_removal_only_on_a_path() {
+        let (_temp, _layout, mut app) = settings_app();
+        open_settings(&mut app);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        assert_footer(&app, &["a  Add"], &["d  Remove"]);
+
+        let (_temp, _layout, mut app) = settings_app();
+        app.ignore.roots.push("/nowhere/protected".to_string());
+        open_settings(&mut app);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        assert_footer(&app, &["a  Add", "d  Remove"], &[]);
+
+        app.handle_key(KeyCode::Down);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Add);
+        assert_footer(&app, &["a  Add"], &["d  Remove"]);
+    }
+
+    #[test]
+    fn the_highlight_follows_an_added_path_and_stays_in_the_list_after_a_removal() {
+        let (temp, _layout, mut app) = settings_app();
+        let folder = temp.path().canonicalize().unwrap();
+        app.ignore.roots.push("/nowhere/one".to_string());
+        app.ignore.roots.push("/nowhere/two".to_string());
+        open_settings(&mut app);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Item(0));
+
+        app.handle_key(KeyCode::Char('a'));
+        type_text(&mut app, &folder.display().to_string());
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Item(2));
+
+        press(&mut app, &[KeyCode::Char('d'), KeyCode::Enter]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::Item(1));
     }
 
     #[test]
     fn the_settings_help_lists_the_keys_of_the_sections_rows_and_picker() {
         let mut app = new_app();
-        press(&mut app, &[KeyCode::End, KeyCode::Up, KeyCode::Enter]);
+        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
 
         let sections: Vec<String> = app
             .help_sections()
@@ -3741,20 +3786,6 @@ mod tests {
             sections.iter().all(|s| !s.contains("threshold")),
             "{sections:?}"
         );
-    }
-
-    #[test]
-    fn a_path_list_offers_removal_only_when_it_has_paths() {
-        let mut app = new_app();
-
-        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
-        assert_footer(&app, &["Add", "Back", "More"], &["Remove", "Move"]);
-
-        app.handle_key(KeyCode::Esc);
-        app.ignore.roots.push("/nowhere/protected".to_string());
-
-        press(&mut app, &[KeyCode::End, KeyCode::Enter]);
-        assert_footer(&app, &["Add", "Remove", "Move", "Back", "More"], &[]);
     }
 
     #[test]
@@ -3788,6 +3819,26 @@ mod tests {
         let mut app = analyze_app(dir.path());
         press(&mut app, &[KeyCode::Char(' '), KeyCode::Char('d')]);
         assert_footer(&app, &[], &toolbar);
+
+        let (_temp, _layout, mut app) = settings_app();
+        app.ignore.roots.push("/nowhere/protected".to_string());
+        open_settings(&mut app);
+        press(
+            &mut app,
+            &[
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Right,
+                KeyCode::Char('a'),
+            ],
+        );
+        assert!(settings(&app).has_dialog());
+        assert_footer(&app, &[], &["Add", "Remove", "Move"]);
+
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('d'));
+        assert!(settings(&app).has_dialog());
+        assert_footer(&app, &[], &["Add", "Remove", "Move"]);
     }
 
     #[test]
@@ -9029,11 +9080,9 @@ mod tests {
             let mut app = new_app();
             app.layout = layout;
             app.ignore.roots.push("/nowhere/protected".to_string());
-            app.screen = Screen::PathListEditor(PathListEditorState::new(
-                PathListKind::ProtectedPaths,
-                &app.ignore,
-                &app.layout,
-            ));
+            app.screen =
+                Screen::Settings(SettingsState::new(&app.config, &app.ignore, &app.layout));
+            press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
             (temp, app)
         }
 
@@ -9042,11 +9091,12 @@ mod tests {
             for key in REMOVAL_KEYS {
                 let (_temp, mut app) = path_list_app();
                 app.handle_key(key);
-                let Screen::PathListEditor(state) = &app.screen else {
-                    panic!("expected the path list");
+                let Screen::Settings(state) = &app.screen else {
+                    panic!("expected the settings screen");
                 };
+                let list = state.list().unwrap();
                 assert!(
-                    matches!(state.mode, PathListMode::ConfirmRemove(0)),
+                    matches!(list.mode, PathListMode::ConfirmRemove(0)),
                     "{key:?}"
                 );
             }
@@ -9057,7 +9107,7 @@ mod tests {
             let (_temp, app) = path_list_app();
 
             assert_footer(&app, &["d  Remove"], &["D  Remove"]);
-            assert_eq!(help_row(&app, "Remove path"), Some("d"));
+            assert_eq!(help_row(&app, "Remove"), Some("d"));
         }
     }
 }

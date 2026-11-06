@@ -14,7 +14,7 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, Settings, and Protected Paths. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, and Settings. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and details of the highlighted item on the right: disk usage for the cleanup, compress, and large files items, disk usage and the largest items of your home folder for Explore Storage, live CPU and memory for System Status, and service details for Startup Items. The main menu, Settings, System Status, Explore Storage, Startup Items, and item selection fill the window.. Settings shows its sections on the left and the rows of the highlighted section on the right. Below 100 columns it shows the sections first, and `↵` or `→` opens one section by itself. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), Orphaned App Files, or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
 - **Project Cleanup (Purge)**: Discovers disposable build directories (`target/`, `node_modules/`, `.venv/`, `.build/`, `dist/`) across configured project roots with configurable age filtering.
@@ -35,13 +35,14 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `↑` / `↓` or `k` / `j` | All screens | Move selection cursor |
 | `Space` | Select / Explore / Startup | Toggle focused item selection / toggle startup service |
 | `A` / `N` | Select / Explore | Select all visible / clear selection |
-| `d` / `D` / `Backspace` / `Delete` | All screens that remove | Start the removal: the cleanup lists, Purge, Docker, Large Files, and Homebrew cleanup ask to remove the selection; Uninstall Apps opens the review; the review asks to uninstall; Homebrew asks to uninstall the focused formula; Explore Storage asks to delete; Startup Items asks to remove a broken item's plist; the path lists ask to remove the focused path |
+| `d` / `D` / `Backspace` / `Delete` | All screens that remove | Start the removal: the cleanup lists, Purge, Docker, Large Files, and Homebrew cleanup ask to remove the selection; Uninstall Apps opens the review; the review asks to uninstall; Homebrew asks to uninstall the focused formula; Explore Storage asks to delete; Startup Items asks to remove a broken item's plist; the lists of Settings ask to remove the focused path |
 | `u` / `⇧U` | Homebrew | Upgrade the focused package / every package with a new version |
 | `⇧S` / `⇧N` / `⇧T` | Explore Storage / Large Files / Docker / Uninstall Apps / Homebrew | Sort by size / name / date |
 | `↵` (Enter) | Slim / Compress | Open the question for the selection |
 | `↵` (Enter) | Question dialogs | Press the highlighted button |
 | `↵` / `→` | Explore Storage | Enter selected folder |
-| `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices or its path list; `←` or `⎋` moves back to the sections; `q` returns to the main menu |
+| `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices, and on `Add folder…` or `Add path…` opens the add dialog; `←` or `⎋` moves back to the sections; `q` returns to the main menu |
+| `a` | Settings | In Project folders and Protected paths: add a folder or a path, from any row of the list |
 | `↵` / `⎋` | List of choices | Choose the highlighted choice / cancel without a change |
 | `↵` / `→` / `←` | Homebrew | Open a row with dependencies / close it; `←` on a closed row moves to its parent |
 | `⎋` (Esc) / `←` | Explore Storage | Go up one directory level; from the top folder, leave Explore Storage |
@@ -709,7 +710,7 @@ A `brew upgrade` does not touch the launch agent. Run `taert schedule off` befor
 
 You can also switch on and adjust scheduled cleanup in the TUI workspace under **Settings** → **Scheduled cleanup**. Press `↵` on the **Run** row to open a list with `Off`, `Every day`, `Every week`, and `Every month`, and pick one. The choice applies at once. If the agent cannot be loaded, the error shows and the row keeps its old value. Picking the value that is already set does nothing.
 
-The **Project cleanup** section holds the project folders and the age that Project cleanup preselects (`1 day` to `365 days`). Picking an age saves it at once. **Protected paths** opens the ignore list.
+The **Project cleanup** section holds the project folders and the age that Project cleanup preselects (`1 day` to `365 days`). Picking an age saves it at once. Under the age, a **Project folders** list shows one row per folder and ends with `Add folder…`. The **Protected paths** section lists the ignore list the same way and ends with `Add path…`. Paths in your home folder show as `~/…`. `↵` or `Space` on the last row, or `a` on any row of the list, opens a dialog where you type the path. `d`, `D`, `Backspace`, or `Delete` on a path asks to remove it. A list taller than the window scrolls with the highlighted row. While you type a path, `?` and `q` go into it instead of opening help or going back.
 
 ### Shell Completion (`taert completion`)
 

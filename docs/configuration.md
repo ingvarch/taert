@@ -56,7 +56,7 @@ taert ignore list
 taert ignore remove ~/Projects/mission-critical
 ```
 
-The ignore list can also be edited interactively inside the TUI workspace under **Settings** → **Protected paths**.
+The ignore list can also be edited interactively inside the TUI workspace under **Settings** → **Protected paths**: `a` adds a path and `d` removes the highlighted one.
 
 ## Scheduled Cleanup
 
