@@ -10,6 +10,7 @@ pub mod help;
 pub mod hints;
 pub mod list;
 pub mod modal;
+pub mod picker;
 pub mod progress;
 pub mod text;
 pub mod toast;
