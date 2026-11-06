@@ -24,6 +24,8 @@ pub struct UiEnv {
     pub depth: ColorDepth,
     pub ascii_glyphs: bool,
     pub reduce_motion: bool,
+    /// Inside tmux or screen.
+    pub multiplexer: bool,
 }
 
 impl Default for UiEnv {
@@ -34,6 +36,7 @@ impl Default for UiEnv {
             depth: ColorDepth::TrueColor,
             ascii_glyphs: false,
             reduce_motion: false,
+            multiplexer: false,
         }
     }
 }
@@ -89,12 +92,17 @@ impl UiEnv {
             .map(|v| v == "1")
             .unwrap_or(false);
 
+        let multiplexer = ["TMUX", "STY"]
+            .into_iter()
+            .any(|name| vars(name).is_some_and(|value| !value.is_empty()));
+
         Self {
             appearance,
             forced_appearance,
             depth,
             ascii_glyphs,
             reduce_motion,
+            multiplexer,
         }
     }
 }
@@ -102,6 +110,22 @@ impl UiEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_or_screen_is_told_by_the_variables_passed_in() {
+        let detect = |name: &'static str, value: &'static str| {
+            UiEnv::detect_from(
+                &|k| (k == name).then(|| value.to_string()),
+                &Config::default(),
+            )
+            .multiplexer
+        };
+
+        assert!(detect("TMUX", "/tmp/tmux-501/default,1,0"));
+        assert!(detect("STY", "1234.pts-0"));
+        assert!(!detect("TMUX", ""));
+        assert!(!detect("TERM", "xterm"));
+    }
 
     #[test]
     fn test_depth_detection() {

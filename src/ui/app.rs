@@ -1368,7 +1368,10 @@ impl App {
 
             Screen::Settings(state) => {
                 if state.has_dialog() {
-                    state.dialog_key(code, &mut self.ignore, &mut self.config);
+                    if let Some(change) = state.dialog_key(code, &mut self.ignore, &mut self.config)
+                    {
+                        state.apply_touch_id(change, &mut self.admin, &*self.host, &self.layout);
+                    }
                     return;
                 }
                 if let Some(picker) = state.picker_mut() {
@@ -1417,7 +1420,7 @@ impl App {
                             SettingsRow::FullDiskAccess
                             | SettingsRow::TouchId
                             | SettingsRow::ScheduledFullDiskAccess => {
-                                state.open_permission(&*self.host, &self.layout);
+                                state.open_permission(&*self.host);
                             }
                             SettingsRow::Item(_) | SettingsRow::Name(_) => {}
                         }
@@ -2005,6 +2008,7 @@ impl App {
         state.section = section;
         state.refresh_status(&self.config, &*self.host, &self.layout);
         state.refresh_permissions(&*self.host, &self.layout);
+        state.in_multiplexer = self.theme.env.multiplexer;
         let settings = Screen::Settings(Box::new(state));
         if matches!(self.screen, Screen::Select(_)) {
             if let Screen::Select(list) = std::mem::replace(&mut self.screen, settings) {
@@ -5157,8 +5161,17 @@ mod tests {
         host: &Arc<crate::core::host::fake::FakeHost>,
         prepare: impl FnOnce(&Layout, &mut Config),
     ) -> (tempfile::TempDir, Layout, App) {
+        permissions_app_in(host, false, prepare)
+    }
+
+    fn permissions_app_in(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+        multiplexer: bool,
+        prepare: impl FnOnce(&Layout, &mut Config),
+    ) -> (tempfile::TempDir, Layout, App) {
         let (temp, layout) = crate::core::apps::testing::sandbox();
         let mut app = new_app();
+        app.theme.env.multiplexer = multiplexer;
         app.layout = layout.clone();
         app.host = host.clone();
         prepare(&layout, &mut app.config);
@@ -5213,55 +5226,302 @@ mod tests {
         assert_eq!(host.count(FDA_PAGE), 1);
     }
 
-    #[test]
-    fn enter_on_touch_id_that_is_off_shows_the_tip() {
-        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+    const SUDO_WITH_INCLUDE: &str =
+        "auth       include      sudo_local\nauth       required     pam_opendirectory.so\n";
+    const PAM_TEMPLATE: &str = "# sudo_local: local config file which survives system update and is included for sudo\n# uncomment following line to enable Touch ID for sudo\n#auth       sufficient     pam_tid.so\n";
+    const PAM_ON: &str = "# sudo_local: local config file which survives system update and is included for sudo\n# uncomment following line to enable Touch ID for sudo\nauth       sufficient     pam_tid.so\n";
+    const SUDO_PROBE: &str = "/usr/bin/sudo -n true";
+
+    fn write_sudo(layout: &Layout, text: &str) {
+        let path = layout.system("etc/pam.d/sudo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// Settings on the Touch ID row, with fingerprints enrolled and `sudo_local` as `local`.
+    fn touch_id_app(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+        sudo: &str,
+        local: Option<&str>,
+    ) -> (tempfile::TempDir, Layout, App) {
         host.reply(
             "/usr/bin/bioutil -c",
             "User 501:\t2 biometric template(s)\n",
         );
-        let (_temp, _layout, mut app) = permissions_app(&host, |_, _| {});
+        let (temp, layout, mut app) = permissions_app(host, |layout, _| {
+            write_sudo(layout, sudo);
+            if let Some(local) = local {
+                write_pam(layout, local);
+            }
+        });
         app.handle_key(KeyCode::Down);
         assert_eq!(settings(&app).current_row(), SettingsRow::TouchId);
-        assert!(!settings(&app).has_dialog());
-        assert_footer(&app, &["Show tip"], &[]);
+        (temp, layout, app)
+    }
 
-        app.handle_key(KeyCode::Enter);
+    /// The screen as one line, so a message that a dialog wraps still matches.
+    fn flat_screen(app: &App) -> String {
+        wide_screen(app)
+            .replace('│', "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 
-        assert!(settings(&app).has_dialog());
-        let text = wide_screen(&app);
-        assert!(text.contains("Tip: sudo can use Touch ID. Copy"), "{text}");
-        assert!(text.contains("sudo_local.template"), "{text}");
-        app.handle_key(KeyCode::Enter);
-        assert!(!settings(&app).has_dialog());
-        assert_eq!(host.count("/usr/bin/open"), 0);
-
-        app.handle_key(KeyCode::Enter);
-        assert!(settings(&app).has_dialog());
-        app.handle_key(KeyCode::Esc);
-        assert!(!settings(&app).has_dialog());
+    /// The password prompt appears and is answered once the run asks.
+    fn asking_host() -> Arc<crate::core::host::fake::FakeHost> {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        *host.tty.lock().unwrap() = true;
+        host.fail(SUDO_PROBE, "");
+        host
     }
 
     #[test]
-    fn enter_on_touch_id_that_is_on_or_without_fingerprints_does_nothing() {
-        for (reply, prepare) in [
-            ("User 501:\t2 biometric template(s)\n", true),
-            ("User 501:\t0 biometric template(s)\n", false),
-        ] {
+    fn enter_on_touch_id_that_is_off_asks_before_it_turns_on() {
+        let host = asking_host();
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+        assert_footer(&app, &["Turn on"], &["Show tip"]);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(settings(&app).has_dialog());
+        let text = flat_screen(&app);
+        assert!(text.contains("Turn on Touch ID for sudo?"), "{text}");
+        assert!(
+            text.contains(
+                "taert writes /etc/pam.d/sudo_local from Apple's template, with the Touch ID line turned on."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("It asks for your administrator password first."),
+            "{text}"
+        );
+        assert!(text.contains("Cancel"), "{text}");
+        assert!(text.contains("Turn On"), "{text}");
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn the_pam_reattach_footnote_follows_the_terminal_env() {
+        let note = "Inside tmux or screen, Touch ID prompts need pam_reattach";
+        for multiplexer in [true, false] {
             let host = Arc::new(crate::core::host::fake::FakeHost::idle());
-            host.reply("/usr/bin/bioutil -c", reply);
-            let (_temp, _layout, mut app) = permissions_app(&host, |layout, _| {
-                if prepare {
-                    write_pam(layout, "auth sufficient pam_tid.so\n");
-                }
-            });
-            app.handle_key(KeyCode::Down);
-            assert_footer(&app, &[], &["Show tip"]);
+            let (_temp, _layout, app) = permissions_app_in(&host, multiplexer, |_, _| {});
+
+            assert_eq!(flat_screen(&app).contains(note), multiplexer);
+        }
+    }
+
+    #[test]
+    fn cancel_button_takes_focus_and_enter_on_it_changes_nothing() {
+        for moves in [[KeyCode::Tab], [KeyCode::Left], [KeyCode::Right]] {
+            let host = asking_host();
+            let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+            app.handle_key(KeyCode::Enter);
+            press(&mut app, &moves);
 
             app.handle_key(KeyCode::Enter);
 
             assert!(!settings(&app).has_dialog());
-            assert_eq!(host.count("/usr/bin/open"), 0);
+            assert!(host.admin_scripts.lock().unwrap().is_empty());
+            assert_eq!(host.sudo_asks(), 0);
+            assert_eq!(settings(&app).touch_id, Some(TouchId::Off));
+        }
+    }
+
+    #[test]
+    fn focus_can_return_to_the_action_button() {
+        let host = asking_host();
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+        app.handle_key(KeyCode::Enter);
+
+        press(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Enter]);
+
+        assert_eq!(host.admin_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancel_closes_the_question_and_changes_nothing() {
+        let host = asking_host();
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+        app.handle_key(KeyCode::Enter);
+
+        app.handle_key(KeyCode::Esc);
+
+        assert!(!settings(&app).has_dialog());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn turn_on_asks_for_the_password_once_and_sends_one_script() {
+        for local in [None, Some(PAM_TEMPLATE)] {
+            let host = asking_host();
+            let (_temp, layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, local);
+            let path = layout.system("etc/pam.d/sudo_local");
+            *host.admin_effect.lock().unwrap() =
+                Some(Box::new(move || std::fs::write(&path, PAM_ON).unwrap()));
+            press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
+
+            assert_eq!(host.sudo_asks(), 1);
+            assert_eq!(host.count("sudo -v turn on Touch ID for sudo"), 1);
+            let scripts = host.admin_scripts.lock().unwrap().clone();
+            let [script] = scripts.as_slice() else {
+                panic!("expected one admin script, got {scripts:?}");
+            };
+            let local = layout.system("etc/pam.d/sudo_local");
+            let local = local.to_str().unwrap();
+            assert!(
+                script.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"),
+                "{script}"
+            );
+            assert!(script.contains("cmp -s"), "{script}");
+            assert!(script.contains("0444"), "{script}");
+            assert!(
+                script.contains(&format!("printf '%s' '{PAM_ON}' > '{local}.taert-tmp'")),
+                "{script}"
+            );
+            assert!(
+                script.contains(&format!("mv -f '{local}.taert-tmp' '{local}'")),
+                "{script}"
+            );
+            assert!(
+                !script.replace(local, "").contains("etc/pam.d/sudo"),
+                "{script}"
+            );
+            let root_etc = format!("{}/etc/", layout.root.display());
+            assert!(!script.replace(&root_etc, "").contains("/etc/"), "{script}");
+            assert_eq!(settings(&app).touch_id, Some(TouchId::On));
+            assert!(!settings(&app).has_dialog());
+            let text = wide_screen(&app);
+            assert!(
+                text.contains("Touch ID for sudo is on. It works from the next sudo prompt."),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_off_writes_the_template_text() {
+        let host = asking_host();
+        let (_temp, layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, Some(PAM_ON));
+        assert_eq!(settings(&app).touch_id, Some(TouchId::On));
+        assert_footer(&app, &["Turn off"], &[]);
+        let path = layout.system("etc/pam.d/sudo_local");
+        *host.admin_effect.lock().unwrap() = Some(Box::new(move || {
+            std::fs::write(&path, PAM_TEMPLATE).unwrap()
+        }));
+
+        app.handle_key(KeyCode::Enter);
+        let text = wide_screen(&app);
+        assert!(text.contains("Turn off Touch ID for sudo?"), "{text}");
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(host.count("sudo -v turn off Touch ID for sudo"), 1);
+        let scripts = host.admin_scripts.lock().unwrap().clone();
+        assert_eq!(scripts.len(), 1);
+        assert!(
+            scripts[0].contains(&format!("printf '%s' '{PAM_TEMPLATE}' >")),
+            "{}",
+            scripts[0]
+        );
+        assert_eq!(settings(&app).touch_id, Some(TouchId::Off));
+        let text = wide_screen(&app);
+        assert!(text.contains("Touch ID for sudo is off."), "{text}");
+        assert_eq!(app.admin.quit_hint(&*host, &layout), None);
+    }
+
+    #[test]
+    fn touch_id_refuses_other_text_without_asking_for_the_password() {
+        let host = asking_host();
+        let own = "auth sufficient pam_tid.so\nauth required pam_foo.so\n";
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, Some(own));
+
+        app.handle_key(KeyCode::Enter);
+
+        let text = flat_screen(&app);
+        assert!(
+            text.contains("/etc/pam.d/sudo_local has your own changes, so taert leaves it alone."),
+            "{text}"
+        );
+        app.handle_key(KeyCode::Enter);
+        assert!(!settings(&app).has_dialog());
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn touch_id_refuses_a_macos_without_sudo_local() {
+        let host = asking_host();
+        let (_temp, _layout, mut app) =
+            touch_id_app(&host, "auth required pam_opendirectory.so\n", None);
+
+        app.handle_key(KeyCode::Enter);
+
+        let text = flat_screen(&app);
+        assert!(
+            text.contains(
+                "This macOS has no /etc/pam.d/sudo_local. Turn on Touch ID for sudo by hand."
+            ),
+            "{text}"
+        );
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        assert_eq!(host.sudo_asks(), 0);
+    }
+
+    #[test]
+    fn a_refused_password_keeps_the_row_and_shows_the_error() {
+        let host = asking_host();
+        *host.sudo_refused.lock().unwrap() = true;
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
+
+        assert_eq!(settings(&app).touch_id, Some(TouchId::Off));
+        assert!(host.admin_scripts.lock().unwrap().is_empty());
+        let text = wide_screen(&app);
+        assert!(
+            text.contains("The administrator password was not given"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_script_keeps_the_row_and_shows_the_error() {
+        let host = asking_host();
+        *host.admin_result.lock().unwrap() = Some("mv: Permission denied".to_string());
+        let (_temp, _layout, mut app) = touch_id_app(&host, SUDO_WITH_INCLUDE, None);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Enter]);
+
+        assert_eq!(settings(&app).touch_id, Some(TouchId::Off));
+        let text = wide_screen(&app);
+        assert!(text.contains("mv: Permission denied"), "{text}");
+    }
+
+    #[test]
+    fn enter_on_touch_id_without_fingerprints_or_a_file_to_turn_off_does_nothing() {
+        for (reply, sudo) in [
+            (
+                "User 501:\t2 biometric template(s)\n",
+                "auth sufficient pam_tid.so\n",
+            ),
+            ("User 501:\t0 biometric template(s)\n", SUDO_WITH_INCLUDE),
+        ] {
+            let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+            host.reply("/usr/bin/bioutil -c", reply);
+            let (_temp, _layout, mut app) = permissions_app(&host, |layout, _| {
+                write_sudo(layout, sudo);
+            });
+            app.handle_key(KeyCode::Down);
+            assert_footer(&app, &[], &["Turn on", "Turn off", "Show tip"]);
+
+            app.handle_key(KeyCode::Enter);
+
+            assert!(!settings(&app).has_dialog());
+            assert!(host.admin_scripts.lock().unwrap().is_empty());
         }
     }
 

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Path completion**: `Tab` completes paths when you add a project folder or a protected path, and the dialog says whether the path exists.
 - **Appearance in Settings**: Settings › Appearance switches between auto, dark, and light, and applies at once.
 - **Permissions in Settings**: Settings › Permissions shows Full Disk Access and Touch ID for sudo, and opens System Settings at the matching page.
+- **Touch ID for sudo in Settings**: Settings › Permissions turns Touch ID for sudo on and off, through Apple's `sudo_local`.
 - **About in Settings**: Settings › About shows the version and where taert keeps its files, and shows them in Finder.
 - **Settings with the comma key**: `,` opens Settings at the section of the current screen, and the menu shows a summary of the settings.
 - **History in the menu**: History lists what taert removed and changed, run by run. `↵` on a run shows its items, and a failed item shows its error. The last three runs show beside the row on a wide window. The last menu group is now titled `taert`.

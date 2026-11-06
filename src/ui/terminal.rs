@@ -67,12 +67,18 @@ impl AdminGate {
         result
     }
 
+    /// Drops the Touch ID tip, once the person has chosen in Settings.
+    pub fn forget_hint(&self) {
+        self.session.take_hint();
+    }
+
     /// The tip to print after the screen closes, so it stays on the terminal.
-    pub fn quit_hint(&self, host: &dyn Host, layout: &Layout) -> Option<&'static str> {
+    pub fn quit_hint(&self, host: &dyn Host, layout: &Layout) -> Option<String> {
         self.session
             .take_hint()
             .then(|| admin::touch_id_hint(host, layout))
             .flatten()
+            .map(|hint| format!("{hint} Or turn it on in taert Settings › Permissions."))
     }
 }
 
@@ -212,6 +218,7 @@ mod tests {
         let tip = gate.quit_hint(&host, &layout).unwrap();
 
         assert!(tip.starts_with("Tip: sudo can use Touch ID."));
+        assert!(tip.ends_with(" Or turn it on in taert Settings › Permissions."));
         assert_eq!(gate.quit_hint(&host, &layout), None);
     }
 

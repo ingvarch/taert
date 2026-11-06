@@ -53,6 +53,7 @@ impl Theme {
             depth: ColorDepth::NoColor,
             ascii_glyphs: true,
             reduce_motion: false,
+            multiplexer: false,
         })
     }
 
@@ -228,6 +229,7 @@ mod tests {
             depth: ColorDepth::TrueColor,
             ascii_glyphs: false,
             reduce_motion: false,
+            multiplexer: false,
         })
     }
 
