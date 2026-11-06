@@ -1335,7 +1335,7 @@ impl App {
 
             Screen::Settings(state) => {
                 if state.has_dialog() {
-                    state.dialog_key(code, &mut self.ignore);
+                    state.dialog_key(code, &mut self.ignore, &mut self.config);
                     return;
                 }
                 if let Some(picker) = state.picker_mut() {
@@ -1371,14 +1371,14 @@ impl App {
                             | SettingsRow::Run
                             | SettingsRow::MinReclaim
                             | SettingsRow::Appearance => state.open_picker(),
-                            SettingsRow::Add => state.start_adding(),
+                            SettingsRow::Add | SettingsRow::AddName => state.start_adding(),
                             SettingsRow::Category(_) => {
                                 state.toggle_category(&mut self.config, &*self.host, &self.layout);
                             }
                             SettingsRow::Reload => {
                                 state.reload_schedule(&mut self.config, &*self.host, &self.layout);
                             }
-                            SettingsRow::Item(_) => {}
+                            SettingsRow::Item(_) | SettingsRow::Name(_) => {}
                         }
                     }
                     (SettingsFocus::Rows, KeyCode::Char('a')) => state.start_adding(),
@@ -3283,7 +3283,10 @@ mod tests {
         let name = folder.file_name().unwrap().to_string_lossy().to_string();
         open_settings(&mut app);
 
-        press(&mut app, &[KeyCode::Right, KeyCode::Up, KeyCode::Enter]);
+        press(
+            &mut app,
+            &[KeyCode::Right, KeyCode::Up, KeyCode::Up, KeyCode::Enter],
+        );
         type_text(&mut app, &folder.display().to_string());
         app.handle_key(KeyCode::Enter);
 
@@ -3297,6 +3300,57 @@ mod tests {
             text.contains("Project cleanup scans these folders."),
             "{text}"
         );
+    }
+
+    #[test]
+    fn adding_a_name_in_project_cleanup_saves_it_and_lists_it() {
+        let (_temp, layout, mut app) = settings_app();
+        open_settings(&mut app);
+
+        press(&mut app, &[KeyCode::Right, KeyCode::Up, KeyCode::Enter]);
+        type_text(&mut app, "a/b");
+        app.handle_key(KeyCode::Enter);
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("Type a name without /."), "{text}");
+
+        for _ in 0..3 {
+            app.handle_key(KeyCode::Backspace);
+        }
+        type_text(&mut app, "bazel-out");
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.config.extra_artifacts, ["bazel-out"]);
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.extra_artifacts, ["bazel-out"]);
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("Also clean folders named"), "{text}");
+        assert!(text.contains("bazel-out"), "{text}");
+        assert!(text.contains("Add name…"), "{text}");
+        assert!(
+            text.contains(
+                "Project cleanup lists folders with these names. You select them yourself."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_name_dialogs_say_name_not_path() {
+        let (_temp, _layout, mut app) = settings_app();
+        open_settings(&mut app);
+
+        press(&mut app, &[KeyCode::Right, KeyCode::Up, KeyCode::Enter]);
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("Add Folder Name"), "{text}");
+        assert!(text.contains("Name:"), "{text}");
+        assert!(!text.contains("Path:"), "{text}");
+
+        type_text(&mut app, "out");
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('d'));
+        let text = screen_rows(&app, 160, 40).join("\n");
+        assert!(text.contains("Remove out?"), "{text}");
+        assert!(text.contains("Stop listing folders named out?"), "{text}");
     }
 
     #[test]
@@ -4381,7 +4435,7 @@ mod tests {
         assert_eq!(settings(&app).section, SettingsSection::ProjectCleanup);
 
         press(&mut app, &[KeyCode::Enter, KeyCode::Char('k')]);
-        assert_eq!(settings(&app).current_row(), SettingsRow::Add);
+        assert_eq!(settings(&app).current_row(), SettingsRow::AddName);
         app.handle_key(KeyCode::Char('j'));
         assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
 
@@ -10047,7 +10101,7 @@ mod tests {
                 let Screen::Settings(state) = &app.screen else {
                     panic!("expected the settings screen");
                 };
-                let list = state.list().unwrap();
+                let list = state.dialog_list().unwrap();
                 assert!(
                     matches!(list.mode, PathListMode::ConfirmRemove(0)),
                     "{key:?}"

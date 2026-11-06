@@ -687,6 +687,31 @@ fn snapshot_settings_project_cleanup() {
 }
 
 #[test]
+fn snapshot_settings_project_cleanup_names() {
+    let theme = snapshot_theme();
+    let temp = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: temp.path().to_path_buf(),
+        root: temp.path().to_path_buf(),
+        user_cache: None,
+    };
+    ProjectFoldersStore::new(vec!["/Volumes/Work/repos".to_string()])
+        .save_to(&layout.projects_path())
+        .unwrap();
+    let config = Config {
+        extra_artifacts: vec!["bazel-out".to_string(), "out".to_string()],
+        ..Config::default()
+    };
+    let mut state = SettingsState::new(&config, &IgnoreStore::default(), &layout);
+    state.focus = SettingsFocus::Rows;
+    state.row = 4;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_project_cleanup_names_120x32", output);
+}
+
+#[test]
 fn snapshot_settings_protected_paths_empty() {
     let theme = snapshot_theme();
     let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &no_layout());
@@ -711,14 +736,15 @@ fn snapshot_settings_add_path_matches() {
         std::fs::create_dir_all(layout.home.join(name)).unwrap();
     }
     let mut ignore = IgnoreStore::default();
-    let mut state = SettingsState::new(&Config::default(), &ignore, &layout);
+    let mut config = Config::default();
+    let mut state = SettingsState::new(&config, &ignore, &layout);
     state.section = SettingsSection::ProtectedPaths;
     state.focus = SettingsFocus::Rows;
     state.start_adding();
     for c in "~/Code/a".chars() {
-        state.dialog_key(KeyCode::Char(c), &mut ignore);
+        state.dialog_key(KeyCode::Char(c), &mut ignore, &mut config);
     }
-    state.dialog_key(KeyCode::Tab, &mut ignore);
+    state.dialog_key(KeyCode::Tab, &mut ignore, &mut config);
 
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 
@@ -738,14 +764,15 @@ fn the_add_dialog_lists_five_matches_and_counts_the_rest() {
         std::fs::create_dir_all(layout.home.join(format!("repo{n}"))).unwrap();
     }
     let mut ignore = IgnoreStore::default();
-    let mut state = SettingsState::new(&Config::default(), &ignore, &layout);
+    let mut config = Config::default();
+    let mut state = SettingsState::new(&config, &ignore, &layout);
     state.section = SettingsSection::ProtectedPaths;
     state.focus = SettingsFocus::Rows;
     state.start_adding();
     for c in "~/re".chars() {
-        state.dialog_key(KeyCode::Char(c), &mut ignore);
+        state.dialog_key(KeyCode::Char(c), &mut ignore, &mut config);
     }
-    state.dialog_key(KeyCode::Tab, &mut ignore);
+    state.dialog_key(KeyCode::Tab, &mut ignore, &mut config);
 
     let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
 

@@ -21,7 +21,7 @@ The file is TOML. A `config.json` file is ignored.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `older_than_days` | integer | `7` | Project cleanup selects build artifacts at least this many days old |
-| `extra_artifacts` | array | `[]` | Folder names that Project cleanup also lists. A folder matches only when its name is exactly one of them; they are not patterns |
+| `extra_artifacts` | array | `[]` | Folder names that Project cleanup also lists. A folder matches only when its name is exactly one of them; they are not patterns. A folder found only by one of these names starts unselected, whatever its age, so `taert purge --force` leaves it. You can still select it. Settings › Project cleanup edits the list |
 | `appearance` | string | `"auto"` | Terminal theme mode: `"auto"`, `"dark"`, or `"light"`. Settings › Appearance changes it |
 | `schedule` | object | `null` | Automatic background cleanup configuration: `every`, `categories`, and `min_reclaim` |
 

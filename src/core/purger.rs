@@ -54,14 +54,13 @@ const ARTIFACT_PREFIXES: &[&str] = &["cmake-build"];
 pub struct Purger;
 
 impl Purger {
+    /// Whether taert already cleans folders with this name.
+    pub fn is_standard_name(name: &str) -> bool {
+        ARTIFACT_PREFIXES.iter().any(|&p| name.starts_with(p)) || STANDARD_ARTIFACTS.contains(&name)
+    }
+
     pub fn is_standard_artifact(name: &str, parent: &Path) -> bool {
-        if ARTIFACT_PREFIXES.iter().any(|&p| name.starts_with(p)) {
-            return true;
-        }
-        if STANDARD_ARTIFACTS.contains(&name) {
-            return Self::is_valid_artifact_marker(name, parent);
-        }
-        false
+        Self::is_standard_name(name) && Self::is_valid_artifact_marker(name, parent)
     }
 
     pub fn is_artifact(name: &str, artifact_names: &[String], parent: &Path) -> bool {
@@ -226,13 +225,15 @@ impl Purger {
 
                 if Self::is_artifact(&file_name, &artifact_names, parent) {
                     let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
-                    let selected_by_age = match modified {
-                        Some(m) => match now.duration_since(m) {
-                            Ok(age) => age >= threshold,
-                            Err(_) => false,
-                        },
-                        None => false,
-                    };
+                    let custom_only = !Self::is_standard_artifact(&file_name, parent);
+                    let selected_by_age = !custom_only
+                        && match modified {
+                            Some(m) => match now.duration_since(m) {
+                                Ok(age) => age >= threshold,
+                                Err(_) => false,
+                            },
+                            None => false,
+                        };
 
                     let project_name = Self::project_label(&path, root);
                     let Some(item) = scan_folder(path, selected_by_age, ignore, &None) else {
@@ -293,6 +294,40 @@ mod tests {
         assert_eq!(scan.groups[0].tool, "my-rust-project");
         assert_eq!(scan.groups[0].items.len(), 1);
         assert!(scan.groups[0].items[0].size_bytes > 0);
+    }
+
+    fn age_by_days(path: &Path, days: u64) {
+        let then = SystemTime::now() - Duration::from_secs(days * 86400);
+        fs::File::open(path).unwrap().set_modified(then).unwrap();
+    }
+
+    #[test]
+    fn a_folder_found_only_by_a_custom_name_starts_unselected() {
+        let temp = tempdir().unwrap();
+        for name in ["out", "node_modules"] {
+            let dir = temp.path().join("app").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file"), vec![1u8; 2048]).unwrap();
+            age_by_days(&dir, 30);
+        }
+
+        let scan = Purger::scan_projects(
+            temp.path(),
+            7,
+            &["out".to_string()],
+            &IgnoreStore::default(),
+        );
+
+        let items = &scan.groups[0].items;
+        let selected = |name: &str| {
+            items
+                .iter()
+                .find(|i| i.path.ends_with(name))
+                .unwrap()
+                .selected
+        };
+        assert!(!selected("out"));
+        assert!(selected("node_modules"));
     }
 
     #[test]
