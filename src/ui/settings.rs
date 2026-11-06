@@ -1,7 +1,7 @@
 //! Settings screen: sections on the left, the rows of the highlighted section on the right.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::KeyCode;
 use ratatui::Frame;
@@ -33,9 +33,9 @@ use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path_in;
 use crate::core::permissions::{FullDiskAccess, full_disk_access, open_full_disk_access};
 use crate::core::schedule::{
-    LastRun, ScheduleFrequency, ScheduleRule, ScheduleStatus, agent_plist_path,
-    format_reclaim_threshold, format_run_time, normalize_categories, remove_schedule,
-    schedule_status, set_schedule,
+    LastRun, MAX_MONTH_DAY, REPEAT_HOURS, ScheduleFrequency, ScheduleRule, ScheduleStatus,
+    WEEKDAYS, agent_plist_path, format_reclaim_threshold, format_run_time, format_weekday_and_time,
+    normalize_categories, remove_schedule, schedule_status, set_schedule,
 };
 use crate::core::startup::disabled_login_items_path;
 use crate::core::stores::{
@@ -68,6 +68,9 @@ const CLEAN_CATEGORIES: [(Category, CleanSubcategory); 4] = [
     (Category::Ai, CleanSubcategory::AiTools),
     (Category::Trash, CleanSubcategory::Trash),
 ];
+
+/// The times of the `At` picker, in minutes after midnight.
+const TIME_STEP_MINUTES: u32 = 30;
 
 /// The values `appearance` can take in the config, in the order of the picker.
 const APPEARANCE_CHOICES: [&str; 3] = ["auto", "dark", "light"];
@@ -141,6 +144,12 @@ impl SettingsSection {
 pub enum SettingsRow {
     AgeThreshold,
     Run,
+    /// The weekdays of a weekly schedule.
+    ScheduleDays,
+    /// The day of the month of a monthly schedule.
+    ScheduleDay,
+    ScheduleAt,
+    ScheduleRepeat,
     /// The category at this place in `CLEAN_CATEGORIES`.
     Category(usize),
     MinReclaim,
@@ -168,6 +177,10 @@ impl SettingsRow {
         match self {
             Self::AgeThreshold => "Preselect artifacts older than",
             Self::Run => "Run",
+            Self::ScheduleDays => "On",
+            Self::ScheduleDay => "On day",
+            Self::ScheduleAt => "At",
+            Self::ScheduleRepeat => "Repeat",
             Self::MinReclaim => "Only when it frees at least",
             Self::Reload => "Load the schedule again",
             Self::Appearance => "Appearance",
@@ -212,7 +225,14 @@ impl SettingsRow {
     pub fn is_popup(self) -> bool {
         matches!(
             self,
-            Self::AgeThreshold | Self::Run | Self::MinReclaim | Self::Appearance
+            Self::AgeThreshold
+                | Self::Run
+                | Self::ScheduleDays
+                | Self::ScheduleDay
+                | Self::ScheduleAt
+                | Self::ScheduleRepeat
+                | Self::MinReclaim
+                | Self::Appearance
         )
     }
 }
@@ -232,6 +252,13 @@ pub struct SettingsState {
     /// What the schedule cleans, or what a new schedule would clean.
     pub categories: Vec<String>,
     pub min_reclaim: u64,
+    /// When the schedule runs, or what a new schedule would use. The defaults while the saved
+    /// values are refused.
+    pub rule: ScheduleRule,
+    /// Why the saved values are refused.
+    pub rule_error: Option<String>,
+    /// The next start of the schedule, read with the status.
+    pub next_run: Option<SystemTime>,
     /// One of `APPEARANCE_CHOICES`. A saved value outside them counts as `auto`.
     pub appearance: &'static str,
     pub full_disk_access: FullDiskAccess,
@@ -323,6 +350,41 @@ pub(super) fn appearance_label(value: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The config name and the label of each checked weekday, Monday first.
+fn checked_weekdays(checked: &[bool]) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+    WEEKDAYS
+        .iter()
+        .zip(checked)
+        .filter_map(|(&(key, name, _), &on)| on.then_some((key, name)))
+}
+
+fn weekday_names(checked: &[bool]) -> Vec<&'static str> {
+    checked_weekdays(checked).map(|(_, name)| name).collect()
+}
+
+fn time_choices(current: &str) -> Vec<String> {
+    let mut times: Vec<String> = (0..24 * 60 / TIME_STEP_MINUTES)
+        .map(|n| {
+            let minutes = n * TIME_STEP_MINUTES;
+            format!("{:02}:{:02}", minutes / 60, minutes % 60)
+        })
+        .collect();
+    if let Err(at) = times.binary_search_by(|time| time.as_str().cmp(current)) {
+        times.insert(at, current.to_string());
+    }
+    times
+}
+
+fn repeat_choices() -> Vec<Option<u32>> {
+    std::iter::once(None)
+        .chain(REPEAT_HOURS.iter().copied().map(Some))
+        .collect()
+}
+
+fn repeat_label(hours: Option<u32>) -> String {
+    hours.map_or_else(|| "Once a day".to_string(), |h| format!("Every {h} hours"))
+}
+
 fn schedule_label(schedule: Option<ScheduleFrequency>) -> String {
     match schedule {
         Some(freq) => format!("Every {freq}"),
@@ -332,6 +394,11 @@ fn schedule_label(schedule: Option<ScheduleFrequency>) -> String {
 
 impl SettingsState {
     pub fn new(config: &Config, ignore: &IgnoreStore, layout: &Layout) -> Self {
+        let (rule, rule_error) = match config.schedule.as_ref().map(ScheduleRule::from_config) {
+            Some(Ok(rule)) => (rule, None),
+            Some(Err(message)) => (ScheduleRule::standard(), Some(message)),
+            None => (ScheduleRule::standard(), None),
+        };
         Self {
             section: SettingsSection::ProjectCleanup,
             focus: SettingsFocus::Sections,
@@ -348,6 +415,9 @@ impl SettingsState {
                 .schedule
                 .as_ref()
                 .map_or_else(default_schedule_min_reclaim, |s| s.min_reclaim),
+            rule,
+            rule_error,
+            next_run: None,
             appearance: appearance_value(&config.appearance),
             full_disk_access: FullDiskAccess::Unknown,
             touch_id: None,
@@ -431,7 +501,15 @@ impl SettingsState {
         if self.section == SettingsSection::Permissions && self.needs_full_disk_access().is_some() {
             rows.push(SettingsRow::ScheduledFullDiskAccess);
         }
-        if self.section == SettingsSection::ScheduledCleanup && self.schedule.is_some() {
+        if self.section == SettingsSection::ScheduledCleanup
+            && let Some(every) = self.schedule
+        {
+            rows.extend(match every {
+                ScheduleFrequency::Day => None,
+                ScheduleFrequency::Week => Some(SettingsRow::ScheduleDays),
+                ScheduleFrequency::Month => Some(SettingsRow::ScheduleDay),
+            });
+            rows.extend([SettingsRow::ScheduleAt, SettingsRow::ScheduleRepeat]);
             rows.extend((0..CLEAN_CATEGORIES.len()).map(SettingsRow::Category));
             rows.push(SettingsRow::MinReclaim);
             if self.needs_reload() {
@@ -574,6 +652,18 @@ impl SettingsState {
         self.picker = None;
     }
 
+    /// Checks or unchecks the highlighted choice of a picker with checkboxes. The last checked
+    /// day stays checked.
+    pub fn toggle_picked(&mut self) {
+        if let Some((_, picker)) = self.picker.as_mut()
+            && picker.is_multi()
+            && !picker.toggle()
+        {
+            self.save_notice = None;
+            self.error_notice = Some("Choose at least one day".to_string());
+        }
+    }
+
     /// Opens the picker of the current row. A row of a list has none.
     pub fn open_picker(&mut self) {
         let row = self.current_row();
@@ -605,6 +695,34 @@ impl SettingsState {
                     .iter()
                     .position(|&c| c == self.appearance),
             ),
+            SettingsRow::ScheduleDay => (
+                (1..=MAX_MONTH_DAY).map(|d| d.to_string()).collect(),
+                Some(self.rule.day() as usize - 1),
+            ),
+            SettingsRow::ScheduleAt => {
+                let current = self.rule.at_text();
+                let times = time_choices(&current);
+                let at = times.iter().position(|t| *t == current);
+                (times, at)
+            }
+            SettingsRow::ScheduleRepeat => (
+                repeat_choices().into_iter().map(repeat_label).collect(),
+                repeat_choices()
+                    .iter()
+                    .position(|&h| h == self.rule.every_hours()),
+            ),
+            SettingsRow::ScheduleDays => {
+                let names = WEEKDAYS.map(|(_, name, _)| name.to_string()).to_vec();
+                self.picker = Some((
+                    row,
+                    PickerState::multi(
+                        row.title().to_string(),
+                        names,
+                        self.rule.weekdays().to_vec(),
+                    ),
+                ));
+                return;
+            }
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
@@ -628,6 +746,7 @@ impl SettingsState {
         let Some((row, picker)) = self.picker.take() else {
             return;
         };
+        let refused = self.rule_error.is_some();
         match row {
             SettingsRow::AgeThreshold => {
                 if let Some(&days) =
@@ -651,6 +770,41 @@ impl SettingsState {
             SettingsRow::Appearance => {
                 if let Some(&value) = APPEARANCE_CHOICES.get(picker.highlighted) {
                     self.set_appearance(value, config, layout);
+                }
+            }
+            SettingsRow::ScheduleDays => {
+                let checked = picker.checked();
+                if refused || checked != self.rule.weekdays() {
+                    let days = checked_weekdays(checked)
+                        .map(|(name, _)| name.to_string())
+                        .collect();
+                    self.apply_rule("Saved days", config, host, layout, |s| s.days = days);
+                }
+            }
+            SettingsRow::ScheduleDay => {
+                let day = picker.highlighted as u32 + 1;
+                if refused || day != self.rule.day() {
+                    self.apply_rule("Saved day of the month", config, host, layout, |s| {
+                        s.day = day;
+                    });
+                }
+            }
+            SettingsRow::ScheduleAt => {
+                let times = time_choices(&self.rule.at_text());
+                if let Some(time) = times.get(picker.highlighted)
+                    && (refused || *time != self.rule.at_text())
+                {
+                    let time = time.clone();
+                    self.apply_rule("Saved time", config, host, layout, |s| s.at = time);
+                }
+            }
+            SettingsRow::ScheduleRepeat => {
+                if let Some(&hours) = repeat_choices().get(picker.highlighted)
+                    && (refused || hours != self.rule.every_hours())
+                {
+                    self.apply_rule("Saved repeat", config, host, layout, |s| {
+                        s.every_hours = hours;
+                    });
                 }
             }
             SettingsRow::Category(_)
@@ -698,6 +852,10 @@ impl SettingsState {
     pub fn refresh_status(&mut self, config: &Config, host: &dyn Host, layout: &Layout) {
         let history = HistoryLog::new(layout.history_path());
         self.status = Some(schedule_status(host, layout, config, &history));
+        self.next_run = self
+            .schedule
+            .filter(|_| self.rule_error.is_none())
+            .map(|_| self.rule.next_run(SystemTime::now()));
         self.row = self.row.min(self.rows().len() - 1);
     }
 
@@ -877,6 +1035,53 @@ impl SettingsState {
         self.save_notice = Some(notice);
     }
 
+    /// Saves the schedule with `edit` applied and loads it again. On failure the old value stays.
+    fn apply_rule(
+        &mut self,
+        notice: &'static str,
+        config: &mut Config,
+        host: &dyn Host,
+        layout: &Layout,
+        edit: impl FnOnce(&mut ScheduleConfig),
+    ) {
+        let mut edited = config.schedule.clone().unwrap_or_default();
+        if self.rule_error.is_some() {
+            // The saved values are refused, so start from the ones the rows show.
+            edited.at = self.rule.at_text();
+            edited.days = checked_weekdays(&self.rule.weekdays())
+                .map(|(name, _)| name.to_string())
+                .collect();
+            edited.day = self.rule.day();
+            edited.every_hours = self.rule.every_hours();
+        }
+        edit(&mut edited);
+        let result = ScheduleRule::from_config(&edited).and_then(|rule| {
+            set_schedule(
+                host,
+                layout,
+                config,
+                &rule,
+                self.categories.clone(),
+                self.min_reclaim,
+                None,
+            )
+            .map(|()| rule)
+        });
+        match result {
+            Ok(rule) => {
+                self.rule = rule;
+                self.rule_error = None;
+                self.error_notice = None;
+                self.save_notice = Some(notice);
+            }
+            Err(message) => {
+                self.save_notice = None;
+                self.error_notice = Some(message);
+            }
+        }
+        self.refresh_status(config, host, layout);
+    }
+
     /// Sends `target` to launchd and the config. On failure the old value stays.
     fn apply_schedule(
         &mut self,
@@ -900,13 +1105,16 @@ impl SettingsState {
                         self.min_reclaim,
                         None,
                     )
+                    .map(|()| rule)
                 })
             }
-            None => remove_schedule(host, layout, config),
+            None => remove_schedule(host, layout, config).map(|()| ScheduleRule::standard()),
         };
         match result {
-            Ok(()) => {
+            Ok(rule) => {
                 self.schedule = target;
+                self.rule = rule;
+                self.rule_error = None;
                 if target.is_none() {
                     self.categories = default_schedule_categories();
                     self.min_reclaim = default_schedule_min_reclaim();
@@ -930,6 +1138,10 @@ impl SettingsState {
         match row {
             SettingsRow::AgeThreshold => age_label(self.older_than_days),
             SettingsRow::Run => schedule_label(self.schedule),
+            SettingsRow::ScheduleDays => weekday_names(&self.rule.weekdays()).join(", "),
+            SettingsRow::ScheduleDay => self.rule.day().to_string(),
+            SettingsRow::ScheduleAt => self.rule.at_text(),
+            SettingsRow::ScheduleRepeat => repeat_label(self.rule.every_hours()),
             SettingsRow::MinReclaim => format_reclaim_threshold(self.min_reclaim),
             SettingsRow::Appearance => appearance_label(self.appearance),
             SettingsRow::FullDiskAccess => match self.full_disk_access {
@@ -1170,7 +1382,7 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
         list_lines(state, inner, theme)
     };
     let last_run = if scheduled {
-        last_run_card(state, width, theme)
+        schedule_card(state, width, theme)
     } else {
         Vec::new()
     };
@@ -1195,7 +1407,7 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
 
 fn last_run_text(last_run: &LastRun) -> String {
     match last_run {
-        LastRun::Never => "Has not run yet".to_string(),
+        LastRun::Never => "Not yet".to_string(),
         LastRun::Ran { at, freed } => {
             format!("{} · freed {}", format_run_time(at), format_bytes(*freed))
         }
@@ -1212,17 +1424,28 @@ fn last_run_text(last_run: &LastRun) -> String {
     }
 }
 
-/// The card with the last run, while `Run` is on and the status is read.
-fn last_run_card(state: &SettingsState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// The card with the next and the last run, while `Run` is on and the status is read.
+fn schedule_card(state: &SettingsState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let (Some(status), Some(_)) = (&state.status, state.schedule) else {
         return Vec::new();
     };
     let inner = width.saturating_sub(FRAME_SIDES);
-    let text = last_run_text(&status.last_run);
+    let next = state
+        .next_run
+        .map(|at| ("Next run", format_weekday_and_time(at)));
+    let lines = next
+        .into_iter()
+        .chain([("Last run", last_run_text(&status.last_run))])
+        .map(|(label, value)| {
+            ListRow::new(vec![Span::styled(label, theme.body())])
+                .detail(Span::styled(value, theme.callout()))
+                .render_line(inner, theme)
+        })
+        .collect();
     card(
-        "Last run",
+        "Schedule",
         Vec::new(),
-        vec![text_line(&text, theme.body(), inner, theme)],
+        lines,
         width,
         0,
         theme.p.purple,
@@ -1309,26 +1532,30 @@ fn schedule_lines(
     theme: &Theme,
 ) -> (Vec<Line<'static>>, usize) {
     let in_rows = state.focus == SettingsFocus::Rows;
+    let rows = state.rows();
     let mut lines = Vec::new();
     let mut focus = 0;
-    let mut push = |lines: &mut Vec<Line<'static>>, at: usize, row: SettingsRow| {
-        let selected = in_rows && state.row == at;
+    let mut push = |lines: &mut Vec<Line<'static>>, row: SettingsRow| {
+        let selected = in_rows && rows.get(state.row) == Some(&row);
         if selected {
             focus = lines.len();
         }
         lines.push(row_line(state, row, selected, width, theme));
     };
-    push(&mut lines, 0, SettingsRow::Run);
+    push(&mut lines, SettingsRow::Run);
+    match state.schedule {
+        Some(ScheduleFrequency::Week) => push(&mut lines, SettingsRow::ScheduleDays),
+        Some(ScheduleFrequency::Month) => push(&mut lines, SettingsRow::ScheduleDay),
+        Some(ScheduleFrequency::Day) | None => {}
+    }
+    push(&mut lines, SettingsRow::ScheduleAt);
+    push(&mut lines, SettingsRow::ScheduleRepeat);
     lines.push(Line::default());
     lines.push(text_line("Clean", theme.callout(), width, theme));
     for index in 0..CLEAN_CATEGORIES.len() {
-        push(&mut lines, 1 + index, SettingsRow::Category(index));
+        push(&mut lines, SettingsRow::Category(index));
     }
-    push(
-        &mut lines,
-        1 + CLEAN_CATEGORIES.len(),
-        SettingsRow::MinReclaim,
-    );
+    push(&mut lines, SettingsRow::MinReclaim);
     if state.schedule.is_none() {
         lines.push(text_line(
             "Turn on Run to choose what it cleans.",
@@ -1336,18 +1563,18 @@ fn schedule_lines(
             width,
             theme,
         ));
+        return (lines, focus);
     }
-    if let Some(status) = state.status.as_ref().filter(|_| state.schedule.is_some()) {
-        let problems = problems(status);
-        if !problems.is_empty() {
-            lines.push(Line::default());
-        }
-        for problem in problems {
-            lines.extend(wrapped_lines(&problem, theme.warning(), width, theme));
-        }
-        if state.needs_reload() {
-            push(&mut lines, 2 + CLEAN_CATEGORIES.len(), SettingsRow::Reload);
-        }
+    let mut warnings: Vec<String> = state.rule_error.iter().cloned().collect();
+    warnings.extend(state.status.iter().flat_map(problems));
+    if !warnings.is_empty() {
+        lines.push(Line::default());
+    }
+    for warning in warnings {
+        lines.extend(wrapped_lines(&warning, theme.warning(), width, theme));
+    }
+    if state.needs_reload() {
+        push(&mut lines, SettingsRow::Reload);
     }
     (lines, focus)
 }
@@ -1559,7 +1786,11 @@ fn row_line(
         SettingsRow::Reload => ListRow::new(vec![Span::styled(row.title(), theme.accent_text())])
             .selected(selected)
             .render_line(width, theme),
-        SettingsRow::MinReclaim => {
+        SettingsRow::MinReclaim
+        | SettingsRow::ScheduleDays
+        | SettingsRow::ScheduleDay
+        | SettingsRow::ScheduleAt
+        | SettingsRow::ScheduleRepeat => {
             let detail = format!("{} {}", state.row_value(row), theme.g.popup);
             let value_style = if state.schedule.is_none() {
                 theme.footnote()

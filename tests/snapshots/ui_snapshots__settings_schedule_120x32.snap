@@ -6,17 +6,17 @@ expression: output
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    ╭─ Settings ─────────────────────╮  ╭─ ◷  Scheduled cleanup ──────────────────────────────────────────────────────╮
    │   ◇ Project cleanup          › │  │ ▌    Run                                                       Every week ⌄ │
-   │   ◷ Scheduled cleanup        › │  │                                                                             │
-   │   ◈ Protected paths          › │  │      Clean                                                                  │
-   │   ◐ Appearance               › │  │      ● Developer caches                                                     │
-   │   ◉ Permissions              › │  │      ● User junk                                                            │
-   │   ⓘ About                    › │  │      ○ AI tools                                                             │
-   ╰────────────────────────────────╯  │      ○ Trash                                                                │
+   │   ◷ Scheduled cleanup        › │  │      On                                                               Mon ⌄ │
+   │   ◈ Protected paths          › │  │      At                                                             09:00 ⌄ │
+   │   ◐ Appearance               › │  │      Repeat                                                    Once a day ⌄ │
+   │   ◉ Permissions              › │  │                                                                             │
+   │   ⓘ About                    › │  │      Clean                                                                  │
+   ╰────────────────────────────────╯  │      ● Developer caches                                                     │
+                                       │      ● User junk                                                            │
+                                       │      ○ AI tools                                                             │
+                                       │      ○ Trash                                                                │
                                        │      Only when it frees at least                                     1 GB ⌄ │
                                        ╰─────────────────────────────────────────────────────────────────────────────╯
-
-
-
 
 
 

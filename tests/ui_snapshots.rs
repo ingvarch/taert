@@ -18,7 +18,7 @@ use taert::core::compress;
 use taert::core::date_utils::format_rfc3339;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
-use taert::core::history::{HistoryLog, OutcomeKind};
+use taert::core::history::HistoryLog;
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, ScanStep};
 use taert::core::large_files;
 use taert::core::layout::Layout;
@@ -859,6 +859,61 @@ fn snapshot_settings_schedule_status() {
         "{output}"
     );
     assert_snapshot!("settings_schedule_status_120x32", output);
+}
+
+/// `hour`:`minute` on `day` November 2026 in the local time zone.
+fn local_november(day: i32, hour: i32, minute: i32) -> std::time::SystemTime {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 10;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_isdst = -1;
+    let secs = unsafe { libc::mktime(&mut tm) };
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+}
+
+#[test]
+fn snapshot_settings_schedule_rule() {
+    let theme = snapshot_theme();
+    let config = Config {
+        schedule: Some(ScheduleConfig {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into(), "junk".into()],
+            min_reclaim: 1_000_000_000,
+            at: "21:30".into(),
+            days: vec!["mon".into(), "thu".into()],
+            every_hours: Some(6),
+            last_skip: None,
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let mut state = SettingsState::new(&config, &IgnoreStore::default(), &no_layout());
+    state.status = Some(ScheduleStatus {
+        settings: ScheduleSettings::On {
+            every: ScheduleFrequency::Week,
+            categories: vec!["dev".into(), "junk".into()],
+            min_reclaim: 1_000_000_000,
+            rule: ScheduleRule::from_config(config.schedule.as_ref().unwrap()),
+        },
+        last_run: LastRun::Never,
+        plist_missing: false,
+        missing_program: None,
+        agent_loaded: Some(true),
+        needs_full_disk_access: None,
+    });
+    state.next_run = Some(local_november(12, 21, 30));
+    state.section = SettingsSection::ScheduledCleanup;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    let next = output.lines().find(|line| line.contains("Next run")).unwrap();
+    assert!(next.contains("Thu 2026-11-12 21:30"), "{output}");
+    assert!(output.contains("Mon, Thu"), "{output}");
+    assert_snapshot!("settings_schedule_rule_120x32", output);
 }
 
 #[test]
@@ -2818,20 +2873,6 @@ fn snapshot_workspace_settings_summary() {
     ProjectFoldersStore::new(vec!["/Users/test/Code".into(), "/Users/test/Work".into()])
         .save_to(&layout.projects_path())
         .unwrap();
-    let log = HistoryLog::new(dir.path().join("history.jsonl"));
-    support::write_run(
-        &log.path,
-        "20261103-090000-dddd",
-        &local_nine_oclock(),
-        "clean dev",
-        "schedule",
-        &[(
-            "/Users/test/.npm/_cacache",
-            2_100_000_000,
-            OutcomeKind::Removed,
-            None,
-        )],
-    );
     let config = Config {
         schedule: Some(ScheduleConfig {
             every: ScheduleFrequency::Week,
@@ -2845,15 +2886,14 @@ fn snapshot_workspace_settings_summary() {
     };
     let ignore = IgnoreStore::new(vec!["/Users/test/Keep".into()]);
     let mut state = home_state(SETTINGS);
-    state.load_history(&log);
     assert!(state.settings_pending());
-    state.load_settings(&config, &ignore, &layout);
+    state.load_settings_at(&config, &ignore, &layout, local_november(3, 10, 0));
     assert!(!state.settings_pending());
 
     let output = home_screen(&state, 120, 32);
 
     assert!(
-        output.contains("Every week · last run 2026-11-03 09:00, freed 2.1 GB"),
+        output.contains("Every week on Mon at 09:00 · next run Mon 2026-11-09"),
         "{output}"
     );
     assert_snapshot!("workspace_settings_120x32", output);

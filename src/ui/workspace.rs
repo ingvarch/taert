@@ -4,6 +4,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -32,9 +33,8 @@ use crate::core::history::{HistoryLog, RunRecord};
 use crate::core::layout::Layout;
 use crate::core::profiler::SystemProfiler;
 use crate::core::safety::Safety;
-use crate::core::schedule::{
-    LastRun, format_reclaim_threshold, format_run_time, last_run, last_scheduled_run,
-};
+use crate::core::schedule::ScheduleRule;
+use crate::core::schedule::format_weekday_and_time;
 use crate::core::stores::{Config, IgnoreStore};
 use crate::core::sysinfo::SysInfo;
 
@@ -121,8 +121,6 @@ pub struct WorkspaceState {
     /// The newest runs, newest first, for the History row's pane.
     /// The newest runs for the History pane, or why they could not be read. `None` until read.
     pub recent_runs: Option<Result<Vec<RunRecord>, String>>,
-    /// The newest scheduled run of the whole history, which the Settings pane tells about.
-    last_scheduled: Option<RunRecord>,
     /// What the Settings pane shows. `None` until read.
     pub settings: Option<SettingsSummary>,
     pane_visible: Cell<bool>,
@@ -160,7 +158,6 @@ impl WorkspaceState {
             largest: None,
             home: Safety::home_dir(),
             recent_runs: None,
-            last_scheduled: None,
             settings: None,
             pane_visible: Cell::new(false),
             items: vec![
@@ -301,11 +298,6 @@ impl WorkspaceState {
     /// Reads the newest runs for the pane.
     pub fn load_history(&mut self, log: &HistoryLog) {
         let runs = log.load_runs().map_err(|error| error.to_string());
-        self.last_scheduled = runs
-            .as_ref()
-            .ok()
-            .and_then(|runs| last_scheduled_run(runs))
-            .cloned();
         self.recent_runs = Some(runs.map(|mut runs| {
             runs.reverse();
             runs.truncate(RECENT_RUNS);
@@ -318,33 +310,32 @@ impl WorkspaceState {
         self.settings.is_none()
     }
 
-    /// Reads the settings for the pane. Call it after `load_history`.
+    /// Reads the settings for the pane.
     pub fn load_settings(&mut self, config: &Config, ignore: &IgnoreStore, layout: &Layout) {
+        self.load_settings_at(config, ignore, layout, SystemTime::now());
+    }
+
+    /// Like `load_settings`, with the next run counted from `now`.
+    pub fn load_settings_at(
+        &mut self,
+        config: &Config,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+        now: SystemTime,
+    ) {
         let saved = SettingsState::new(config, ignore, layout);
-        let schedule = config.schedule.as_ref().map(|sched| {
-            let every = format!("Every {}", sched.every);
-            let last = match last_run(sched, self.last_scheduled.as_ref()) {
-                LastRun::Never => "has not run yet".to_string(),
-                LastRun::Ran { at, freed } => {
-                    format!(
-                        "last run {}, freed {}",
-                        format_run_time(&at),
-                        format_bytes(freed)
-                    )
-                }
-                LastRun::Skipped {
-                    at,
-                    found,
-                    threshold,
-                } => format!(
-                    "last run {}, skipped: found {}, below {}",
-                    format_run_time(&at),
-                    format_bytes(found),
-                    format_reclaim_threshold(threshold)
-                ),
-            };
-            format!("{every} · {last}")
-        });
+        let schedule =
+            config
+                .schedule
+                .as_ref()
+                .map(|sched| match ScheduleRule::from_config(sched) {
+                    Ok(rule) => format!(
+                        "{} · next run {}",
+                        rule.describe(),
+                        format_weekday_and_time(rule.next_run(now))
+                    ),
+                    Err(message) => message,
+                });
         let appearance = saved.appearance;
         self.settings = Some(SettingsSummary {
             schedule: schedule.unwrap_or_else(|| "Off".to_string()),
@@ -925,7 +916,19 @@ mod tests {
     use super::*;
     use crate::core::apps::testing::sandbox;
     use crate::core::schedule::ScheduleFrequency;
-    use crate::core::stores::{ScheduleConfig, ScheduleSkip};
+    use crate::core::stores::ScheduleConfig;
+
+    fn local(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> SystemTime {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_isdst = -1;
+        let secs = unsafe { libc::mktime(&mut tm) };
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+    }
 
     fn weekly() -> ScheduleConfig {
         ScheduleConfig {
@@ -952,24 +955,37 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_pane_says_when_the_schedule_has_not_run() {
+    fn the_settings_pane_describes_the_rule_and_the_next_run() {
         let config = Config {
-            schedule: Some(weekly()),
+            schedule: Some(ScheduleConfig {
+                at: "21:30".into(),
+                days: vec!["mon".into(), "thu".into()],
+                ..weekly()
+            }),
             ..Config::default()
         };
 
-        assert_eq!(schedule_summary(&config), "Every week · has not run yet");
+        let (_temp, layout) = sandbox();
+        let mut state = WorkspaceState::new();
+
+        state.load_settings_at(
+            &config,
+            &IgnoreStore::default(),
+            &layout,
+            local(2026, 11, 10, 10, 0),
+        );
+
+        assert_eq!(
+            state.settings.expect("the settings").schedule,
+            "Every week on Mon, Thu at 21:30 · next run Thu 2026-11-12 21:30"
+        );
     }
 
     #[test]
-    fn the_settings_pane_tells_about_a_skipped_run() {
-        let at = "2026-11-03T08:00:00Z";
+    fn the_settings_pane_gives_the_reason_when_the_saved_rule_is_refused() {
         let config = Config {
             schedule: Some(ScheduleConfig {
-                last_skip: Some(ScheduleSkip {
-                    at: at.to_string(),
-                    bytes: 300_000_000,
-                }),
+                at: "25:99".into(),
                 ..weekly()
             }),
             ..Config::default()
@@ -977,10 +993,7 @@ mod tests {
 
         assert_eq!(
             schedule_summary(&config),
-            format!(
-                "Every week · last run {}, skipped: found 300.0 MB, below 1 GB",
-                format_run_time(at)
-            )
+            "Time 25:99 is not HH:MM between 00:00 and 23:59."
         );
     }
 }

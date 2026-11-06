@@ -52,7 +52,7 @@ impl PickerState {
         }
     }
 
-    fn is_multi(&self) -> bool {
+    pub fn is_multi(&self) -> bool {
         self.checked.is_some()
     }
 

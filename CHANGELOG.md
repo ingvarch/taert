@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Schedule time from the command line**: `taert schedule set` chooses the time, the weekdays, the day of the month, and a repeat every few hours with `--at`, `--on`, `--day`, and `--every-hours`, and `taert schedule show` prints the next run.
 - **Scheduled cleanup in Settings**: Settings › Scheduled cleanup chooses what the schedule cleans and how much it must free.
+- **Time, days, and repeat of scheduled cleanup in Settings**: Settings › Scheduled cleanup chooses the time, the weekdays, the day of the month, and a repeat every few hours, and shows the next run. The Settings summary in the menu describes the rule and the next run.
 - **Scheduled cleanup status in Settings**: Settings › Scheduled cleanup shows the last run and says when the schedule cannot run.
 - **Custom artifact names in Settings**: Settings › Project cleanup lists the folder names from `extra_artifacts` under `Also clean folders named`, and `Add name…` adds one. taert refuses an empty name, a name with `/`, a name it already cleans, and a name already in the list.
 - **Path completion**: `Tab` completes paths when you add a project folder or a protected path, and the dialog says whether the path exists.

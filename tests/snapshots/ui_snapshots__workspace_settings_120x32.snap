@@ -13,7 +13,7 @@ expression: output
    ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
    ╭─ Optimize ─────────────────────╮
    │   ✚ Doctor                   › │  ╭─ Settings ──────────────────────────────────────────────────────────────────╮
-   │   ▲ Startup items            › │  │ Scheduled cleanup      Every week · last run 2026-11-03 09:00, freed 2.1 GB │
+   │   ▲ Startup items            › │  │ Scheduled cleanup  Every week on Mon at 09:00 · next run Mon 2026-11-09 09… │
    │   ⌦ Slim apps                › │  │ Project folders                                                           2 │
    │   ✧ Compress                 › │  │ Protected paths                                                           1 │
    ╰────────────────────────────────╯  │ Appearance                                                             Dark │
