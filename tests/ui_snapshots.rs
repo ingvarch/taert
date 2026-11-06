@@ -866,6 +866,30 @@ fn snapshot_settings_appearance() {
     assert_snapshot!("settings_appearance_120x32", output);
 }
 
+#[test]
+fn snapshot_settings_about() {
+    let theme = snapshot_theme();
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: home.path().to_path_buf(),
+        root: "/nonexistent/root".into(),
+        user_cache: None,
+    };
+    for path in [layout.config_path(), layout.history_path()] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
+    state.section = SettingsSection::About;
+    state.focus = SettingsFocus::Rows;
+    state.version = "0.0.0".to_string();
+    state.program = Some("/opt/homebrew/bin/taert".into());
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_about_120x32", output);
+}
+
 fn render_appearance_section(env: UiEnv) -> String {
     let theme = Theme::with_env(env);
     let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &no_layout());

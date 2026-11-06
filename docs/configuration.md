@@ -14,6 +14,8 @@ taert keeps its files in these places:
 - **LaunchAgent Plist**: `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`
 - **Schedule Lock**: `~/.config/taert/schedule.lock`
 
+Settings › About shows the version, the program, and the paths of all of these files except the lock. `↵` on one that exists shows it in Finder.
+
 ## Settings (`config.toml`)
 
 The file is TOML. A `config.json` file is ignored.

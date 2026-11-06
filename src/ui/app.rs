@@ -1378,6 +1378,9 @@ impl App {
                             SettingsRow::Reload => {
                                 state.reload_schedule(&mut self.config, &*self.host, &self.layout);
                             }
+                            SettingsRow::Program | SettingsRow::File(_) => {
+                                state.reveal(&*self.host);
+                            }
                             SettingsRow::Item(_) | SettingsRow::Name(_) => {}
                         }
                     }
@@ -4071,6 +4074,84 @@ mod tests {
         assert!(screen_text(&app).contains("Saved appearance"));
     }
 
+    fn about_app() -> (
+        Arc<crate::core::host::fake::FakeHost>,
+        tempfile::TempDir,
+        Layout,
+        App,
+    ) {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        app.host = host.clone();
+        press(
+            &mut app,
+            &[KeyCode::End, KeyCode::Enter, KeyCode::Up, KeyCode::Right],
+        );
+        (host, temp, layout, app)
+    }
+
+    fn opens(host: &crate::core::host::fake::FakeHost) -> Vec<String> {
+        host.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("/usr/bin/open"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn enter_on_a_file_that_exists_shows_it_in_finder() {
+        let (host, _temp, layout, mut app) = about_app();
+        std::fs::create_dir_all(layout.history_path().parent().unwrap()).unwrap();
+        std::fs::write(layout.history_path(), "").unwrap();
+        press(&mut app, &[KeyCode::Down; 4]);
+        assert_eq!(settings(&app).current_row(), SettingsRow::File(3));
+        let action = crate::ui::settings::settings_primary(settings(&app), app.theme.g.key_enter)
+            .expect("an action on a file row");
+        assert!(action.enabled);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(
+            opens(&host),
+            [format!(
+                "/usr/bin/open -R {}",
+                layout.history_path().display()
+            )]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_file_that_is_missing_runs_nothing() {
+        let (host, _temp, layout, mut app) = about_app();
+        assert!(!layout.config_path().exists());
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        assert_eq!(settings(&app).current_row(), SettingsRow::File(0));
+        assert!(opens(&host).is_empty());
+        let action = crate::ui::settings::settings_primary(settings(&app), app.theme.g.key_enter)
+            .expect("an action on a file row");
+        assert_eq!(action.label, "Show in Finder");
+        assert!(!action.enabled);
+    }
+
+    #[test]
+    fn enter_on_the_program_shows_it_in_finder() {
+        let (host, _temp, _layout, mut app) = about_app();
+        assert_eq!(settings(&app).current_row(), SettingsRow::Program);
+
+        app.handle_key(KeyCode::Enter);
+
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            opens(&host),
+            [format!("/usr/bin/open -R {}", exe.display())]
+        );
+    }
+
     #[test]
     fn a_saved_appearance_the_screen_does_not_know_shows_as_auto() {
         let (_temp, _layout, mut app) = appearance_app("neon");
@@ -4430,7 +4511,7 @@ mod tests {
         press(&mut app, &[KeyCode::End, KeyCode::Enter]);
 
         app.handle_key(KeyCode::Up);
-        assert_eq!(settings(&app).section, SettingsSection::Appearance);
+        assert_eq!(settings(&app).section, SettingsSection::About);
         app.handle_key(KeyCode::Char('j'));
         assert_eq!(settings(&app).section, SettingsSection::ProjectCleanup);
 

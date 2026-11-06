@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Settings ─────────────────────╮  ╭─ ⓘ  About ──────────────────────────────────────────────────────────────────╮
+   │   ◇ Project cleanup          › │  │      Version                                                          0.0.0 │
+   │   ◷ Scheduled cleanup        › │  │ ▌    Program                                                                │
+   │   ◈ Protected paths          › │  │      /opt/homebrew/bin/taert                                                │
+   │   ◐ Appearance               › │  │                                                                             │
+   │   ⓘ About                    › │  │      Files                                                                  │
+   ╰────────────────────────────────╯  │      Settings                                                               │
+                                       │      ~/Library/Application Support/taert/config.toml                        │
+                                       │      Protected paths                                        Not created yet │
+                                       │      ~/Library/Application Support/taert/ignore.toml                        │
+                                       │      Project folders                                        Not created yet │
+                                       │      ~/Library/Application Support/taert/projects                           │
+                                       │      History                                                                │
+                                       │      ~/.config/taert/history.jsonl                                          │
+                                       │      Switched-off login items                               Not created yet │
+                                       │      ~/.config/taert/disabled_login_items.json                              │
+                                       │      Schedule agent                                         Not created yet │
+                                       │      ~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist         │
+                                       ╰─────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ↑↓  Move    ←  Sections    ⎋  Back    ?  More                                                      Show in Finder  ↵
