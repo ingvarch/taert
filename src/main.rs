@@ -1453,6 +1453,42 @@ fn handle_history(
     }
 }
 
+/// The rule `taert schedule set` asks for. A flag left out takes its default;
+/// the days and the day of the month the frequency does not use stay as saved,
+/// unless the rule refuses the saved schedule.
+fn schedule_rule(
+    saved: Option<&crate::core::stores::ScheduleConfig>,
+    args: &crate::cli::ScheduleSetArgs,
+) -> Result<schedule::ScheduleRule, String> {
+    if args.on.is_some() && args.every != schedule::ScheduleFrequency::Week {
+        return Err("--on works only with --every week".to_string());
+    }
+    if args.day.is_some() && args.every != schedule::ScheduleFrequency::Month {
+        return Err("--day works only with --every month".to_string());
+    }
+    let defaults = crate::core::stores::ScheduleConfig::default();
+    let mut config = saved
+        .filter(|saved| schedule::ScheduleRule::from_config(saved).is_ok())
+        .cloned()
+        .unwrap_or_default();
+    config.every = args.every;
+    config.at = args.at.clone().unwrap_or(defaults.at);
+    config.every_hours = args.every_hours;
+    match args.every {
+        schedule::ScheduleFrequency::Week => {
+            config.days = args.on.as_ref().map_or(defaults.days, |on| {
+                on.split(',')
+                    .map(|day| day.trim().to_lowercase())
+                    .filter(|day| !day.is_empty())
+                    .collect()
+            });
+        }
+        schedule::ScheduleFrequency::Month => config.day = args.day.unwrap_or(defaults.day),
+        schedule::ScheduleFrequency::Day => {}
+    }
+    schedule::ScheduleRule::from_config(&config)
+}
+
 fn handle_schedule(
     args: &ScheduleArgs,
     config: &Config,
@@ -1477,19 +1513,17 @@ fn handle_schedule(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let result =
-                schedule::ScheduleRule::for_frequency(config.schedule.as_ref(), set_args.every)
-                    .and_then(|rule| {
-                        schedule::set_schedule(
-                            host,
-                            layout,
-                            &mut config,
-                            &rule,
-                            categories,
-                            set_args.min_reclaim,
-                            None,
-                        )
-                    });
+            let result = schedule_rule(config.schedule.as_ref(), set_args).and_then(|rule| {
+                schedule::set_schedule(
+                    host,
+                    layout,
+                    &mut config,
+                    &rule,
+                    categories,
+                    set_args.min_reclaim,
+                    None,
+                )
+            });
             match result {
                 Ok(()) => {
                     let history = HistoryLog::new(layout.history_path());
@@ -3361,8 +3395,9 @@ mod tests {
 
         assert!(set.ok);
         assert!(
-            set.out
-                .contains("Every week: dev, junk, when at least 1 GB can be freed.")
+            set.out.contains(
+                "Every week on Mon at 09:00: dev, junk, when at least 1 GB can be freed."
+            )
         );
         assert!(host.ran("/bin/launchctl bootstrap"));
         let saved = Config::load_from(&layout.config_path()).unwrap();
@@ -3378,7 +3413,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_set_every_keeps_the_saved_time_days_and_repeat() {
+    fn schedule_set_every_uses_the_defaults_for_flags_left_out() {
         let (_temp, layout) = sandbox();
         let host = FakeHost::default();
         host.reply("/bin/launchctl", "");
@@ -3396,23 +3431,261 @@ mod tests {
         .save_to(&layout.config_path())
         .unwrap();
 
-        let set = schedule(&["schedule", "set", "--every", "month"], &host, &layout);
+        let set = schedule(&["schedule", "set", "--every", "day"], &host, &layout);
 
         assert!(set.ok, "{}", set.err);
         let saved = Config::load_from(&layout.config_path())
             .unwrap()
             .schedule
             .unwrap();
-        assert_eq!(saved.every, schedule::ScheduleFrequency::Month);
-        assert_eq!(saved.at, "21:30");
+        assert_eq!(saved.every, schedule::ScheduleFrequency::Day);
+        assert_eq!(saved.at, "09:00");
+        assert_eq!(saved.every_hours, None);
         assert_eq!(saved.days, ["thu"]);
         assert_eq!(saved.day, 15);
-        assert_eq!(saved.every_hours, Some(6));
         let bin = schedule::resolve_binary_path(&std::env::current_exe().unwrap());
         let rule = schedule::ScheduleRule::from_config(&saved).unwrap();
         assert_eq!(
             std::fs::read_to_string(schedule::agent_plist_path(&layout)).unwrap(),
             schedule::generate_plist(&bin, &rule).unwrap()
+        );
+    }
+
+    #[test]
+    fn schedule_set_week_and_month_use_their_defaults_for_days() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        Config {
+            schedule: Some(crate::core::stores::ScheduleConfig {
+                days: vec!["thu".into()],
+                day: 15,
+                ..Default::default()
+            }),
+            ..Config::default()
+        }
+        .save_to(&layout.config_path())
+        .unwrap();
+
+        assert!(schedule(&["schedule", "set", "--every", "week"], &host, &layout).ok);
+        let saved = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(saved.days, ["mon"]);
+
+        assert!(schedule(&["schedule", "set", "--every", "month"], &host, &layout).ok);
+        let saved = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(saved.day, 1);
+    }
+
+    #[test]
+    fn schedule_set_replaces_a_refused_saved_schedule() {
+        use crate::core::stores::ScheduleConfig;
+        let refused = [
+            ScheduleConfig {
+                at: "25:00".into(),
+                ..Default::default()
+            },
+            ScheduleConfig {
+                day: 31,
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every: schedule::ScheduleFrequency::Day,
+                days: vec!["funday".into()],
+                ..Default::default()
+            },
+        ];
+        for broken in refused {
+            let (_temp, layout) = sandbox();
+            let host = FakeHost::default();
+            host.reply("/bin/launchctl", "");
+            let every = broken.every;
+            Config {
+                schedule: Some(broken),
+                ..Config::default()
+            }
+            .save_to(&layout.config_path())
+            .unwrap();
+
+            let show = schedule(&["schedule", "show"], &host, &layout);
+            let hint = show
+                .out
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("taert "))
+                .unwrap();
+            assert!(
+                hint.starts_with(&format!("schedule set --every {every} ")),
+                "{hint}"
+            );
+            let set = schedule(&hint.split(' ').collect::<Vec<_>>(), &host, &layout);
+
+            assert!(set.ok, "{hint}: {}", set.err);
+            let saved = Config::load_from(&layout.config_path())
+                .unwrap()
+                .schedule
+                .unwrap();
+            assert_eq!(saved.every, every);
+            assert_eq!(saved.at, "09:00");
+            assert_eq!(saved.days, ["mon"]);
+            assert_eq!(saved.day, 1);
+        }
+    }
+
+    fn plist_entries(layout: &Layout) -> usize {
+        let value = plist::Value::from_file(schedule::agent_plist_path(layout)).unwrap();
+        value
+            .into_dictionary()
+            .unwrap()
+            .get("StartCalendarInterval")
+            .and_then(plist::Value::as_array)
+            .map(Vec::len)
+            .unwrap()
+    }
+
+    #[test]
+    fn schedule_set_saves_the_weekdays_and_the_time() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+
+        let set = schedule(
+            &[
+                "schedule", "set", "--every", "week", "--on", "mon,thu", "--at", "21:30",
+            ],
+            &host,
+            &layout,
+        );
+
+        assert!(set.ok, "{}", set.err);
+        let saved = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(saved.days, ["mon", "thu"]);
+        assert_eq!(saved.at, "21:30");
+        assert_eq!(plist_entries(&layout), 2);
+        assert!(
+            set.out
+                .starts_with("Every week on Mon, Thu at 21:30: dev, junk, when at least 1 GB"),
+            "{}",
+            set.out
+        );
+        assert!(set.out.contains("\nNext run: "), "{}", set.out);
+    }
+
+    #[test]
+    fn schedule_set_saves_the_day_of_the_month_and_the_repeat() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+
+        let set = schedule(
+            &[
+                "schedule",
+                "set",
+                "--every",
+                "month",
+                "--day",
+                "15",
+                "--every-hours",
+                "12",
+            ],
+            &host,
+            &layout,
+        );
+
+        assert!(set.ok, "{}", set.err);
+        let saved = Config::load_from(&layout.config_path())
+            .unwrap()
+            .schedule
+            .unwrap();
+        assert_eq!(saved.day, 15);
+        assert_eq!(saved.every_hours, Some(12));
+        assert_eq!(plist_entries(&layout), 2);
+    }
+
+    /// `args` stop with `message` and change nothing, with no schedule and with a saved one.
+    fn refused(args: &[&str], message: &str) {
+        let (_temp, layout) = sandbox();
+        let read = |path: &Path| std::fs::read(path).ok();
+        let files = || {
+            (
+                read(&layout.config_path()),
+                read(&schedule::agent_plist_path(&layout)),
+            )
+        };
+        let refuse = || {
+            let host = FakeHost::default();
+            host.reply("/bin/launchctl", "");
+            let before = files();
+
+            let set = schedule(args, &host, &layout);
+
+            assert!(!set.ok);
+            assert_eq!(set.err, format!("Error: {message}\n"));
+            assert!(set.out.is_empty());
+            assert!(!host.ran("/bin/launchctl"));
+            assert_eq!(files(), before);
+        };
+
+        refuse();
+        let host = FakeHost::default();
+        host.reply("/bin/launchctl", "");
+        let saved = schedule(&["schedule", "set", "--at", "07:15"], &host, &layout);
+        assert!(saved.ok, "{}", saved.err);
+        refuse();
+    }
+
+    #[test]
+    fn schedule_set_on_works_only_with_every_week() {
+        refused(
+            &["schedule", "set", "--every", "day", "--on", "mon"],
+            "--on works only with --every week",
+        );
+    }
+
+    #[test]
+    fn schedule_set_day_works_only_with_every_month() {
+        refused(
+            &["schedule", "set", "--every", "week", "--day", "5"],
+            "--day works only with --every month",
+        );
+    }
+
+    #[test]
+    fn schedule_set_refuses_a_day_the_rule_refuses() {
+        refused(
+            &["schedule", "set", "--every", "month", "--day", "31"],
+            "Day 31 is not between 1 and 28.",
+        );
+    }
+
+    #[test]
+    fn schedule_set_refuses_a_repeat_the_rule_refuses() {
+        refused(
+            &["schedule", "set", "--every-hours", "5"],
+            "Repeat every 5 hours is not one of 2, 3, 4, 6, 8, 12.",
+        );
+    }
+
+    #[test]
+    fn schedule_set_refuses_a_time_and_a_weekday_the_rule_refuses() {
+        refused(
+            &["schedule", "set", "--at", "25:00"],
+            "Time 25:00 is not HH:MM between 00:00 and 23:59.",
+        );
+        refused(
+            &["schedule", "set", "--on", "funday"],
+            "Weekday funday is not one of mon, tue, wed, thu, fri, sat, sun.",
+        );
+        refused(
+            &["schedule", "set", "--on", ""],
+            "Weekdays are empty. Use mon, tue, wed, thu, fri, sat, sun.",
         );
     }
 

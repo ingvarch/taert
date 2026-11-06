@@ -179,6 +179,22 @@ pub struct ScheduleSetArgs {
     /// Skip run if less than this size would be freed
     #[arg(long, default_value = "1G", value_parser = crate::core::bytes::parse_size)]
     pub min_reclaim: u64,
+
+    /// Time of the run, HH:MM (default 09:00)
+    #[arg(long, value_name = "HH:MM")]
+    pub at: Option<String>,
+
+    /// Weekdays for --every week, such as mon,thu (default mon)
+    #[arg(long, value_name = "DAYS")]
+    pub on: Option<String>,
+
+    /// Day of the month for --every month, 1 to 28 (default 1)
+    #[arg(long, value_name = "N")]
+    pub day: Option<u32>,
+
+    /// Also run every N hours before and after --at on the same day: 2, 3, 4, 6, 8, or 12
+    #[arg(long, value_name = "N")]
+    pub every_hours: Option<u32>,
 }
 
 #[derive(Debug, Args, Default)]

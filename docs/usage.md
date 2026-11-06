@@ -688,6 +688,12 @@ Keep caches under control with no manual runs. You choose categories and recurre
 # Schedule weekly cleanup for dev and junk caches when at least 1 GB can be freed
 taert schedule set --every week --categories dev,junk --min-reclaim 1G
 
+# Run on Monday and Thursday at 21:30
+taert schedule set --every week --on mon,thu --at 21:30
+
+# Run on the 15th of each month, every 12 hours from 09:00
+taert schedule set --every month --day 15 --every-hours 12
+
 # View schedule status, last run details, and health checks
 taert schedule show
 
@@ -695,23 +701,39 @@ taert schedule show
 taert schedule off
 ```
 
-- **`--every`**: Frequency interval: `day` (daily at 09:00), `week` (Mondays at 09:00, default), or `month` (1st of each month at 09:00).
+- **`--every`**: Frequency interval: `day`, `week` (default), or `month`.
+- **`--at`**: Time of the run, `HH:MM` (default `09:00`).
+- **`--on`**: Weekdays, such as `mon,thu` (default `mon`). Only with `--every week`.
+- **`--day`**: Day of the month, 1 to 28 (default `1`). Only with `--every month`.
+- **`--every-hours`**: Also runs every N hours before and after `--at` on the same day, one of 2, 3, 4, 6, 8, or 12. `--at 21:30 --every-hours 6` runs at 03:30, 09:30, 15:30, and 21:30.
 - **`--categories`**: Comma-separated list of any of `dev`, `junk`, `ai`, and `trash` (default `dev,junk`). Names are stored in lower case and each is kept once, so `DEV,dev` becomes `dev`.
   - `purge`, `docker`, `uninstall`, and `clean orphans` cannot be scheduled; their results require interactive review.
 - **`--min-reclaim`**: Minimum reclaimable space threshold (default `1G`). If scanning finds less than this amount, the run is skipped and the skip is recorded.
+
+A flag you leave out takes its default, so `schedule set --every day` after a schedule with `--every-hours 6` saves a daily run at 09:00 with no repeat. To keep a time or a repeat, give it again. `--on` with another frequency stops with `Error: --on works only with --every week`, and `--day` with another frequency stops with `Error: --day works only with --every month`. A value that is not allowed, such as `--day 31` or `--every-hours 5`, stops with a message that names the allowed values. An error saves nothing and loads nothing.
+
+`taert schedule show` starts with the rule, then the categories and the minimum, and tells when the next run is, in your local time:
+
+```text
+Every week on Mon, Thu at 21:30: dev, junk, when at least 1 GB can be freed.
+Next run: Thu 2026-11-12 21:30.
+Last run: 2026-11-09 21:30, freed 2.1 GB.
+```
+
+If you edited the config by hand and the schedule has a value that is not allowed, `show` prints the message about that value in place of the rule.
 
 If `launchctl` cannot load the agent, `taert schedule set` prints the error, exits with failure, and saves nothing. The old plist and settings stay, but the old agent stays unloaded until `taert schedule set` succeeds.
 
 #### Launch Agent & Full Disk Access
 
 Scheduled cleanup installs a user launch agent into `~/Library/LaunchAgents/io.github.ingvarch.taert.schedule.plist`:
-- Missed calendar intervals run automatically when your Mac wakes.
+- When the Mac is asleep at a scheduled time, launchd runs the missed time once when the Mac wakes. When the Mac is off at that time, launchd skips it.
 - `taert schedule run` executes silently in the background, acquiring a lock file at `~/.config/taert/schedule.lock` to prevent overlapping runs.
 - Because `launchd` launches `taert` directly in the background, permissions granted to your terminal app do not apply. Any rows that fail with `EPERM` are logged as failures, and `taert schedule show` will warn and provide instructions on how to grant Full Disk Access to the stable binary (e.g. `/opt/homebrew/bin/taert`).
 
 #### Homebrew
 
-A `brew upgrade` does not touch the launch agent. Run `taert schedule off` before `brew uninstall taert`, or use `brew uninstall --zap taert`, which also removes the agent. If the agent file is missing, `taert schedule show` prints the `taert schedule set` command that loads it again.
+A `brew upgrade` does not touch the launch agent. Run `taert schedule off` before `brew uninstall taert`, or use `brew uninstall --zap taert`, which also removes the agent. If the agent file is missing, `taert schedule show` prints the full `taert schedule set` command, with every flag of the saved schedule, that loads it again.
 
 #### Interactive Settings
 

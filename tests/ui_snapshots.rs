@@ -29,7 +29,9 @@ use taert::core::profiler::{
 };
 use taert::core::projects_store::ProjectFoldersStore;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
-use taert::core::schedule::{LastRun, ScheduleFrequency, ScheduleSettings, ScheduleStatus};
+use taert::core::schedule::{
+    LastRun, ScheduleFrequency, ScheduleRule, ScheduleSettings, ScheduleStatus,
+};
 use taert::core::slim;
 use taert::core::startup::{StartupItem, StartupKind, StartupState};
 use taert::core::stores::{Config, IgnoreStore, ScheduleConfig};
@@ -834,6 +836,7 @@ fn snapshot_settings_schedule_status() {
     state.status = Some(ScheduleStatus {
         settings: ScheduleSettings::On {
             every: ScheduleFrequency::Week,
+            rule: ScheduleRule::for_frequency(None, ScheduleFrequency::Week),
             categories: vec!["dev".into(), "junk".into()],
             min_reclaim: 1_000_000_000,
         },
@@ -911,6 +914,7 @@ fn snapshot_settings_permissions() {
     state.status = Some(ScheduleStatus {
         settings: ScheduleSettings::On {
             every: ScheduleFrequency::Week,
+            rule: ScheduleRule::for_frequency(None, ScheduleFrequency::Week),
             categories: vec!["dev".into()],
             min_reclaim: 1_000_000_000,
         },
