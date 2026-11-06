@@ -9,9 +9,9 @@ expression: output
    │   ◷ Scheduled cleanup        › │  │                                                                             │
    │   ◈ Protected paths          › │  │      Project folders                                                        │
    │   ◐ Appearance               › │  │      ~/Projects                                                             │
-   │   ⓘ About                    › │  │      ~/Code                                                                 │
-   ╰────────────────────────────────╯  │      ~/dev                                                                  │
-                                       │      ~/GitHub                                                               │
+   │   ◉ Permissions              › │  │      ~/Code                                                                 │
+   │   ⓘ About                    › │  │      ~/dev                                                                  │
+   ╰────────────────────────────────╯  │      ~/GitHub                                                               │
                                        │      ~/Workspace                                                            │
                                        │      ~/Repos                                                                │
                                        │      Add folder…                                                            │

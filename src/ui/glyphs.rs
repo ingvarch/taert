@@ -51,6 +51,7 @@ pub struct Glyphs {
     pub icon_protected: &'static str,
     pub icon_history: &'static str,
     pub icon_appearance: &'static str,
+    pub icon_permissions: &'static str,
     pub icon_about: &'static str,
 }
 
@@ -112,6 +113,7 @@ impl Glyphs {
             icon_protected: "◈",
             icon_history: "↺",
             icon_appearance: "◐",
+            icon_permissions: "◉",
             icon_about: "ⓘ",
         }
     }
@@ -167,6 +169,7 @@ impl Glyphs {
             icon_protected: "X",
             icon_history: "H",
             icon_appearance: "A",
+            icon_permissions: "K",
             icon_about: "I",
         }
     }
@@ -207,5 +210,22 @@ mod tests {
         let ascii = Glyphs::ascii().icon_about;
         assert_eq!(ascii.len(), 1);
         assert!(ascii.chars().all(|c| c.is_ascii_alphabetic()));
+    }
+
+    #[test]
+    fn the_permissions_icon_takes_one_cell_and_has_an_ascii_letter() {
+        assert_eq!(Glyphs::unicode().icon_permissions.width(), 1);
+        let ascii = Glyphs::ascii().icon_permissions;
+        assert_eq!(ascii.len(), 1);
+        assert!(ascii.chars().all(|c| c.is_ascii_alphabetic()));
+        let g = Glyphs::ascii();
+        for other in [
+            g.icon_projects,
+            g.icon_schedule,
+            g.icon_protected,
+            g.icon_appearance,
+        ] {
+            assert_ne!(ascii, other);
+        }
     }
 }

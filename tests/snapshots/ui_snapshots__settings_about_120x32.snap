@@ -9,9 +9,9 @@ expression: output
    │   ◷ Scheduled cleanup        › │  │ ▌    Program                                                                │
    │   ◈ Protected paths          › │  │      /opt/homebrew/bin/taert                                                │
    │   ◐ Appearance               › │  │                                                                             │
-   │   ⓘ About                    › │  │      Files                                                                  │
-   ╰────────────────────────────────╯  │      Settings                                                               │
-                                       │      ~/Library/Application Support/taert/config.toml                        │
+   │   ◉ Permissions              › │  │      Files                                                                  │
+   │   ⓘ About                    › │  │      Settings                                                               │
+   ╰────────────────────────────────╯  │      ~/Library/Application Support/taert/config.toml                        │
                                        │      Protected paths                                        Not created yet │
                                        │      ~/Library/Application Support/taert/ignore.toml                        │
                                        │      Project folders                                        Not created yet │

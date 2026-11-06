@@ -9,9 +9,9 @@ expression: output
    │   ◷ Scheduled cleanup        › │  │                                                                             │
    │   ◈ Protected paths          › │  │      Clean                                                                  │
    │   ◐ Appearance               › │  │      ● Developer caches                                                     │
-   │   ⓘ About                    › │  │      ● User junk                                                            │
-   ╰────────────────────────────────╯  │      ○ AI tools                                                             │
-                                       │      ○ Trash                                                                │
+   │   ◉ Permissions              › │  │      ● User junk                                                            │
+   │   ⓘ About                    › │  │      ○ AI tools                                                             │
+   ╰────────────────────────────────╯  │      ○ Trash                                                                │
                                        │      Only when it frees at least                                     1 GB ⌄ │
                                        ╰─────────────────────────────────────────────────────────────────────────────╯
 

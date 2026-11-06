@@ -9,9 +9,9 @@ expression: output
    │   ◷ Scheduled cleanup        › │  │      Cleanup and project scans skip these paths.                            │
    │   ◈ Protected paths          › │  ╰─────────────────────────────────────────────────────────────────────────────╯
    │   ◐ Appearance               › │
+   │   ◉ Permissions              › │
    │   ⓘ About                    › │
    ╰────────────────────────────────╯
-
 
 
 

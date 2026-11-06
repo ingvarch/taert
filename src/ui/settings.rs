@@ -10,10 +10,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::components::button::Button;
 use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH, split_panes};
 use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::{ListRow, path_spans};
+use super::components::modal::Modal;
 use super::components::picker::{PickerState, render_picker};
 use super::components::text::{plural, wrap_line};
 use super::components::toast::Toast;
@@ -21,12 +23,14 @@ use super::env::{Appearance, ColorDepth};
 use super::path_list::{PathList, PathListKind};
 use super::theme::Theme;
 use super::workspace::CleanSubcategory;
+use crate::core::admin::{TouchId, touch_id_status, touch_id_tip};
 use crate::core::bytes::format_bytes;
 use crate::core::catalog::Category;
 use crate::core::history::HistoryLog;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path_in;
+use crate::core::permissions::{FullDiskAccess, full_disk_access, open_full_disk_access};
 use crate::core::schedule::{
     LastRun, ScheduleFrequency, ScheduleStatus, agent_plist_path, format_reclaim_threshold,
     format_run_time, normalize_categories, remove_schedule, schedule_status, set_schedule,
@@ -72,15 +76,17 @@ pub enum SettingsSection {
     ScheduledCleanup,
     ProtectedPaths,
     Appearance,
+    Permissions,
     About,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ProjectCleanup,
         Self::ScheduledCleanup,
         Self::ProtectedPaths,
         Self::Appearance,
+        Self::Permissions,
         Self::About,
     ];
 
@@ -90,6 +96,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => "Scheduled cleanup",
             Self::ProtectedPaths => "Protected paths",
             Self::Appearance => "Appearance",
+            Self::Permissions => "Permissions",
             Self::About => "About",
         }
     }
@@ -100,7 +107,7 @@ impl SettingsSection {
             Self::ProjectCleanup => &[PathListKind::ProjectFolders, PathListKind::ArtifactNames],
             Self::ScheduledCleanup => &[],
             Self::ProtectedPaths => &[PathListKind::ProtectedPaths],
-            Self::Appearance | Self::About => &[],
+            Self::Appearance | Self::Permissions | Self::About => &[],
         }
     }
 
@@ -111,6 +118,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => &[SettingsRow::Run],
             Self::ProtectedPaths => &[],
             Self::Appearance => &[SettingsRow::Appearance],
+            Self::Permissions => &[SettingsRow::FullDiskAccess, SettingsRow::TouchId],
             Self::About => &[SettingsRow::Program],
         }
     }
@@ -121,6 +129,7 @@ impl SettingsSection {
             Self::ScheduledCleanup => theme.g.icon_schedule,
             Self::ProtectedPaths => theme.g.icon_protected,
             Self::Appearance => theme.g.icon_appearance,
+            Self::Permissions => theme.g.icon_permissions,
             Self::About => theme.g.icon_about,
         }
     }
@@ -136,6 +145,10 @@ pub enum SettingsRow {
     /// Loads the launch agent again.
     Reload,
     Appearance,
+    FullDiskAccess,
+    TouchId,
+    /// The program of the schedule needs Full Disk Access.
+    ScheduledFullDiskAccess,
     /// The program taert runs from.
     Program,
     /// The file at this place in `taert_files`.
@@ -156,6 +169,9 @@ impl SettingsRow {
             Self::MinReclaim => "Only when it frees at least",
             Self::Reload => "Load the schedule again",
             Self::Appearance => "Appearance",
+            Self::FullDiskAccess => "Full Disk Access",
+            Self::TouchId => "Touch ID for sudo",
+            Self::ScheduledFullDiskAccess => "Scheduled cleanup",
             Self::Program => "Program",
             Self::Category(_)
             | Self::Item(_)
@@ -216,6 +232,9 @@ pub struct SettingsState {
     pub min_reclaim: u64,
     /// One of `APPEARANCE_CHOICES`. A saved value outside them counts as `auto`.
     pub appearance: &'static str,
+    pub full_disk_access: FullDiskAccess,
+    /// `None` until the check runs.
+    pub touch_id: Option<TouchId>,
     pub folders: PathList,
     pub names: PathList,
     pub protected: PathList,
@@ -229,6 +248,8 @@ pub struct SettingsState {
     pub save_notice: Option<&'static str>,
     pub error_notice: Option<String>,
     picker: Option<(SettingsRow, PickerState)>,
+    /// The tip on Touch ID for sudo that a dialog shows.
+    touch_id_tip: Option<&'static str>,
 }
 
 /// A file taert keeps, shown in About.
@@ -313,6 +334,8 @@ impl SettingsState {
                 .as_ref()
                 .map_or_else(default_schedule_min_reclaim, |s| s.min_reclaim),
             appearance: appearance_value(&config.appearance),
+            full_disk_access: FullDiskAccess::Unknown,
+            touch_id: None,
             folders: PathList::new(PathListKind::ProjectFolders, ignore, config, layout),
             names: PathList::new(PathListKind::ArtifactNames, ignore, config, layout),
             protected: PathList::new(PathListKind::ProtectedPaths, ignore, config, layout),
@@ -327,6 +350,7 @@ impl SettingsState {
             save_notice: None,
             error_notice: None,
             picker: None,
+            touch_id_tip: None,
         }
     }
 
@@ -387,6 +411,9 @@ impl SettingsState {
         if self.section == SettingsSection::About {
             rows.extend((0..self.files.len()).map(SettingsRow::File));
         }
+        if self.section == SettingsSection::Permissions && self.needs_full_disk_access().is_some() {
+            rows.push(SettingsRow::ScheduledFullDiskAccess);
+        }
         if self.section == SettingsSection::ScheduledCleanup && self.schedule.is_some() {
             rows.extend((0..CLEAN_CATEGORIES.len()).map(SettingsRow::Category));
             rows.push(SettingsRow::MinReclaim);
@@ -425,9 +452,9 @@ impl SettingsState {
         }
     }
 
-    /// A dialog of a list is open, so keys go to it.
+    /// A dialog is open, so keys go to it.
     pub fn has_dialog(&self) -> bool {
-        self.dialog_list().is_some()
+        self.touch_id_tip.is_some() || self.dialog_list().is_some()
     }
 
     /// Text goes into the path of the add dialog.
@@ -458,6 +485,12 @@ impl SettingsState {
     /// Passes a key to the open dialog. The highlight follows an added item and stays in the
     /// list after a removal.
     pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore, config: &mut Config) {
+        if self.touch_id_tip.is_some() {
+            if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                self.touch_id_tip = None;
+            }
+            return;
+        }
         let Some(kind) = self.dialog_list().map(|list| list.kind) else {
             return;
         };
@@ -541,7 +574,10 @@ impl SettingsState {
             | SettingsRow::Name(_)
             | SettingsRow::AddName
             | SettingsRow::Program
-            | SettingsRow::File(_) => return,
+            | SettingsRow::File(_)
+            | SettingsRow::FullDiskAccess
+            | SettingsRow::TouchId
+            | SettingsRow::ScheduledFullDiskAccess => return,
         };
         self.picker = Some((
             row,
@@ -586,7 +622,10 @@ impl SettingsState {
             | SettingsRow::Name(_)
             | SettingsRow::AddName
             | SettingsRow::Program
-            | SettingsRow::File(_) => {}
+            | SettingsRow::File(_)
+            | SettingsRow::FullDiskAccess
+            | SettingsRow::TouchId
+            | SettingsRow::ScheduledFullDiskAccess => {}
         }
     }
 
@@ -622,6 +661,30 @@ impl SettingsState {
         let history = HistoryLog::new(layout.history_path());
         self.status = Some(schedule_status(host, layout, config, &history));
         self.row = self.row.min(self.rows().len() - 1);
+    }
+
+    /// The program the last scheduled run needed Full Disk Access for.
+    fn needs_full_disk_access(&self) -> Option<&Path> {
+        self.status.as_ref()?.needs_full_disk_access.as_deref()
+    }
+
+    /// Runs the checks of the Permissions section again.
+    pub fn refresh_permissions(&mut self, host: &dyn Host, layout: &Layout) {
+        self.full_disk_access = full_disk_access(layout);
+        self.touch_id = Some(touch_id_status(host, layout));
+    }
+
+    /// Opens the Full Disk Access page, or shows the tip when Touch ID for sudo is off.
+    pub fn open_permission(&mut self, host: &dyn Host, layout: &Layout) {
+        match self.current_row() {
+            SettingsRow::FullDiskAccess | SettingsRow::ScheduledFullDiskAccess => {
+                open_full_disk_access(host);
+            }
+            SettingsRow::TouchId if self.touch_id == Some(TouchId::Off) => {
+                self.touch_id_tip = Some(touch_id_tip(layout));
+            }
+            _ => {}
+        }
     }
 
     /// Writes the saved schedule to the agent file and loads it again.
@@ -785,6 +848,19 @@ impl SettingsState {
             SettingsRow::Run => schedule_label(self.schedule),
             SettingsRow::MinReclaim => format_reclaim_threshold(self.min_reclaim),
             SettingsRow::Appearance => appearance_label(self.appearance),
+            SettingsRow::FullDiskAccess => match self.full_disk_access {
+                FullDiskAccess::On => "On",
+                FullDiskAccess::Off => "Off",
+                FullDiskAccess::Unknown => "Unknown",
+            }
+            .to_string(),
+            SettingsRow::TouchId => match self.touch_id {
+                Some(TouchId::On) => "On",
+                Some(TouchId::Off) => "Off",
+                Some(TouchId::NoFingerprints) => "No fingerprints",
+                None => "",
+            }
+            .to_string(),
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
@@ -792,7 +868,8 @@ impl SettingsState {
             | SettingsRow::Name(_)
             | SettingsRow::AddName
             | SettingsRow::Program
-            | SettingsRow::File(_) => String::new(),
+            | SettingsRow::File(_)
+            | SettingsRow::ScheduledFullDiskAccess => String::new(),
         }
     }
 }
@@ -811,6 +888,12 @@ pub fn settings_primary<'a>(state: &SettingsState, enter: &'a str) -> Option<Pri
         }
         SettingsRow::Program | SettingsRow::File(_) => {
             Some(PrimaryAction::disabled("Show in Finder", enter))
+        }
+        SettingsRow::FullDiskAccess | SettingsRow::ScheduledFullDiskAccess => {
+            Some(PrimaryAction::new("Open", enter))
+        }
+        SettingsRow::TouchId if state.touch_id == Some(TouchId::Off) => {
+            Some(PrimaryAction::new("Show tip", enter))
         }
         _ => None,
     }
@@ -838,6 +921,9 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
         if row.is_item() {
             hints.push(Hint::new("d", "Remove"));
         }
+    }
+    if in_rows && state.section == SettingsSection::Permissions {
+        hints.push(Hint::new("r", "Check again"));
     }
     hints.push(Hint::new("↑↓", "Move"));
     hints.push(if in_rows {
@@ -886,6 +972,19 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
     if let Some(list) = state.dialog_list() {
         list.render_dialog(frame, theme);
     }
+    if let Some(tip) = state.touch_id_tip {
+        Modal::new("Touch ID for sudo")
+            .message(vec![Line::from(Span::styled(tip, theme.body()))])
+            .buttons(vec![Button::primary("Done").focused(true)])
+            .hints(Line::from(vec![
+                Span::styled(
+                    format!("{}/{}", theme.g.key_enter, theme.g.key_esc),
+                    theme.callout(),
+                ),
+                Span::styled(" Close", theme.footnote()),
+            ]))
+            .render(frame, frame.area(), theme);
+    }
 }
 
 fn render_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
@@ -930,6 +1029,8 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
         schedule_lines(state, inner, theme)
     } else if state.section == SettingsSection::Appearance {
         appearance_lines(state, inner, theme)
+    } else if state.section == SettingsSection::Permissions {
+        permissions_lines(state, inner, theme)
     } else if state.section == SettingsSection::About {
         about_lines(state, inner, theme)
     } else {
@@ -1032,8 +1133,7 @@ fn wrapped_lines(text: &str, style: Style, width: usize, theme: &Theme) -> Vec<L
         .collect()
 }
 
-/// The rows of a section other than Scheduled cleanup and Appearance, and the line of the
-/// highlighted one. Each list has its heading above it and its footnote below it.
+/// The rows of a section with a list of paths, and the line of the highlighted one.
 fn list_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
     let rows = state.rows();
     let mut lines = Vec::new();
@@ -1195,6 +1295,33 @@ fn about_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<
     (lines, focus)
 }
 
+/// The rows of Permissions, with the note on Full Disk Access under its row.
+fn permissions_lines(
+    state: &SettingsState,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let in_rows = state.focus == SettingsFocus::Rows;
+    let mut lines = Vec::new();
+    let mut focus = 0;
+    for (at, row) in state.rows().into_iter().enumerate() {
+        let selected = in_rows && state.row == at;
+        if selected {
+            focus = lines.len();
+        }
+        lines.push(row_line(state, row, selected, width, theme));
+        if row == SettingsRow::FullDiskAccess {
+            lines.extend(wrapped_lines(
+                "macOS gives it to the terminal app. Quit and reopen the terminal after you change it.",
+                theme.footnote(),
+                width,
+                theme,
+            ));
+        }
+    }
+    (lines, focus)
+}
+
 /// The title line of an About row. `about_lines` adds its path under it.
 fn about_title(title: &str, selected: bool, width: usize, theme: &Theme) -> Line<'static> {
     ListRow::new(vec![Span::styled(title.to_string(), theme.body())])
@@ -1274,6 +1401,24 @@ fn row_line(
             .selected(selected)
             .render_line(width, theme)
         }
+        SettingsRow::FullDiskAccess | SettingsRow::TouchId => {
+            ListRow::new(vec![Span::styled(row.title(), theme.body())])
+                .selected(selected)
+                .detail(Span::styled(state.row_value(row), value_style))
+                .render_line(width, theme)
+        }
+        SettingsRow::ScheduledFullDiskAccess => {
+            let program = state.needs_full_disk_access().unwrap_or(Path::new(""));
+            ListRow::new(vec![
+                Span::styled(row.title(), theme.body()),
+                Span::styled(
+                    format!("  {} needs Full Disk Access", program.display()),
+                    theme.warning(),
+                ),
+            ])
+            .selected(selected)
+            .render_line(width, theme)
+        }
         SettingsRow::Reload => ListRow::new(vec![Span::styled(row.title(), theme.accent_text())])
             .selected(selected)
             .render_line(width, theme),
@@ -1345,6 +1490,7 @@ mod tests {
                 "Scheduled cleanup",
                 "Protected paths",
                 "Appearance",
+                "Permissions",
                 "About"
             ]
         );
@@ -1368,6 +1514,11 @@ mod tests {
         assert_eq!(state.rows(), [SettingsRow::Add]);
         state.section = SettingsSection::Appearance;
         assert_eq!(state.rows(), [SettingsRow::Appearance]);
+        state.section = SettingsSection::Permissions;
+        assert_eq!(
+            state.rows(),
+            [SettingsRow::FullDiskAccess, SettingsRow::TouchId]
+        );
         state.section = SettingsSection::About;
         let mut expected = vec![SettingsRow::Program];
         expected.extend((0..6).map(SettingsRow::File));

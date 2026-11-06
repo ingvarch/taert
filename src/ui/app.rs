@@ -20,7 +20,9 @@ use super::history::{HistoryState, render_history};
 use super::keys::is_removal_key;
 use super::progress::{ProgressState, render_progress};
 use super::select::{ConfirmButton, ModalOverlay, SelectState, render_select};
-use super::settings::{SettingsFocus, SettingsRow, SettingsState, render_settings};
+use super::settings::{
+    SettingsFocus, SettingsRow, SettingsSection, SettingsState, render_settings,
+};
 use super::startup::{StartupConfirm, StartupScreenState, render_startup};
 use super::system_status::{SystemStatusState, render_system_status};
 use super::terminal::{AdminGate, enter_tui, leave_tui};
@@ -1381,8 +1383,19 @@ impl App {
                             SettingsRow::Program | SettingsRow::File(_) => {
                                 state.reveal(&*self.host);
                             }
+                            SettingsRow::FullDiskAccess
+                            | SettingsRow::TouchId
+                            | SettingsRow::ScheduledFullDiskAccess => {
+                                state.open_permission(&*self.host, &self.layout);
+                            }
                             SettingsRow::Item(_) | SettingsRow::Name(_) => {}
                         }
+                    }
+                    (SettingsFocus::Rows, KeyCode::Char('r'))
+                        if state.section == SettingsSection::Permissions =>
+                    {
+                        state.refresh_permissions(&*self.host, &self.layout);
+                        state.refresh_status(&self.config, &*self.host, &self.layout);
                     }
                     (SettingsFocus::Rows, KeyCode::Char('a')) => state.start_adding(),
                     (SettingsFocus::Rows, code) if is_removal_key(code) => state.prompt_remove(),
@@ -1551,6 +1564,7 @@ impl App {
                     "Lists of paths",
                     vec![Hint::new("a", "Add"), Hint::new("d", "Remove")],
                 ),
+                HelpSection::new("Permissions", vec![Hint::new("r", "Check again")]),
                 HelpSection::new(
                     "List of choices",
                     vec![
@@ -1942,6 +1956,7 @@ impl App {
             MainMenuChoice::Settings => {
                 let mut state = SettingsState::new(&self.config, &self.ignore, &self.layout);
                 state.refresh_status(&self.config, &*self.host, &self.layout);
+                state.refresh_permissions(&*self.host, &self.layout);
                 self.open(Screen::Settings(Box::new(state)));
             }
         }
@@ -4776,6 +4791,267 @@ mod tests {
                 "Delete",
             ],
         );
+    }
+
+    const FDA_PAGE: &str =
+        "/usr/bin/open x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+    const TCC: &str = "Library/Application Support/com.apple.TCC/TCC.db";
+
+    fn write_tcc(layout: &Layout, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = layout.home.join(TCC);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn write_pam(layout: &Layout, text: &str) {
+        let path = layout.system("etc/pam.d/sudo_local");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    use crate::core::admin::TouchId;
+    use crate::core::permissions::FullDiskAccess;
+
+    /// Settings on the Permissions section, with the rows focused. `prepare` sets up the sandbox first.
+    fn permissions_app(
+        host: &Arc<crate::core::host::fake::FakeHost>,
+        prepare: impl FnOnce(&Layout, &mut Config),
+    ) -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = new_app();
+        app.layout = layout.clone();
+        app.host = host.clone();
+        prepare(&layout, &mut app.config);
+        press(
+            &mut app,
+            &[
+                KeyCode::End,
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Right,
+            ],
+        );
+        (temp, layout, app)
+    }
+
+    #[test]
+    fn permissions_show_what_the_checks_found_when_settings_opens() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t2 biometric template(s)\n",
+        );
+        let (_temp, _layout, app) = permissions_app(&host, |layout, _| write_tcc(layout, 0o000));
+
+        assert_eq!(settings(&app).section, SettingsSection::Permissions);
+        assert_eq!(settings(&app).full_disk_access, FullDiskAccess::Off);
+        assert_eq!(settings(&app).touch_id, Some(TouchId::Off));
+        let text = wide_screen(&app);
+        assert!(text.contains("Full Disk Access"), "{text}");
+        assert!(text.contains("Touch ID for sudo"), "{text}");
+        assert!(
+            text.contains(
+                "macOS gives it to the terminal app. Quit and reopen the terminal after you change it."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("needs Full Disk Access"), "{text}");
+    }
+
+    #[test]
+    fn enter_on_full_disk_access_opens_its_page_in_system_settings() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let (_temp, _layout, mut app) = permissions_app(&host, |_, _| {});
+        assert_eq!(settings(&app).current_row(), SettingsRow::FullDiskAccess);
+        assert_eq!(host.count(FDA_PAGE), 0);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(host.count(FDA_PAGE), 1);
+    }
+
+    #[test]
+    fn enter_on_touch_id_that_is_off_shows_the_tip() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t2 biometric template(s)\n",
+        );
+        let (_temp, _layout, mut app) = permissions_app(&host, |_, _| {});
+        app.handle_key(KeyCode::Down);
+        assert_eq!(settings(&app).current_row(), SettingsRow::TouchId);
+        assert!(!settings(&app).has_dialog());
+        assert_footer(&app, &["Show tip"], &[]);
+
+        app.handle_key(KeyCode::Enter);
+
+        assert!(settings(&app).has_dialog());
+        let text = wide_screen(&app);
+        assert!(text.contains("Tip: sudo can use Touch ID. Copy"), "{text}");
+        assert!(text.contains("sudo_local.template"), "{text}");
+        app.handle_key(KeyCode::Enter);
+        assert!(!settings(&app).has_dialog());
+        assert_eq!(host.count("/usr/bin/open"), 0);
+
+        app.handle_key(KeyCode::Enter);
+        assert!(settings(&app).has_dialog());
+        app.handle_key(KeyCode::Esc);
+        assert!(!settings(&app).has_dialog());
+    }
+
+    #[test]
+    fn enter_on_touch_id_that_is_on_or_without_fingerprints_does_nothing() {
+        for (reply, prepare) in [
+            ("User 501:\t2 biometric template(s)\n", true),
+            ("User 501:\t0 biometric template(s)\n", false),
+        ] {
+            let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+            host.reply("/usr/bin/bioutil -c", reply);
+            let (_temp, _layout, mut app) = permissions_app(&host, |layout, _| {
+                if prepare {
+                    write_pam(layout, "auth sufficient pam_tid.so\n");
+                }
+            });
+            app.handle_key(KeyCode::Down);
+            assert_footer(&app, &[], &["Show tip"]);
+
+            app.handle_key(KeyCode::Enter);
+
+            assert!(!settings(&app).has_dialog());
+            assert_eq!(host.count("/usr/bin/open"), 0);
+        }
+    }
+
+    #[test]
+    fn r_checks_the_permissions_again_and_only_on_this_section() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t0 biometric template(s)\n",
+        );
+        let (_temp, layout, mut app) = permissions_app(&host, |_, _| {});
+        assert_footer(&app, &["r  Check again"], &[]);
+        assert_eq!(help_row(&app, "Check again"), Some("r"));
+        assert_eq!(settings(&app).full_disk_access, FullDiskAccess::Unknown);
+        assert_eq!(settings(&app).touch_id, Some(TouchId::NoFingerprints));
+
+        write_tcc(&layout, 0o644);
+        write_pam(&layout, "auth sufficient pam_tid.so\n");
+        host.reply(
+            "/usr/bin/bioutil -c",
+            "User 501:\t2 biometric template(s)\n",
+        );
+        app.handle_key(KeyCode::Char('r'));
+
+        assert_eq!(settings(&app).full_disk_access, FullDiskAccess::On);
+        assert_eq!(settings(&app).touch_id, Some(TouchId::On));
+
+        press(&mut app, &[KeyCode::Left, KeyCode::Up, KeyCode::Right]);
+        assert_eq!(settings(&app).section, SettingsSection::Appearance);
+        assert_eq!(settings(&app).focus, SettingsFocus::Rows);
+        write_tcc(&layout, 0o000);
+        app.handle_key(KeyCode::Char('r'));
+        assert_eq!(settings(&app).full_disk_access, FullDiskAccess::On);
+        assert_footer(&app, &[], &["Check again"]);
+    }
+
+    #[test]
+    fn the_scheduled_run_that_lacked_permission_adds_a_row_that_opens_the_same_page() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, _layout, mut app) = permissions_app(&host, |layout, config| {
+            config.schedule = Some(ScheduleConfig {
+                every: ScheduleFrequency::Week,
+                categories: vec!["dev".to_string()],
+                min_reclaim: 1_000_000_000,
+                last_skip: None,
+            });
+            write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert"));
+            history_lines(
+                layout,
+                &[
+                    r#"{"event":"start","run":"r1","at":"2026-01-01T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
+                    r#"{"event":"item","run":"r1","path":"/a","bytes":10,"outcome":"failed","error":"Operation not permitted (os error 1)"}"#,
+                    r#"{"event":"end","run":"r1","at":"2026-01-01T00:00:00Z"}"#,
+                ],
+            );
+        });
+
+        let text = wide_screen(&app);
+        assert!(
+            text.contains("/nowhere/bin/taert needs Full Disk Access"),
+            "{text}"
+        );
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(
+            settings(&app).current_row(),
+            SettingsRow::ScheduledFullDiskAccess
+        );
+
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(host.count(FDA_PAGE), 1);
+    }
+
+    #[test]
+    fn r_adds_and_removes_the_scheduled_cleanup_row() {
+        const FAILED_RUN: [&str; 3] = [
+            r#"{"event":"start","run":"r1","at":"2026-01-01T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
+            r#"{"event":"item","run":"r1","path":"/a","bytes":10,"outcome":"failed","error":"Operation not permitted (os error 1)"}"#,
+            r#"{"event":"end","run":"r1","at":"2026-01-01T00:00:00Z"}"#,
+        ];
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (_temp, layout, mut app) = permissions_app(&host, |layout, config| {
+            config.schedule = Some(ScheduleConfig {
+                every: ScheduleFrequency::Week,
+                categories: vec!["dev".to_string()],
+                min_reclaim: 1_000_000_000,
+                last_skip: None,
+            });
+            write_plist_for(layout, std::path::Path::new("/nowhere/bin/taert"));
+        });
+        let has_row = |app: &App| {
+            settings(app)
+                .rows()
+                .contains(&SettingsRow::ScheduledFullDiskAccess)
+        };
+        assert!(!has_row(&app));
+
+        history_lines(&layout, &FAILED_RUN);
+        app.handle_key(KeyCode::Char('r'));
+
+        assert!(has_row(&app));
+        let text = wide_screen(&app);
+        assert!(
+            text.contains("/nowhere/bin/taert needs Full Disk Access"),
+            "{text}"
+        );
+        press(&mut app, &[KeyCode::Down, KeyCode::Down]);
+        assert_eq!(
+            settings(&app).current_row(),
+            SettingsRow::ScheduledFullDiskAccess
+        );
+
+        let mut lines = FAILED_RUN.to_vec();
+        lines.extend([
+            r#"{"event":"start","run":"r2","at":"2026-01-08T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
+            r#"{"event":"item","run":"r2","path":"/a","bytes":10,"outcome":"trashed","error":null}"#,
+            r#"{"event":"end","run":"r2","at":"2026-01-08T00:00:00Z"}"#,
+        ]);
+        history_lines(&layout, &lines);
+        app.handle_key(KeyCode::Char('r'));
+
+        assert!(!has_row(&app));
+        assert_eq!(settings(&app).current_row(), SettingsRow::TouchId);
+        let text = wide_screen(&app);
+        assert!(!text.contains("needs Full Disk Access"), "{text}");
     }
 
     #[test]

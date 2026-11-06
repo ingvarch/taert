@@ -1,0 +1,36 @@
+---
+source: tests/ui_snapshots.rs
+expression: output
+---
+ taert › Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ╭─ Settings ─────────────────────╮  ╭─ ◉  Permissions ────────────────────────────────────────────────────────────╮
+   │   ◇ Project cleanup          › │  │ ▌    Full Disk Access                                                   Off │
+   │   ◷ Scheduled cleanup        › │  │      macOS gives it to the terminal app. Quit and reopen the terminal       │
+   │   ◈ Protected paths          › │  │      after you change it.                                                   │
+   │   ◐ Appearance               › │  │      Touch ID for sudo                                                  Off │
+   │   ◉ Permissions              › │  │      Scheduled cleanup  /opt/homebrew/bin/taert needs Full Disk Access      │
+   │   ⓘ About                    › │  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╰────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  r  Check again    ↑↓  Move    ←  Sections    ⎋  Back    ?  More                                              Open  ↵
