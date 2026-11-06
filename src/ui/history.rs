@@ -132,13 +132,13 @@ impl HistoryState {
 }
 
 fn run_label(run: &RunRecord) -> String {
-    format!("{} {}", run.date_label(), run.command)
+    format!("{} {}", run.date_label(), run.command_label())
 }
 
 fn date_and_command(run: &RunRecord, theme: &Theme) -> Vec<Span<'static>> {
     vec![
         Span::styled(format!("{:<DATE_W$}  ", run.date_label()), theme.body()),
-        Span::styled(run.command.clone(), theme.body()),
+        Span::styled(run.command_label(), theme.body()),
     ]
 }
 
@@ -198,6 +198,7 @@ fn list_lines(
     let offset = scroll_offset(state.selected, state.runs.len(), height);
     for (index, run) in state.runs.iter().enumerate().skip(offset).take(height) {
         let row = ListRow::new(date_and_command(run, theme))
+            .cut_title_at_end()
             .leading(Span::styled(
                 theme.g.icon_history.to_string(),
                 theme.callout(),
@@ -375,6 +376,7 @@ pub fn recent_runs_card(
             runs.iter()
                 .map(|run| {
                     ListRow::new(date_and_command(run, theme))
+                        .cut_title_at_end()
                         .columns(vec![Column::new(
                             Span::styled(run.summary(), theme.body()),
                             result_w,

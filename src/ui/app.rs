@@ -41,7 +41,9 @@ use crate::core::cleaner::{
 use crate::core::compress::{self, Compressor};
 use crate::core::docker;
 use crate::core::doctor;
-use crate::core::history::{HistoryLog, ItemOutcome, command_for_scan, is_history_disabled};
+use crate::core::history::{
+    HistoryLog, ItemOutcome, brew_uninstall_command, command_for_scan, is_history_disabled,
+};
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
@@ -1817,7 +1819,17 @@ impl App {
                         rep
                     }
                     None => {
-                        let command = command_for_scan(&scan_id);
+                        let command = if scan_id == homebrew::SCAN_ID {
+                            let paths: Vec<String> = selected_items
+                                .iter()
+                                .map(|item| item.path.to_string_lossy().into_owned())
+                                .collect();
+                            let names: Vec<&str> =
+                                paths.iter().map(|p| homebrew::formula_name(p)).collect();
+                            brew_uninstall_command(&names)
+                        } else {
+                            command_for_scan(&scan_id)
+                        };
                         let total = selected_items.len();
                         let session = HistoryLog::new(layout.history_path()).start_run(
                             &command,
@@ -9228,7 +9240,7 @@ mod tests {
                 .load_runs()
                 .unwrap();
             assert_eq!(runs.len(), 1);
-            assert_eq!(runs[0].command, "brew uninstall");
+            assert_eq!(runs[0].command, "brew uninstall lib");
             assert_eq!(runs[0].items.len(), 1);
             assert_eq!(runs[0].items[0].path, "lib 1");
             assert!(before >= 20_000);

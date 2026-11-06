@@ -24,7 +24,7 @@ pub fn command_for_scan(scan_id: &str) -> String {
     match scan_id {
         docker::SCAN_ID => "docker".to_string(),
         homebrew::CLEANUP_ID => "brew cleanup".to_string(),
-        homebrew::SCAN_ID => "brew uninstall".to_string(),
+        homebrew::SCAN_ID => BREW_UNINSTALL.to_string(),
         purger::SCAN_ID => "purge".to_string(),
         large_files::SCAN_ID => "large".to_string(),
         compress::SCAN_ID => "compress".to_string(),
@@ -32,6 +32,16 @@ pub fn command_for_scan(scan_id: &str) -> String {
             .map_or("clean", Category::history_command)
             .to_string(),
     }
+}
+
+const BREW_UNINSTALL: &str = "brew uninstall";
+
+/// The history command of a Homebrew removal, naming each formula.
+pub fn brew_uninstall_command(names: &[&str]) -> String {
+    std::iter::once(BREW_UNINSTALL)
+        .chain(names.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 static RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -137,6 +147,20 @@ impl RunRecord {
         !self.completed
     }
 
+    /// The command as the screens and `taert history` show it. A run logged with the bare
+    /// `brew uninstall` gets the formulae of its items.
+    pub fn command_label(&self) -> String {
+        if self.command != BREW_UNINSTALL {
+            return self.command.clone();
+        }
+        let names: Vec<&str> = self
+            .items
+            .iter()
+            .map(|item| homebrew::formula_name(&item.path))
+            .collect();
+        brew_uninstall_command(&names)
+    }
+
     /// Short human-readable summary of the run outcome.
     pub fn summary(&self) -> String {
         if self.is_interrupted() {
@@ -216,7 +240,7 @@ impl RunRecord {
     /// - Summary (48..)
     pub fn format_line(&self) -> String {
         // Command starts at 18, mode starts at 35 (width 17).
-        let mut line = format!("{}  {}", self.date_label(), self.command);
+        let mut line = format!("{}  {}", self.date_label(), self.command_label());
         if line.len() < 35 {
             line.push_str(&" ".repeat(35 - line.len()));
         } else {
@@ -701,6 +725,60 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    fn run_of(command: &str, paths: &[&str]) -> RunRecord {
+        RunRecord {
+            run: "1".into(),
+            at: "2026-11-05T15:25:00Z".into(),
+            command: command.into(),
+            mode: "interactive".into(),
+            version: "0.10.0".into(),
+            total: None,
+            completed: true,
+            ended_at: None,
+            items: paths
+                .iter()
+                .map(|path| RunItem {
+                    path: (*path).into(),
+                    bytes: 1,
+                    outcome: OutcomeKind::Removed,
+                    error: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_brew_uninstall_command_names_its_formulae() {
+        assert_eq!(
+            brew_uninstall_command(&["terraform"]),
+            "brew uninstall terraform"
+        );
+        assert_eq!(
+            brew_uninstall_command(&["terraform", "k9s", "awscli"]),
+            "brew uninstall terraform k9s awscli"
+        );
+    }
+
+    #[test]
+    fn a_run_logged_with_the_bare_brew_label_shows_the_names_of_its_items() {
+        let one = run_of("brew uninstall", &["terraform"]);
+        assert_eq!(one.command_label(), "brew uninstall terraform");
+        assert!(one.format_line().contains("brew uninstall terraform "));
+        let many = run_of("brew uninstall", &["terraform 1.5.7", "k9s 0.32.5"]);
+        assert_eq!(many.command_label(), "brew uninstall terraform k9s");
+        assert_eq!(
+            run_of("brew uninstall", &[]).command_label(),
+            "brew uninstall"
+        );
+    }
+
+    #[test]
+    fn any_other_run_shows_its_command_as_it_is() {
+        assert_eq!(run_of("clean dev", &["/a"]).command_label(), "clean dev");
+        let named = run_of("brew uninstall k9s", &["k9s 0.32.5"]);
+        assert_eq!(named.command_label(), "brew uninstall k9s");
+    }
 
     #[test]
     fn scans_map_to_their_history_commands() {

@@ -22,7 +22,7 @@ use crate::core::cleaner::{RemovalMode, RemovalReport, item_removal_mode};
 use crate::core::date_utils::format_rfc3339;
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
-use crate::core::history::{HistoryLog, ItemOutcome};
+use crate::core::history::{HistoryLog, ItemOutcome, brew_uninstall_command};
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
 use crate::core::large_files;
@@ -390,7 +390,8 @@ fn handle_brew_uninstall(
         "interactive"
     };
 
-    let report = clean_and_log(&scan, cli, ignore, "brew uninstall", mode, context);
+    let command = brew_uninstall_command(&[homebrew::formula_name(&row.path.to_string_lossy())]);
+    let report = clean_and_log(&scan, cli, ignore, &command, mode, context);
     let _ = PlainRunner::write_report("Uninstall", &report, console);
     if report.failures.is_empty() {
         ExitCode::SUCCESS
@@ -1392,7 +1393,7 @@ fn handle_history(
         } else {
             let _ = writeln!(out, "Run:     {}", run_record.run);
             let _ = writeln!(out, "Date:    {}", run_record.date_label());
-            let _ = writeln!(out, "Command: {}", run_record.command);
+            let _ = writeln!(out, "Command: {}", run_record.command_label());
             let _ = writeln!(out, "Mode:    {}", run_record.mode);
             let status = if run_record.is_interrupted() {
                 "interrupted"
@@ -2608,7 +2609,7 @@ mod tests {
         assert!(!ran.out.contains("[y/N]"));
         let runs = runs_in(&layout);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].command, "brew uninstall");
+        assert_eq!(runs[0].command, "brew uninstall brotli");
         assert_eq!(runs[0].mode, "force");
         assert_eq!(runs[0].items.len(), 1);
         assert_eq!(
@@ -2648,7 +2649,7 @@ mod tests {
         assert!(removal_calls(&host).is_empty());
         let runs = runs_in(&layout);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].command, "brew uninstall");
+        assert_eq!(runs[0].command, "brew uninstall brotli");
         assert_eq!(runs[0].items.len(), 1);
         assert_eq!(
             runs[0].items[0].outcome,
@@ -4944,6 +4945,30 @@ mod tests {
         assert_eq!(removed.out, format!("Removed from ignore list: {path}\n"));
         let saved = IgnoreStore::load_from(&layout.ignore_path()).unwrap();
         assert!(!saved.roots.contains(&path));
+    }
+
+    #[test]
+    fn history_show_names_the_formula_of_a_run_logged_before() {
+        let (_temp, layout) = sandbox();
+        let session =
+            HistoryLog::new(layout.history_path()).start_run("brew uninstall", "force", Some(1));
+        session.record_item(&ItemOutcome {
+            path: "terraform 1.5.7".into(),
+            bytes: 1,
+            outcome: crate::core::history::OutcomeKind::Removed,
+            error: None,
+        });
+        let run_id = session.run_id().to_string();
+        session.finish();
+
+        let shown = history(&["history", "show", &run_id], &layout);
+
+        assert!(shown.ok);
+        assert!(
+            shown.out.contains("Command: brew uninstall terraform\n"),
+            "{}",
+            shown.out
+        );
     }
 
     #[test]

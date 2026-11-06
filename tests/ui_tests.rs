@@ -7,7 +7,7 @@ use ratatui::backend::TestBackend;
 use taert::core::history::{HistoryLog, OutcomeKind};
 use taert::core::safety::Safety;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
-use taert::ui::history::{HistoryState, render_history};
+use taert::ui::history::{HistoryState, recent_runs_card, render_history};
 use taert::ui::select::{SelectState, render_select};
 use taert::ui::theme::Theme;
 use taert::ui::workspace::{WorkspaceState, render_workspace};
@@ -872,6 +872,72 @@ fn a_narrower_history_screen_hides_the_result_and_keeps_the_date_and_the_command
         assert!(!text.contains("RESULT"), "{text}");
         assert!(!text.contains("removed"), "{text}");
     }
+}
+
+const LONG_BREW_COMMAND: &str =
+    "brew uninstall terraform k9s awscli kubectl helm jq ripgrep fd bat eza zoxide";
+
+fn write_brew_runs(log: &HistoryLog) {
+    let item = |name: &'static str| (name, 1_000_000, OutcomeKind::Removed, None);
+    support::write_run(
+        &log.path,
+        "20261104-100000-aaaa",
+        &support::local_time(2026, 11, 4, 10, 0),
+        "brew uninstall",
+        "interactive",
+        &[item("terraform 1.5.7")],
+    );
+    support::write_run(
+        &log.path,
+        "20261105-152500-bbbb",
+        &support::local_time(2026, 11, 5, 15, 25),
+        LONG_BREW_COMMAND,
+        "interactive",
+        &[item("terraform 1.5.7")],
+    );
+}
+
+#[test]
+fn the_history_screen_names_the_formula_of_a_run_logged_before_and_cuts_a_long_label_with_an_ellipsis()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    write_brew_runs(&log);
+    let state = HistoryState::load(&log, false);
+    let theme = Theme::new();
+
+    let rows = screen(80, 24, |f| render_history(f, &state, &theme));
+
+    let text = rows.join("\n");
+    let old = &rows[row_of(&rows, "2026-11-04 10:00")];
+    assert!(old.contains("brew uninstall terraform "), "{text}");
+    let long = &rows[row_of(&rows, "2026-11-05 15:25")];
+    assert!(long.contains("brew uninstall terraform k"), "{text}");
+    assert!(!long.contains("zoxide"), "{text}");
+    assert!(long.contains("… "), "{text}");
+}
+
+#[test]
+fn the_menu_pane_names_the_formula_of_a_run_logged_before_and_cuts_a_long_label_with_an_ellipsis() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = history_in(&dir);
+    write_brew_runs(&log);
+    let runs = log.load_runs().unwrap();
+    let theme = Theme::new();
+
+    let lines = recent_runs_card(&Ok(runs), 72, &theme);
+
+    let text = lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("2026-11-04 10:00  brew uninstall terraform "),
+        "{text}"
+    );
+    assert!(!text.contains("zoxide"), "{text}");
+    assert!(text.contains("… "), "{text}");
 }
 
 #[test]

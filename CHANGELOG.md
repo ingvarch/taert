@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Settings with the comma key**: `,` opens Settings at the section of the current screen, and the menu shows a summary of the settings.
 
 ### Changed
+- **History names the formulas a Homebrew removal took**: a row reads `brew uninstall terraform` instead of `brew uninstall`, also for runs logged before. A command too long for the column ends with `…`.
 - **Folders found by a custom name start unselected**: a folder that Project cleanup lists only because its name is in `extra_artifacts` starts unselected, whatever its age, and `taert purge --force` leaves it. You can still select it. Folders found by the built-in names are unchanged.
 - **Project folders and protected paths**: Settings edits both lists in place, under Project cleanup and in Protected paths, and `a` adds a path from any row of a list. The separate screen and the Protected paths row of the main menu are gone.
 - **Settings**: Preferences is now Settings, with the sections on the left and their rows on the right. `↵` opens a list of choices, and the choice saves at once. `←` and `→` no longer change a value. Below 100 columns the screen shows one section at a time.
