@@ -117,7 +117,7 @@ impl std::fmt::Display for TimeOfDay {
 }
 
 /// Config name, display name, and launchd number of each weekday, Monday first.
-const WEEKDAYS: [(&str, &str, i32); 7] = [
+pub(crate) const WEEKDAYS: [(&str, &str, i32); 7] = [
     ("mon", "Mon", 1),
     ("tue", "Tue", 2),
     ("wed", "Wed", 3),
@@ -126,8 +126,8 @@ const WEEKDAYS: [(&str, &str, i32); 7] = [
     ("sat", "Sat", 6),
     ("sun", "Sun", 0),
 ];
-const REPEAT_HOURS: [u32; 6] = [2, 3, 4, 6, 8, 12];
-const MAX_MONTH_DAY: u32 = 28;
+pub(crate) const REPEAT_HOURS: [u32; 6] = [2, 3, 4, 6, 8, 12];
+pub(crate) const MAX_MONTH_DAY: u32 = 28;
 /// A month rule matches within 31 days; two months leave room to spare.
 const SEARCH_DAYS: i32 = 62;
 
@@ -180,6 +180,11 @@ impl ScheduleRule {
         })
     }
 
+    /// The rule of a schedule that has no saved values.
+    pub fn standard() -> Self {
+        Self::from_config(&ScheduleConfig::default()).expect("the default schedule is valid")
+    }
+
     /// The rule of the saved schedule with another frequency. Without a saved schedule, the defaults.
     pub fn for_frequency(
         saved: Option<&ScheduleConfig>,
@@ -188,6 +193,23 @@ impl ScheduleRule {
         let mut config = saved.cloned().unwrap_or_default();
         config.every = every;
         Self::from_config(&config)
+    }
+
+    pub fn at_text(&self) -> String {
+        self.at.to_string()
+    }
+
+    /// Whether each weekday, Monday first, is checked.
+    pub fn weekdays(&self) -> [bool; 7] {
+        std::array::from_fn(|i| self.days.contains(&i))
+    }
+
+    pub fn day(&self) -> u32 {
+        self.day
+    }
+
+    pub fn every_hours(&self) -> Option<u32> {
+        self.every_hours
     }
 
     pub fn times_of_day(&self) -> Vec<TimeOfDay> {
@@ -725,7 +747,7 @@ pub fn format_run_time(at: &str) -> String {
 }
 
 /// A time as `Thu 2026-11-12 21:30`, in the local time zone.
-fn format_weekday_and_time(time: SystemTime) -> String {
+pub fn format_weekday_and_time(time: SystemTime) -> String {
     let secs = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
     let mut local: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {

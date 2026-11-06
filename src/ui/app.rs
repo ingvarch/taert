@@ -1387,6 +1387,7 @@ impl App {
                                 self.theme = Theme::from_config(&self.config);
                             }
                         }
+                        KeyCode::Char(' ') => state.toggle_picked(),
                         KeyCode::Esc => state.close_picker(),
                         _ => {}
                     }
@@ -1405,6 +1406,10 @@ impl App {
                         match state.current_row() {
                             SettingsRow::AgeThreshold
                             | SettingsRow::Run
+                            | SettingsRow::ScheduleDays
+                            | SettingsRow::ScheduleDay
+                            | SettingsRow::ScheduleAt
+                            | SettingsRow::ScheduleRepeat
                             | SettingsRow::MinReclaim
                             | SettingsRow::Appearance => state.open_picker(),
                             SettingsRow::Add | SettingsRow::AddName => state.start_adding(),
@@ -3281,14 +3286,6 @@ mod tests {
         let (_temp, layout, mut app) = settings_app();
         app.host = host.clone();
         write_plist_for(&layout, std::path::Path::new("/nowhere/bin/taert"));
-        history_lines(
-            &layout,
-            &[
-                r#"{"event":"start","run":"r1","at":"2026-01-01T00:00:00Z","command":"schedule run","mode":"schedule","version":"0"}"#,
-                r#"{"event":"item","run":"r1","path":"/a","bytes":2000000000,"outcome":"removed"}"#,
-                r#"{"event":"end","run":"r1","at":"2026-01-01T00:00:00Z"}"#,
-            ],
-        );
         app.config.schedule = Some(ScheduleConfig {
             every: ScheduleFrequency::Week,
             categories: vec!["dev".to_string()],
@@ -3310,8 +3307,10 @@ mod tests {
         };
         state.selected_index = 13;
         let text = wide_screen(&app);
-        assert!(text.contains("Every week · last run"), "{text}");
-        assert!(text.contains("freed"), "{text}");
+        assert!(
+            text.contains("Every week on Mon at 09:00 · next run"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -3993,8 +3992,7 @@ mod tests {
             thursday_at_21_30_every_6_hours,
         );
         host.reply("/bin/launchctl", "");
-        press(&mut app, &[KeyCode::Down; 6]);
-        assert_eq!(settings(&app).current_row(), SettingsRow::Reload);
+        go_to(&mut app, SettingsRow::Reload);
 
         app.handle_key(KeyCode::Enter);
 
@@ -4013,16 +4011,9 @@ mod tests {
     fn space_on_a_category_saves_it_without_launchctl() {
         let (host, _temp, layout, mut app) = weekly_dev_junk_app();
         let calls = host.calls.lock().unwrap().len();
+        go_to(&mut app, SettingsRow::Category(2));
 
-        press(
-            &mut app,
-            &[
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Down,
-                KeyCode::Char(' '),
-            ],
-        );
+        app.handle_key(KeyCode::Char(' '));
 
         assert_eq!(saved_schedule(&layout).categories, ["dev", "junk", "ai"]);
         assert_eq!(
@@ -4041,7 +4032,8 @@ mod tests {
             bytes: 5,
         });
 
-        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+        go_to(&mut app, SettingsRow::Category(0));
+        app.handle_key(KeyCode::Enter);
 
         let saved = saved_schedule(&layout);
         assert_eq!(saved.categories, ["junk"]);
@@ -4053,10 +4045,12 @@ mod tests {
     #[test]
     fn the_last_checked_category_stays_checked() {
         let (_host, _temp, layout, mut app) = weekly_dev_junk_app();
-        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+        go_to(&mut app, SettingsRow::Category(0));
+        app.handle_key(KeyCode::Char(' '));
         std::fs::remove_file(layout.config_path()).unwrap();
 
-        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+        go_to(&mut app, SettingsRow::Category(1));
+        app.handle_key(KeyCode::Char(' '));
 
         let text = screen_text(&app);
         assert!(text.contains("Choose at least one category"), "{text}");
@@ -4122,8 +4116,7 @@ mod tests {
         host.reply("/bin/launchctl", "");
         assert!(!crate::core::schedule::agent_plist_path(&layout).exists());
         assert!(screen_text(&app).contains("The launch agent file is missing."));
-        press(&mut app, &[KeyCode::Down; 6]);
-        assert_eq!(settings(&app).current_row(), SettingsRow::Reload);
+        go_to(&mut app, SettingsRow::Reload);
 
         app.handle_key(KeyCode::Enter);
 
@@ -4149,7 +4142,7 @@ mod tests {
     fn a_failed_load_shows_the_error_and_keeps_the_row() {
         let (host, _temp, _layout, mut app) = weekly_dev_junk_app();
         host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
-        press(&mut app, &[KeyCode::Down; 6]);
+        go_to(&mut app, SettingsRow::Reload);
 
         app.handle_key(KeyCode::Enter);
 
@@ -4188,9 +4181,341 @@ mod tests {
         );
 
         let text = screen_text(&app);
-        assert!(text.contains("Has not run yet"), "{text}");
+        assert!(text.contains("Not yet"), "{text}");
         assert!(!text.contains("Load the schedule again"), "{text}");
         assert!(!text.contains("launch agent"), "{text}");
+    }
+
+    fn rule_app(
+        every: ScheduleFrequency,
+        prepare: impl FnOnce(&Layout, &mut Option<ScheduleConfig>),
+    ) -> (
+        Arc<crate::core::host::fake::FakeHost>,
+        tempfile::TempDir,
+        Layout,
+        App,
+    ) {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.reply("/bin/launchctl", "");
+        let (temp, layout, app) =
+            schedule_app_prepared(&host, Some(every), &["dev"], 1_000_000_000, prepare);
+        (host, temp, layout, app)
+    }
+
+    fn go_to(app: &mut App, row: SettingsRow) {
+        for _ in 0..settings(app).rows().len() {
+            if settings(app).current_row() == row {
+                break;
+            }
+            app.handle_key(KeyCode::Down);
+        }
+        assert_eq!(settings(app).current_row(), row);
+    }
+
+    fn open_rule_picker(app: &mut App, row: SettingsRow) {
+        go_to(app, row);
+        app.handle_key(KeyCode::Enter);
+        assert!(settings(app).picker_state().is_some());
+    }
+
+    #[test]
+    fn checking_a_day_in_the_on_picker_saves_it_with_one_launchctl_load() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleDays);
+        assert_eq!(
+            picker_choices(&app),
+            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        );
+
+        press(
+            &mut app,
+            &[
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Char(' '),
+                KeyCode::Enter,
+            ],
+        );
+
+        assert_eq!(saved_schedule(&layout).days, ["mon", "thu"]);
+        assert_eq!(bootstraps(&host), 1);
+        assert!(screen_text(&app).contains("Mon, Thu"));
+    }
+
+    #[test]
+    fn escape_in_the_on_picker_changes_nothing() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleDays);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Char(' '), KeyCode::Esc]);
+
+        assert!(settings(&app).picker_state().is_none());
+        assert_eq!(bootstraps(&host), 0);
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn unchecking_the_only_day_keeps_it_and_shows_a_toast() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleDays);
+
+        press(&mut app, &[KeyCode::Char(' ')]);
+
+        let picker = settings(&app).picker_state().unwrap();
+        assert_eq!(
+            picker.checked(),
+            [true, false, false, false, false, false, false]
+        );
+        assert!(screen_text(&app).contains("Choose at least one day"));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(bootstraps(&host), 0);
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn space_in_a_single_choice_picker_shows_no_toast() {
+        let (_host, _temp, _layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleAt);
+
+        app.handle_key(KeyCode::Char(' '));
+
+        assert!(!screen_text(&app).contains("Choose at least"));
+    }
+
+    #[test]
+    fn the_at_picker_lists_half_hours_and_saves_the_choice() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleAt);
+        let choices = picker_choices(&app);
+        assert_eq!(choices.len(), 48);
+        assert_eq!(choices[0], "00:00");
+        assert_eq!(choices[47], "23:30");
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(18));
+
+        let target = choices.iter().position(|c| c == "21:30").unwrap();
+        press(&mut app, &vec![KeyCode::Down; target - 18]);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(saved_schedule(&layout).at, "21:30");
+        assert_eq!(bootstraps(&host), 1);
+        assert!(screen_text(&app).contains("21:30"));
+    }
+
+    #[test]
+    fn a_saved_time_outside_the_list_is_added_in_order_and_marked() {
+        let (_host, _temp, _layout, mut app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "21:47".into();
+        });
+        open_rule_picker(&mut app, SettingsRow::ScheduleAt);
+
+        let choices = picker_choices(&app);
+        let at = choices.iter().position(|c| c == "21:47").unwrap();
+        assert_eq!(choices[at - 1], "21:30");
+        assert_eq!(choices[at + 1], "22:00");
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(at));
+    }
+
+    #[test]
+    fn the_repeat_picker_saves_hours_and_once_a_day_removes_them() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Week, |_, _| {});
+        open_rule_picker(&mut app, SettingsRow::ScheduleRepeat);
+        assert_eq!(
+            picker_choices(&app),
+            [
+                "Once a day",
+                "Every 2 hours",
+                "Every 3 hours",
+                "Every 4 hours",
+                "Every 6 hours",
+                "Every 8 hours",
+                "Every 12 hours"
+            ]
+        );
+
+        press(&mut app, &[KeyCode::Down; 4]);
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(saved_schedule(&layout).every_hours, Some(6));
+        assert_eq!(bootstraps(&host), 1);
+        assert!(screen_text(&app).contains("Every 6 hours"));
+
+        open_rule_picker(&mut app, SettingsRow::ScheduleRepeat);
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(4));
+        press(&mut app, &[KeyCode::Home, KeyCode::Enter]);
+        assert_eq!(saved_schedule(&layout).every_hours, None);
+        assert_eq!(bootstraps(&host), 2);
+    }
+
+    fn next_run_line(app: &App) -> Option<String> {
+        screen_rows(app, 220, 40)
+            .into_iter()
+            .find(|r| r.contains("Next run"))
+    }
+
+    #[test]
+    fn the_schedule_card_shows_the_next_run_of_a_weekly_rule() {
+        let (_host, _temp, _layout, app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            let s = schedule.as_mut().unwrap();
+            s.days = vec!["mon".into(), "thu".into()];
+            s.at = "09:00".into();
+        });
+
+        let line = next_run_line(&app).expect("a Next run line");
+
+        let value = line.split("Next run").nth(1).unwrap().trim_start();
+        let value = value.split('│').next().unwrap().trim();
+        let (day, rest) = value.split_once(' ').unwrap();
+        assert!(day == "Mon" || day == "Thu", "{line}");
+        assert!(rest.ends_with(" 09:00"), "{line}");
+        assert_eq!(rest.len(), "YYYY-MM-DD 09:00".len(), "{line}");
+    }
+
+    #[test]
+    fn a_refused_rule_shows_no_next_run() {
+        let (_host, _temp, _layout, app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "25:99".into();
+        });
+
+        assert_eq!(next_run_line(&app), None);
+    }
+
+    #[test]
+    fn a_monthly_schedule_shows_on_day_and_not_on() {
+        let (host, _temp, layout, mut app) = rule_app(ScheduleFrequency::Month, |_, _| {});
+        let rows = settings(&app).rows();
+        assert!(rows.contains(&SettingsRow::ScheduleDay));
+        assert!(!rows.contains(&SettingsRow::ScheduleDays));
+        let text = screen_text(&app);
+        assert!(text.contains("On day"), "{text}");
+
+        open_rule_picker(&mut app, SettingsRow::ScheduleDay);
+        let choices = picker_choices(&app);
+        assert_eq!(choices.len(), 28);
+        assert_eq!(choices[0], "1");
+        assert_eq!(choices[27], "28");
+        press(&mut app, &[KeyCode::Down; 14]);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(saved_schedule(&layout).day, 15);
+        assert_eq!(bootstraps(&host), 1);
+        let rows = screen_rows(&app, 120, 32);
+        let line = rows
+            .iter()
+            .find(|r| r.contains("On day"))
+            .expect("On day row");
+        assert!(line.contains("15 ⌄"), "{line}");
+    }
+
+    #[test]
+    fn a_daily_schedule_has_neither_on_nor_on_day() {
+        let (_host, _temp, _layout, app) = rule_app(ScheduleFrequency::Day, |_, _| {});
+
+        let rows = settings(&app).rows();
+
+        assert!(!rows.contains(&SettingsRow::ScheduleDay));
+        assert!(!rows.contains(&SettingsRow::ScheduleDays));
+        assert_eq!(rows[1], SettingsRow::ScheduleAt);
+        assert_eq!(rows[2], SettingsRow::ScheduleRepeat);
+    }
+
+    #[test]
+    fn a_failed_load_keeps_the_old_value_and_shows_the_error() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        host.fail("/bin/launchctl bootstrap", "Bootstrap failed: 5");
+        let (_temp, layout, mut app) = schedule_app(&host, Some(ScheduleFrequency::Week));
+        open_rule_picker(&mut app, SettingsRow::ScheduleAt);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+
+        let text = screen_text(&app);
+        assert!(text.contains("Bootstrap failed: 5"), "{text}");
+        assert!(text.contains("09:00"), "{text}");
+        assert!(!text.contains("09:30"), "{text}");
+        assert!(!layout.config_path().exists());
+    }
+
+    #[test]
+    fn the_time_and_repeat_rows_are_dimmed_and_out_of_reach_while_run_is_off() {
+        let host = Arc::new(crate::core::host::fake::FakeHost::idle());
+        let footnote = app_theme_fg(|t| t.footnote());
+        let body = app_theme_fg(|t| t.body());
+        let (_temp, _layout, off) = schedule_app(&host, None);
+        let (_temp2, _layout2, on) = schedule_app(&host, Some(ScheduleFrequency::Week));
+
+        assert_eq!(settings(&off).rows(), [SettingsRow::Run]);
+        for title in ["At", "Repeat"] {
+            assert_eq!(fg_of(&off, title), footnote, "{title} off");
+            assert_eq!(fg_of(&on, title), body, "{title} on");
+        }
+        let text = screen_text(&off);
+        assert!(text.contains("09:00"), "{text}");
+        assert!(text.contains("Once a day"), "{text}");
+    }
+
+    #[test]
+    fn a_saved_value_the_rule_refuses_shows_its_message_and_default_rows() {
+        let (_host, _temp, _layout, app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "25:99".into();
+        });
+
+        let text = screen_text(&app);
+
+        assert!(
+            text.contains("Time 25:99 is not HH:MM between 00:00 and 23:59."),
+            "{text}"
+        );
+        assert!(text.contains("09:00"), "{text}");
+        assert_eq!(fg_of(&app, "Time 25:99"), app_theme_fg(|t| t.warning()));
+    }
+
+    #[test]
+    fn choosing_the_shown_value_replaces_a_refused_one() {
+        let (host, _temp, _layout, mut app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "25:99".into();
+        });
+        let before = bootstraps(&host);
+
+        open_rule_picker(&mut app, SettingsRow::ScheduleAt);
+        app.handle_key(KeyCode::Enter);
+
+        assert_eq!(app.config.schedule.as_ref().unwrap().at, "09:00");
+        assert_eq!(bootstraps(&host), before + 1);
+        let text = screen_text(&app);
+        assert!(!text.contains("Time 25:99"), "{text}");
+    }
+
+    #[test]
+    fn turning_run_off_shows_the_time_a_new_schedule_would_use() {
+        let (_host, _temp, _layout, mut app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "21:30".into();
+        });
+        go_to(&mut app, SettingsRow::Run);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Home, KeyCode::Enter]);
+
+        assert!(app.config.schedule.is_none());
+        let text = screen_text(&app);
+        assert!(!text.contains("21:30"), "{text}");
+        assert_eq!(fg_of(&app, "09:00 ⌄"), app_theme_fg(|t| t.footnote()));
+    }
+
+    #[test]
+    fn turning_run_off_and_on_again_clears_a_refused_rule() {
+        let (_host, _temp, _layout, mut app) = rule_app(ScheduleFrequency::Week, |_, schedule| {
+            schedule.as_mut().unwrap().at = "25:99".into();
+        });
+        go_to(&mut app, SettingsRow::Run);
+
+        press(&mut app, &[KeyCode::Enter, KeyCode::Home, KeyCode::Enter]);
+        press(
+            &mut app,
+            &[KeyCode::Enter, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
+
+        assert_eq!(settings(&app).schedule, Some(ScheduleFrequency::Week));
+        let text = wide_screen(&app);
+        assert!(!text.contains("Time 25:99"), "{text}");
+        assert!(next_run_line(&app).is_some(), "{text}");
     }
 
     fn history_lines(layout: &Layout, lines: &[&str]) {
@@ -4256,7 +4581,8 @@ mod tests {
         );
         let before = launchctl_prints(&host);
 
-        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
+        go_to(&mut app, SettingsRow::Category(0));
+        app.handle_key(KeyCode::Char(' '));
 
         assert_eq!(app.config.schedule.as_ref().unwrap().categories, ["junk"]);
         assert_eq!(launchctl_prints(&host), before + 1);
@@ -4378,14 +4704,15 @@ mod tests {
     }
 
     #[test]
-    fn with_run_off_there_is_no_last_run_card() {
+    fn with_run_off_there_is_no_schedule_card() {
         let host = Arc::new(crate::core::host::fake::FakeHost::idle());
         let (_temp, _layout, app) = schedule_app(&host, None);
 
         let text = screen_text(&app);
 
-        assert!(!text.contains("Last run"), "{text}");
-        assert!(!text.contains("Has not run yet"), "{text}");
+        assert!(!text.contains("─ Schedule ─"), "{text}");
+        assert!(!text.contains("Next run"), "{text}");
+        assert!(!text.contains("Not yet"), "{text}");
     }
 
     fn appearance_app(saved: &str) -> (tempfile::TempDir, Layout, App) {
@@ -4524,8 +4851,7 @@ mod tests {
     fn picking_a_minimum_saves_it_without_launchctl() {
         let (host, _temp, layout, mut app) = weekly_dev_junk_app();
         let calls = host.calls.lock().unwrap().len();
-        press(&mut app, &[KeyCode::Down; 5]);
-        assert_eq!(settings(&app).current_row(), SettingsRow::MinReclaim);
+        go_to(&mut app, SettingsRow::MinReclaim);
 
         app.handle_key(KeyCode::Enter);
 
@@ -4548,7 +4874,7 @@ mod tests {
             &["dev", "junk"],
             3_000_000_000,
         );
-        press(&mut app, &[KeyCode::Down; 5]);
+        go_to(&mut app, SettingsRow::MinReclaim);
 
         app.handle_key(KeyCode::Enter);
 
@@ -4606,8 +4932,9 @@ mod tests {
     fn turning_run_on_after_off_shows_the_defaults_again() {
         let (_host, _temp, layout, mut app) = weekly_dev_junk_app();
         host_reply_ok(&_host);
-        press(&mut app, &[KeyCode::Down, KeyCode::Char(' ')]);
-        app.handle_key(KeyCode::Up);
+        go_to(&mut app, SettingsRow::Category(0));
+        app.handle_key(KeyCode::Char(' '));
+        go_to(&mut app, SettingsRow::Run);
 
         press(
             &mut app,
