@@ -16,6 +16,7 @@ use super::components::list::{ListRow, path_spans};
 use super::components::picker::{PickerState, render_picker};
 use super::components::text::{plural, wrap_line};
 use super::components::toast::Toast;
+use super::env::{Appearance, ColorDepth};
 use super::path_list::{PathList, PathListKind};
 use super::theme::Theme;
 use super::workspace::CleanSubcategory;
@@ -59,18 +60,23 @@ const CLEAN_CATEGORIES: [(Category, CleanSubcategory); 4] = [
     (Category::Trash, CleanSubcategory::Trash),
 ];
 
+/// The values `appearance` can take in the config, in the order of the picker.
+const APPEARANCE_CHOICES: [&str; 3] = ["auto", "dark", "light"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     ProjectCleanup,
     ScheduledCleanup,
     ProtectedPaths,
+    Appearance,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::ProjectCleanup,
         Self::ScheduledCleanup,
         Self::ProtectedPaths,
+        Self::Appearance,
     ];
 
     pub fn title(self) -> &'static str {
@@ -78,6 +84,7 @@ impl SettingsSection {
             Self::ProjectCleanup => "Project cleanup",
             Self::ScheduledCleanup => "Scheduled cleanup",
             Self::ProtectedPaths => "Protected paths",
+            Self::Appearance => "Appearance",
         }
     }
 
@@ -86,6 +93,7 @@ impl SettingsSection {
             Self::ProjectCleanup => Some(PathListKind::ProjectFolders),
             Self::ScheduledCleanup => None,
             Self::ProtectedPaths => Some(PathListKind::ProtectedPaths),
+            Self::Appearance => None,
         }
     }
 
@@ -95,6 +103,7 @@ impl SettingsSection {
             Self::ProjectCleanup => &[SettingsRow::AgeThreshold],
             Self::ScheduledCleanup => &[SettingsRow::Run],
             Self::ProtectedPaths => &[],
+            Self::Appearance => &[SettingsRow::Appearance],
         }
     }
 
@@ -103,6 +112,7 @@ impl SettingsSection {
             Self::ProjectCleanup => theme.g.icon_projects,
             Self::ScheduledCleanup => theme.g.icon_schedule,
             Self::ProtectedPaths => theme.g.icon_protected,
+            Self::Appearance => theme.g.icon_appearance,
         }
     }
 }
@@ -116,6 +126,7 @@ pub enum SettingsRow {
     MinReclaim,
     /// Loads the launch agent again.
     Reload,
+    Appearance,
     /// The path at this place in the list of the section.
     Item(usize),
     Add,
@@ -128,13 +139,17 @@ impl SettingsRow {
             Self::Run => "Run",
             Self::MinReclaim => "Only when it frees at least",
             Self::Reload => "Load the schedule again",
+            Self::Appearance => "Appearance",
             Self::Category(_) | Self::Item(_) | Self::Add => "",
         }
     }
 
     /// A row that opens a picker.
     pub fn is_popup(self) -> bool {
-        matches!(self, Self::AgeThreshold | Self::Run | Self::MinReclaim)
+        matches!(
+            self,
+            Self::AgeThreshold | Self::Run | Self::MinReclaim | Self::Appearance
+        )
     }
 }
 
@@ -153,6 +168,8 @@ pub struct SettingsState {
     /// What the schedule cleans, or what a new schedule would clean.
     pub categories: Vec<String>,
     pub min_reclaim: u64,
+    /// One of `APPEARANCE_CHOICES`. A saved value outside them counts as `auto`.
+    pub appearance: &'static str,
     pub folders: PathList,
     pub protected: PathList,
     /// What the schedule does now, read when Settings opens and after each change.
@@ -173,6 +190,22 @@ fn with_current(presets: &[u64], current: u64) -> Vec<u64> {
 
 fn age_label(days: u64) -> String {
     plural(days as usize, "day", "days")
+}
+
+fn appearance_value(saved: &str) -> &'static str {
+    let saved = saved.to_lowercase();
+    APPEARANCE_CHOICES
+        .into_iter()
+        .find(|&choice| choice == saved)
+        .unwrap_or("auto")
+}
+
+fn appearance_label(value: &str) -> String {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn schedule_label(schedule: Option<ScheduleFrequency>) -> String {
@@ -200,6 +233,7 @@ impl SettingsState {
                 .schedule
                 .as_ref()
                 .map_or_else(default_schedule_min_reclaim, |s| s.min_reclaim),
+            appearance: appearance_value(&config.appearance),
             folders: PathList::new(PathListKind::ProjectFolders, ignore, layout),
             protected: PathList::new(PathListKind::ProtectedPaths, ignore, layout),
             status: None,
@@ -369,6 +403,12 @@ impl SettingsState {
                     current,
                 )
             }
+            SettingsRow::Appearance => (
+                APPEARANCE_CHOICES.map(appearance_label).to_vec(),
+                APPEARANCE_CHOICES
+                    .iter()
+                    .position(|&c| c == self.appearance),
+            ),
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
@@ -403,6 +443,11 @@ impl SettingsState {
                     with_current(&RECLAIM_PRESETS, self.min_reclaim).get(picker.highlighted)
                 {
                     self.set_min_reclaim(bytes, config, host, layout);
+                }
+            }
+            SettingsRow::Appearance => {
+                if let Some(&value) = APPEARANCE_CHOICES.get(picker.highlighted) {
+                    self.set_appearance(value, config, layout);
                 }
             }
             SettingsRow::Category(_)
@@ -443,6 +488,17 @@ impl SettingsState {
             }
         }
         self.refresh_status(config, host, layout);
+    }
+
+    fn set_appearance(&mut self, value: &'static str, config: &mut Config, layout: &Layout) {
+        if value == self.appearance {
+            return;
+        }
+        self.appearance = value;
+        config.appearance = value.to_string();
+        let _ = config.save_to(&layout.config_path());
+        self.error_notice = None;
+        self.save_notice = Some("Saved appearance");
     }
 
     fn set_age(&mut self, days: u64, config: &mut Config, layout: &Layout) {
@@ -568,6 +624,7 @@ impl SettingsState {
             SettingsRow::AgeThreshold => age_label(self.older_than_days),
             SettingsRow::Run => schedule_label(self.schedule),
             SettingsRow::MinReclaim => format_reclaim_threshold(self.min_reclaim),
+            SettingsRow::Appearance => appearance_label(self.appearance),
             SettingsRow::Category(_)
             | SettingsRow::Item(_)
             | SettingsRow::Add
@@ -695,6 +752,8 @@ fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> V
     let scheduled = state.section == SettingsSection::ScheduledCleanup;
     let (lines, focus) = if scheduled {
         schedule_lines(state, inner, theme)
+    } else if state.section == SettingsSection::Appearance {
+        appearance_lines(state, inner, theme)
     } else {
         list_lines(state, inner, theme)
     };
@@ -795,7 +854,7 @@ fn wrapped_lines(text: &str, style: Style, width: usize, theme: &Theme) -> Vec<L
         .collect()
 }
 
-/// The rows of a section other than Scheduled cleanup and the line of the highlighted one.
+/// The rows of a section other than Scheduled cleanup and Appearance, and the line of the highlighted one.
 fn list_lines(state: &SettingsState, width: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
     let first_list_row = state.section.fixed_rows().len();
     let mut lines = Vec::new();
@@ -868,6 +927,41 @@ fn schedule_lines(
         }
     }
     (lines, focus)
+}
+
+/// The Appearance row and the notes on what decides the colors.
+fn appearance_lines(
+    state: &SettingsState,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let selected = state.focus == SettingsFocus::Rows;
+    let mut lines = vec![row_line(
+        state,
+        SettingsRow::Appearance,
+        selected,
+        width,
+        theme,
+    )];
+    let mut notes = vec![
+        "Auto uses the background color the terminal reports, and dark when it reports none."
+            .to_string(),
+    ];
+    if theme.env.depth == ColorDepth::NoColor {
+        notes.push("This terminal shows no colors (NO_COLOR or TERM=dumb).".to_string());
+    } else if let Some(forced) = theme.env.forced_appearance {
+        let name = match forced {
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        };
+        notes.push(format!(
+            "TAERT_APPEARANCE is set, so this session stays {name}."
+        ));
+    }
+    for note in notes {
+        lines.extend(wrapped_lines(&note, theme.footnote(), width, theme));
+    }
+    (lines, 0)
 }
 
 /// A line of text that sits in the column of the row titles.
@@ -947,7 +1041,7 @@ fn row_line(
                 .detail(Span::styled(detail, value_style))
                 .render_line(width, theme)
         }
-        SettingsRow::AgeThreshold | SettingsRow::Run => {
+        SettingsRow::AgeThreshold | SettingsRow::Run | SettingsRow::Appearance => {
             let detail = format!("{} {}", state.row_value(row), theme.g.popup);
             ListRow::new(vec![Span::styled(row.title(), theme.body())])
                 .selected(selected)
@@ -993,7 +1087,12 @@ mod tests {
         let titles: Vec<_> = SettingsSection::ALL.iter().map(|s| s.title()).collect();
         assert_eq!(
             titles,
-            ["Project cleanup", "Scheduled cleanup", "Protected paths"]
+            [
+                "Project cleanup",
+                "Scheduled cleanup",
+                "Protected paths",
+                "Appearance"
+            ]
         );
         let (_temp, layout) = sandbox();
         ProjectFoldersStore::new(vec!["/nowhere/code".to_string()])
@@ -1012,6 +1111,8 @@ mod tests {
         assert_eq!(state.rows(), [SettingsRow::Run]);
         state.section = SettingsSection::ProtectedPaths;
         assert_eq!(state.rows(), [SettingsRow::Add]);
+        state.section = SettingsSection::Appearance;
+        assert_eq!(state.rows(), [SettingsRow::Appearance]);
     }
 
     #[test]

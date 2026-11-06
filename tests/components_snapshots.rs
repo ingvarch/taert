@@ -36,6 +36,7 @@ fn render_to_string(w: u16, h: u16, draw: impl FnOnce(&mut Frame)) -> String {
 fn dark_theme() -> Theme {
     Theme::with_env(UiEnv {
         appearance: Appearance::Dark,
+        forced_appearance: None,
         depth: ColorDepth::TrueColor,
         ascii_glyphs: false,
         reduce_motion: false,

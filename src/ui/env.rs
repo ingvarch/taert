@@ -19,6 +19,8 @@ pub enum ColorDepth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiEnv {
     pub appearance: Appearance,
+    /// Set when `TAERT_APPEARANCE` decided `appearance`.
+    pub forced_appearance: Option<Appearance>,
     pub depth: ColorDepth,
     pub ascii_glyphs: bool,
     pub reduce_motion: bool,
@@ -28,6 +30,7 @@ impl Default for UiEnv {
     fn default() -> Self {
         Self {
             appearance: Appearance::Dark,
+            forced_appearance: None,
             depth: ColorDepth::TrueColor,
             ascii_glyphs: false,
             reduce_motion: false,
@@ -55,11 +58,13 @@ impl UiEnv {
             ColorDepth::Ansi16
         };
 
-        let appearance = if let Some(app) = vars("TAERT_APPEARANCE") {
-            match app.to_lowercase().as_str() {
+        let forced_appearance =
+            vars("TAERT_APPEARANCE").map(|app| match app.to_lowercase().as_str() {
                 "light" => Appearance::Light,
                 _ => Appearance::Dark,
-            }
+            });
+        let appearance = if let Some(forced) = forced_appearance {
+            forced
         } else {
             match config.appearance.to_lowercase().as_str() {
                 "light" => Appearance::Light,
@@ -86,6 +91,7 @@ impl UiEnv {
 
         Self {
             appearance,
+            forced_appearance,
             depth,
             ascii_glyphs,
             reduce_motion,
@@ -158,6 +164,23 @@ mod tests {
 
         let env = UiEnv::detect_from(&|k| (k == "COLORFGBG").then(|| "15;0".to_string()), &cfg);
         assert_eq!(env.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn the_variable_is_reported_only_when_it_decides_the_appearance() {
+        let cfg = Config {
+            appearance: "dark".to_string(),
+            ..Config::default()
+        };
+        let env = UiEnv::detect_from(
+            &|k| (k == "TAERT_APPEARANCE").then(|| "light".to_string()),
+            &cfg,
+        );
+        assert_eq!(env.appearance, Appearance::Light);
+        assert_eq!(env.forced_appearance, Some(Appearance::Light));
+
+        let env = UiEnv::detect_from(&|_| None, &cfg);
+        assert_eq!(env.forced_appearance, None);
     }
 
     #[test]

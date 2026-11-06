@@ -1345,7 +1345,11 @@ impl App {
                         KeyCode::Home | KeyCode::Char('g') => picker.first(),
                         KeyCode::End | KeyCode::Char('G') => picker.last(),
                         KeyCode::Enter => {
+                            let appearance = self.config.appearance.clone();
                             state.pick(&mut self.config, &*self.host, &self.layout);
+                            if self.config.appearance != appearance {
+                                self.theme = Theme::from_config(&self.config);
+                            }
                         }
                         KeyCode::Esc => state.close_picker(),
                         _ => {}
@@ -1365,7 +1369,8 @@ impl App {
                         match state.current_row() {
                             SettingsRow::AgeThreshold
                             | SettingsRow::Run
-                            | SettingsRow::MinReclaim => state.open_picker(),
+                            | SettingsRow::MinReclaim
+                            | SettingsRow::Appearance => state.open_picker(),
                             SettingsRow::Add => state.start_adding(),
                             SettingsRow::Category(_) => {
                                 state.toggle_category(&mut self.config, &*self.host, &self.layout);
@@ -3969,6 +3974,60 @@ mod tests {
         assert!(!text.contains("Has not run yet"), "{text}");
     }
 
+    fn appearance_app(saved: &str) -> (tempfile::TempDir, Layout, App) {
+        let (temp, layout) = crate::core::apps::testing::sandbox();
+        let mut app = offline(App::new(
+            IgnoreStore::default(),
+            Config {
+                appearance: saved.to_string(),
+                ..Config::default()
+            },
+        ));
+        app.layout = layout.clone();
+        press(
+            &mut app,
+            &[
+                KeyCode::End,
+                KeyCode::Enter,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Right,
+            ],
+        );
+        (temp, layout, app)
+    }
+
+    #[test]
+    fn picking_light_saves_it_and_repaints_in_the_new_colors() {
+        let (_temp, layout, mut app) = appearance_app("dark");
+        assert_eq!(settings(&app).current_row(), SettingsRow::Appearance);
+        assert!(screen_text(&app).contains("Dark ⌄"));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(picker_choices(&app), ["Auto", "Dark", "Light"]);
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(1));
+        assert_eq!(app.theme.env.appearance, crate::ui::env::Appearance::Dark);
+
+        press(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+
+        let saved = Config::load_from(&layout.config_path()).unwrap();
+        assert_eq!(saved.appearance, "light");
+        assert_eq!(app.config.appearance, "light");
+        assert_eq!(app.theme.env.appearance, crate::ui::env::Appearance::Light);
+        assert!(screen_text(&app).contains("Saved appearance"));
+    }
+
+    #[test]
+    fn a_saved_appearance_the_screen_does_not_know_shows_as_auto() {
+        let (_temp, _layout, mut app) = appearance_app("neon");
+
+        let text = screen_text(&app);
+        assert!(text.contains("Auto ⌄"), "{text}");
+        assert_eq!(settings(&app).appearance, "auto");
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(settings(&app).picker_state().unwrap().current, Some(0));
+    }
+
     #[test]
     fn picking_a_minimum_saves_it_without_launchctl() {
         let (host, _temp, layout, mut app) = weekly_dev_junk_app();
@@ -4317,7 +4376,7 @@ mod tests {
         press(&mut app, &[KeyCode::End, KeyCode::Enter]);
 
         app.handle_key(KeyCode::Up);
-        assert_eq!(settings(&app).section, SettingsSection::ProtectedPaths);
+        assert_eq!(settings(&app).section, SettingsSection::Appearance);
         app.handle_key(KeyCode::Char('j'));
         assert_eq!(settings(&app).section, SettingsSection::ProjectCleanup);
 

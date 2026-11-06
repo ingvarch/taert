@@ -8,8 +8,8 @@ expression: output
    │   ◇ Project cleanup          › │  │ ▌    Run                                                       Every week ⌄ │
    │   ◷ Scheduled cleanup        › │  │                                                                             │
    │   ◈ Protected paths          › │  │      Clean                                                                  │
-   ╰────────────────────────────────╯  │      ● Developer caches                                                     │
-                                       │      ● User junk                                                            │
+   │   ◐ Appearance               › │  │      ● Developer caches                                                     │
+   ╰────────────────────────────────╯  │      ● User junk                                                            │
                                        │      ○ AI tools                                                             │
                                        │      ○ Trash                                                                │
                                        │      Only when it frees at least                                     1 GB ⌄ │
