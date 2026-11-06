@@ -288,6 +288,23 @@ impl ScheduleRule {
         }
     }
 
+    /// The flags of `taert schedule set` that make this rule.
+    fn set_flags(&self) -> String {
+        let mut flags = format!("--every {}", self.every);
+        match self.every {
+            ScheduleFrequency::Day => {}
+            ScheduleFrequency::Week => {
+                flags.push_str(&format!(" --on {}", self.day_names().join(",")))
+            }
+            ScheduleFrequency::Month => flags.push_str(&format!(" --day {}", self.day)),
+        }
+        flags.push_str(&format!(" --at {}", self.at));
+        if let Some(hours) = self.every_hours {
+            flags.push_str(&format!(" --every-hours {hours}"));
+        }
+        flags
+    }
+
     fn day_names(&self) -> Vec<String> {
         self.days
             .iter()
@@ -572,6 +589,8 @@ pub enum ScheduleSettings {
     },
     On {
         every: ScheduleFrequency,
+        /// The rule of the saved schedule, or why the config refuses it.
+        rule: Result<ScheduleRule, String>,
         categories: Vec<String>,
         min_reclaim: u64,
     },
@@ -688,6 +707,7 @@ pub fn schedule_status(
     ScheduleStatus {
         settings: ScheduleSettings::On {
             every: sched.every,
+            rule: ScheduleRule::from_config(sched),
             categories: sched.categories.clone(),
             min_reclaim: sched.min_reclaim,
         },
@@ -704,10 +724,26 @@ pub fn format_run_time(at: &str) -> String {
     parse_rfc3339(at).map_or_else(|| at.to_string(), format_system_time)
 }
 
-/// Writes the status as the text of `taert schedule show`.
-pub fn format_schedule_status(status: &ScheduleStatus) -> String {
+/// A time as `Thu 2026-11-12 21:30`, in the local time zone.
+fn format_weekday_and_time(time: SystemTime) -> String {
+    let secs = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&secs, &mut local);
+    }
+    let weekday = WEEKDAYS
+        .iter()
+        .find(|(_, _, number)| *number == local.tm_wday)
+        .map_or("", |(_, name, _)| name);
+    format!("{weekday} {}", format_system_time(time))
+}
+
+/// Writes the status as the text of `taert schedule show`. `now` is the time the next run
+/// counts from.
+pub fn format_schedule_status(status: &ScheduleStatus, now: SystemTime) -> String {
     let ScheduleSettings::On {
         every,
+        rule,
         categories,
         min_reclaim,
     } = &status.settings
@@ -722,10 +758,19 @@ pub fn format_schedule_status(status: &ScheduleStatus) -> String {
     };
 
     let threshold_str = format_reclaim_threshold(*min_reclaim);
-    let mut out = format!(
-        "Every {every}: {}, when at least {threshold_str} can be freed.\n",
-        categories.join(", ")
-    );
+    let mut out = match rule {
+        Ok(rule) => format!(
+            "{}: {}, when at least {threshold_str} can be freed.\n\
+             Next run: {}.\n",
+            rule.describe(),
+            categories.join(", "),
+            format_weekday_and_time(rule.next_run(now))
+        ),
+        Err(message) => format!(
+            "{message}\nCleans {} when at least {threshold_str} can be freed.\n",
+            categories.join(", ")
+        ),
+    };
 
     match &status.last_run {
         LastRun::Skipped {
@@ -747,8 +792,11 @@ pub fn format_schedule_status(status: &ScheduleStatus) -> String {
     }
 
     if status.plist_missing {
+        let flags = rule
+            .as_ref()
+            .map_or_else(|_| format!("--every {every}"), ScheduleRule::set_flags);
         out.push_str(&format!(
-            "\nWarning: The launch agent file is missing. A Homebrew upgrade can remove it. Load it again with:\n  taert schedule set --every {every} --categories {} --min-reclaim {min_reclaim}\n",
+            "\nWarning: The launch agent file is missing. A Homebrew upgrade can remove it. Load it again with:\n  taert schedule set {flags} --categories {} --min-reclaim {min_reclaim}\n",
             categories.join(",")
         ));
     } else {
@@ -782,7 +830,10 @@ pub fn show_schedule(
     config: &Config,
     history: &HistoryLog,
 ) -> String {
-    format_schedule_status(&schedule_status(host, layout, config, history))
+    format_schedule_status(
+        &schedule_status(host, layout, config, history),
+        SystemTime::now(),
+    )
 }
 
 /// Unattended background cleanup execution (`taert schedule run`).
@@ -1115,7 +1166,11 @@ mod tests {
         let history = HistoryLog::new(temp.path().join("history.jsonl"));
 
         let output = show_schedule(&host, &layout, &config, &history);
-        assert!(output.contains("Every week: dev, junk, when at least 1 GB can be freed."));
+        assert!(
+            output.contains(
+                "Every week on Mon at 09:00: dev, junk, when at least 1 GB can be freed."
+            )
+        );
         assert!(output.contains("Binary '"));
         assert!(output.contains("does not exist"));
         assert!(output.contains("Launch agent is not loaded in launchd"));
@@ -1254,6 +1309,113 @@ mod tests {
         scheduled(&["dev", "junk"], 1_000_000_000)
     }
 
+    fn custom_config(config: ScheduleConfig) -> Config {
+        Config {
+            schedule: Some(config),
+            ..Default::default()
+        }
+    }
+
+    fn thursday_config() -> ScheduleConfig {
+        ScheduleConfig {
+            at: "21:30".into(),
+            days: vec!["mon".into(), "thu".into()],
+            ..Default::default()
+        }
+    }
+
+    fn show_of(config: &Config) -> String {
+        let (_temp, layout) = sandbox();
+        let history = HistoryLog::new(layout.history_path());
+        show_schedule(&FakeHost::default(), &layout, config, &history)
+    }
+
+    #[test]
+    fn show_starts_with_the_described_rule_and_names_the_next_run() {
+        let (_temp, layout) = sandbox();
+        let history = HistoryLog::new(layout.history_path());
+        let status = schedule_status(
+            &FakeHost::default(),
+            &layout,
+            &custom_config(thursday_config()),
+            &history,
+        );
+
+        let text = format_schedule_status(&status, monday_night());
+
+        assert!(
+            text.starts_with(
+                "Every week on Mon, Thu at 21:30: dev, junk, when at least 1 GB can be freed.\nNext run: Thu 2026-11-12 21:30.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn show_prints_the_message_of_a_rule_the_config_refuses() {
+        let output = show_of(&custom_config(ScheduleConfig {
+            at: "25:00".into(),
+            ..Default::default()
+        }));
+
+        assert!(
+            output.starts_with(
+                "Time 25:00 is not HH:MM between 00:00 and 23:59.\n\
+                 Cleans dev, junk when at least 1 GB can be freed.\n"
+            ),
+            "{output}"
+        );
+        assert!(!output.contains("Next run"), "{output}");
+        assert!(!output.contains("Every week"), "{output}");
+    }
+
+    #[test]
+    fn the_hint_for_a_refused_rule_names_only_the_frequency() {
+        let output = show_of(&custom_config(ScheduleConfig {
+            at: "25:00".into(),
+            ..Default::default()
+        }));
+
+        assert!(
+            output.contains(
+                "\n  taert schedule set --every week --categories dev,junk --min-reclaim 1000000000\n"
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_hint_for_a_missing_agent_file_names_every_flag_of_the_rule() {
+        let hint = |config: ScheduleConfig| {
+            let output = show_of(&custom_config(config));
+            let line = output.lines().find(|l| l.contains("taert schedule set"));
+            line.unwrap().trim().to_string()
+        };
+
+        assert_eq!(
+            hint(ScheduleConfig {
+                every_hours: Some(6),
+                ..thursday_config()
+            }),
+            "taert schedule set --every week --on mon,thu --at 21:30 --every-hours 6 --categories dev,junk --min-reclaim 1000000000"
+        );
+        assert_eq!(
+            hint(ScheduleConfig {
+                every: ScheduleFrequency::Month,
+                day: 15,
+                ..Default::default()
+            }),
+            "taert schedule set --every month --day 15 --at 09:00 --categories dev,junk --min-reclaim 1000000000"
+        );
+        assert_eq!(
+            hint(ScheduleConfig {
+                every: ScheduleFrequency::Day,
+                ..Default::default()
+            }),
+            "taert schedule set --every day --at 09:00 --categories dev,junk --min-reclaim 1000000000"
+        );
+    }
+
     #[test]
     fn show_says_the_agent_file_is_missing() {
         let (_temp, layout) = sandbox();
@@ -1266,7 +1428,7 @@ mod tests {
             "{output}"
         );
         assert!(output.contains(
-            "taert schedule set --every week --categories dev,junk --min-reclaim 1000000000"
+            "taert schedule set --every week --on mon --at 09:00 --categories dev,junk --min-reclaim 1000000000"
         ));
         assert!(!output.contains("System Settings"));
         assert!(!output.contains("not loaded"));
@@ -1624,6 +1786,14 @@ mod tests {
         host
     }
 
+    fn monday_night() -> SystemTime {
+        local(2026, 11, 9, 22, 0)
+    }
+
+    fn text_of(status: &ScheduleStatus) -> String {
+        format_schedule_status(status, monday_night())
+    }
+
     fn status_of(host: &FakeHost, layout: &Layout, config: &Config) -> ScheduleStatus {
         let history = HistoryLog::new(layout.history_path());
         schedule_status(host, layout, config, &history)
@@ -1642,6 +1812,7 @@ mod tests {
             status.settings,
             ScheduleSettings::On {
                 every: ScheduleFrequency::Week,
+                rule: Ok(default_rule(ScheduleFrequency::Week)),
                 categories: vec!["dev".into(), "junk".into()],
                 min_reclaim: 1_000_000_000,
             }
@@ -1807,15 +1978,12 @@ mod tests {
         let (temp, layout) = sandbox();
         let host = FakeHost::default();
         let status = status_of(&host, &layout, &Config::default());
-        assert_eq!(
-            format_schedule_status(&status),
-            "Scheduled cleanup is off.\n"
-        );
+        assert_eq!(text_of(&status), "Scheduled cleanup is off.\n");
 
         loaded_plist(&layout, &temp.path().join("taert"));
         let status = status_of(&host, &layout, &Config::default());
         assert_eq!(
-            format_schedule_status(&status),
+            text_of(&status),
             "Scheduled cleanup is off (config disabled, but LaunchAgent plist exists).\n"
         );
     }
@@ -1832,10 +2000,10 @@ mod tests {
             &[("/a", 1_500_000, "removed", None)],
         );
 
-        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+        let text = text_of(&status_of(&host, &layout, &week_config()));
 
         assert!(
-            text.starts_with("Every week: dev, junk, when at least 1 GB can be freed.\nLast run: "),
+            text.starts_with("Every week on Mon at 09:00: dev, junk, when at least 1 GB can be freed.\nNext run: Mon 2026-11-16 09:00.\nLast run: "),
             "{text}"
         );
         assert!(text.ends_with(", freed 1.5 MB.\n"), "{text}");
@@ -1848,11 +2016,11 @@ mod tests {
         fs::write(&bin, b"bin").unwrap();
         let host = loaded_plist(&layout, &bin);
 
-        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+        let text = text_of(&status_of(&host, &layout, &week_config()));
 
         assert_eq!(
             text,
-            "Every week: dev, junk, when at least 1 GB can be freed.\nLast run: never.\n"
+            "Every week on Mon at 09:00: dev, junk, when at least 1 GB can be freed.\nNext run: Mon 2026-11-16 09:00.\nLast run: never.\n"
         );
     }
 
@@ -1868,7 +2036,7 @@ mod tests {
             bytes: 2048,
         });
 
-        let text = format_schedule_status(&status_of(&host, &layout, &config));
+        let text = text_of(&status_of(&host, &layout, &config));
 
         let line = format!(
             "Last run: skipped on {} (2.0 KB found, below 1 GB threshold).\n",
@@ -1876,7 +2044,9 @@ mod tests {
         );
         assert_eq!(
             text,
-            format!("Every week: dev, junk, when at least 1 GB can be freed.\n{line}")
+            format!(
+                "Every week on Mon at 09:00: dev, junk, when at least 1 GB can be freed.\nNext run: Mon 2026-11-16 09:00.\n{line}"
+            )
         );
     }
 
@@ -1897,7 +2067,7 @@ mod tests {
             )],
         );
 
-        let text = format_schedule_status(&status_of(&host, &layout, &week_config()));
+        let text = text_of(&status_of(&host, &layout, &week_config()));
 
         let block = format!(
             "\nScheduled cleanup failed to remove some files due to missing permissions.\nTo grant taert Full Disk Access:\n  1. Open System Settings > Privacy & Security > Full Disk Access\n  2. Add and enable: {}\n",
