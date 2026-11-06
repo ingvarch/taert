@@ -20,6 +20,7 @@ use taert::core::leftovers::{Evidence, UninstallRole};
 use taert::core::profiler::{
     DetailedMemoryStatus, DetailedStorageStatus, FullSystemStatus, MachineInfo, MemoryPressureLevel,
 };
+use taert::core::projects_store::ProjectFoldersStore;
 use taert::core::scanner::{CategoryScan, ScanItem, ToolGroup};
 use taert::core::slim;
 use taert::core::startup::{StartupItem, StartupKind, StartupState};
@@ -32,10 +33,9 @@ use taert::core::uninstaller::{self, Route};
 use taert::ui::analyze::{AnalyzeState, SortOrder, render_analyze};
 use taert::ui::doctor::{DoctorScreenState, render_doctor};
 use taert::ui::env::UiEnv;
-use taert::ui::path_list_editor::{PathListEditorState, PathListKind, render_path_list_editor};
 use taert::ui::progress::{ProgressState, render_progress};
 use taert::ui::select::{ModalOverlay, SelectState, render_select};
-use taert::ui::settings::{SettingsState, render_settings};
+use taert::ui::settings::{SettingsFocus, SettingsSection, SettingsState, render_settings};
 use taert::ui::startup::{StartupScreenState, render_startup};
 use taert::ui::system_status::{SystemStatusState, render_system_status};
 use taert::ui::theme::Theme;
@@ -655,19 +655,40 @@ fn snapshot_settings() {
 }
 
 #[test]
-fn snapshot_path_list_editor() {
+fn snapshot_settings_project_cleanup() {
     let theme = snapshot_theme();
-    let ignore = IgnoreStore {
-        roots: vec![
-            "/Users/test/Documents/Secret".to_string(),
-            "/Users/test/Projects/keep-this".to_string(),
-        ],
+    let temp = tempfile::tempdir().unwrap();
+    let layout = Layout {
+        home: temp.path().to_path_buf(),
+        root: temp.path().to_path_buf(),
+        user_cache: None,
     };
-    let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
-    for &(w, h, label) in SIZES {
-        let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));
-        assert_snapshot!(format!("path_list_editor_{label}"), output);
-    }
+    let home = taert::core::safety::Safety::home_dir();
+    ProjectFoldersStore::new(vec![
+        home.join("Code").display().to_string(),
+        "/Volumes/Work/repos".to_string(),
+    ])
+    .save_to(&layout.projects_path())
+    .unwrap();
+    let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
+    state.focus = SettingsFocus::Rows;
+    state.row = 2;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_project_cleanup_120x32", output);
+}
+
+#[test]
+fn snapshot_settings_protected_paths_empty() {
+    let theme = snapshot_theme();
+    let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &no_layout());
+    state.section = SettingsSection::ProtectedPaths;
+    state.focus = SettingsFocus::Rows;
+
+    let output = render_to_string(120, 32, |f| render_settings(f, &state, &theme));
+
+    assert_snapshot!("settings_protected_paths_empty_120x32", output);
 }
 
 const WIDE_WINDOW: (u16, u16) = (205, 60);
@@ -746,19 +767,6 @@ fn settings_fill_a_wide_window_like_the_main_menu() {
     let output = render_to_string(w, h, |f| render_settings(f, &state, &theme));
 
     assert!(right_edge(&output) > 190, "{output}");
-    assert!(left_edge(&output) < 10, "{output}");
-}
-
-#[test]
-fn text_screens_keep_a_readable_width_at_the_left_edge_of_a_wide_window() {
-    let theme = snapshot_theme();
-    let (w, h) = WIDE_WINDOW;
-    let ignore = IgnoreStore::default();
-    let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
-
-    let output = render_to_string(w, h, |f| render_path_list_editor(f, &state, &theme));
-
-    assert!(right_edge(&output) <= 113, "{output}");
     assert!(left_edge(&output) < 10, "{output}");
 }
 
@@ -2369,22 +2377,6 @@ fn settings_sit_in_frames() {
 }
 
 #[test]
-fn a_path_list_sits_in_a_frame_even_when_empty() {
-    let theme = snapshot_theme();
-    let filled = IgnoreStore {
-        roots: vec!["/Users/test/Documents/Secret".to_string()],
-    };
-    let empty = IgnoreStore::default();
-
-    for ignore in [filled, empty] {
-        let state = PathListEditorState::new(PathListKind::ProtectedPaths, &ignore, &no_layout());
-        let output = render_to_string(120, 32, |f| render_path_list_editor(f, &state, &theme));
-        assert!(output.contains("╭─ Protected paths"), "{output}");
-        assert!(output.contains('╰'), "{output}");
-    }
-}
-
-#[test]
 fn the_main_menu_sits_in_frames_on_every_width() {
     for (width, height) in [(205, 60), (120, 32), (80, 40)] {
         let output = home_screen(&home_state(CLEAN_CACHES), width, height);
@@ -2436,7 +2428,7 @@ fn content_lines(output: &str, w: u16, h: u16) -> Vec<String> {
 #[test]
 fn every_menu_row_shows_when_selected() {
     for (w, h) in [(80, 24), (50, 16), (50, 9), (120, 24)] {
-        for row in 0..14 {
+        for row in 0..13 {
             let state = home_state(row);
             let lines = content_lines(&home_screen(&state, w, h), w, h);
             let title = state.items[row].1;
@@ -2497,20 +2489,20 @@ fn a_long_menu_says_how_many_rows_are_hidden() {
             "{lines:#?}"
         );
     };
-    check(80, 24, 0, None, Some("3 more below"));
-    check(80, 24, 13, Some("3 more above"), Some("╰"));
-    check(50, 16, 0, None, Some("9 more below"));
-    check(50, 16, 13, Some("9 more above"), Some("╰"));
-    check(50, 16, 4, None, Some("8 more below"));
-    check(50, 16, 9, Some("6 more above"), Some("2 more below"));
-    check(120, 24, 0, None, Some("2 more below"));
-    check(120, 24, 13, Some("2 more above"), None);
+    check(80, 24, 0, None, Some("2 more below"));
+    check(80, 24, 12, Some("2 more above"), Some("╰"));
+    check(50, 16, 0, None, Some("8 more below"));
+    check(50, 16, 12, Some("8 more above"), Some("╰"));
+    check(50, 16, 4, None, Some("7 more below"));
+    check(50, 16, 9, Some("6 more above"), Some("1 more below"));
+    check(120, 24, 0, None, Some("1 more below"));
+    check(120, 24, 12, Some("1 more above"), Some("╰"));
 }
 
 #[test]
 fn a_menu_that_fits_has_no_hint() {
     for (w, h) in [(100, 30), (120, 32)] {
-        for row in 0..14 {
+        for row in 0..13 {
             let output = home_screen(&home_state(row), w, h);
             assert!(
                 !output.contains("more above") && !output.contains("more below"),
@@ -2522,7 +2514,7 @@ fn a_menu_that_fits_has_no_hint() {
 
 #[test]
 fn snapshot_workspace_last_row() {
-    let state = home_state(13);
+    let state = home_state(12);
     for (w, h, label) in [(80, 24, "80x24"), (50, 16, "50x16"), (120, 24, "120x24")] {
         assert_snapshot!(
             format!("workspace_last_row_{label}"),

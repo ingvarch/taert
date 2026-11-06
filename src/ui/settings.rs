@@ -1,22 +1,25 @@
 //! Settings screen: sections on the left, the rows of the highlighted section on the right.
 
+use std::path::Path;
+
+use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH, split_panes};
-use super::components::frame::{FRAME_SIDES, card};
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
 use super::components::hints::{Hint, PrimaryAction};
-use super::components::list::ListRow;
+use super::components::list::{ListRow, path_spans};
 use super::components::picker::{PickerState, render_picker};
 use super::components::text::plural;
 use super::components::toast::Toast;
+use super::path_list::{PathList, PathListKind};
 use super::theme::Theme;
 use crate::core::host::Host;
 use crate::core::layout::Layout;
-use crate::core::projects_store::ProjectFoldersStore;
 use crate::core::schedule::{ScheduleFrequency, remove_schedule, set_schedule};
 use crate::core::stores::{Config, IgnoreStore};
 
@@ -51,11 +54,20 @@ impl SettingsSection {
         }
     }
 
-    pub fn rows(self) -> &'static [SettingsRow] {
+    fn list_kind(self) -> Option<PathListKind> {
         match self {
-            Self::ProjectCleanup => &[SettingsRow::ProjectFolders, SettingsRow::AgeThreshold],
+            Self::ProjectCleanup => Some(PathListKind::ProjectFolders),
+            Self::ScheduledCleanup => None,
+            Self::ProtectedPaths => Some(PathListKind::ProtectedPaths),
+        }
+    }
+
+    /// The rows that come before the list of the section.
+    fn fixed_rows(self) -> &'static [SettingsRow] {
+        match self {
+            Self::ProjectCleanup => &[SettingsRow::AgeThreshold],
             Self::ScheduledCleanup => &[SettingsRow::Run],
-            Self::ProtectedPaths => &[SettingsRow::ProtectedPaths],
+            Self::ProtectedPaths => &[],
         }
     }
 
@@ -70,23 +82,23 @@ impl SettingsSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRow {
-    ProjectFolders,
     AgeThreshold,
     Run,
-    ProtectedPaths,
+    /// The path at this place in the list of the section.
+    Item(usize),
+    Add,
 }
 
 impl SettingsRow {
     fn title(self) -> &'static str {
         match self {
-            Self::ProjectFolders => "Project folders",
             Self::AgeThreshold => "Preselect artifacts older than",
             Self::Run => "Run",
-            Self::ProtectedPaths => "Protected paths",
+            Self::Item(_) | Self::Add => "",
         }
     }
 
-    /// A row that opens a picker. The others open a list.
+    /// A row that opens a picker.
     pub fn is_popup(self) -> bool {
         matches!(self, Self::AgeThreshold | Self::Run)
     }
@@ -104,8 +116,8 @@ pub struct SettingsState {
     pub row: usize,
     pub older_than_days: u64,
     pub schedule: Option<ScheduleFrequency>,
-    pub folder_count: usize,
-    pub path_count: usize,
+    pub folders: PathList,
+    pub protected: PathList,
     pub save_notice: Option<&'static str>,
     pub error_notice: Option<String>,
     picker: Option<(SettingsRow, PickerState)>,
@@ -138,32 +150,47 @@ impl SettingsState {
             row: 0,
             older_than_days: config.older_than_days,
             schedule: config.schedule.as_ref().map(|s| s.every),
-            folder_count: ProjectFoldersStore::load_or_default_at(&layout.projects_path())
-                .roots
-                .len(),
-            path_count: ignore.roots.len(),
+            folders: PathList::new(PathListKind::ProjectFolders, ignore, layout),
+            protected: PathList::new(PathListKind::ProtectedPaths, ignore, layout),
             save_notice: None,
             error_notice: None,
             picker: None,
         }
     }
 
-    /// The state with the focus on `row` of `section`.
-    pub fn at(mut self, section: SettingsSection, row: usize) -> Self {
-        self.section = section;
-        self.row = row;
-        self.focus = SettingsFocus::Rows;
-        self
+    /// The list of the section, if it has one.
+    pub fn list(&self) -> Option<&PathList> {
+        match self.section.list_kind()? {
+            PathListKind::ProjectFolders => Some(&self.folders),
+            PathListKind::ProtectedPaths => Some(&self.protected),
+        }
+    }
+
+    fn list_mut(&mut self) -> Option<&mut PathList> {
+        match self.section.list_kind()? {
+            PathListKind::ProjectFolders => Some(&mut self.folders),
+            PathListKind::ProtectedPaths => Some(&mut self.protected),
+        }
+    }
+
+    /// The rows of the section: its fixed rows, then one per path and the `Add` row.
+    pub fn rows(&self) -> Vec<SettingsRow> {
+        let mut rows = self.section.fixed_rows().to_vec();
+        if let Some(list) = self.list() {
+            rows.extend((0..list.items.len()).map(SettingsRow::Item));
+            rows.push(SettingsRow::Add);
+        }
+        rows
     }
 
     pub fn current_row(&self) -> SettingsRow {
-        self.section.rows()[self.row]
+        self.rows()[self.row]
     }
 
     pub fn next(&mut self) {
         match self.focus {
             SettingsFocus::Sections => self.move_section(1),
-            SettingsFocus::Rows => self.row = (self.row + 1) % self.section.rows().len(),
+            SettingsFocus::Rows => self.row = (self.row + 1) % self.rows().len(),
         }
     }
 
@@ -171,9 +198,54 @@ impl SettingsState {
         match self.focus {
             SettingsFocus::Sections => self.move_section(SettingsSection::ALL.len() - 1),
             SettingsFocus::Rows => {
-                let rows = self.section.rows().len();
+                let rows = self.rows().len();
                 self.row = (self.row + rows - 1) % rows;
             }
+        }
+    }
+
+    /// A dialog of a list is open, so keys go to it.
+    pub fn has_dialog(&self) -> bool {
+        self.list().is_some_and(PathList::has_dialog)
+    }
+
+    /// Text goes into the path of the add dialog.
+    pub fn is_typing(&self) -> bool {
+        self.list().is_some_and(PathList::is_adding)
+    }
+
+    /// Opens the add dialog when the focus is on a row of a list.
+    pub fn start_adding(&mut self) {
+        if matches!(self.current_row(), SettingsRow::Item(_) | SettingsRow::Add)
+            && let Some(list) = self.list_mut()
+        {
+            list.start_adding();
+        }
+    }
+
+    /// Asks to remove the highlighted path.
+    pub fn prompt_remove(&mut self) {
+        if let SettingsRow::Item(index) = self.current_row()
+            && let Some(list) = self.list_mut()
+        {
+            list.prompt_remove(index);
+        }
+    }
+
+    /// Passes a key to the open dialog. The highlight follows an added path and stays in the
+    /// list after a removal.
+    pub fn dialog_key(&mut self, code: KeyCode, ignore: &mut IgnoreStore) {
+        let first = self.section.fixed_rows().len();
+        let before = self.list().map_or(0, |list| list.items.len());
+        let Some(list) = self.list_mut() else {
+            return;
+        };
+        list.dialog_key(code, ignore);
+        let after = list.items.len();
+        if after > before {
+            self.row = first + after - 1;
+        } else if after < before {
+            self.row = self.row.min(first + after.saturating_sub(1));
         }
     }
 
@@ -207,7 +279,7 @@ impl SettingsState {
         self.picker = None;
     }
 
-    /// Opens the picker of the current row. A row that opens a list has none.
+    /// Opens the picker of the current row. A row of a list has none.
     pub fn open_picker(&mut self) {
         let row = self.current_row();
         let (choices, current) = match row {
@@ -224,7 +296,7 @@ impl SettingsState {
                     .collect(),
                 SCHEDULE_CHOICES.iter().position(|&c| c == self.schedule),
             ),
-            SettingsRow::ProjectFolders | SettingsRow::ProtectedPaths => return,
+            SettingsRow::Item(_) | SettingsRow::Add => return,
         };
         self.picker = Some((
             row,
@@ -248,7 +320,7 @@ impl SettingsState {
                     self.apply_schedule(target, config, host, layout);
                 }
             }
-            SettingsRow::ProjectFolders | SettingsRow::ProtectedPaths => {}
+            SettingsRow::Item(_) | SettingsRow::Add => {}
         }
     }
 
@@ -309,10 +381,9 @@ impl SettingsState {
 
     fn row_value(&self, row: SettingsRow) -> String {
         match row {
-            SettingsRow::ProjectFolders => plural(self.folder_count, "folder", "folders"),
             SettingsRow::AgeThreshold => age_label(self.older_than_days),
             SettingsRow::Run => schedule_label(self.schedule),
-            SettingsRow::ProtectedPaths => plural(self.path_count, "path", "paths"),
+            SettingsRow::Item(_) | SettingsRow::Add => String::new(),
         }
     }
 }
@@ -330,12 +401,22 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
         crumbs.push(state.section.title());
     }
 
-    let primary = if in_rows && state.current_row().is_popup() {
-        PrimaryAction::new("Change", theme.g.key_enter)
-    } else {
-        PrimaryAction::new("Open", theme.g.key_enter)
+    let row = state.current_row();
+    let primary = match row {
+        _ if !in_rows => Some(PrimaryAction::new("Open", theme.g.key_enter)),
+        _ if row.is_popup() => Some(PrimaryAction::new("Change", theme.g.key_enter)),
+        SettingsRow::Add => Some(PrimaryAction::new("Add", theme.g.key_enter)),
+        _ => None,
     };
-    let mut hints = vec![Hint::new("↑↓", "Move")];
+    let in_list = in_rows && !row.is_popup();
+    let mut hints = Vec::new();
+    if in_list {
+        hints.push(Hint::new("a", "Add"));
+        if matches!(row, SettingsRow::Item(_)) {
+            hints.push(Hint::new("d", "Remove"));
+        }
+    }
+    hints.push(Hint::new("↑↓", "Move"));
     hints.push(if in_rows {
         Hint::new("←", "Sections")
     } else {
@@ -348,26 +429,39 @@ pub fn render_settings(frame: &mut Frame, state: &SettingsState, theme: &Theme) 
         None => state.save_notice.map(Toast::success),
     };
 
-    let chrome = AppChrome::new(crumbs)
+    let mut chrome = AppChrome::new(crumbs)
         .hints(hints)
-        .primary(primary)
         .toast(toast.as_ref())
-        .behind_dialog(state.picker.is_some())
+        .behind_dialog(state.picker.is_some() || state.has_dialog())
         .full_width();
+    if let Some(primary) = primary {
+        chrome = chrome.primary(primary);
+    }
     let content = chrome.render(frame, theme);
 
     if split {
         let (sidebar, pane) = split_panes(content);
         render_lines(frame, sidebar, sections_card(state, sidebar.width, theme));
-        render_lines(frame, pane, rows_card(state, pane.width, theme));
+        render_lines(
+            frame,
+            pane,
+            rows_card(state, pane.width, pane.height, theme),
+        );
     } else if in_rows {
-        render_lines(frame, content, rows_card(state, content.width, theme));
+        render_lines(
+            frame,
+            content,
+            rows_card(state, content.width, content.height, theme),
+        );
     } else {
         render_lines(frame, content, sections_card(state, content.width, theme));
     }
 
     if let Some(picker) = state.picker_state() {
         render_picker(frame, frame.area(), picker, theme);
+    }
+    if let Some(list) = state.list() {
+        list.render_dialog(frame, theme);
     }
 }
 
@@ -405,43 +499,100 @@ fn sections_card(state: &SettingsState, width: u16, theme: &Theme) -> Vec<Line<'
     )
 }
 
-fn rows_card(state: &SettingsState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn rows_card(state: &SettingsState, width: u16, height: u16, theme: &Theme) -> Vec<Line<'static>> {
     let width = width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
-    let rows = state
-        .section
-        .rows()
-        .iter()
-        .enumerate()
-        .map(|(i, &row)| {
-            let value = state.row_value(row);
-            let selected = state.focus == SettingsFocus::Rows && i == state.row;
-            let value_style = if selected {
-                theme.accent_text()
-            } else {
-                theme.callout()
-            };
-            let list_row =
-                ListRow::new(vec![Span::styled(row.title(), theme.body())]).selected(selected);
-            if row.is_popup() {
-                let detail = format!("{value} {}", theme.g.popup);
-                list_row.detail(Span::styled(detail, value_style))
-            } else {
-                list_row
-                    .detail(Span::styled(value, value_style))
-                    .chevron(true)
-            }
-            .render_line(inner, theme)
-        })
-        .collect();
+    let first_list_row = state.section.fixed_rows().len();
+    let mut lines = Vec::new();
+    let mut focus = 0;
+    for (i, row) in state.rows().into_iter().enumerate() {
+        let selected = state.focus == SettingsFocus::Rows && i == state.row;
+        if i == first_list_row
+            && let Some(heading) = state.list().and_then(PathList::heading)
+        {
+            lines.push(Line::default());
+            lines.push(text_line(heading, theme.callout(), inner, theme));
+        }
+        if selected {
+            focus = lines.len();
+        }
+        lines.push(row_line(state, row, selected, inner, theme));
+    }
+    if let Some(list) = state.list() {
+        lines.push(text_line(list.footnote(), theme.footnote(), inner, theme));
+    }
+    let (start, end) = visible_window(
+        lines.len(),
+        focus,
+        (height as usize).saturating_sub(FRAME_ROWS),
+    );
     let heading = format!("{}  {}", state.section.icon(theme), state.section.title());
-    card(&heading, Vec::new(), rows, width, 0, theme.p.purple, theme)
+    card(
+        &heading,
+        Vec::new(),
+        lines[start..end].to_vec(),
+        width,
+        0,
+        theme.p.purple,
+        theme,
+    )
+}
+
+/// A line of text that sits in the column of the row titles.
+fn text_line(text: &str, style: Style, width: usize, theme: &Theme) -> Line<'static> {
+    ListRow::new(vec![Span::styled(text.to_string(), style)]).render_line(width, theme)
+}
+
+fn row_line(
+    state: &SettingsState,
+    row: SettingsRow,
+    selected: bool,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let value_style = if selected {
+        theme.accent_text()
+    } else {
+        theme.callout()
+    };
+    match row {
+        SettingsRow::Item(index) => {
+            let path = state.list().map_or("", |list| list.items[index].as_str());
+            let max_len = width.saturating_sub(8);
+            ListRow::new(path_spans(Path::new(path), max_len, theme))
+                .selected(selected)
+                .render_line(width, theme)
+        }
+        SettingsRow::Add => {
+            let label = state.list().map_or("", PathList::add_label);
+            ListRow::new(vec![Span::styled(label, theme.accent_text())])
+                .selected(selected)
+                .render_line(width, theme)
+        }
+        SettingsRow::AgeThreshold | SettingsRow::Run => {
+            let detail = format!("{} {}", state.row_value(row), theme.g.popup);
+            ListRow::new(vec![Span::styled(row.title(), theme.body())])
+                .selected(selected)
+                .detail(Span::styled(detail, value_style))
+                .render_line(width, theme)
+        }
+    }
+}
+
+/// The lines `start..end` of `total` that fit `room` and keep the line `focus` in view.
+fn visible_window(total: usize, focus: usize, room: usize) -> (usize, usize) {
+    if total <= room {
+        return (0, total);
+    }
+    let start = focus.saturating_sub(room / 2).min(total - room);
+    (start, start + room)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::apps::testing::sandbox;
+    use crate::core::projects_store::ProjectFoldersStore;
 
     #[test]
     fn the_sections_come_in_order_with_their_rows() {
@@ -450,10 +601,23 @@ mod tests {
             titles,
             ["Project cleanup", "Scheduled cleanup", "Protected paths"]
         );
+        let (_temp, layout) = sandbox();
+        ProjectFoldersStore::new(vec!["/nowhere/code".to_string()])
+            .save_to(&layout.projects_path())
+            .unwrap();
+        let mut state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
         assert_eq!(
-            SettingsSection::ProjectCleanup.rows(),
-            [SettingsRow::ProjectFolders, SettingsRow::AgeThreshold]
+            state.rows(),
+            [
+                SettingsRow::AgeThreshold,
+                SettingsRow::Item(0),
+                SettingsRow::Add
+            ]
         );
+        state.section = SettingsSection::ScheduledCleanup;
+        assert_eq!(state.rows(), [SettingsRow::Run]);
+        state.section = SettingsSection::ProtectedPaths;
+        assert_eq!(state.rows(), [SettingsRow::Add]);
     }
 
     #[test]
@@ -464,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn the_folder_count_comes_from_the_layout() {
+    fn the_folders_come_from_the_layout() {
         let (temp, layout) = sandbox();
         let folder = temp.path().canonicalize().unwrap().display().to_string();
         ProjectFoldersStore::new(vec![folder])
@@ -473,6 +637,14 @@ mod tests {
 
         let state = SettingsState::new(&Config::default(), &IgnoreStore::default(), &layout);
 
-        assert_eq!(state.folder_count, 1);
+        assert_eq!(state.folders.items.len(), 1);
+        assert_eq!(
+            state.rows(),
+            [
+                SettingsRow::AgeThreshold,
+                SettingsRow::Item(0),
+                SettingsRow::Add
+            ]
+        );
     }
 }

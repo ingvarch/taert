@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Project folders and protected paths**: Settings edits both lists in place, under Project cleanup and in Protected paths, and `a` adds a path from any row of a list. The separate screen and the Protected paths row of the main menu are gone.
 - **Settings**: Preferences is now Settings, with the sections on the left and their rows on the right. `↵` opens a list of choices, and the choice saves at once. `←` and `→` no longer change a value. Below 100 columns the screen shows one section at a time.
 
 ### Fixed

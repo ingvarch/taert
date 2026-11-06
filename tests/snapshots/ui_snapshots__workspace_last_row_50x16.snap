@@ -4,7 +4,8 @@ expression: "home_screen(&state, w, h)"
 ---
  taert              118.6 GB available · 24% free
 ──────────────────────────────────────────────────
-   9 more above
+   8 more above
+   │   ✧ Compress                            › │
    ╰───────────────────────────────────────────╯
    ╭─ Inspect ─────────────────────────────────╮
    │   ◔ Explore storage                     › │
@@ -12,9 +13,8 @@ expression: "home_screen(&state, w, h)"
    │   ▤ System status                       › │
    ╰───────────────────────────────────────────╯
    ╭─ Settings ────────────────────────────────╮
-   │   ⌥ Settings                            › │
-   │ ▌ ◈ Protected paths                     › │
-   │      Choose paths excluded from cleanup   │
+   │ ▌ ⌥ Settings                            › │
+   │      Project folders, the schedule, and pro
    ╰───────────────────────────────────────────╯
 ──────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More         Open  ↵

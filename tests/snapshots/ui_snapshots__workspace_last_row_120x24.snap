@@ -1,15 +1,16 @@
 ---
 source: tests/ui_snapshots.rs
-expression: "home_screen(&state, 120, 24)"
+expression: "home_screen(&state, w, h)"
 ---
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   2 more above                        ╭─ ◈  Protected paths ────────────────────────────────────────────────────────╮
-   │   ▦ Docker cleanup           › │  │ Manage directories and files permanently protected from                     │
-   │   ⌦ Uninstall apps           › │  │ all automated cleanup and purge operations.                                 │
-   │   ◆ Homebrew                 › │  │                                                                             │
-   ╰────────────────────────────────╯  │ ↵ Open                                                                      │
-   ╭─ Optimize ─────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
+   1 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
+   │   ◇ Project cleanup          › │  │ Choose the folders Project cleanup scans, when scheduled                    │
+   │   ▦ Docker cleanup           › │  │ cleanup runs, and which paths taert never touches.                          │
+   │   ⌦ Uninstall apps           › │  │                                                                             │
+   │   ◆ Homebrew                 › │  │ ↵ Open                                                                      │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
+   ╭─ Optimize ─────────────────────╮
    │   ✚ Doctor                   › │
    │   ▲ Startup items            › │
    │   ⌦ Slim apps                › │
@@ -21,8 +22,7 @@ expression: "home_screen(&state, 120, 24)"
    │   ▤ System status            › │
    ╰────────────────────────────────╯
    ╭─ Settings ─────────────────────╮
-   │   ⌥ Settings                 › │
-   │ ▌ ◈ Protected paths          › │
+   │ ▌ ⌥ Settings                 › │
    ╰────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More                                                                               Open  ↵
