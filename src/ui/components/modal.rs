@@ -24,6 +24,31 @@ pub fn dim_backdrop(buf: &mut Buffer, area: Rect) {
     }
 }
 
+/// Shades one column right of `rect` and one row below it, inside `area`.
+pub fn drop_shadow(buf: &mut Buffer, rect: Rect, area: Rect, theme: &Theme) {
+    if theme.env.depth == ColorDepth::NoColor {
+        return;
+    }
+    let shadow = Rect {
+        x: rect.x + 1,
+        y: rect.y + 1,
+        width: rect.width,
+        height: rect.height,
+    };
+    for y in shadow.top()..shadow.bottom().min(area.bottom()) {
+        let x = shadow.right().saturating_sub(1);
+        if x < area.right() {
+            buf[(x, y)].set_bg(theme.p.fill);
+        }
+    }
+    let bottom_y = shadow.bottom().saturating_sub(1);
+    if bottom_y < area.bottom() {
+        for x in shadow.left()..shadow.right().min(area.right()) {
+            buf[(x, bottom_y)].set_bg(theme.p.fill);
+        }
+    }
+}
+
 pub struct Modal<'a> {
     pub title: &'a str,
     pub message: Vec<Line<'a>>,
@@ -126,28 +151,8 @@ impl<'a> Modal<'a> {
             height: modal_h,
         };
 
-        // 3. Render Drop Shadow (1 col right, 1 row bottom)
-        if theme.env.depth != ColorDepth::NoColor {
-            let shadow_rect = Rect {
-                x: modal_rect.x + 1,
-                y: modal_rect.y + 1,
-                width: modal_rect.width,
-                height: modal_rect.height,
-            };
-            let buf = frame.buffer_mut();
-            for y in shadow_rect.top()..shadow_rect.bottom().min(area.bottom()) {
-                let x = shadow_rect.right().saturating_sub(1);
-                if x < area.right() && y < area.bottom() {
-                    buf[(x, y)].set_bg(theme.p.fill);
-                }
-            }
-            let bottom_y = shadow_rect.bottom().saturating_sub(1);
-            if bottom_y < area.bottom() {
-                for x in shadow_rect.left()..shadow_rect.right().min(area.right()) {
-                    buf[(x, bottom_y)].set_bg(theme.p.fill);
-                }
-            }
-        }
+        // 3. Drop shadow
+        drop_shadow(frame.buffer_mut(), modal_rect, area, theme);
 
         // 4. Clear modal area
         frame.render_widget(Clear, modal_rect);

@@ -11,6 +11,7 @@ use taert::ui::components::help::{HelpSection, HelpSheet};
 use taert::ui::components::hints::{Hint, PrimaryAction};
 use taert::ui::components::list::{ListRow, render_section_header};
 use taert::ui::components::modal::Modal;
+use taert::ui::components::picker::{PickerState, render_picker};
 use taert::ui::components::progress::ProgressView;
 use taert::ui::components::toast::Toast;
 use taert::ui::env::{Appearance, ColorDepth, UiEnv};
@@ -158,6 +159,32 @@ fn snapshot_component_modal() {
         });
         assert_snapshot!(format!("modal_{name}"), output);
     }
+}
+
+#[test]
+fn snapshot_component_picker() {
+    for (name, theme) in [("dark", dark_theme()), ("nocolor", nocolor_theme())] {
+        let state = PickerState::new(
+            "Appearance".into(),
+            ["System", "Light", "Dark", "Auto"]
+                .map(String::from)
+                .to_vec(),
+            Some(1),
+        );
+        let output = render_to_string(50, 14, |f| render_picker(f, f.area(), &state, &theme));
+        assert_snapshot!(format!("picker_{name}"), output);
+    }
+}
+
+#[test]
+fn snapshot_component_picker_scrolled() {
+    let choices = (1..=9).map(|n| format!("Choice {n}")).collect();
+    let mut state = PickerState::new("Older than".into(), choices, Some(0));
+    state.last();
+    let output = render_to_string(40, 12, |f| {
+        render_picker(f, f.area(), &state, &dark_theme());
+    });
+    assert_snapshot!("picker_scrolled", output);
 }
 
 #[test]

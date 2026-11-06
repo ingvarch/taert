@@ -19,7 +19,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes through read-only `brew info` and `brew outdated` calls, and removes unused dependencies, old versions, and one formula that nothing uses through brew |
 | Orphan Detector | `crate::core::orphans` | Finds files left behind by apps that are gone with Spotlight and bundle ID checks |
 | App Controller | `crate::ui::app` | Main Ratatui event loop, key router, and modal overlays |
-| TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Button, Gauge, ProgressView) |
+| TUI Components | `crate::ui::components` | Apple HIG-inspired widgets (AppChrome, Modal, Picker, Button, Gauge, ProgressView) |
 
 ## Safety Engine
 

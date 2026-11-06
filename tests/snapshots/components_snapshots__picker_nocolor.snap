@@ -1,0 +1,16 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+
+          ╭───────────────────────────╮
+          │ Appearance                │
+          │                           │
+          │     System                │
+          │ > + Light                 │
+          │     Dark                  │
+          │     Auto                  │
+          │                           │
+          │ Enter Choose   Esc Cancel │
+          ╰───────────────────────────╯

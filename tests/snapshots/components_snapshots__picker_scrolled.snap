@@ -1,0 +1,15 @@
+---
+source: tests/components_snapshots.rs
+expression: output
+---
+
+        ╭─────────────────────╮
+        │ Older than          │
+        │                     │
+        │     Choice 6        │
+        │     Choice 7        │
+        │     Choice 8        │
+        │ ▌   Choice 9        │
+        │                     │
+        │ ↵ Choose   ⎋ Cancel │
+        ╰─────────────────────╯
