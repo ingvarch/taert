@@ -15,17 +15,19 @@ use unicode_width::UnicodeWidthStr;
 
 use super::analyze::SortOrder;
 use super::components::button::Button;
-use super::components::chrome::{AppChrome, SPLIT_MIN_WIDTH, split_panes};
-use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card};
+use super::components::chrome::{
+    AppChrome, MENU_THREE_COLUMNS_MIN_WIDTH, SPLIT_MIN_WIDTH, split_panes, split_three,
+};
+use super::components::frame::{FRAME_ROWS, FRAME_SIDES, card, stretch};
 use super::components::hints::{Hint, PrimaryAction};
 use super::components::list::ListRow;
 use super::components::modal::Modal;
-use super::components::text::fit_width;
+use super::components::text::{fit_width, wrap_line};
 use super::env::ColorDepth;
 use super::folder_preview::folder_rows;
 use super::history::recent_runs_card;
 use super::settings::{SettingsState, appearance_label};
-use super::system_status::{SystemStatusState, load_summary, storage_summary};
+use super::system_status::{SystemStatusState, metrics_summary};
 use super::theme::Theme;
 use crate::core::bytes::format_bytes;
 use crate::core::cache::{FolderSnapshot, StorageCache};
@@ -123,7 +125,8 @@ pub struct WorkspaceState {
     pub recent_runs: Option<Result<Vec<RunRecord>, String>>,
     /// What the Settings pane shows. `None` until read.
     pub settings: Option<SettingsSummary>,
-    pane_visible: Cell<bool>,
+    /// Whether the last frame drew CPU and memory, so `tick` keeps their sampler running.
+    metrics_visible: Cell<bool>,
 }
 
 impl Default for WorkspaceState {
@@ -159,91 +162,91 @@ impl WorkspaceState {
             home: Safety::home_dir(),
             recent_runs: None,
             settings: None,
-            pane_visible: Cell::new(false),
+            metrics_visible: Cell::new(false),
             items: vec![
                 (
                     MainMenuChoice::CleanCaches,
                     "Clean caches",
                     "Choose tools and individual paths to remove",
-                    "Choose tools and individual paths to remove.\n\nIncludes developer caches, user junk, AI tool caches\nand the Trash. You'll review every item before\nanything is removed.",
+                    "Choose tools and individual paths to remove.\n\nIncludes developer caches, user junk, AI tool caches and the Trash. You'll review every item before anything is removed.",
                 ),
                 (
                     MainMenuChoice::ProjectCleanup,
                     "Project cleanup",
                     "Review dependencies and generated build artifacts",
-                    "Scan project directories for build targets, dependencies,\nand intermediate artifacts. Reclaim gigabytes of space\nacross multiple repositories at once.",
+                    "Scan project directories for build targets, dependencies, and intermediate artifacts. Reclaim gigabytes of space across multiple repositories at once.",
                 ),
                 (
                     MainMenuChoice::DockerCleanup,
                     "Docker cleanup",
                     "Remove what no container uses",
-                    "Find images, volumes and networks that no container uses,\nplus the build cache. Volumes can hold real data, so they\nare never selected for you.",
+                    "Find images, volumes and networks that no container uses, plus the build cache. Volumes can hold real data, so they are never selected for you.",
                 ),
                 (
                     MainMenuChoice::UninstallApps,
                     "Uninstall apps",
                     "Remove apps with everything they left behind",
-                    "Remove an app together with its settings, caches, login\nitems and background helpers. You'll review every file\nbefore anything is removed.",
+                    "Remove an app together with its settings, caches, login items and background helpers. You'll review every file before anything is removed.",
                 ),
                 (
                     MainMenuChoice::Homebrew,
                     "Homebrew",
                     "Review installed formulae and casks",
-                    "List Homebrew formulae and casks by the space they take.\nSee which ones you installed, which are only dependencies,\nand what uses them. Remove a formula that nothing uses.",
+                    "List Homebrew formulae and casks by the space they take. See which ones you installed, which are only dependencies, and what uses them. Remove a formula that nothing uses.",
                 ),
                 (
                     MainMenuChoice::Doctor,
                     "Doctor",
                     "Explain what is slowing the Mac down",
-                    "Watch the Mac for a few seconds to find what is slow,\nhot, or draining battery. Lists named causes and evidence,\nand suggests what to do. Changes nothing on its own.",
+                    "Watch the Mac for a few seconds to find what is slow, hot, or draining battery. Lists named causes and evidence, and suggests what to do. Changes nothing on its own.",
                 ),
                 (
                     MainMenuChoice::StartupItems,
                     "Startup items",
                     "Review and switch off login and background items",
-                    "Inspect launchd agents, daemons, and classic login items.\nDisable unneeded background services to save battery and\nfree CPU cycles. You'll review every change before\nanything is switched off.",
+                    "Inspect launchd agents, daemons, and classic login items. Disable unneeded background services to save battery and free CPU cycles. You'll review every change before anything is switched off.",
                 ),
                 (
                     MainMenuChoice::SlimApps,
                     "Slim apps",
                     "Remove Intel code from universal apps",
-                    "Strip Intel (x86_64) code from universal apps that you only\nrun on Apple Silicon. Slices of apps you keep stay untouched,\nand the original app goes to the Trash.",
+                    "Strip Intel (x86_64) code from universal apps that you only run on Apple Silicon. Slices of apps you keep stay untouched, and the original app goes to the Trash.",
                 ),
                 (
                     MainMenuChoice::Compress,
                     "Compress",
                     "Free space with transparent APFS compression",
-                    "Store files compressed on APFS and unpack on read.\nApps and tools keep working with the same bytes.\nReview candidates and estimated savings before\ncompressing.",
+                    "Store files compressed on APFS and unpack on read. Apps and tools keep working with the same bytes. Review candidates and estimated savings before compressing.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
                     "Explore storage",
                     "Browse folders and find what takes up space",
-                    "Interactive directory size analyzer with breadcrumb\nnavigation. Inspect deep subfolders and reveal large\nfiles directly in Finder.",
+                    "Interactive directory size analyzer with breadcrumb navigation. Inspect deep subfolders and reveal large files directly in Finder.",
                 ),
                 (
                     MainMenuChoice::LargeFiles,
                     "Large files",
                     "Find the largest and oldest files",
-                    "Find the largest and oldest files in your home folder.\nReview deep files before removing them to the Trash,\nor reveal them in Finder.",
+                    "Find the largest and oldest files in your home folder. Review deep files before removing them to the Trash, or reveal them in Finder.",
                 ),
                 (
                     MainMenuChoice::SystemStatus,
                     "System status",
                     "Inspect memory and available disk space",
-                    "Live macOS hardware, memory pressure, and APFS\nstorage telemetry with visual breakdown.",
+                    "Live macOS hardware, memory pressure, and APFS storage telemetry with visual breakdown.",
                 ),
                 (
                     MainMenuChoice::History,
                     "History",
                     "See what taert removed and changed",
-                    "Every removal and change taert made, run by run.\nOpen a run to see each path, what happened to it,\nand how much space it took.",
+                    "Every removal and change taert made, run by run. Open a run to see each path, what happened to it, and how much space it took.",
                 ),
                 (
                     MainMenuChoice::Settings,
                     "Settings",
                     "Project folders, the schedule, protection, and more",
-                    "Choose the folders Project cleanup scans, when scheduled\ncleanup runs, which paths taert never touches, and how\nit looks. Check permissions and find taert's files.",
+                    "Choose the folders Project cleanup scans, when scheduled cleanup runs, which paths taert never touches, and how it looks. Check permissions and find taert's files.",
                 ),
             ],
             clean_options: vec![
@@ -354,7 +357,7 @@ impl WorkspaceState {
 
     pub fn tick(&mut self, cache: &Arc<RwLock<StorageCache>>) {
         let choice = self.current_main_choice();
-        let live = self.pane_visible.get() && choice == MainMenuChoice::SystemStatus;
+        let live = self.metrics_visible.get();
         if let Some(system) = &mut self.system {
             system.set_live(live);
             system.tick();
@@ -486,7 +489,7 @@ pub fn render_workspace(frame: &mut Frame, state: &WorkspaceState, theme: &Theme
 
     let content_rect = chrome.render(frame, theme);
     let split = !is_submenu && content_rect.width >= SPLIT_MIN_WIDTH;
-    state.pane_visible.set(split);
+    state.metrics_visible.set(false);
 
     if let Some(selected) = state.submenu_row() {
         render_submenu_content(frame, content_rect, state, selected, theme);
@@ -677,7 +680,14 @@ fn render_desc_line(desc: &str, width: usize, theme: &Theme) -> Line<'static> {
 }
 
 fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, theme: &Theme) {
-    let (sidebar_area, pane) = split_panes(area);
+    let three = area.width >= MENU_THREE_COLUMNS_MIN_WIDTH;
+    let (sidebar_area, pane, metrics) = if three {
+        let (menu, middle, right) = split_three(area);
+        (menu, middle, Some(right))
+    } else {
+        let (menu, pane) = split_panes(area);
+        (menu, pane, None)
+    };
 
     let width = sidebar_area.width as usize;
     let inner = width.saturating_sub(FRAME_SIDES);
@@ -694,78 +704,89 @@ fn render_split_view(frame: &mut Frame, area: Rect, state: &WorkspaceState, them
         sidebar.frame(title, rows, width, theme, state.selected_index);
     }
     let sidebar = sidebar.window(sidebar_area.height as usize, theme);
+    let column_h = sidebar.len();
     frame.render_widget(Paragraph::new(sidebar), sidebar_area);
 
-    let (choice, title, _, long_desc) = &state.items[state.selected_index];
+    let pane_w = pane.width as usize;
+    let mut lines = about_card(state, pane_w, detail_color, theme);
+    let choice = state.items[state.selected_index].0;
 
-    let mut about: Vec<Line<'static>> = long_desc
-        .lines()
-        .map(|line| Line::from(Span::styled(line.to_string(), theme.callout())))
-        .collect();
+    if three {
+        let room = column_h.saturating_sub(lines.len() + 1);
+        let extra = detail_data(state, choice, pane_w, room, theme);
+        if extra.is_empty() || extra.len() > room {
+            lines = stretch(lines, column_h, theme);
+        } else {
+            lines.push(Line::default());
+            lines.extend(stretch(extra, room, theme));
+        }
+    } else {
+        let left = (pane.height as usize).saturating_sub(lines.len() + 1);
+        // Half of what is left, so the metric cards below keep room.
+        let extra = detail_data(state, choice, pane_w, left / 2, theme);
+        if !extra.is_empty() && extra.len() <= left {
+            lines.push(Line::default());
+            lines.extend(extra);
+        }
+    }
+    let used = lines.len();
+    frame.render_widget(Paragraph::new(lines), pane);
+
+    let Some(system) = &state.system else {
+        return;
+    };
+    if let Some(right) = metrics {
+        let cards = metrics_summary(system, right.width as usize, column_h, theme);
+        state.metrics_visible.set(!cards.is_empty());
+        frame.render_widget(Paragraph::new(stretch(cards, column_h, theme)), right);
+    } else {
+        let room = (pane.height as usize).saturating_sub(used + 1);
+        let cards = metrics_summary(system, pane_w, room, theme);
+        state.metrics_visible.set(!cards.is_empty());
+        let below = Rect::new(pane.x, pane.y + (used + 1) as u16, pane.width, room as u16);
+        frame.render_widget(Paragraph::new(cards), below);
+    }
+}
+
+/// The card of the selected row: its heading, its description wrapped to the card, and `↵ Open`.
+fn about_card(
+    state: &WorkspaceState,
+    width: usize,
+    color: Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let (choice, title, _, long_desc) = &state.items[state.selected_index];
+    let inner = width.saturating_sub(FRAME_SIDES);
+
+    let mut about: Vec<Line<'static>> = Vec::new();
+    for paragraph in long_desc.split("\n\n") {
+        if !about.is_empty() {
+            about.push(Line::default());
+        }
+        let text = Line::from(Span::styled(paragraph.to_string(), theme.callout()));
+        about.extend(wrap_line(text, inner, 0));
+    }
     about.push(Line::default());
     about.push(Line::from(Span::styled(
         format!("{} Open", theme.g.key_enter),
         theme.headline(),
     )));
 
-    let pane_w = pane.width as usize;
     let heading = format!("{}  {title}", menu_icon(*choice, theme));
-    let mut lines = card(&heading, Vec::new(), about, pane_w, 0, detail_color, theme);
-
-    let used = lines.len() + 1;
-    let data = detail_data(
-        state,
-        *choice,
-        pane_w,
-        (pane.height as usize).saturating_sub(used),
-        theme,
-    );
-    if !data.is_empty() {
-        lines.push(Line::default());
-        lines.extend(data);
-    }
-    frame.render_widget(Paragraph::new(lines), pane);
+    card(&heading, Vec::new(), about, width, 0, color, theme)
 }
 
+/// Cards under the row's card for the rows that have more to show. Explore storage fits its
+/// list to `room` lines.
 fn detail_data(
     state: &WorkspaceState,
     choice: MainMenuChoice,
     width: usize,
-    height: usize,
+    room: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let Some(system) = &state.system else {
-        return Vec::new();
-    };
-
     match choice {
-        MainMenuChoice::CleanCaches
-        | MainMenuChoice::ProjectCleanup
-        | MainMenuChoice::Compress
-        | MainMenuChoice::SlimApps
-        | MainMenuChoice::LargeFiles
-        | MainMenuChoice::UninstallApps
-        | MainMenuChoice::Homebrew => storage_summary(system, width, theme),
-        MainMenuChoice::ExploreStorage => {
-            let mut lines = storage_summary(system, width, theme);
-            lines.push(Line::default());
-            match &state.largest {
-                Some(snapshot) => {
-                    let rows = height.saturating_sub(lines.len() + FRAME_ROWS);
-                    let inner = width.saturating_sub(FRAME_SIDES);
-                    let items = folder_rows(snapshot, inner, rows, theme);
-                    let color = theme.p.teal;
-                    let title = "Largest in home folder";
-                    lines.extend(card(title, Vec::new(), items, width, 0, color, theme));
-                }
-                None => lines.push(Line::from(Span::styled(
-                    "Open Explore storage to see the largest items in your home folder.",
-                    theme.callout(),
-                ))),
-            }
-            lines
-        }
-        MainMenuChoice::SystemStatus => load_summary(system, width, height, theme),
+        MainMenuChoice::ExploreStorage => explore_card(state, width, room, theme),
         MainMenuChoice::History => state
             .recent_runs
             .as_ref()
@@ -774,10 +795,28 @@ fn detail_data(
             .settings
             .as_ref()
             .map_or_else(Vec::new, |settings| settings_card(settings, width, theme)),
-        MainMenuChoice::DockerCleanup | MainMenuChoice::Doctor | MainMenuChoice::StartupItems => {
-            Vec::new()
-        }
+        _ => Vec::new(),
     }
+}
+
+/// The largest folders of the home folder, or the note to open Explore storage.
+fn explore_card(
+    state: &WorkspaceState,
+    width: usize,
+    room: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let items = match &state.largest {
+        Some(snapshot) => folder_rows(snapshot, inner, room.saturating_sub(FRAME_ROWS), theme),
+        None => {
+            let note = "Open Explore storage to see the largest items in your home folder.";
+            let note = Line::from(Span::styled(note, theme.callout()));
+            wrap_line(note, inner, 0)
+        }
+    };
+    let title = "Largest in home folder";
+    card(title, Vec::new(), items, width, 0, theme.p.teal, theme)
 }
 
 /// A frame with the settings, for the pane beside the main menu.

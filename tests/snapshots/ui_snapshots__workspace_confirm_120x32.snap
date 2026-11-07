@@ -7,29 +7,29 @@ expression: output
    ╭─ Cleanup ──────────────────────╮  ╭─ ✧  Clean caches ───────────────────────────────────────────────────────────╮
    │ ▌ ✧ Clean caches             › │  │ Choose tools and individual paths to remove.                                │
    │   ◇ Project cleanup          › │  │                                                                             │
-   │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches                        │
-   │   ⌦ Uninstall apps           › │  │ and the Trash. You'll review every item before                              │
-   │   ◆ Homebrew                 › │  │ anything is removed.                                                        │
-   ╰────────────────────────────────╯  │                                                                             │
-   ╭─ Optimize ─────────────────────╮  │ ↵ Open                                                                      │
-   │   ✚ Doctor                   › │  ╰─────────────────────────────────────────────────────────────────────────────╯
-   │   ▲ Startup items       ╭────────────────────────────────────────────────────────────╮
-   │   ⌦ Slim apps           │ Explore your home folder?                                  │───── 118.6 GB available ─╮
-   │   ✧ Compress            │                                                            │──── 375.8 GB of 494.4 GB │
-   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │━───   1.85 TB of 2.00 TB │
-   ╭─ Inspect ───────────────│                                                            │                          │
-   │   ◔ Explore storage     │                                                            │                          │
+   │   ▦ Docker cleanup           › │  │ Includes developer caches, user junk, AI tool caches and the Trash. You'll  │
+   │   ⌦ Uninstall apps           › │  │ review every item before anything is removed.                               │
+   │   ◆ Homebrew                 › │  │                                                                             │
+   ╰────────────────────────────────╯  │ ↵ Open                                                                      │
+   ╭─ Optimize ─────────────────────╮  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ✚ Doctor                   › │
+   │   ▲ Startup items       ╭────────────────────────────────────────────────────────────╮°C · Load 8.43 6.50 5.86 ─╮
+   │   ⌦ Slim apps           │ Explore your home folder?                                  │──────────────────  48.8% │
+   │   ✧ Compress            │                                                            │──────────────────  31.0% │
+   ╰─────────────────────────│ Measuring every folder can take a few minutes.             │                          │
+   ╭─ Inspect ───────────────│                                                            │▁▂▃▄▄▅      ▁▁▂▃▄▄▅       │
+   │   ◔ Explore storage     │                                                            │██████▄▅▆▆▇████████▄▅▆▆▇█ │
    │   ◔ Large files         │                                           Cancel    Start  │──────────────────────────╯
    │   ▤ System status       │                                    Enter select   Esc back │
-   ╰─────────────────────────╰────────────────────────────────────────────────────────────╯
-   ╭─ taert ────────────────────────╮
-   │   ↺ History                  › │
-   │   ⌥ Settings                 › │
+   ╰─────────────────────────╰────────────────────────────────────────────────────────────╯───── Pressure  ● Normal ─╮
+   ╭─ taert ────────────────────────╮  │ Used    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────── 33.9 GB of 48 GB │
+   │   ↺ History                  › │  │ History ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆                  │
+   │   ⌥ Settings                 › │  ╰─────────────────────────────────────────────────────────────────────────────╯
    ╰────────────────────────────────╯
-
-
-
-
-
-
+                                       ╭─ Storage ────────────────────────────────────────────── 118.6 GB available ─╮
+                                       │ Macintosh HD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────── 375.8 GB of 494.4 GB │
+                                       │ Time Machine ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───   1.85 TB of 2.00 TB │
+                                       │ ● Used     375.8 GB   ● Managed    5.7 GB                                   │
+                                       │ ● Free     118.6 GB                                                         │
+                                       ╰─────────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

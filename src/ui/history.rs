@@ -372,7 +372,7 @@ pub fn recent_runs_card(
             vec![Line::from(Span::styled(NO_HISTORY, theme.callout()))]
         }
         Ok(runs) => {
-            let result_w = result_width(runs).min(inner / 2);
+            let result_w = result_width(runs);
             runs.iter()
                 .map(|run| {
                     ListRow::new(date_and_command(run, theme))
@@ -380,7 +380,7 @@ pub fn recent_runs_card(
                         .columns(vec![Column::new(
                             Span::styled(run.summary(), theme.body()),
                             result_w,
-                            0,
+                            result_min_row_width(result_w),
                         )])
                         .render_line(inner, theme)
                 })

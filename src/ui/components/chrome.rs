@@ -17,6 +17,7 @@ const TOOLBAR_MARGINS: usize = 2;
 pub const SPLIT_MIN_WIDTH: u16 = 100;
 const SIDEBAR_WIDTH: u16 = 34;
 const PANE_GAP: u16 = 2;
+pub const MENU_THREE_COLUMNS_MIN_WIDTH: u16 = 130;
 const PANE_MIN_WIDTH: u16 = 40;
 
 /// The list on the left and the pane on the right of a split screen.
@@ -30,6 +31,21 @@ pub fn split_panes(area: Rect) -> (Rect, Rect) {
         ])
         .split(area);
     (chunks[0], chunks[2])
+}
+
+/// The list, and the rest of the window split into two columns, the middle one the larger.
+pub fn split_three(area: Rect) -> (Rect, Rect, Rect) {
+    let (list, rest) = split_panes(area);
+    let right_w = rest.width.saturating_sub(PANE_GAP) / 2;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(PANE_GAP),
+            Constraint::Length(right_w),
+        ])
+        .split(rest);
+    (list, chunks[0], chunks[2])
 }
 
 pub struct AppChrome<'a> {
@@ -311,6 +327,24 @@ mod tests {
         let rect = content_rect(&AppChrome::new(vec!["taert"]), 205, 85);
 
         assert_eq!((rect.x, rect.width), (PAD_LEFT, MAX_CONTENT_WIDTH));
+    }
+
+    #[test]
+    fn three_columns_give_the_middle_the_larger_half() {
+        let (list, middle, right) = split_three(Rect::new(3, 2, 135, 30));
+
+        assert_eq!((list.x, list.width), (3, SIDEBAR_WIDTH));
+        assert_eq!(middle.x, list.x + list.width + PANE_GAP);
+        assert_eq!(right.x, middle.x + middle.width + PANE_GAP);
+        assert_eq!((middle.width, right.width), (49, 48));
+        assert_eq!(right.x + right.width, 3 + 135);
+    }
+
+    #[test]
+    fn the_right_column_is_at_least_40_wide_from_the_three_column_width() {
+        let (_, middle, right) = split_three(Rect::new(0, 0, MENU_THREE_COLUMNS_MIN_WIDTH, 30));
+
+        assert!(right.width >= PANE_MIN_WIDTH && middle.width >= right.width);
     }
 
     #[test]
