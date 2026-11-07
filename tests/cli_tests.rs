@@ -54,7 +54,7 @@ fn brew_help_lists_uninstall() {
         .success()
         .stdout(predicate::str::contains("uninstall"))
         .stdout(predicate::str::contains(
-            "Remove one formula through Homebrew",
+            "Remove one formula or cask through Homebrew",
         ));
 }
 

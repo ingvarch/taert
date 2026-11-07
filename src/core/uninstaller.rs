@@ -306,6 +306,18 @@ fn cask_has_several_apps(cask: &Cask) -> bool {
     })
 }
 
+/// The apps among `apps` whose bundle the cask folder `room` holds.
+pub fn apps_of_cask(apps: &[InstalledApp], room: &Path) -> Vec<InstalledApp> {
+    apps.iter()
+        .filter(|app| {
+            app.path
+                .file_name()
+                .is_some_and(|name| cask_holds(room, &app.path, name))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The cask that installed an app. More than one candidate means none, because
 /// Homebrew must not uninstall a cask taert only guessed.
 fn find_cask(app: &InstalledApp, layout: &Layout) -> Option<Cask> {
@@ -2259,6 +2271,49 @@ mod plan_tests {
         assert_eq!(plan.apps[0].cask.as_ref().unwrap().token, "foo-app");
         assert!(!plan.apps[0].shared);
         assert!(has_row(&plan, &data));
+    }
+
+    /// Foo.app in /Applications, and the link back to it that Homebrew leaves at `source` in
+    /// the Caskroom folder of foo-app.
+    fn cask_with_app(layout: &Layout, source: &str) -> PathBuf {
+        let bundle = layout.system("Applications/Foo.app");
+        fake_app(&bundle, "com.acme.foo", "Foo");
+        let link = layout
+            .system("opt/homebrew/Caskroom/foo-app/1.0")
+            .join(source);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&bundle, &link).unwrap();
+        bundle
+    }
+
+    #[test]
+    fn the_app_a_cask_holds_is_found_by_its_bundle() {
+        let (_temp, layout) = sandbox();
+        let bundle = cask_with_app(&layout, "Foo.app");
+        let copy = layout.user("Applications/Foo.app");
+        fake_app(&copy, "com.acme.foo", "Foo");
+        let other = layout.system("Applications/Bar.app");
+        fake_app(&other, "com.acme.bar", "Bar");
+        let found = crate::core::apps::find_apps(&layout);
+        let room = layout.system("opt/homebrew/Caskroom/foo-app");
+
+        let held = apps_of_cask(&found, &room);
+
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].path, bundle);
+    }
+
+    #[test]
+    fn the_app_a_cask_holds_in_a_subfolder_is_found() {
+        let (_temp, layout) = sandbox();
+        let bundle = cask_with_app(&layout, "Foo 1.2/Foo.app");
+        let found = crate::core::apps::find_apps(&layout);
+        let room = layout.system("opt/homebrew/Caskroom/foo-app");
+
+        let held = apps_of_cask(&found, &room);
+
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].path, bundle);
     }
 
     fn caskroom_link(layout: &Layout, prefix: &str, app: &InstalledApp) {
