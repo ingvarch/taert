@@ -7998,7 +7998,20 @@ mod tests {
 
             let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
             terminal.draw(|frame| app.render_screen(frame)).unwrap();
-            let text = format!("{:?}", terminal.backend().buffer());
+            let buffer = terminal.backend().buffer();
+            // The card of the row is the middle column, and its text wraps.
+            let card: Vec<String> = (0..buffer.area.height)
+                .map(|y| {
+                    (41..96)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+            let text = card
+                .iter()
+                .map(|row| row.trim())
+                .collect::<Vec<_>>()
+                .join(" ");
             assert!(
                 text.contains("Remove a formula that nothing uses."),
                 "{text}"

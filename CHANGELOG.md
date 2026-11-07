@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **CPU, memory, and storage beside every menu row**: from 130 columns the main menu has three columns, with the card of the row filling the height of the menu and CPU, Memory, and Storage cards on the right, whichever row is selected. From 100 to 129 columns the three cards come under the card of the row, as many as fit. In the narrow middle column the last runs under History hide their result, so the date and the command stay readable.
+
 ## [0.10.0] - 2026-11-07
 
 ### Added

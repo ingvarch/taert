@@ -5,24 +5,24 @@ expression: "home_screen(&state, w, h)"
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
    2 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
-   │   ▦ Docker cleanup           › │  │ Choose the folders Project cleanup scans, when scheduled                    │
-   │   ⌦ Uninstall apps           › │  │ cleanup runs, which paths taert never touches, and how                      │
-   │   ◆ Homebrew                 › │  │ it looks. Check permissions and find taert's files.                         │
+   │   ▦ Docker cleanup           › │  │ Choose the folders Project cleanup scans, when scheduled cleanup runs,      │
+   │   ⌦ Uninstall apps           › │  │ which paths taert never touches, and how it looks. Check permissions and    │
+   │   ◆ Homebrew                 › │  │ find taert's files.                                                         │
    ╰────────────────────────────────╯  │                                                                             │
    ╭─ Optimize ─────────────────────╮  │ ↵ Open                                                                      │
    │   ✚ Doctor                   › │  ╰─────────────────────────────────────────────────────────────────────────────╯
    │   ▲ Startup items            › │
-   │   ⌦ Slim apps                › │
-   │   ✧ Compress                 › │
+   │   ⌦ Slim apps                › │  ╭─ CPU ────────────────────────────────────────── 61°C · Load 8.43 6.50 5.86 ─╮
+   │   ✧ Compress                 › │  │ Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────────────────────────  48.8% │
+   ╰────────────────────────────────╯  │ GPU     ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────  31.0% │
+   ╭─ Inspect ──────────────────────╮  │ History                                                                     │
+   │   ◔ Explore storage          › │  │ ▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅       │
+   │   ◔ Large files              › │  │ ████▄▅▆▆▇████████▄▅▆▆▇████████▄▅▆▆▇████████▄▅▆▆▇████████▄▅▆▆▇████████▄▅▆▆▇█ │
+   │   ▤ System status            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
    ╰────────────────────────────────╯
-   ╭─ Inspect ──────────────────────╮
-   │   ◔ Explore storage          › │
-   │   ◔ Large files              › │
-   │   ▤ System status            › │
-   ╰────────────────────────────────╯
-   ╭─ taert ────────────────────────╮
-   │   ↺ History                  › │
-   │ ▌ ⌥ Settings                 › │
-   ╰────────────────────────────────╯
+   ╭─ taert ────────────────────────╮  ╭─ Memory ─────────────────────────────────────────────── Pressure  ● Normal ─╮
+   │   ↺ History                  › │  │ Used    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────── 33.9 GB of 48 GB │
+   │ ▌ ⌥ Settings                 › │  │ History ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆                  │
+   ╰────────────────────────────────╯  ╰─────────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   ↑↓  Move    ⎋  Quit    ?  More                                                                               Open  ↵

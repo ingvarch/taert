@@ -119,6 +119,24 @@ pub fn card(
     lines
 }
 
+/// Grows the last card of `card` to make it `height` lines, with empty rows above its bottom border.
+pub fn stretch(mut card: Vec<Line<'static>>, height: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let (Some(first), Some(bottom)) = (card.first(), card.last()) else {
+        return card;
+    };
+    let inner = first.width().saturating_sub(FRAME_SIDES);
+    let color = bottom
+        .spans
+        .first()
+        .and_then(|span| span.style.fg)
+        .unwrap_or_default();
+    let missing = height.saturating_sub(card.len());
+    let at = card.len() - 1;
+    let blank = framed(Line::default(), inner, color, theme);
+    card.splice(at..at, std::iter::repeat_n(blank, missing));
+    card
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +183,22 @@ mod tests {
         let line = framed(Line::from("hi"), 6, Color::Reset, &theme);
 
         assert_eq!(text(&line), "│ hi     │");
+    }
+
+    #[test]
+    fn a_stretched_card_keeps_its_borders_and_its_color() {
+        let theme = Theme::with_env(UiEnv::default());
+        let body = vec![Line::from("one")];
+        let short = card("Title", Vec::new(), body, 16, 0, Color::Red, &theme);
+
+        let lines = stretch(short.clone(), 6, &theme);
+
+        assert_eq!(lines.len(), 6);
+        assert_eq!(text(&lines[1]), "│ one          │");
+        assert_eq!(text(&lines[4]), "│              │");
+        assert_eq!(lines[4].spans[0].style, short[1].spans[0].style);
+        assert_eq!(text(&lines[5]), text(&short[2]));
+        assert_eq!(stretch(short.clone(), 2, &theme), short);
     }
 
     #[test]

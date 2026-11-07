@@ -1129,14 +1129,14 @@ const PROJECT_CLEANUP: usize = 1;
 const DOCKER_CLEANUP: usize = 2;
 const _UNINSTALL_APPS: usize = 3;
 const _HOMEBREW: usize = 4;
-const _DOCTOR: usize = 5;
+const DOCTOR: usize = 5;
 const _STARTUP_ITEMS: usize = 6;
 const _SLIM_APPS: usize = 7;
 const _COMPRESS: usize = 8;
 const EXPLORE_STORAGE: usize = 9;
 const _LARGE_FILES: usize = 10;
 const SYSTEM_STATUS: usize = 11;
-const _HISTORY: usize = 12;
+const HISTORY: usize = 12;
 const SETTINGS: usize = 13;
 
 #[test]
@@ -1166,35 +1166,322 @@ fn the_status_row_shows_cpu_and_memory() {
     assert!(!output.contains("Top by"), "{output}");
 }
 
-#[test]
-fn the_status_row_fits_a_large_window_in_two_columns() {
-    let output = home_screen(&home_state(SYSTEM_STATUS), 205, 60);
+// The menu starts at column 3, the middle column after the menu and the gap.
+const MENU_COL: usize = 3;
+const MIDDLE_COL: usize = 39;
+const RIGHT_COL_160: usize = 100;
 
-    let row = output.lines().find(|line| line.contains("CPU")).unwrap();
-    assert!(row.contains("Memory"), "{output}");
-    assert!(body_rows(&output).iter().any(|row| row.contains('█')));
+fn column(output: &str, from: usize, to: usize) -> Vec<String> {
+    output
+        .lines()
+        .map(|line| line.chars().skip(from).take(to - from).collect())
+        .collect()
+}
+
+fn rows_with(output: &str, col: usize, glyph: char) -> Vec<usize> {
+    output
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.chars().nth(col) == Some(glyph))
+        .map(|(row, _)| row)
+        .collect()
+}
+
+fn titles_at(output: &str, col: usize) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.chars().nth(col) == Some('╭'))
+        .map(|line| {
+            let title: String = line.chars().skip(col + 3).collect();
+            title.split(" ─").next().unwrap().trim().to_string()
+        })
+        .collect()
+}
+
+fn menu_end(output: &str) -> Option<usize> {
+    rows_with(output, MENU_COL, '╰').last().copied()
 }
 
 #[test]
-fn the_explore_row_lists_the_largest_items_once_home_is_measured() {
-    let mut state = home_state(EXPLORE_STORAGE);
-    let before = home_screen(&state, 120, 32);
-    assert!(before.contains("Open Explore storage"), "{before}");
+fn a_wide_menu_has_three_columns_that_end_on_one_line() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 160, 40);
 
-    state.largest = sample_analyze().levels.pop().map(|level| level.snapshot);
-
-    let after = home_screen(&state, 120, 32);
-    assert!(after.contains("file.bin"), "{after}");
-    assert!(after.contains("Largest in home folder"), "{after}");
-    assert!(!after.contains("Open Explore storage"), "{after}");
+    let end = menu_end(&output);
+    assert!(end.is_some(), "{output}");
+    assert_eq!(
+        rows_with(&output, MIDDLE_COL, '╰'),
+        [end.unwrap()],
+        "{output}"
+    );
+    assert_eq!(
+        rows_with(&output, RIGHT_COL_160, '╰').last().copied(),
+        end,
+        "{output}"
+    );
+    assert_eq!(
+        titles_at(&output, RIGHT_COL_160),
+        ["CPU", "Memory", "Storage"],
+        "{output}"
+    );
+    assert!(
+        titles_at(&output, MIDDLE_COL)[0].contains("Clean caches"),
+        "{output}"
+    );
+    assert_snapshot!("workspace_three_columns_160x40", output);
 }
 
 #[test]
-fn other_rows_keep_only_their_description() {
-    let output = home_screen(&home_state(SETTINGS), 120, 32);
+fn the_narrowest_three_columns_still_hold_all_three_cards() {
+    // A 130-column content area gives the right column 48 columns, from column 87.
+    let right_col = 87;
+    let output = home_screen(&home_state(CLEAN_CACHES), 135, 40);
 
-    assert!(!output.contains("Storage"), "{output}");
-    assert!(!output.contains("CPU"), "{output}");
+    assert_eq!(
+        titles_at(&output, right_col),
+        ["CPU", "Memory", "Storage"],
+        "{output}"
+    );
+    assert_eq!(
+        rows_with(&output, right_col, '╰').last().copied(),
+        menu_end(&output),
+        "{output}"
+    );
+}
+
+#[test]
+fn one_column_less_than_that_is_two_columns() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 134, 40);
+
+    let titles = titles_at(&output, MIDDLE_COL);
+    assert!(titles[0].contains("Clean caches"), "{output}");
+    assert_eq!(titles[1..], ["CPU", "Memory", "Storage"], "{output}");
+    assert!(titles_at(&output, 87).is_empty(), "{output}");
+}
+
+#[test]
+fn external_volumes_do_not_push_a_card_out_of_the_right_column() {
+    let right_col = 87;
+    let mut status = mock_system_status();
+    status.live.volumes = (0..2)
+        .map(|i| VolumeStatus {
+            name: format!("Disk {i}"),
+            total_bytes: 1_000_000_000_000,
+            available_bytes: 400_000_000_000,
+        })
+        .collect();
+    let mut state = home_state(CLEAN_CACHES);
+    state.system = Some(Box::new(SystemStatusState::with_status(status)));
+
+    let output = home_screen(&state, 135, 40);
+
+    assert_eq!(
+        titles_at(&output, right_col),
+        ["CPU", "Memory", "Storage"],
+        "{output}"
+    );
+    assert_eq!(
+        rows_with(&output, right_col, '╰').last().copied(),
+        menu_end(&output),
+        "{output}"
+    );
+}
+
+#[test]
+fn a_short_window_drops_whole_cards() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 160, 20);
+
+    assert_eq!(
+        titles_at(&output, RIGHT_COL_160),
+        ["CPU", "Memory"],
+        "{output}"
+    );
+    // The menu scrolls, so the middle card marks the bottom line.
+    assert_eq!(
+        rows_with(&output, RIGHT_COL_160, '╰').last(),
+        rows_with(&output, MIDDLE_COL, '╰').last(),
+        "{output}"
+    );
+}
+
+#[test]
+fn the_right_column_shows_only_the_rows_the_menu_lists() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 160, 40);
+
+    let right = column(&output, RIGHT_COL_160, 160).join("\n");
+    for listed in ["Usage", "GPU", "History", "Used", "Macintosh HD", "Free"] {
+        assert!(right.contains(listed), "{listed} is missing:\n{output}");
+    }
+    for unlisted in ["Cores", "Compressed", "Swap"] {
+        assert!(!right.contains(unlisted), "{unlisted} shows:\n{output}");
+    }
+}
+
+#[test]
+fn the_charts_take_the_spare_rows_of_the_right_column() {
+    for (width, col) in [(160, RIGHT_COL_160), (140, 90)] {
+        let output = home_screen(&home_state(CLEAN_CACHES), width, 40);
+
+        let right = column(&output, col, width as usize);
+        let end = menu_end(&output).unwrap();
+        assert!(right[end - 1].contains("Free"), "{output}");
+        let captions = right
+            .iter()
+            .filter(|line| line.trim_matches(['│', ' ']) == "History")
+            .count();
+        assert_eq!(captions, 2, "each chart has rows of its own:\n{output}");
+    }
+}
+
+#[test]
+fn the_metrics_column_does_not_depend_on_the_row() {
+    let right = |row| column(&home_screen(&home_state(row), 160, 40), RIGHT_COL_160, 160);
+
+    let output = home_screen(&home_state(DOCTOR), 160, 40);
+    assert_eq!(
+        titles_at(&output, RIGHT_COL_160),
+        ["CPU", "Memory", "Storage"],
+        "{output}"
+    );
+    assert_eq!(right(DOCTOR), right(CLEAN_CACHES));
+    assert_eq!(right(SYSTEM_STATUS), right(CLEAN_CACHES));
+}
+
+#[test]
+fn the_description_wraps_to_the_card_without_hand_made_breaks() {
+    let state = home_state(CLEAN_CACHES);
+    for (_, title, _, long) in &state.items {
+        assert!(
+            !long.replace("\n\n", "").contains('\n'),
+            "{title} keeps a hand-made break"
+        );
+    }
+
+    let output = home_screen(&state, 160, 40);
+
+    let middle_end = RIGHT_COL_160 - 2;
+    let text: Vec<String> = column(&output, MIDDLE_COL, middle_end)
+        .iter()
+        .filter(|line| line.starts_with("│ "))
+        .map(|line| line.trim_matches('│').trim().to_string())
+        .collect();
+    let joined = text.join(" ");
+    assert!(
+        joined.contains(
+            "Includes developer caches, user junk, AI tool caches and the Trash. \
+             You'll review every item before anything is removed."
+        ),
+        "{output}"
+    );
+    assert!(joined.contains("↵ Open"), "{output}");
+}
+
+#[test]
+fn a_medium_menu_stacks_the_row_and_the_metrics_in_two_columns() {
+    let output = home_screen(&home_state(CLEAN_CACHES), 120, 32);
+
+    let titles = titles_at(&output, MIDDLE_COL);
+    assert!(titles[0].contains("Clean caches"), "{output}");
+    assert_eq!(titles[1..], ["CPU", "Memory", "Storage"], "{output}");
+
+    let tall = home_screen(&home_state(CLEAN_CACHES), 120, 40);
+    let titles = titles_at(&tall, MIDDLE_COL);
+    assert_eq!(titles[1..], ["CPU", "Memory", "Storage"], "{tall}");
+    assert_snapshot!("workspace_two_columns_120x40", tall);
+}
+
+#[test]
+fn the_middle_column_holds_the_extras_of_history_settings_and_explore() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = HistoryLog::new(dir.path().join("history.jsonl"));
+    support::write_three_runs(&log.path);
+    let mut history = home_state(HISTORY);
+    history.load_history(&log);
+    let middle = |output: &str| column(output, MIDDLE_COL, RIGHT_COL_160 - 2).join("\n");
+
+    let output = home_screen(&history, 160, 40);
+    assert!(middle(&output).contains("2026-11-01 13:40"), "{output}");
+    assert!(middle(&output).contains("Recent runs"), "{output}");
+    assert_eq!(
+        rows_with(&output, MIDDLE_COL, '╰').last().copied(),
+        menu_end(&output)
+    );
+
+    let mut settings = home_state(SETTINGS);
+    let layout = no_layout();
+    settings.load_settings(&Config::default(), &IgnoreStore::default(), &layout);
+    let output = home_screen(&settings, 160, 40);
+    assert!(middle(&output).contains("Scheduled cleanup"), "{output}");
+    assert_eq!(
+        rows_with(&output, MIDDLE_COL, '╰').last().copied(),
+        menu_end(&output)
+    );
+
+    let mut explore = home_state(EXPLORE_STORAGE);
+    explore.largest = sample_analyze().levels.pop().map(|level| level.snapshot);
+    let output = home_screen(&explore, 160, 40);
+    assert!(middle(&output).contains("file.bin"), "{output}");
+    assert_eq!(
+        rows_with(&output, MIDDLE_COL, '╰').last().copied(),
+        menu_end(&output)
+    );
+}
+
+#[test]
+fn recent_runs_hide_their_result_before_the_command_is_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = HistoryLog::new(dir.path().join("history.jsonl"));
+    support::write_three_runs(&log.path);
+    let mut state = home_state(HISTORY);
+    state.load_history(&log);
+
+    let output = home_screen(&state, 160, 40);
+
+    let middle = column(&output, MIDDLE_COL, RIGHT_COL_160 - 2);
+    for (date, command) in [
+        ("2026-11-01 13:40", "clean junk"),
+        ("2026-10-31 18:20", "docker"),
+        ("2026-10-30 09:00", "clean dev"),
+    ] {
+        let row = middle.iter().find(|row| row.contains(date));
+        let row = row.unwrap_or_else(|| panic!("{date} is missing:\n{output}"));
+        assert!(row.contains(&format!("{date}  {command}")), "{output}");
+        assert!(!row.contains('…'), "{output}");
+    }
+
+    let output = home_screen(&state, 120, 32);
+    assert!(output.contains("removed 1, 4.0 MB, 1 failed"), "{output}");
+}
+
+#[test]
+fn a_short_two_column_menu_cuts_no_card() {
+    let mut settings = home_state(SETTINGS);
+    let layout = no_layout();
+    settings.load_settings(&Config::default(), &IgnoreStore::default(), &layout);
+    let mut explore = home_state(EXPLORE_STORAGE);
+    explore.largest = sample_analyze().levels.pop().map(|level| level.snapshot);
+
+    for state in [&settings, &explore] {
+        // From 12 rows the card of the row fits.
+        for height in 12..=20 {
+            let output = home_screen(state, 120, height);
+            assert_eq!(
+                rows_with(&output, MIDDLE_COL, '╭').len(),
+                rows_with(&output, MIDDLE_COL, '╰').len(),
+                "{output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_explore_row_asks_to_open_the_folder_until_it_is_measured() {
+    let output = home_screen(&home_state(EXPLORE_STORAGE), 160, 40);
+
+    assert!(output.contains("Open Explore storage"), "{output}");
+    assert_eq!(
+        rows_with(&output, MIDDLE_COL, '╰').last().copied(),
+        menu_end(&output)
+    );
 }
 
 #[test]
@@ -1202,24 +1489,44 @@ fn a_narrow_main_menu_shows_no_data() {
     let output = home_screen(&home_state(CLEAN_CACHES), 80, 24);
 
     assert!(!output.contains("Storage"), "{output}");
+    assert!(!output.contains("CPU"), "{output}");
 }
 
 #[test]
-fn the_sampler_runs_only_while_the_status_row_is_highlighted() {
+fn the_sampler_runs_while_the_menu_shows_the_metrics() {
     let cache = Arc::new(RwLock::new(StorageCache::new()));
     let is_live = |state: &WorkspaceState| state.system.as_ref().unwrap().is_live();
-    let mut state = home_state(SYSTEM_STATUS);
+    let mut state = home_state(CLEAN_CACHES);
 
     state.tick(&cache);
-    assert!(!is_live(&state), "the pane was never drawn");
+    assert!(!is_live(&state), "the metrics were never drawn");
+
+    home_screen(&state, 120, 32);
+    for row in [CLEAN_CACHES, DOCKER_CLEANUP, SYSTEM_STATUS, SETTINGS] {
+        state.selected_index = row;
+        state.tick(&cache);
+        assert!(is_live(&state), "row {row}");
+    }
+
+    home_screen(&state, 120, 16);
+    state.tick(&cache);
+    assert!(!is_live(&state), "the window is too short for the metrics");
+
+    home_screen(&state, 160, 40);
+    state.tick(&cache);
+    assert!(is_live(&state), "three columns show the metrics");
+
+    home_screen(&state, 160, 8);
+    state.tick(&cache);
+    assert!(!is_live(&state), "three columns too short for the metrics");
 
     home_screen(&state, 120, 32);
     state.tick(&cache);
-    assert!(is_live(&state));
+    assert!(is_live(&state), "two columns show the metrics again");
 
-    state.selected_index = CLEAN_CACHES;
+    home_screen(&state, 90, 30);
     state.tick(&cache);
-    assert!(!is_live(&state));
+    assert!(!is_live(&state), "the window is too narrow for the metrics");
 }
 
 #[test]

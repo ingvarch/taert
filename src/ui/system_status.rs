@@ -268,11 +268,11 @@ struct Dashboard<'a> {
 
 impl Dashboard<'_> {
     fn cpu(&self, charts: usize) -> Card {
-        cpu_card(self.state, self.inner_w, charts, self.theme)
+        cpu_card(self.state, self.inner_w, charts, CardSize::Full, self.theme)
     }
 
     fn memory(&self, charts: usize) -> Card {
-        memory_card(self.state, self.inner_w, charts, self.theme)
+        memory_card(self.state, self.inner_w, charts, CardSize::Full, self.theme)
     }
 
     fn storage(&self, charts: usize) -> Card {
@@ -421,43 +421,59 @@ fn dashboard<'a>(
     }
 }
 
-/// CPU and memory for the main menu.
-pub fn load_summary(
+/// What the CPU and Memory cards show: every row on this screen, or the bars the main menu lists.
+#[derive(Clone, Copy, PartialEq)]
+enum CardSize {
+    Full,
+    Brief,
+}
+
+/// CPU, Memory, and Storage stacked for the main menu, as many whole cards as fit `height`.
+/// The charts take the spare rows, the odd one going to CPU.
+pub fn metrics_summary(
     state: &SystemStatusState,
     width: usize,
     height: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let columns = if width >= TWO_COLUMNS_MIN_WIDTH { 2 } else { 1 };
-    let cards = dashboard(state, width, columns, theme);
-    let w = cards.inner_w;
-    let top = cards.cpu(1).top.len().max(cards.memory(1).top.len());
+    let inner = width.saturating_sub(FRAME_SIDES);
+    let cards = |cpu_rows: usize, memory_rows: usize| {
+        vec![
+            cpu_card(state, inner, cpu_rows, CardSize::Brief, theme).lines(inner, 0, theme),
+            memory_card(state, inner, memory_rows, CardSize::Brief, theme).lines(inner, 0, theme),
+            capacity_card(state, inner, theme).0.lines(inner, 0, theme),
+        ]
+    };
 
-    if columns == 2 {
-        let charts = chart_height(height.saturating_sub(top + FRAME_ROWS));
-        let left = cards.cpu(charts).lines(w, top, theme);
-        let right = cards.memory(charts).lines(w, top, theme);
-        cards.beside(left, right)
-    } else {
-        let spare = height.saturating_sub(2 * (top + FRAME_ROWS) + 1);
-        let charts = chart_height(spare / 2);
-        stacked(vec![
-            cards.cpu(charts).lines(w, top, theme),
-            cards.memory(charts).lines(w, top, theme),
-        ])
+    let mut shown = cards(1, 1);
+    while stacked(shown.clone()).len() > height {
+        shown.pop();
     }
+    let count = shown.len();
+    let spare = height - stacked(shown).len();
+    let (cpu_rows, memory_rows) = match count {
+        0 => return Vec::new(),
+        1 => (chart_height(spare + 1), 1),
+        _ => split_chart_rows(spare + 2),
+    };
+    stacked(
+        cards(cpu_rows, memory_rows)
+            .into_iter()
+            .take(count)
+            .collect(),
+    )
 }
 
-/// Disk capacity for the main menu. Speeds need the sampler, which runs on demand.
-pub fn storage_summary(
-    state: &SystemStatusState,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let inner_w = width.saturating_sub(FRAME_SIDES);
-    capacity_card(state, inner_w, theme)
-        .0
-        .lines(inner_w, 0, theme)
+/// Chart rows for CPU and Memory from the `rows` both may use. A share of two would leave
+/// a row empty, so CPU takes it. Three rows still leave one: a chart of two rows has no form.
+fn split_chart_rows(rows: usize) -> (usize, usize) {
+    let (cpu, memory) = (rows.div_ceil(2), rows / 2);
+    let (cpu, memory) = if memory == 2 {
+        (cpu + 1, 1)
+    } else {
+        (cpu, memory)
+    };
+    (chart_height(cpu), chart_height(memory))
 }
 
 fn content_lines(
@@ -700,7 +716,13 @@ impl Rows<'_> {
     }
 }
 
-fn cpu_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
+fn cpu_card(
+    state: &SystemStatusState,
+    width: usize,
+    chart_rows: usize,
+    size: CardSize,
+    theme: &Theme,
+) -> Card {
     let live = &state.status.live;
     let cpu = &live.cpu;
 
@@ -735,21 +757,24 @@ fn cpu_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &
         Some(usage) => usage_bar("GPU", usage),
         None => rows.caption("GPU", UNKNOWN),
     };
-    let cores = if cpu.core_percents.is_empty() {
-        rows.caption("Cores", UNKNOWN)
-    } else {
-        rows.row(
-            "Cores",
-            core_strip(cpu.core_percents.as_slice(), cpu.efficiency_cores, theme),
-            "",
-        )
-    };
+    let mut top = vec![usage, gpu];
+    if size == CardSize::Full {
+        top.push(if cpu.core_percents.is_empty() {
+            rows.caption("Cores", UNKNOWN)
+        } else {
+            rows.row(
+                "Cores",
+                core_strip(cpu.core_percents.as_slice(), cpu.efficiency_cores, theme),
+                "",
+            )
+        });
+    }
 
     Card {
         title: "CPU",
         detail: detail_text(detail.join(" · "), theme),
         color: theme.p.accent,
-        top: vec![usage, gpu, cores],
+        top,
         charts: rows.series(
             "History",
             &state.history.cpu,
@@ -786,7 +811,13 @@ fn core_strip(percents: &[f32], efficiency: usize, theme: &Theme) -> Vec<Span<'s
     spans
 }
 
-fn memory_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme: &Theme) -> Card {
+fn memory_card(
+    state: &SystemStatusState,
+    width: usize,
+    chart_rows: usize,
+    size: CardSize,
+    theme: &Theme,
+) -> Card {
     let mem = &state.status.memory;
     let (pressure, color) = match mem.pressure {
         Some(MemoryPressureLevel::Normal) | None => ("Normal", theme.p.green),
@@ -821,39 +852,41 @@ fn memory_card(state: &SystemStatusState, width: usize, chart_rows: usize, theme
         ],
         &value,
     )];
-    top.extend(legend_grid(
-        &[
-            ("App", format_memory_bytes(mem.app_bytes), theme.p.accent),
-            (
-                "Wired",
-                format_memory_bytes(mem.wired_bytes),
-                theme.p.purple,
-            ),
-            (
-                "Compressed",
-                format_memory_bytes(mem.compressed_bytes),
-                theme.p.teal,
-            ),
-            (
-                "Cached",
-                format_memory_bytes(mem.cached_bytes),
-                theme.p.gray,
-            ),
-            (
-                "Free",
-                format_memory_bytes(mem.free_bytes),
-                theme.p.quaternary,
-            ),
-            (
-                "Swap",
-                format_memory_bytes(mem.swap_used_bytes),
-                theme.p.quaternary,
-            ),
-        ],
-        0,
-        width,
-        theme,
-    ));
+    if size == CardSize::Full {
+        top.extend(legend_grid(
+            &[
+                ("App", format_memory_bytes(mem.app_bytes), theme.p.accent),
+                (
+                    "Wired",
+                    format_memory_bytes(mem.wired_bytes),
+                    theme.p.purple,
+                ),
+                (
+                    "Compressed",
+                    format_memory_bytes(mem.compressed_bytes),
+                    theme.p.teal,
+                ),
+                (
+                    "Cached",
+                    format_memory_bytes(mem.cached_bytes),
+                    theme.p.gray,
+                ),
+                (
+                    "Free",
+                    format_memory_bytes(mem.free_bytes),
+                    theme.p.quaternary,
+                ),
+                (
+                    "Swap",
+                    format_memory_bytes(mem.swap_used_bytes),
+                    theme.p.quaternary,
+                ),
+            ],
+            0,
+            width,
+            theme,
+        ));
+    }
 
     Card {
         title: "Memory",
