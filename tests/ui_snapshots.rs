@@ -19,7 +19,7 @@ use taert::core::date_utils::format_rfc3339;
 use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::history::HistoryLog;
-use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, ScanStep};
+use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, Removal, ScanStep};
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
@@ -1788,6 +1788,10 @@ fn brew_package(kind: PackageKind, name: &str, version: &str, bytes: u64) -> Pac
         pinned: false,
         used_by: Vec::new(),
         apps: Vec::new(),
+        removal: match kind {
+            PackageKind::Formula => Removal::Formula,
+            PackageKind::Cask => Removal::Plain,
+        },
         dependencies: Vec::new(),
         path: PathBuf::new(),
         installed_at: None,

@@ -27,7 +27,9 @@ const GROUP_FORMULA: &str = "Formula";
 const GROUP_FORMULAE: &str = "Formulae";
 const GROUP_UNNEEDED: &str = "Not needed by anything you installed";
 const GROUP_NEEDED: &str = "Needed by what you installed";
-const GROUP_CASKS: &str = "Casks · Remove with taert uninstall";
+const GROUP_CASK: &str = "Cask";
+const GROUP_CASKS: &str = "Casks";
+const TAERT_CASK: &str = "taert";
 const GROUP_UNUSED: &str = "Unused dependencies";
 const GROUP_OLD: &str = "Old versions";
 const NOT_INSTALLED: &str = "Homebrew is not installed.";
@@ -39,6 +41,19 @@ const ORIGIN_DEPENDENCY: &str = "dependency";
 pub enum PackageKind {
     Formula,
     Cask,
+}
+
+/// How a package can be removed, from the artifacts of a cask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// A formula.
+    Formula,
+    /// A cask with an app: Uninstall Apps removes it with what it left behind.
+    App,
+    /// A cask with only command-line tools, fonts, man pages, or completions.
+    Plain,
+    /// A cask with other artifacts, which Homebrew removes with its own steps. Holds the kinds.
+    Other(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,6 +73,8 @@ pub struct Package {
     /// Installed formulae that list this one as a dependency.
     pub used_by: Vec<String>,
     pub apps: Vec<String>,
+    #[serde(skip)]
+    pub removal: Removal,
     #[serde(skip)]
     pub dependencies: Vec<String>,
     #[serde(skip)]
@@ -81,6 +98,13 @@ pub enum BrewTask {
         name: String,
         brew: PathBuf,
         cellar: PathBuf,
+    },
+    /// `brew uninstall --cask <full name>`, after checking again that the cask is still plain.
+    UninstallCask {
+        name: String,
+        full_name: String,
+        brew: PathBuf,
+        caskroom: PathBuf,
     },
 }
 
@@ -109,12 +133,15 @@ impl Inventory {
         changed
     }
 
-    /// Drops an uninstalled formula and its name from what the others list as used by it.
-    pub fn forget(&mut self, name: &str) {
+    /// Drops an uninstalled package and, for a formula, its name from what the others list as
+    /// used by it.
+    pub fn forget(&mut self, kind: PackageKind, name: &str) {
         self.packages
-            .retain(|package| !(package.kind == PackageKind::Formula && package.name == name));
-        for package in &mut self.packages {
-            package.used_by.retain(|user| user != name);
+            .retain(|package| !(package.kind == kind && package.name == name));
+        if kind == PackageKind::Formula {
+            for package in &mut self.packages {
+                package.used_by.retain(|user| user != name);
+            }
         }
     }
 }
@@ -215,6 +242,7 @@ struct RawKeg {
 #[derive(Deserialize)]
 struct RawCask {
     token: String,
+    full_token: Option<String>,
     installed: Option<String>,
     #[serde(default)]
     outdated: bool,
@@ -317,6 +345,44 @@ fn cask_apps(artifacts: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// Artifacts that only run when the owner asks for `--zap`, so they do not decide how a cask
+/// is removed.
+const ZAP: &str = "zap";
+/// A key of an artifact that names where it goes, not what it is.
+const TARGET: &str = "target";
+const PLAIN_KINDS: [&str; 7] = [
+    "binary",
+    "font",
+    "manpage",
+    "bash_completion",
+    "fish_completion",
+    "zsh_completion",
+    "generate_completions_from_executable",
+];
+
+fn cask_removal(artifacts: &[Value]) -> Removal {
+    let kinds: Vec<&str> = artifacts
+        .iter()
+        .filter_map(Value::as_object)
+        .flat_map(|artifact| artifact.keys().map(String::as_str))
+        .filter(|kind| *kind != TARGET && *kind != ZAP)
+        .collect();
+    if kinds.contains(&"app") {
+        return Removal::App;
+    }
+    let mut other: Vec<String> = Vec::new();
+    for kind in kinds.into_iter().filter(|kind| !PLAIN_KINDS.contains(kind)) {
+        if !other.iter().any(|seen| seen == kind) {
+            other.push(kind.to_string());
+        }
+    }
+    if other.is_empty() {
+        Removal::Plain
+    } else {
+        Removal::Other(other)
+    }
+}
+
 fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
     Package {
         kind: PackageKind::Formula,
@@ -337,6 +403,7 @@ fn formula_package(raw: &RawFormula, prefix: &Path) -> Package {
         pinned: raw.pinned,
         used_by: Vec::new(),
         apps: Vec::new(),
+        removal: Removal::Formula,
         dependencies: raw.dependencies.clone(),
         path: cellar_of(prefix, &raw.name),
         installed_at: raw
@@ -352,7 +419,7 @@ fn cask_package(raw: &RawCask, prefix: &Path) -> Package {
     Package {
         kind: PackageKind::Cask,
         name: raw.token.clone(),
-        full_name: raw.token.clone(),
+        full_name: raw.full_token.clone().unwrap_or_else(|| raw.token.clone()),
         version: raw.installed.clone().unwrap_or_default(),
         size_bytes: 0,
         on_request: true,
@@ -361,6 +428,7 @@ fn cask_package(raw: &RawCask, prefix: &Path) -> Package {
         pinned: false,
         used_by: Vec::new(),
         apps: cask_apps(&raw.artifacts),
+        removal: cask_removal(&raw.artifacts),
         dependencies: Vec::new(),
         path: prefix.join("Caskroom").join(&raw.token),
         installed_at: raw.installed_time.map(unix_time),
@@ -639,10 +707,18 @@ fn item(label: String, size_bytes: u64, selected: bool, brew: Option<BrewTask>) 
 }
 
 fn uninstall_task(package: &Package, brew: &Path) -> BrewTask {
-    BrewTask::Uninstall {
-        name: package.name.clone(),
-        brew: brew.to_path_buf(),
-        cellar: package.path.clone(),
+    match package.kind {
+        PackageKind::Formula => BrewTask::Uninstall {
+            name: package.name.clone(),
+            brew: brew.to_path_buf(),
+            cellar: package.path.clone(),
+        },
+        PackageKind::Cask => BrewTask::UninstallCask {
+            name: package.name.clone(),
+            full_name: package.full_name.clone(),
+            brew: brew.to_path_buf(),
+            caskroom: package.path.clone(),
+        },
     }
 }
 
@@ -789,8 +865,8 @@ pub fn tree_sections<'a>(
 /// the tree.
 pub fn list_scan(inventory: &Inventory) -> CategoryScan {
     let row = |package: &Package| {
-        let task = match (package.kind, &inventory.brew) {
-            (PackageKind::Formula, Some(brew)) => Some(uninstall_task(package, brew)),
+        let task = match (&package.removal, &inventory.brew) {
+            (Removal::Formula | Removal::Plain, Some(brew)) => Some(uninstall_task(package, brew)),
             _ => None,
         };
         ScanItem {
@@ -836,14 +912,46 @@ fn not_installed(name: &str) -> String {
 /// Why taert will not uninstall this package, if it will not.
 pub fn refusal(package: &Package) -> Option<String> {
     let name = &package.name;
-    if package.kind == PackageKind::Cask {
-        Some(format!("{name} is a cask. Remove it with taert uninstall."))
+    if package.kind == PackageKind::Cask && name == TAERT_CASK {
+        Some(format!(
+            "{name} cannot remove itself. Run brew uninstall --cask {name}."
+        ))
+    } else if package.removal == Removal::App {
+        Some(format!(
+            "{name} is an app. Remove it with Uninstall Apps, which also removes what it left behind."
+        ))
+    } else if let Removal::Other(kinds) = &package.removal {
+        Some(format!(
+            "{name} installs {}, which Homebrew removes with its own steps. Run brew uninstall --cask {name}.",
+            with_articles(kinds)
+        ))
     } else if package.pinned {
         Some(pinned(name))
     } else if !package.used_by.is_empty() {
         Some(in_use(name, &package.used_by))
     } else {
         None
+    }
+}
+
+/// `a pkg`, `a pkg and an installer`, `a pkg, an installer, and a suite`.
+fn with_articles(kinds: &[String]) -> String {
+    let mut words: Vec<String> = kinds
+        .iter()
+        .map(|kind| {
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {kind}")
+        })
+        .collect();
+    let last = words.pop().unwrap_or_default();
+    match words.len() {
+        0 => last,
+        1 => format!("{} and {last}", words[0]),
+        _ => format!("{}, and {last}", words.join(", ")),
     }
 }
 
@@ -877,11 +985,15 @@ pub fn uninstall_plan(
     let size = DirSizer::size_of(&package.path);
     let task = uninstall_task(package, &brew.path);
     let row = item(name_version(package), size, true, Some(task));
+    let tool = match package.kind {
+        PackageKind::Formula => GROUP_FORMULA,
+        PackageKind::Cask => GROUP_CASK,
+    };
     Ok(CategoryScan {
         id: UNINSTALL_ID.to_string(),
         title: "Homebrew Uninstall".to_string(),
         groups: vec![ToolGroup {
-            tool: GROUP_FORMULA.to_string(),
+            tool: tool.to_string(),
             items: vec![row],
         }],
         notes: Vec::new(),
@@ -1188,17 +1300,27 @@ fn versions(cellar: &Path) -> Vec<String> {
 
 /// Uninstalls every version of the formula, only if the packages brew lists now still show
 /// nothing using it.
-fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<(), String> {
-    let packages = installed(host, brew, prefix_of(cellar)?)?;
+/// Reads Homebrew again right before a removal: the package must still be installed and
+/// not refused.
+fn recheck(
+    host: &dyn Host,
+    brew: &Path,
+    path: &Path,
+    kind: PackageKind,
+    name: &str,
+) -> Result<(), String> {
+    let packages = installed(host, brew, prefix_of(path)?)?;
     let Some(package) = packages
         .iter()
-        .find(|package| package.kind == PackageKind::Formula && package.name == name)
+        .find(|package| package.kind == kind && package.name == name)
     else {
         return Err(format!("{name} is no longer installed."));
     };
-    if let Some(reason) = refusal(package) {
-        return Err(reason);
-    }
+    refusal(package).map_or(Ok(()), Err)
+}
+
+fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<(), String> {
+    recheck(host, brew, cellar, PackageKind::Formula, name)?;
     let mut left = versions(cellar);
     if left.is_empty() {
         return Err(format!(
@@ -1232,21 +1354,59 @@ fn uninstall(host: &dyn Host, name: &str, brew: &Path, cellar: &Path) -> Result<
     ))
 }
 
+/// Uninstalls a cask, only if the packages brew lists now still show it as plain.
+fn uninstall_cask(
+    host: &dyn Host,
+    name: &str,
+    full_name: &str,
+    brew: &Path,
+    caskroom: &Path,
+) -> Result<(), String> {
+    recheck(host, brew, caskroom, PackageKind::Cask, name)?;
+    remove(
+        host,
+        brew,
+        &["uninstall", "--cask", full_name],
+        &format!("Homebrew could not remove {name}"),
+    )?;
+    if caskroom.exists() {
+        return Err(format!(
+            "Homebrew removed part of {name}; it is still installed."
+        ));
+    }
+    Ok(())
+}
+
 /// Runs one task through brew and returns the bytes it freed.
 pub fn run_task(host: &dyn Host, task: &BrewTask) -> Result<u64, String> {
-    let (BrewTask::Uninstall { name, brew, cellar } | BrewTask::Cleanup { name, brew, cellar }) =
-        task;
-    let before = DirSizer::size_of(cellar);
+    let (BrewTask::Uninstall {
+        brew, cellar: path, ..
+    }
+    | BrewTask::Cleanup {
+        brew, cellar: path, ..
+    }
+    | BrewTask::UninstallCask {
+        brew,
+        caskroom: path,
+        ..
+    }) = task;
+    let before = DirSizer::size_of(path);
     match task {
-        BrewTask::Uninstall { .. } => uninstall(host, name, brew, cellar)?,
-        BrewTask::Cleanup { .. } => remove(
+        BrewTask::Uninstall { name, cellar, .. } => uninstall(host, name, brew, cellar)?,
+        BrewTask::Cleanup { name, .. } => remove(
             host,
             brew,
             &["cleanup", name],
             &format!("Homebrew could not clean up {name}"),
         )?,
+        BrewTask::UninstallCask {
+            name,
+            full_name,
+            caskroom,
+            ..
+        } => uninstall_cask(host, name, full_name, brew, caskroom)?,
     }
-    Ok(before.saturating_sub(DirSizer::size_of(cellar)))
+    Ok(before.saturating_sub(DirSizer::size_of(path)))
 }
 
 struct Widths {
@@ -1329,7 +1489,7 @@ pub fn plain_text(inventory: &Inventory) -> String {
     };
     [
         section("Formulae", PackageKind::Formula),
-        section("Casks (remove with taert uninstall)", PackageKind::Cask),
+        section("Casks", PackageKind::Cask),
     ]
     .into_iter()
     .flatten()
@@ -1341,7 +1501,7 @@ pub fn plain_text(inventory: &Inventory) -> String {
 pub mod testing {
     use std::path::PathBuf;
 
-    use super::{Package, PackageKind};
+    use super::{Package, PackageKind, Removal};
     use crate::core::apps::testing::sandbox;
     use crate::core::layout::Layout;
 
@@ -1372,6 +1532,10 @@ pub mod testing {
             pinned: false,
             used_by: Vec::new(),
             apps: Vec::new(),
+            removal: match kind {
+                PackageKind::Formula => Removal::Formula,
+                PackageKind::Cask => Removal::Plain,
+            },
             dependencies: Vec::new(),
             path: PathBuf::new(),
             installed_at: None,
@@ -1650,11 +1814,11 @@ mod tests {
     fn forget_drops_the_formula_and_its_name_from_what_it_used() {
         let mut inventory = fixture_inventory();
 
-        inventory.forget("actionlint");
+        inventory.forget(PackageKind::Formula, "actionlint");
 
         assert!(inventory.packages.iter().all(|p| p.name != "actionlint"));
         assert!(named(&inventory.packages, "shellcheck").used_by.is_empty());
-        inventory.forget("golangci-lint");
+        inventory.forget(PackageKind::Formula, "golangci-lint");
         assert_eq!(named(&inventory.packages, "go").used_by, ["gosec"]);
     }
 
@@ -1668,7 +1832,7 @@ mod tests {
             ..Inventory::default()
         };
 
-        inventory.forget("x");
+        inventory.forget(PackageKind::Formula, "x");
 
         assert_eq!(
             inventory.packages,
@@ -1677,10 +1841,24 @@ mod tests {
     }
 
     #[test]
+    fn forget_of_a_cask_keeps_the_formula_with_the_same_name_and_what_it_uses() {
+        let mut lib = package(PackageKind::Formula, "x", "1", 0);
+        lib.used_by = vec!["x".to_string()];
+        let mut inventory = Inventory {
+            packages: vec![lib.clone(), package(PackageKind::Cask, "x", "1", 0)],
+            ..Inventory::default()
+        };
+
+        inventory.forget(PackageKind::Cask, "x");
+
+        assert_eq!(inventory.packages, [lib]);
+    }
+
+    #[test]
     fn forget_of_an_unknown_name_changes_nothing() {
         let mut inventory = fixture_inventory();
 
-        inventory.forget("no-such-formula");
+        inventory.forget(PackageKind::Formula, "no-such-formula");
 
         assert_eq!(inventory.packages, packages());
     }
@@ -2072,11 +2250,7 @@ Formulae
         let tools: Vec<&str> = scan.groups.iter().map(|g| g.tool.as_str()).collect();
         assert_eq!(
             tools,
-            [
-                "Formulae",
-                "Not needed by anything you installed",
-                "Casks · Remove with taert uninstall"
-            ]
+            ["Formulae", "Not needed by anything you installed", "Casks"]
         );
         assert_eq!(scan.groups[0].items.len(), 8);
         assert_eq!(scan.groups[1].items.len(), 2);
@@ -2487,7 +2661,7 @@ Formulae
   fd       10.5.0     2.0 MB  on request  -         pinned  0
   bun      1.4.2     60.0 MB  on request  outdated  -       0
 
-Casks (remove with taert uninstall)
+Casks
   ghostty  1.3.1     50.0 MB  on request  -         -       0
 ";
         assert_eq!(text, expected);
@@ -3233,7 +3407,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
 
         let text = plain_text(&inventory);
 
-        assert!(text.starts_with("Casks (remove with taert uninstall)\n"));
+        assert!(text.starts_with("Casks\n"));
         assert!(!text.contains("Formulae"));
         assert_eq!(plain_text(&Inventory::default()), "");
     }
@@ -3250,7 +3424,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
              "installed":[{"version":"1","installed_on_request":true}]},
             {"name":"app","dependencies":["lib"],
              "installed":[{"version":"1","installed_on_request":true}]}
-        ],"casks":[{"token":"ghostty","installed":"1"}]}"#;
+        ],"casks":[{"token":"ghostty","installed":"1","artifacts":[{"app":["Ghostty.app"]}]}]}"#;
         parse_packages(json, Path::new("/opt/homebrew")).unwrap()
     }
 
@@ -3260,7 +3434,7 @@ Would remove: /opt/homebrew/Cellar/go/1.0
 
         assert_eq!(
             refusal(named(&packages, "ghostty")).unwrap(),
-            "ghostty is a cask. Remove it with taert uninstall."
+            "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind."
         );
     }
 
@@ -3344,11 +3518,11 @@ Would remove: /opt/homebrew/Cellar/go/1.0
              "installed":[{"version":"1","installed_on_request":false}]},
             {"name":"app","dependencies":["lib"],
              "installed":[{"version":"1","installed_on_request":true}]}
-        ],"casks":[{"token":"ghostty","installed":"1"}]}"#;
+        ],"casks":[{"token":"ghostty","installed":"1","artifacts":[{"app":["Ghostty.app"]}]}]}"#;
         let expected = [
             (
                 "ghostty",
-                "ghostty is a cask. Remove it with taert uninstall.",
+                "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.",
             ),
             ("fd", "fd is pinned. Run brew unpin fd first."),
             ("lib", "lib stays: app use it."),
@@ -3433,7 +3607,18 @@ Would remove: /opt/homebrew/Cellar/go/1.0
             })
             .collect();
         assert_eq!(tasks, expected);
-        assert!(scan.groups[2].items.iter().all(|item| item.brew.is_none()));
+        let casks = &scan.groups[2].items;
+        let task_of = |name: &str| {
+            casks
+                .iter()
+                .find(|item| item.path.to_string_lossy().starts_with(name))
+                .map(|item| item.brew.clone())
+        };
+        assert_eq!(task_of("ghostty"), Some(None));
+        assert!(matches!(
+            task_of("codex"),
+            Some(Some(BrewTask::UninstallCask { .. }))
+        ));
         assert!(
             scan.groups
                 .iter()
@@ -3581,8 +3766,10 @@ Would remove: /opt/homebrew/Cellar/go/1.0
                 .map(|(_, text)| text.as_str())
         };
         assert_eq!(
-            text("ghostty 1"),
-            Some("ghostty is a cask. Remove it with taert uninstall.")
+            text("ghostty 1 · Ghostty.app"),
+            Some(
+                "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind."
+            )
         );
         assert_eq!(
             text("fd 1 · pinned"),
@@ -3936,5 +4123,312 @@ Would remove: /opt/homebrew/Cellar/go/1.0
         bun.latest_version = Some("1.4.4_1".to_string());
 
         assert_eq!(upgrade_change(&bun), "bun 1.4.2 → 1.4.4_1");
+    }
+
+    fn cask_entry(token: &str, artifacts: &[Value]) -> Value {
+        serde_json::json!({"token": token, "full_token": token, "installed": "1", "artifacts": artifacts})
+    }
+
+    fn five_casks() -> Vec<Package> {
+        let casks = [
+            cask_entry(
+                "ghostty",
+                &[
+                    serde_json::json!({"uninstall": [{"quit": "x"}]}),
+                    serde_json::json!({"app": ["Ghostty.app"], "target": "/Applications/Ghostty.app"}),
+                    serde_json::json!({"zap": [{"trash": "~/x"}]}),
+                ],
+            ),
+            cask_entry(
+                "codex",
+                &[
+                    serde_json::json!({"binary": ["bin/codex"], "target": "/opt/homebrew/bin/codex"}),
+                    serde_json::json!({"generate_completions_from_executable": ["bin/codex"]}),
+                    serde_json::json!({"zap": [{"rmdir": "~/.codex"}]}),
+                ],
+            ),
+            cask_entry("font-x", &[serde_json::json!({"font": ["X.ttf"]})]),
+            cask_entry("suite", &[serde_json::json!({"pkg": ["Suite.pkg"]})]),
+            cask_entry(
+                "tool",
+                &[
+                    serde_json::json!({"binary": ["bin/tool"]}),
+                    serde_json::json!({"uninstall_postflight": null}),
+                ],
+            ),
+        ];
+        let json = serde_json::json!({"formulae": [], "casks": casks}).to_string();
+        parse_packages(&json, Path::new("/opt/homebrew")).unwrap()
+    }
+
+    #[test]
+    fn a_cask_is_removed_as_an_app_plainly_or_by_homebrew_from_its_artifacts() {
+        let packages = five_casks();
+
+        assert_eq!(named(&packages, "ghostty").removal, Removal::App);
+        assert_eq!(named(&packages, "codex").removal, Removal::Plain);
+        assert_eq!(named(&packages, "font-x").removal, Removal::Plain);
+        assert_eq!(
+            named(&packages, "suite").removal,
+            Removal::Other(vec!["pkg".to_string()])
+        );
+        assert_eq!(
+            named(&packages, "tool").removal,
+            Removal::Other(vec!["uninstall_postflight".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_formula_has_no_cask_removal() {
+        let packages = refusal_packages();
+
+        assert_eq!(named(&packages, "plain").removal, Removal::Formula);
+    }
+
+    #[test]
+    fn each_kind_of_cask_has_its_own_refusal() {
+        let packages = five_casks();
+
+        assert_eq!(
+            refusal(named(&packages, "ghostty")).unwrap(),
+            "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind."
+        );
+        assert_eq!(refusal(named(&packages, "codex")), None);
+        assert_eq!(refusal(named(&packages, "font-x")), None);
+        assert_eq!(
+            refusal(named(&packages, "suite")).unwrap(),
+            "suite installs a pkg, which Homebrew removes with its own steps. Run brew uninstall --cask suite."
+        );
+        assert_eq!(
+            refusal(named(&packages, "tool")).unwrap(),
+            "tool installs an uninstall_postflight, which Homebrew removes with its own steps. Run brew uninstall --cask tool."
+        );
+    }
+
+    #[test]
+    fn several_artifact_kinds_are_listed_once_each() {
+        let json = serde_json::json!({"formulae": [], "casks": [cask_entry("multi", &[
+            serde_json::json!({"pkg": ["A.pkg"]}),
+            serde_json::json!({"pkg": ["B.pkg"]}),
+            serde_json::json!({"installer": [{"manual": "x"}]}),
+        ])]})
+        .to_string();
+        let packages = parse_packages(&json, Path::new("/opt/homebrew")).unwrap();
+
+        assert_eq!(
+            refusal(&packages[0]).unwrap(),
+            "multi installs a pkg and an installer, which Homebrew removes with its own steps. Run brew uninstall --cask multi."
+        );
+    }
+
+    #[test]
+    fn a_pinned_plain_cask_is_refused_as_pinned() {
+        let mut codex = package(PackageKind::Cask, "codex", "1", 1);
+        codex.removal = Removal::Plain;
+        codex.pinned = true;
+
+        assert_eq!(
+            refusal(&codex).unwrap(),
+            "codex is pinned. Run brew unpin codex first."
+        );
+    }
+
+    #[test]
+    fn taert_cannot_remove_itself() {
+        let mut taert = package(PackageKind::Cask, "taert", "1", 1);
+        taert.removal = Removal::Plain;
+
+        assert_eq!(
+            refusal(&taert).unwrap(),
+            "taert cannot remove itself. Run brew uninstall --cask taert."
+        );
+    }
+
+    fn cask_task_setup() -> (tempfile::TempDir, Layout, FakeHost, PathBuf) {
+        cask_task_setup_with(&[serde_json::json!({"binary": ["bin/codex"]})])
+    }
+
+    /// The codex cask in its Caskroom folder, which brew lists with `artifacts`.
+    fn cask_task_setup_with(artifacts: &[Value]) -> (tempfile::TempDir, Layout, FakeHost, PathBuf) {
+        let (temp, layout) = with_brew("opt/homebrew");
+        let room = prefix_of(&layout).join("Caskroom/codex");
+        fill(&room.join("1"), 50_000);
+        let host = FakeHost::default();
+        let info = serde_json::json!({"formulae": [], "casks": [cask_entry("codex", artifacts)]});
+        host.reply(&line(&layout, READS[0]), &info.to_string());
+        (temp, layout, host, room)
+    }
+
+    fn codex_task(layout: &Layout, room: &Path) -> BrewTask {
+        BrewTask::UninstallCask {
+            name: "codex".to_string(),
+            full_name: "codex".to_string(),
+            brew: brew_of(layout),
+            caskroom: room.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn a_plain_cask_is_planned_with_its_caskroom_size() {
+        let (_temp, layout, host, room) = cask_task_setup();
+
+        let scan = uninstall_plan(&layout, &host, "codex").unwrap();
+
+        assert_eq!(scan.groups[0].tool, "Cask");
+        let row = &scan.groups[0].items[0];
+        assert_eq!(row.path, Path::new("codex 1"));
+        assert!(row.size_bytes >= 50_000);
+        assert!(row.selected);
+        assert_eq!(row.brew, Some(codex_task(&layout, &room)));
+    }
+
+    #[test]
+    fn a_cask_with_an_app_is_not_planned() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let host = FakeHost::default();
+        host.reply(&line(&layout, READS[0]), BREW_INFO);
+
+        let error = uninstall_plan(&layout, &host, "ghostty").unwrap_err();
+
+        assert!(error.starts_with("ghostty is an app."), "{error}");
+    }
+
+    #[test]
+    fn removing_a_plain_cask_runs_brew_uninstall_cask_and_counts_the_freed_bytes() {
+        let (_temp, layout, host, room) = cask_task_setup();
+        let before = DirSizer::size_of(&room);
+        let doomed = room.clone();
+        host.reply(&removing_line(&layout, "uninstall --cask codex"), "");
+        host.when(
+            &removing_line(&layout, "uninstall --cask codex"),
+            move || fs::remove_dir_all(&doomed).unwrap(),
+        );
+
+        let freed = run_task(&host, &codex_task(&layout, &room)).unwrap();
+
+        assert_eq!(
+            *host.calls.lock().unwrap(),
+            [
+                line(&layout, READS[0]),
+                removing_line(&layout, "uninstall --cask codex")
+            ]
+        );
+        assert!(before >= 50_000);
+        assert_eq!(freed, before);
+    }
+
+    #[test]
+    fn a_tap_cask_is_removed_by_its_full_name() {
+        let (_temp, layout) = with_brew("opt/homebrew");
+        let room = prefix_of(&layout).join("Caskroom/kraken");
+        fill(&room.join("1"), 50_000);
+        let host = FakeHost::default();
+        let info = serde_json::json!({"formulae": [], "casks": [{
+            "token": "kraken", "full_token": "ingvarch/tap/kraken", "installed": "1",
+            "artifacts": [{"binary": ["kraken"]}],
+        }]});
+        host.reply(&line(&layout, READS[0]), &info.to_string());
+        let command = removing_line(&layout, "uninstall --cask ingvarch/tap/kraken");
+        host.reply(&command, "");
+        let doomed = room.clone();
+        host.when(&command, move || fs::remove_dir_all(&doomed).unwrap());
+
+        let scan = uninstall_plan(&layout, &host, "kraken").unwrap();
+        let task = scan.groups[0].items[0].brew.clone().unwrap();
+        let BrewTask::UninstallCask { full_name, .. } = &task else {
+            panic!("expected a cask task");
+        };
+        assert_eq!(full_name, "ingvarch/tap/kraken");
+
+        run_task(&host, &task).unwrap();
+
+        assert!(host.ran(&command));
+    }
+
+    #[test]
+    fn a_cask_whose_folder_stays_after_brew_uninstall_is_an_error() {
+        let (_temp, layout, host, room) = cask_task_setup();
+        host.reply(&removing_line(&layout, "uninstall --cask codex"), "");
+
+        let error = run_task(&host, &codex_task(&layout, &room)).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Homebrew removed part of codex; it is still installed."
+        );
+    }
+
+    #[test]
+    fn a_failed_cask_uninstall_is_an_error_with_the_message_of_brew() {
+        let (_temp, layout, host, room) = cask_task_setup();
+        host.fail(
+            &removing_line(&layout, "uninstall --cask codex"),
+            "Error: boom\n",
+        );
+
+        let error = run_task(&host, &codex_task(&layout, &room)).unwrap_err();
+
+        assert_eq!(error, "Homebrew could not remove codex: Error: boom");
+    }
+
+    #[test]
+    fn a_cask_that_brew_lists_with_a_pkg_by_the_run_is_not_removed() {
+        let (_temp, layout, host, room) =
+            cask_task_setup_with(&[serde_json::json!({"pkg": ["codex.pkg"]})]);
+
+        let error = run_task(&host, &codex_task(&layout, &room)).unwrap_err();
+
+        assert_eq!(
+            error,
+            "codex installs a pkg, which Homebrew removes with its own steps. Run brew uninstall --cask codex."
+        );
+        assert!(!host.ran(REMOVING_LINE_START));
+    }
+
+    #[test]
+    fn a_cask_that_brew_no_longer_lists_is_not_removed() {
+        let (_temp, layout, host, room) = cask_task_setup();
+        let task = BrewTask::UninstallCask {
+            name: "gone".to_string(),
+            full_name: "gone".to_string(),
+            brew: brew_of(&layout),
+            caskroom: room.clone(),
+        };
+
+        let error = run_task(&host, &task).unwrap_err();
+
+        assert_eq!(error, "gone is no longer installed.");
+        assert!(!host.ran(REMOVING_LINE_START));
+    }
+
+    #[test]
+    fn the_list_carries_a_task_on_plain_cask_rows_only() {
+        let inventory = Inventory {
+            packages: five_casks(),
+            brew: Some(brew_of_prefix()),
+            ..Inventory::default()
+        };
+
+        let scan = list_scan(&inventory);
+
+        let tasks: Vec<(String, bool)> = scan.groups[0]
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    label_name(&item.path.to_string_lossy()).to_string(),
+                    item.brew.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(scan.groups[0].tool, "Casks");
+        for (label, has_task) in tasks {
+            let plain = label.starts_with("codex") || label.starts_with("font-x");
+            assert_eq!(has_task, plain, "{label}");
+        }
+    }
+
+    fn brew_of_prefix() -> PathBuf {
+        PathBuf::from("/opt/homebrew/bin/brew")
     }
 }

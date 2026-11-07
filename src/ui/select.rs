@@ -310,17 +310,17 @@ impl SelectState {
         let Some(mut inventory) = self.homebrew.take() else {
             return;
         };
-        let removed: Vec<&str> = self
+        let removed: Vec<(homebrew::PackageKind, &str)> = self
             .scan
             .selected_items()
             .into_iter()
             .filter_map(|item| {
-                let name = uninstall_name(item)?;
+                let (kind, name) = uninstall_target(item)?;
                 let failed = report.failures.iter().any(|failure| {
                     homebrew::label_name(&item.path.to_string_lossy())
                         == failure.path.to_string_lossy()
                 });
-                (!failed).then_some(name)
+                (!failed).then_some((kind, name))
             })
             .collect();
         if removed.is_empty() {
@@ -330,8 +330,42 @@ impl SelectState {
             }
             return;
         }
-        for name in removed {
-            inventory.forget(name);
+        for (kind, name) in removed {
+            inventory.forget(kind, name);
+        }
+        let mut fresh = self.rebuilt(&inventory);
+        fresh.focus_item_at_or_before(self.focused_index);
+        *self = fresh;
+    }
+
+    /// After the review of an app: drops the casks of `plan` that Homebrew no longer holds, with
+    /// the sort, the search, and the focus kept.
+    pub fn forget_gone_casks(&mut self, plan: &Option<uninstaller::UninstallPlan>) {
+        let Some(plan) = plan else {
+            return;
+        };
+        let Some(mut inventory) = self.homebrew.take() else {
+            return;
+        };
+        let gone: Vec<String> = plan
+            .apps
+            .iter()
+            .filter_map(|planned| planned.cask.as_ref())
+            .filter(|cask| {
+                inventory.packages.iter().any(|package| {
+                    package.kind == homebrew::PackageKind::Cask
+                        && package.name == cask.token
+                        && !package.path.exists()
+                })
+            })
+            .map(|cask| cask.token.clone())
+            .collect();
+        if gone.is_empty() {
+            self.homebrew = Some(inventory);
+            return;
+        }
+        for token in gone {
+            inventory.forget(homebrew::PackageKind::Cask, &token);
         }
         let mut fresh = self.rebuilt(&inventory);
         fresh.focus_item_at_or_before(self.focused_index);
@@ -695,7 +729,7 @@ impl SelectState {
         if self.refusal_of_focused().is_some() {
             return None;
         }
-        uninstall_name(item)
+        uninstall_target(item).map(|(_, name)| name)
     }
 
     /// D on the Homebrew list: says why the focused row stays, or asks to remove only it.
@@ -722,7 +756,7 @@ impl SelectState {
 
     /// The package of the focused row of the Homebrew list. A formula and a cask can share a
     /// label, so the group says which kind it is.
-    fn focused_package(&self) -> Option<&homebrew::Package> {
+    pub fn focused_package(&self) -> Option<&homebrew::Package> {
         let (group, item) = self.focused_position()?;
         let group = self.scan.groups.get(group)?;
         let label = group.items.get(item)?.path.to_string_lossy();
@@ -1634,17 +1668,18 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
     }
 }
 
-/// The formula the confirm dialog of the Homebrew list is about.
+/// The package the confirm dialog of the Homebrew list is about.
 fn homebrew_formula(state: &SelectState) -> Option<&str> {
     if state.scan.id != homebrew::SCAN_ID {
         return None;
     }
-    uninstall_name(state.scan.selected_items().first()?)
+    uninstall_target(state.scan.selected_items().first()?).map(|(_, name)| name)
 }
 
-fn uninstall_name(item: &ScanItem) -> Option<&str> {
+fn uninstall_target(item: &ScanItem) -> Option<(homebrew::PackageKind, &str)> {
     match item.brew.as_ref()? {
-        homebrew::BrewTask::Uninstall { name, .. } => Some(name),
+        homebrew::BrewTask::Uninstall { name, .. } => Some((homebrew::PackageKind::Formula, name)),
+        homebrew::BrewTask::UninstallCask { name, .. } => Some((homebrew::PackageKind::Cask, name)),
         homebrew::BrewTask::Cleanup { .. } => None,
     }
 }
@@ -2259,6 +2294,7 @@ mod tests {
         let mut cask_codex =
             homebrew::testing::package(homebrew::PackageKind::Cask, "codex", "0.166.0", 2000);
         cask_codex.latest_version = Some("0.171.0".to_string());
+        cask_codex.removal = homebrew::Removal::App;
         brew_state(vec![formula_codex, cask_codex, formula("zed", 1000)])
     }
 

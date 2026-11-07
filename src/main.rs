@@ -2570,11 +2570,11 @@ mod tests {
     }
 
     #[test]
-    fn brew_uninstall_refuses_a_cask_a_used_formula_and_a_pinned_one_even_with_force() {
+    fn brew_uninstall_refuses_an_app_cask_a_used_formula_and_a_pinned_one_even_with_force() {
         let refusals = [
             (
                 "ghostty",
-                "Error: ghostty is a cask. Remove it with taert uninstall.\n",
+                "Error: ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.\n",
             ),
             ("go", "Error: go stays: golangci-lint, gosec use it.\n"),
             ("fd", "Error: fd is pinned. Run brew unpin fd first.\n"),
@@ -2591,6 +2591,91 @@ mod tests {
             assert!(!mentions_uninstall(&host), "{name}");
             assert!(!layout.history_path().exists());
         }
+    }
+
+    /// The casks of the fixture (an app and a binary) and a pkg cask, with `codex` in its Caskroom.
+    fn cask_mac() -> (tempfile::TempDir, Layout, FakeHost) {
+        let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+        let room = layout.system("opt/homebrew/Caskroom/codex/0.166.0");
+        std::fs::create_dir_all(&room).unwrap();
+        std::fs::write(room.join("codex"), vec![1_u8; 30_000]).unwrap();
+        let mut info: serde_json::Value = serde_json::from_str(BREW_INFO).unwrap();
+        info["casks"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "token": "suite", "installed": "1", "artifacts": [{"pkg": ["Suite.pkg"]}],
+            }));
+        let brew = layout.system("opt/homebrew/bin/brew");
+        let host = FakeHost::default();
+        host.reply(
+            &format!("{ENV_START} {} info --json=v2 --installed", brew.display()),
+            &info.to_string(),
+        );
+        (temp, layout, host)
+    }
+
+    #[test]
+    fn brew_uninstall_force_removes_a_plain_cask_and_logs_it() {
+        let (_temp, layout, host) = cask_mac();
+        let brew = layout.system("opt/homebrew/bin/brew");
+        let line = format!(
+            "{ENV_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall --cask codex",
+            brew.display()
+        );
+        let room = layout.system("opt/homebrew/Caskroom/codex");
+        host.reply(&line, "");
+        host.when(&line, move || std::fs::remove_dir_all(&room).unwrap());
+
+        let ran = brew_uninstall(
+            &["brew", "uninstall", "codex", "--force"],
+            "",
+            &host,
+            &layout,
+        );
+
+        assert!(ran.ok, "{}{}", ran.out, ran.err);
+        assert_eq!(removal_calls(&host), [line]);
+        let runs = runs_in(&layout);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "brew uninstall codex");
+        assert_eq!(runs[0].items[0].path, "codex 0.166.0");
+        assert!(runs[0].items[0].bytes >= 30_000);
+    }
+
+    #[test]
+    fn brew_uninstall_stops_at_an_app_cask_and_a_pkg_cask_without_running_brew_uninstall() {
+        let refusals = [
+            (
+                "ghostty",
+                "Error: ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.\n",
+            ),
+            (
+                "suite",
+                "Error: suite installs a pkg, which Homebrew removes with its own steps. Run brew uninstall --cask suite.\n",
+            ),
+        ];
+        for (name, text) in refusals {
+            let (_temp, layout, host) = cask_mac();
+
+            let ran = brew_uninstall(&["brew", "uninstall", name, "--force"], "", &host, &layout);
+
+            assert!(!ran.ok, "{name}");
+            assert_eq!(ran.err, text);
+            assert!(!mentions_uninstall(&host), "{name}");
+            assert!(!layout.history_path().exists());
+        }
+    }
+
+    #[test]
+    fn brew_uninstall_asks_before_it_removes_a_plain_cask() {
+        let (_temp, layout, host) = cask_mac();
+
+        let ran = brew_uninstall(&["brew", "uninstall", "codex"], "n\n", &host, &layout);
+
+        assert!(ran.out.contains("Remove codex 0.166.0 ("), "{}", ran.out);
+        assert!(ran.out.contains("[y/N]"), "{}", ran.out);
+        assert!(removal_calls(&host).is_empty());
     }
 
     #[test]
@@ -3185,7 +3270,7 @@ mod tests {
 
         assert!(ran.ok);
         assert!(ran.out.starts_with("Formulae\n"));
-        assert!(ran.out.contains("\nCasks (remove with taert uninstall)\n"));
+        assert!(ran.out.contains("\nCasks\n"));
         let row = |name: &str| {
             ran.out
                 .lines()

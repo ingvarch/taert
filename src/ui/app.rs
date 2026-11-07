@@ -371,23 +371,54 @@ impl App {
             .filter(|app| chosen.contains(&app.path))
             .cloned()
             .collect();
-        let Some(first) = selected.first() else {
+        if selected.is_empty() {
             return;
-        };
+        }
+        let installed = self.installed.clone();
+        let screen = self.planning_screen(selected, Some(installed));
+        self.open(screen);
+    }
+
+    /// Reviews the app a Homebrew cask holds. Esc from the review returns to the Homebrew list as
+    /// it was. Returns false when no installed app belongs to the cask.
+    fn start_cask_review(&mut self, package: &homebrew::Package) -> bool {
+        let found = apps::find_apps(&self.layout);
+        let selected = uninstaller::apps_of_cask(&found, &package.path);
+        if selected.is_empty() {
+            return false;
+        }
+        let screen = self.planning_screen(selected, None);
+        let list = std::mem::replace(&mut self.screen, screen);
+        if let Screen::Select(list) = list {
+            self.back_stack.push(ReturnPoint::Select(list));
+        }
+        true
+    }
+
+    /// The screen that plans the removal of `selected` on a thread. Without `installed`, the
+    /// thread measures `selected` and finds the installed apps itself.
+    fn planning_screen(
+        &self,
+        mut selected: Vec<InstalledApp>,
+        installed: Option<Vec<InstalledApp>>,
+    ) -> Screen {
         let headline = match selected.len() {
-            1 => format!("Finding what {} left behind", first.name),
+            1 => format!("Finding what {} left behind", selected[0].name),
             count => format!("Finding what {count} apps left behind"),
         };
 
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_plan = cancel.clone();
-        let installed = self.installed.clone();
         let ignore = self.ignore.clone();
         let (layout, host) = (self.layout.clone(), self.host.clone());
 
         thread::spawn(move || {
             let (progress, bridge) = forward_progress(tx.clone());
+            let installed = installed.unwrap_or_else(|| {
+                apps::measure_apps(&mut selected, &*host, None, Some(cancel_plan.clone()));
+                apps::find_all_apps(&layout, &*host)
+            });
             let request = PlanRequest {
                 selected: &selected,
                 installed: &installed,
@@ -400,15 +431,18 @@ impl App {
             let _ = tx.send(ScanMessage::Planned(plan));
         });
 
-        self.open(Screen::Scanning(
-            ProgressState::new(headline).top_level(),
-            rx,
-            cancel,
-        ));
+        Screen::Scanning(ProgressState::new(headline).top_level(), rx, cancel)
     }
 
     /// The list on the way back is out of date once an app is gone.
     fn show_fresh_app_list(&mut self) {
+        if let Some(ReturnPoint::Select(list)) = self.back_stack.last_mut()
+            && list.scan.id == homebrew::SCAN_ID
+        {
+            list.forget_gone_casks(&self.plan);
+            self.go_back();
+            return;
+        }
         if matches!(self.back_stack.last(), Some(ReturnPoint::Select(_))) {
             self.back_stack.pop();
         }
@@ -546,33 +580,31 @@ impl App {
     fn go_back(&mut self) {
         self.screen = match self.back_stack.pop() {
             Some(ReturnPoint::Workspace { row, submenu_row }) => {
-                self.brew_refresh = None;
                 Screen::Workspace(WorkspaceState::at(row, submenu_row))
             }
-            Some(ReturnPoint::Select(state)) => {
-                if state.scan.id != homebrew::SCAN_ID {
-                    self.brew_refresh = None;
-                }
-                Screen::Select(state)
-            }
-            None => {
-                self.brew_refresh = None;
-                Screen::Workspace(WorkspaceState::new())
-            }
+            Some(ReturnPoint::Select(state)) => Screen::Select(state),
+            None => Screen::Workspace(WorkspaceState::new()),
         };
+        if self.brew_list_mut().is_none() {
+            self.brew_refresh = None;
+        }
     }
 
-    /// The Homebrew list, on screen or waiting under Settings.
+    /// The Homebrew list, on screen or waiting in the back stack.
     fn brew_list_mut(&mut self) -> Option<&mut SelectState> {
         match &mut self.screen {
-            Screen::Select(select) => Some(&mut **select),
-            Screen::Settings(_) => match self.back_stack.last_mut() {
-                Some(ReturnPoint::Select(select)) => Some(&mut **select),
-                _ => None,
-            },
-            _ => None,
+            Screen::Select(select) if select.scan.id == homebrew::SCAN_ID => Some(&mut **select),
+            _ => self
+                .back_stack
+                .iter_mut()
+                .rev()
+                .find_map(|point| match point {
+                    ReturnPoint::Select(select) if select.scan.id == homebrew::SCAN_ID => {
+                        Some(&mut **select)
+                    }
+                    _ => None,
+                }),
         }
-        .filter(|select| select.scan.id == homebrew::SCAN_ID)
     }
 
     fn poll_removal(&mut self) {
@@ -970,7 +1002,15 @@ impl App {
                         state.collapse_focused();
                     }
                     code if is_removal_key(code) && state.scan.id == homebrew::SCAN_ID => {
-                        state.uninstall_focused();
+                        let cask = state
+                            .focused_package()
+                            .filter(|package| package.removal == homebrew::Removal::App)
+                            .cloned();
+                        if !cask.is_some_and(|package| self.start_cask_review(&package))
+                            && let Screen::Select(state) = &mut self.screen
+                        {
+                            state.uninstall_focused();
+                        }
                     }
                     KeyCode::Char('u') if state.scan.id == homebrew::SCAN_ID => {
                         state.upgrade_focused();
@@ -7891,6 +7931,13 @@ mod tests {
             homebrew::testing::package(kind, name, "1.0", bytes)
         }
 
+        fn app_cask(name: &str, bytes: u64) -> Package {
+            Package {
+                removal: homebrew::Removal::App,
+                ..package(PackageKind::Cask, name, bytes)
+            }
+        }
+
         fn brew_list_app(inventory: &Inventory) -> App {
             let mut app = new_app();
             app.screen = Screen::Select(Box::new(SelectState::homebrew_list(inventory)));
@@ -7920,7 +7967,7 @@ mod tests {
                     package(PackageKind::Formula, "fd", 5_000),
                     pinned,
                     used,
-                    package(PackageKind::Cask, "ghostty", 9_000),
+                    app_cask("ghostty", 9_000),
                 ],
                 brew: Some("/fake/bin/brew".into()),
                 ..Inventory::default()
@@ -9139,7 +9186,7 @@ mod tests {
             let refusals = [
                 (
                     "ghostty",
-                    "ghostty is a cask. Remove it with taert uninstall.",
+                    "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.",
                 ),
                 ("pin", "pin is pinned. Run brew unpin pin first."),
                 ("lib", "lib stays: app, tool use it."),
@@ -9201,7 +9248,7 @@ mod tests {
         #[test]
         fn the_list_opened_from_the_command_line_has_the_refusals_too() {
             let inventory = Inventory {
-                packages: vec![package(PackageKind::Cask, "ghostty", 9_000)],
+                packages: vec![app_cask("ghostty", 9_000)],
                 brew: Some("/fake/bin/brew".into()),
                 ..Inventory::default()
             };
@@ -9215,7 +9262,7 @@ mod tests {
 
             assert_eq!(
                 select(&app).toast.as_ref().unwrap().text,
-                "ghostty is a cask. Remove it with taert uninstall."
+                "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind."
             );
         }
 
@@ -9230,7 +9277,7 @@ mod tests {
                     {"name": "app", "dependencies": ["lib"], "installed": [{"version": "1"}]},
                     {"name": "tool", "dependencies": ["lib"], "installed": [{"version": "1"}]},
                 ],
-                "casks": [{"token": "ghostty", "installed": "1.0"}],
+                "casks": [{"token": "ghostty", "installed": "1.0", "artifacts": [{"app": ["Ghostty.app"]}]}],
             });
             let host = Arc::new(FakeHost::default());
             host.reply(
@@ -9252,7 +9299,7 @@ mod tests {
             let refusals = [
                 (
                     "ghostty",
-                    "ghostty is a cask. Remove it with taert uninstall.",
+                    "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.",
                 ),
                 ("pin", "pin is pinned. Run brew unpin pin first."),
                 ("lib", "lib stays: app, tool use it."),
@@ -9372,11 +9419,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 sections,
-                [
-                    "Formulae",
-                    "Not needed by anything you installed",
-                    "Casks · Remove with taert uninstall"
-                ]
+                ["Formulae", "Not needed by anything you installed", "Casks"]
             );
         }
 
@@ -9554,7 +9597,7 @@ mod tests {
             let refusals = [
                 (
                     "ghostty",
-                    "ghostty is a cask. Remove it with taert uninstall.",
+                    "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind.",
                 ),
                 ("pin", "pin is pinned. Run brew unpin pin first."),
                 ("lib", "lib stays: app, tool use it."),
@@ -9928,6 +9971,229 @@ mod tests {
             assert_eq!(labels.len(), 1);
             assert!(labels[0].starts_with("keep "), "{labels:?}");
             assert_eq!(size_of(&run.app, "keep"), keep_size);
+        }
+
+        /// A plain cask and an app cask whose app is installed, read by `homebrew::scan`.
+        fn cask_run() -> Removal {
+            let (temp, layout) = homebrew::testing::with_brew("opt/homebrew");
+            let brew = layout.system("opt/homebrew/bin/brew");
+            let info_line = format!("{BREW_START} {} info --json=v2 --installed", brew.display());
+            let info = serde_json::json!({"formulae": [], "casks": [
+                {"token": "codex", "installed": "1", "artifacts": [{"binary": ["bin/codex"]}]},
+                {"token": "ghostty", "installed": "1", "artifacts": [{"app": ["Ghostty.app"]}]},
+            ]});
+            let host = FakeHost::default();
+            host.simulate_trash();
+            host.reply(&info_line, &info.to_string());
+            let room = layout.system("opt/homebrew/Caskroom/codex");
+            std::fs::create_dir_all(room.join("1")).unwrap();
+            std::fs::write(room.join("1/codex"), vec![1_u8; 20_000]).unwrap();
+            let line = format!(
+                "{BREW_START} HOMEBREW_NO_AUTOREMOVE=1 {} uninstall --cask codex",
+                brew.display()
+            );
+            host.reply(&line, "");
+            host.when(&line, move || std::fs::remove_dir_all(&room).unwrap());
+            let bundle = layout.system("Applications/Ghostty.app");
+            crate::core::apps::testing::fake_app(&bundle, "com.acme.ghostty", "Ghostty");
+            let link = layout.system("opt/homebrew/Caskroom/ghostty/1/Ghostty.app");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&bundle, &link).unwrap();
+            let inventory = homebrew::scan(&layout, &host).unwrap();
+            let mut app = brew_list_app(&inventory);
+            app.layout = layout;
+            let host = Arc::new(host);
+            app.host = host.clone();
+            Removal {
+                _temp: temp,
+                app,
+                host,
+                brew,
+                info_line,
+            }
+        }
+
+        /// `d` on ghostty in the list of `cask_run`, then waits for the review of its app.
+        fn open_ghostty_review(run: &mut Removal) {
+            focus_on(&mut run.app, "ghostty");
+            run.app.handle_key(KeyCode::Char('d'));
+            while matches!(run.app.screen, Screen::Scanning(..)) {
+                run.app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(select(&run.app).scan.id, uninstaller::PLAN_ID);
+        }
+
+        #[test]
+        fn a_plain_cask_is_removed_from_the_list_without_reading_homebrew_again() {
+            let mut run = cask_run();
+            let ghostty = labels(&run.app)
+                .into_iter()
+                .find(|l| l.starts_with("ghostty"))
+                .unwrap();
+
+            run.remove("codex");
+
+            let outcome = screen_text(&run.app);
+            assert!(outcome.contains("Uninstall Complete"), "{outcome}");
+            let runs = HistoryLog::new(run.app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "brew uninstall codex");
+            assert_eq!(runs[0].items[0].path, "codex 1");
+            assert!(runs[0].items[0].bytes >= 20_000);
+            assert_eq!(run.info_calls(), 2);
+
+            run.close_outcome();
+
+            assert_eq!(run.info_calls(), 2);
+            assert_eq!(labels(&run.app), [ghostty]);
+        }
+
+        #[test]
+        fn d_on_an_app_cask_opens_the_review_of_its_app_and_esc_returns_to_the_list() {
+            let mut run = cask_run();
+            focus_on(&mut run.app, "ghostty");
+
+            run.app.handle_key(KeyCode::Char('d'));
+            while matches!(run.app.screen, Screen::Scanning(..)) {
+                run.app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let review = select(&run.app);
+            assert_eq!(review.scan.id, uninstaller::PLAN_ID);
+            assert_eq!(run.app.plan.as_ref().unwrap().apps[0].app.name, "Ghostty");
+            assert!(
+                !run.host
+                    .ran(&format!("{BREW_START} HOMEBREW_NO_AUTOREMOVE=1"))
+            );
+
+            run.app.handle_key(KeyCode::Esc);
+
+            let list = select(&run.app);
+            assert_eq!(list.scan.id, homebrew::SCAN_ID);
+            assert!(list.toast.is_none());
+            assert_eq!(labels(&run.app).len(), 2);
+            assert_eq!(run.info_calls(), 1);
+        }
+
+        #[test]
+        fn after_a_review_of_an_app_cask_the_list_comes_back_without_the_cask_that_is_gone() {
+            let mut run = cask_run();
+            open_ghostty_review(&mut run);
+            std::fs::remove_dir_all(run.app.layout.system("opt/homebrew/Caskroom/ghostty"))
+                .unwrap();
+
+            run.app.show_fresh_app_list();
+
+            assert_eq!(select(&run.app).scan.id, homebrew::SCAN_ID);
+            let labels = labels(&run.app);
+            assert_eq!(labels.len(), 1);
+            assert!(labels[0].starts_with("codex "), "{labels:?}");
+            assert_eq!(run.info_calls(), 1);
+        }
+
+        #[test]
+        fn after_a_review_of_an_app_cask_that_stays_the_list_keeps_it() {
+            let mut run = cask_run();
+            open_ghostty_review(&mut run);
+
+            run.app.show_fresh_app_list();
+
+            assert_eq!(select(&run.app).scan.id, homebrew::SCAN_ID);
+            assert_eq!(labels(&run.app).len(), 2);
+        }
+
+        /// The list of `cask_run` while the check for updates runs, and the sender of its result.
+        fn checking_cask_run() -> (Removal, mpsc::Sender<BrewCheck>) {
+            let mut run = cask_run();
+            let (tx, rx) = mpsc::channel();
+            run.app.brew_check = Some(rx);
+            let Screen::Select(list) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            list.checking_updates = true;
+            (run, tx)
+        }
+
+        #[test]
+        fn an_update_check_that_ends_under_the_cask_review_reaches_the_list() {
+            let (mut run, tx) = checking_cask_run();
+            open_ghostty_review(&mut run);
+
+            tx.send(BrewCheck {
+                update_error: None,
+                latest: Err("offline".to_string()),
+            })
+            .unwrap();
+            run.app.poll_brew_check();
+            run.app.handle_key(KeyCode::Esc);
+
+            let list = select(&run.app);
+            assert_eq!(list.scan.id, homebrew::SCAN_ID);
+            assert!(!list.checking_updates);
+        }
+
+        #[test]
+        fn an_update_check_that_ends_under_settings_from_the_cask_review_reaches_the_list() {
+            let (mut run, tx) = checking_cask_run();
+            open_ghostty_review(&mut run);
+            run.app.handle_key(KeyCode::Char(','));
+            assert!(matches!(run.app.screen, Screen::Settings(_)));
+
+            tx.send(BrewCheck {
+                update_error: None,
+                latest: Err("offline".to_string()),
+            })
+            .unwrap();
+            run.app.poll_brew_check();
+            press(&mut run.app, &[KeyCode::Esc, KeyCode::Esc]);
+
+            let list = select(&run.app);
+            assert_eq!(list.scan.id, homebrew::SCAN_ID);
+            assert!(!list.checking_updates);
+        }
+
+        #[test]
+        fn a_refresh_goes_on_after_settings_opened_from_the_cask_review() {
+            let mut run = cask_run();
+            let (tx, rx) = mpsc::channel();
+            run.app.brew_refresh = Some(rx);
+            let Screen::Select(list) = &mut run.app.screen else {
+                panic!("expected the select screen");
+            };
+            list.refreshing = true;
+            open_ghostty_review(&mut run);
+
+            press(&mut run.app, &[KeyCode::Char(','), KeyCode::Esc]);
+            assert_eq!(select(&run.app).scan.id, uninstaller::PLAN_ID);
+            tx.send(Ok(read_with_rg()))
+                .expect("the read is still awaited");
+            run.app.poll_brew_refresh();
+            run.app.handle_key(KeyCode::Esc);
+
+            let list = select(&run.app);
+            assert_eq!(list.scan.id, homebrew::SCAN_ID);
+            assert!(!list.refreshing);
+            assert!(labels(&run.app).contains(&"rg 1.0".to_string()));
+        }
+
+        #[test]
+        fn d_on_an_app_cask_without_an_installed_app_shows_the_refusal() {
+            let mut run = cask_run();
+            std::fs::remove_dir_all(run.app.layout.system("Applications/Ghostty.app")).unwrap();
+            focus_on(&mut run.app, "ghostty");
+
+            run.app.handle_key(KeyCode::Char('d'));
+
+            let state = select(&run.app);
+            assert_eq!(state.scan.id, homebrew::SCAN_ID);
+            assert_eq!(
+                state.toast.as_ref().unwrap().text,
+                "ghostty is an app. Remove it with Uninstall Apps, which also removes what it left behind."
+            );
         }
 
         #[test]
@@ -10864,7 +11130,7 @@ mod tests {
                     "Formulae",
                     "Not needed by anything you installed",
                     "Needed by what you installed",
-                    "Casks · Remove with taert uninstall"
+                    "Casks"
                 ]
             );
             let row = &state.flattened_rows()[state.focused_index];

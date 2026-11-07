@@ -223,9 +223,9 @@ pub struct BrewArgs {
 pub enum BrewAction {
     /// Remove unused dependencies and old versions through Homebrew
     Cleanup,
-    /// Remove one formula through Homebrew
+    /// Remove one formula or cask through Homebrew
     Uninstall {
-        /// Name of the formula
+        /// Name of the formula or cask
         name: String,
     },
     /// Upgrade one outdated formula or cask, or all of them, through Homebrew
