@@ -17,7 +17,7 @@ use super::bytes::format_bytes;
 use super::catalog::Category;
 use super::date_utils::{format_rfc3339, format_system_time, parse_rfc3339};
 use super::safety::Safety;
-use super::{compress, docker, homebrew, large_files, purger};
+use super::{compress, docker, homebrew, icloud, large_files, purger};
 
 /// The history command a scan is logged under when its rows are removed.
 pub fn command_for_scan(scan_id: &str) -> String {
@@ -28,6 +28,7 @@ pub fn command_for_scan(scan_id: &str) -> String {
         purger::SCAN_ID => "purge".to_string(),
         large_files::SCAN_ID => "large".to_string(),
         compress::SCAN_ID => "compress".to_string(),
+        icloud::SCAN_ID => "icloud".to_string(),
         id => Category::from_id(id)
             .map_or("clean", Category::history_command)
             .to_string(),
@@ -789,6 +790,7 @@ mod tests {
             ("purge", "purge"),
             ("large", "large"),
             ("compress", "compress"),
+            ("icloud", "icloud"),
             ("dev", "clean dev"),
             ("junk", "clean junk"),
             ("ai", "clean ai"),

@@ -1,6 +1,14 @@
 //! Commands taert runs on the Mac, behind a trait so tests never touch the real system.
 
 use crate::core::admin::{self, NOT_GIVEN};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::AnyObject;
+use objc2_foundation::{
+    NSFileManager, NSNumber, NSString, NSURL, NSURLIsUbiquitousItemKey, NSURLResourceKey,
+    NSURLUbiquitousItemDownloadingStatusCurrent, NSURLUbiquitousItemDownloadingStatusDownloaded,
+    NSURLUbiquitousItemDownloadingStatusKey, NSURLUbiquitousItemHasUnresolvedConflictsKey,
+    NSURLUbiquitousItemIsUploadedKey, NSURLUbiquitousItemIsUploadingKey,
+};
 use std::io::{IsTerminal, Read};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -14,6 +22,43 @@ pub struct Output {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// What iCloud says about one file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ICloudState {
+    pub ubiquitous: bool,
+    pub downloaded: bool,
+    pub uploaded: bool,
+    pub uploading: bool,
+    pub conflicts: bool,
+}
+
+impl ICloudState {
+    pub const EVICTABLE: Self = Self {
+        ubiquitous: true,
+        downloaded: true,
+        uploaded: true,
+        uploading: false,
+        conflicts: false,
+    };
+
+    /// Why the local copy must stay, or None when iCloud can download it again.
+    pub fn refusal(&self) -> Option<&'static str> {
+        if !self.ubiquitous {
+            Some("iCloud does not keep this file")
+        } else if !self.downloaded {
+            Some("the file is only in iCloud")
+        } else if self.uploading {
+            Some("iCloud is still uploading the file")
+        } else if !self.uploaded {
+            Some("iCloud has not uploaded the file yet")
+        } else if self.conflicts {
+            Some("the file has unresolved conflicts")
+        } else {
+            None
+        }
+    }
 }
 
 pub trait Host: Send + Sync {
@@ -38,6 +83,10 @@ pub trait Host: Send + Sync {
     fn pause(&self, duration: Duration);
     /// Moves a file or folder to the system Trash.
     fn trash(&self, path: &std::path::Path) -> Result<(), String>;
+    /// Reads what iCloud says about a file.
+    fn icloud_state(&self, path: &std::path::Path) -> Result<ICloudState, String>;
+    /// Asks iCloud to remove the local copy of a file. The file stays in iCloud.
+    fn evict(&self, path: &std::path::Path) -> Result<(), String>;
     fn uid(&self) -> u32;
     fn pid(&self) -> u32;
     /// Whether stdin and stderr are a terminal, so sudo can ask for a password there.
@@ -176,6 +225,57 @@ impl Host for MacHost {
         ctx.delete(path).map_err(|e| e.to_string())
     }
 
+    fn icloud_state(&self, path: &std::path::Path) -> Result<ICloudState, String> {
+        let url = file_url(path)?;
+        autoreleasepool(|_| {
+            // SAFETY: reads Foundation's key constants
+            let keys = unsafe {
+                (
+                    NSURLIsUbiquitousItemKey,
+                    NSURLUbiquitousItemIsUploadedKey,
+                    NSURLUbiquitousItemIsUploadingKey,
+                    NSURLUbiquitousItemHasUnresolvedConflictsKey,
+                    NSURLUbiquitousItemDownloadingStatusKey,
+                )
+            };
+            let ubiquitous = flag(&url, keys.0)?;
+            let uploaded = flag(&url, keys.1)?;
+            let uploading = flag(&url, keys.2)?;
+            let conflicts = flag(&url, keys.3)?;
+            let status = resource(&url, keys.4)?;
+            let downloaded = status
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .is_some_and(|status| {
+                    // SAFETY: the statuses are Foundation's own constants.
+                    unsafe {
+                        status.isEqualToString(NSURLUbiquitousItemDownloadingStatusCurrent)
+                            || status
+                                .isEqualToString(NSURLUbiquitousItemDownloadingStatusDownloaded)
+                    }
+                });
+            Ok(ICloudState {
+                ubiquitous,
+                downloaded,
+                uploaded,
+                uploading,
+                conflicts,
+            })
+        })
+    }
+
+    fn evict(&self, path: &std::path::Path) -> Result<(), String> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !meta.file_type().is_file() {
+            return Err("only a file's local copy can be removed".to_string());
+        }
+        let url = file_url(path)?;
+        autoreleasepool(|_| {
+            NSFileManager::defaultManager()
+                .evictUbiquitousItemAtURL_error(&url)
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn uid(&self) -> u32 {
         unsafe { libc::getuid() }
     }
@@ -217,6 +317,23 @@ impl Host for MacHost {
     }
 }
 
+fn file_url(path: &std::path::Path) -> Result<Retained<NSURL>, String> {
+    NSURL::from_file_path(path).ok_or_else(|| format!("not a file path: {}", path.display()))
+}
+
+fn resource(url: &NSURL, key: &NSURLResourceKey) -> Result<Option<Retained<AnyObject>>, String> {
+    let mut value = None;
+    // SAFETY: an untyped object pointer fits every resource key
+    unsafe { url.getResourceValue_forKey_error(&mut value, key) }.map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
+fn flag(url: &NSURL, key: &NSURLResourceKey) -> Result<bool, String> {
+    Ok(resource(url, key)?
+        .and_then(|value| value.downcast::<NSNumber>().ok())
+        .is_some_and(|number| number.boolValue()))
+}
+
 /// The pid as `kill` takes it, or an error for pid 0 (a whole process group), pid 1 (launchd),
 /// and a pid too large for `pid_t`, which would turn negative and reach a group or every process.
 pub fn signal_pid(pid: u32) -> Result<libc::pid_t, String> {
@@ -235,7 +352,7 @@ pub fn shell_quote(text: &str) -> String {
 pub mod fake {
     use super::*;
     use crate::core::admin::NOT_GIVEN;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -262,6 +379,10 @@ pub mod fake {
         pub signal_error: Mutex<Option<String>>,
         pub trashed: Mutex<Vec<PathBuf>>,
         pub trash_error: Mutex<Option<String>>,
+        icloud: Mutex<HashMap<PathBuf, ICloudState>>,
+        icloud_error: Mutex<Option<String>>,
+        evicted: Mutex<Vec<PathBuf>>,
+        evict_errors: Mutex<HashMap<PathBuf, String>>,
         pub simulate_trash: Mutex<bool>,
         pub uid: Mutex<Option<u32>>,
         pub pid: Mutex<Option<u32>>,
@@ -368,6 +489,26 @@ pub mod fake {
             self.trashed.lock().unwrap().clone()
         }
 
+        pub fn set_icloud(&self, path: &Path, state: ICloudState) {
+            self.icloud
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), state);
+        }
+
+        pub fn fail_icloud(&self, error: &str) {
+            *self.icloud_error.lock().unwrap() = Some(error.to_string());
+        }
+
+        pub fn fail_evict(&self, path: &Path, error: &str) {
+            let mut errors = self.evict_errors.lock().unwrap();
+            errors.insert(path.to_path_buf(), error.to_string());
+        }
+
+        pub fn evicted(&self) -> Vec<PathBuf> {
+            self.evicted.lock().unwrap().clone()
+        }
+
         pub fn simulate_trash(&self) {
             *self.simulate_trash.lock().unwrap() = true;
         }
@@ -464,6 +605,22 @@ pub mod fake {
                 }
             }
             Ok(())
+        }
+
+        fn icloud_state(&self, path: &Path) -> Result<ICloudState, String> {
+            if let Some(error) = self.icloud_error.lock().unwrap().clone() {
+                return Err(error);
+            }
+            let known = self.icloud.lock().unwrap().get(path).copied();
+            Ok(known.unwrap_or_default())
+        }
+
+        fn evict(&self, path: &Path) -> Result<(), String> {
+            self.evicted.lock().unwrap().push(path.to_path_buf());
+            match self.evict_errors.lock().unwrap().get(path) {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
         }
 
         fn uid(&self) -> u32 {
@@ -613,5 +770,92 @@ mod tests {
         }
 
         assert!(host.signals.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn icloud_state_allows_eviction_only_when_settled() {
+        assert_eq!(ICloudState::EVICTABLE.refusal(), None);
+        assert!(ICloudState::default().refusal().is_some());
+
+        let e = ICloudState::EVICTABLE;
+        let flipped = [
+            ICloudState {
+                ubiquitous: false,
+                ..e
+            },
+            ICloudState {
+                downloaded: false,
+                ..e
+            },
+            ICloudState {
+                uploaded: false,
+                ..e
+            },
+            ICloudState {
+                uploading: true,
+                ..e
+            },
+            ICloudState {
+                conflicts: true,
+                ..e
+            },
+        ];
+        for state in flipped {
+            assert!(state.refusal().is_some(), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn the_fake_host_knows_no_icloud_file_until_told() {
+        let host = fake::FakeHost::default();
+        let path = std::path::Path::new("/nowhere/a.txt");
+
+        assert_eq!(host.icloud_state(path), Ok(ICloudState::default()));
+        host.set_icloud(path, ICloudState::EVICTABLE);
+        assert_eq!(host.icloud_state(path), Ok(ICloudState::EVICTABLE));
+        host.fail_icloud("no answer");
+        assert_eq!(host.icloud_state(path), Err("no answer".to_string()));
+    }
+
+    #[test]
+    fn the_fake_host_records_evictions_and_fails_on_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b) = (temp.path().join("a"), temp.path().join("b"));
+        std::fs::write(&a, "one").unwrap();
+        std::fs::write(&b, "two").unwrap();
+        let host = fake::FakeHost::default();
+        host.fail_evict(&b, "busy");
+
+        assert_eq!(host.evict(&a), Ok(()));
+        assert_eq!(host.evict(&b), Err("busy".to_string()));
+
+        assert_eq!(host.evicted(), vec![a.clone(), b.clone()]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "one");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "two");
+    }
+
+    #[test]
+    fn mac_host_never_evicts_a_folder() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = MacHost.evict(temp.path());
+
+        assert_eq!(
+            result,
+            Err("only a file's local copy can be removed".to_string())
+        );
+        assert!(temp.path().is_dir());
+    }
+
+    #[test]
+    fn mac_host_reads_a_temp_file_as_not_kept_in_icloud() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("a.txt");
+        std::fs::write(&file, "text").unwrap();
+
+        let state = MacHost.icloud_state(&file).unwrap();
+
+        assert!(!state.ubiquitous);
+        assert!(state.refusal().is_some());
     }
 }

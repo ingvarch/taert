@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::os::darwin::fs::MetadataExt as DarwinMetadataExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -12,8 +13,11 @@ use plist::Value;
 use thiserror::Error;
 
 use super::host::{Host, MacHost};
+use super::icloud;
 use super::layout::Layout;
 use super::stores::IgnoreStore;
+
+pub(crate) const SF_DATALESS: u32 = 0x4000_0000;
 
 /// The uid that owns the system's apps.
 pub const SYSTEM_OWNER: u32 = 0;
@@ -25,12 +29,17 @@ pub struct FileIdentity {
 }
 
 impl FileIdentity {
-    pub fn of(path: &Path) -> Option<Self> {
-        let meta = fs::symlink_metadata(path).ok()?;
-        Some(Self {
+    pub fn from_meta(meta: &fs::Metadata) -> Self {
+        Self {
             dev: meta.dev(),
             ino: meta.ino(),
-        })
+        }
+    }
+
+    pub fn of(path: &Path) -> Option<Self> {
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|meta| Self::from_meta(&meta))
     }
 }
 
@@ -68,6 +77,20 @@ pub enum SafetyError {
     ProcessListUnavailable,
     #[error("path is where apps keep data that changes while they run")]
     AppDataPath,
+    #[error("path is not inside iCloud Drive or an app's iCloud folder")]
+    OutsideICloud,
+    #[error("path is a folder iCloud needs or a hidden iCloud place")]
+    ICloudStructure,
+    #[error("path is not a regular file")]
+    NotAFile,
+    #[error("file changed since the scan")]
+    ChangedSinceScan,
+    #[error("iCloud does not keep this file")]
+    NotInICloud,
+    #[error("{0}")]
+    StaysLocal(&'static str),
+    #[error("could not read the iCloud state: {0}")]
+    ICloudStateUnknown(String),
     #[error(
         "app bundle requires App Management permission: allow terminal in System Settings > Privacy & Security > App Management"
     )]
@@ -793,6 +816,55 @@ impl Safety {
         }
 
         Ok(())
+    }
+
+    /// Allows asking iCloud to remove the local copy of one regular file that iCloud has
+    /// uploaded and can download again. `expected` is the file as the walk saw it.
+    /// Never call `can_remove` here: it refuses every path with `com~apple~`.
+    pub fn can_evict(
+        path: &Path,
+        expected: FileIdentity,
+        ignore: &IgnoreStore,
+        layout: &Layout,
+        host: &dyn Host,
+    ) -> Result<(), SafetyError> {
+        let plain = path
+            .components()
+            .all(|part| !matches!(part, Component::CurDir | Component::ParentDir));
+        if !path.is_absolute() || !plain {
+            return Err(SafetyError::UnsafeName);
+        }
+        let inside = path
+            .strip_prefix(icloud::root(layout))
+            .map_err(|_| SafetyError::OutsideICloud)?;
+        if inside.components().count() < 2 || icloud::is_hidden_place(inside) {
+            return Err(SafetyError::ICloudStructure);
+        }
+        if Self::has_symlink_component(path) {
+            return Err(SafetyError::SymlinkDetected);
+        }
+        let meta = fs::symlink_metadata(path).map_err(|_| SafetyError::NotFound)?;
+        if !meta.file_type().is_file() {
+            return Err(SafetyError::NotAFile);
+        }
+        if meta.st_flags() & SF_DATALESS != 0 {
+            return Err(SafetyError::StaysLocal("the file is only in iCloud"));
+        }
+        if FileIdentity::from_meta(&meta) != expected {
+            return Err(SafetyError::ChangedSinceScan);
+        }
+        if Self::is_ignored(path, ignore) {
+            return Err(SafetyError::Ignored);
+        }
+        let state = host
+            .icloud_state(path)
+            .map_err(SafetyError::ICloudStateUnknown)?;
+        if !state.ubiquitous {
+            return Err(SafetyError::NotInICloud);
+        }
+        state
+            .refusal()
+            .map_or(Ok(()), |why| Err(SafetyError::StaysLocal(why)))
     }
 
     /// Folders where apps keep files that change while they run.
@@ -1622,6 +1694,266 @@ mod tests {
         assert_eq!(
             Safety::can_compress(&root_dir, &ignore, &layout),
             Err(SafetyError::ProtectedRoot)
+        );
+    }
+
+    use crate::core::host::ICloudState;
+    use crate::core::icloud;
+
+    fn drive(layout: &Layout) -> PathBuf {
+        icloud::root(layout).join("com~apple~CloudDocs")
+    }
+
+    fn put(path: &Path) -> PathBuf {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![1_u8; 8192]).unwrap();
+        path.to_path_buf()
+    }
+
+    fn evictable(path: &Path) -> (FakeHost, FileIdentity) {
+        let host = FakeHost::default();
+        host.set_icloud(path, ICloudState::EVICTABLE);
+        (host, FileIdentity::of(path).unwrap())
+    }
+
+    fn evict_check(
+        path: &Path,
+        layout: &Layout,
+        ignore: &IgnoreStore,
+        host: &FakeHost,
+    ) -> Result<(), SafetyError> {
+        let identity = FileIdentity::of(path).unwrap_or(FileIdentity { dev: 0, ino: 0 });
+        Safety::can_evict(path, identity, ignore, layout, host)
+    }
+
+    #[test]
+    fn can_evict_allows_an_uploaded_file_in_icloud_drive() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let files = [
+            put(&drive(&layout).join("Archive/a.pdf")),
+            put(&icloud::root(&layout).join("iCloud~com~example~Notes/Documents/n.txt")),
+        ];
+        for file in files {
+            let (host, identity) = evictable(&file);
+
+            let result = Safety::can_evict(&file, identity, &ignore, &layout, &host);
+
+            assert_eq!(result, Ok(()), "{}", file.display());
+        }
+    }
+
+    #[test]
+    fn can_evict_refuses_paths_outside_mobile_documents() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let outside = put(&layout.home.join("Documents/a.pdf"));
+        let (host, identity) = evictable(&outside);
+
+        assert_eq!(
+            Safety::can_evict(&outside, identity, &ignore, &layout, &host),
+            Err(SafetyError::OutsideICloud)
+        );
+        let inside = put(&drive(&layout).join("Archive/a.pdf"));
+        let with_dots = drive(&layout).join("Archive/../Archive/a.pdf");
+        host.set_icloud(&with_dots, ICloudState::EVICTABLE);
+        let identity = FileIdentity::of(&inside).unwrap();
+        for path in [with_dots, PathBuf::from("Library/a.pdf")] {
+            assert_eq!(
+                Safety::can_evict(&path, identity, &ignore, &layout, &host),
+                Err(SafetyError::UnsafeName),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn can_evict_refuses_folders_and_icloud_structure() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let root = icloud::root(&layout);
+        let container = make(&root.join("iCloud~com~example~Notes"));
+        let archive = make(&drive(&layout).join("Archive"));
+        let stray = put(&root.join("stray.txt"));
+        let host = FakeHost::default();
+
+        for path in [&root, &drive(&layout), &container, &stray] {
+            host.set_icloud(path, ICloudState::EVICTABLE);
+            assert_eq!(
+                evict_check(path, &layout, &ignore, &host),
+                Err(SafetyError::ICloudStructure),
+                "{}",
+                path.display()
+            );
+        }
+        host.set_icloud(&archive, ICloudState::EVICTABLE);
+        assert_eq!(
+            evict_check(&archive, &layout, &ignore, &host),
+            Err(SafetyError::NotAFile)
+        );
+    }
+
+    #[test]
+    fn can_evict_refuses_hidden_places_and_the_icloud_trash() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let root = icloud::root(&layout);
+        let host = FakeHost::default();
+        let files = [
+            put(&drive(&layout).join(".Trash/a")),
+            put(&root.join(".Trash/x/a")),
+            put(&drive(&layout).join("Archive/.Trash/a")),
+        ];
+        for file in files {
+            host.set_icloud(&file, ICloudState::EVICTABLE);
+
+            assert_eq!(
+                evict_check(&file, &layout, &ignore, &host),
+                Err(SafetyError::ICloudStructure),
+                "{}",
+                file.display()
+            );
+        }
+    }
+
+    #[test]
+    fn can_evict_refuses_symlinks_on_the_way() {
+        let (temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let outside = put(&temp.path().canonicalize().unwrap().join("outside/b.txt"));
+        let target = put(&drive(&layout).join("Archive/a.pdf"));
+        let link_file = drive(&layout).join("Archive/link.pdf");
+        std::os::unix::fs::symlink(&target, &link_file).unwrap();
+        let link_dir = drive(&layout).join("Link");
+        std::os::unix::fs::symlink(outside.parent().unwrap(), &link_dir).unwrap();
+        let through = link_dir.join("b.txt");
+        let host = FakeHost::default();
+
+        for path in [link_file, through] {
+            host.set_icloud(&path, ICloudState::EVICTABLE);
+            assert_eq!(
+                evict_check(&path, &layout, &ignore, &host),
+                Err(SafetyError::SymlinkDetected),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn can_evict_refuses_a_file_replaced_since_the_walk() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+        let (host, before) = evictable(&file);
+        let swap = file.with_file_name("swap");
+        fs::write(&swap, "new").unwrap();
+        fs::rename(&swap, &file).unwrap();
+        assert_ne!(FileIdentity::of(&file).unwrap(), before);
+
+        assert_eq!(
+            Safety::can_evict(&file, before, &ignore, &layout, &host),
+            Err(SafetyError::ChangedSinceScan)
+        );
+    }
+
+    #[test]
+    fn can_evict_refuses_files_icloud_has_not_settled() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+        let e = ICloudState::EVICTABLE;
+        let states = [
+            ICloudState {
+                downloaded: false,
+                ..e
+            },
+            ICloudState {
+                uploaded: false,
+                ..e
+            },
+            ICloudState {
+                uploading: true,
+                ..e
+            },
+            ICloudState {
+                conflicts: true,
+                ..e
+            },
+        ];
+        for state in states {
+            let host = FakeHost::default();
+            host.set_icloud(&file, state);
+
+            assert_eq!(
+                evict_check(&file, &layout, &ignore, &host),
+                Err(SafetyError::StaysLocal(state.refusal().unwrap())),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn can_evict_refuses_a_file_icloud_does_not_keep() {
+        let (_temp, layout) = sandbox();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+        let host = FakeHost::default();
+        host.set_icloud(
+            &file,
+            ICloudState {
+                ubiquitous: false,
+                ..ICloudState::EVICTABLE
+            },
+        );
+
+        assert_eq!(
+            evict_check(&file, &layout, &IgnoreStore::default(), &host),
+            Err(SafetyError::NotInICloud)
+        );
+    }
+
+    #[test]
+    fn can_evict_refuses_ignored_files() {
+        let (_temp, layout) = sandbox();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+        let ignore = IgnoreStore::new(vec![
+            drive(&layout)
+                .join("Archive")
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+        let (host, _) = evictable(&file);
+
+        assert_eq!(
+            evict_check(&file, &layout, &ignore, &host),
+            Err(SafetyError::Ignored)
+        );
+    }
+
+    #[test]
+    fn can_evict_refuses_when_icloud_cannot_answer() {
+        let (_temp, layout) = sandbox();
+        let ignore = IgnoreStore::default();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+        let (host, _) = evictable(&file);
+        host.fail_icloud("no answer");
+
+        assert_eq!(
+            evict_check(&file, &layout, &ignore, &host),
+            Err(SafetyError::ICloudStateUnknown("no answer".to_string()))
+        );
+    }
+
+    #[test]
+    fn removal_still_refuses_icloud_files() {
+        let (_temp, layout) = sandbox();
+        let file = put(&drive(&layout).join("Archive/a.pdf"));
+
+        assert!(Safety::is_cloud_or_dataless_in(&file, &layout.home));
+        assert_eq!(
+            Safety::can_remove(&file, &IgnoreStore::default()),
+            Err(SafetyError::CloudOrDataless)
         );
     }
 }

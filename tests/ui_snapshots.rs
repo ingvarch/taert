@@ -20,6 +20,7 @@ use taert::core::docker::{self, DockerObject};
 use taert::core::doctor::{CheckResult, DoctorReport, Finding, FindingAction, FindingSeverity};
 use taert::core::history::HistoryLog;
 use taert::core::homebrew::{self, BrewTask, Inventory, Package, PackageKind, Removal, ScanStep};
+use taert::core::icloud;
 use taert::core::large_files;
 use taert::core::layout::Layout;
 use taert::core::leftovers::{Evidence, UninstallRole};
@@ -1133,11 +1134,12 @@ const DOCTOR: usize = 5;
 const _STARTUP_ITEMS: usize = 6;
 const _SLIM_APPS: usize = 7;
 const _COMPRESS: usize = 8;
-const EXPLORE_STORAGE: usize = 9;
-const _LARGE_FILES: usize = 10;
-const SYSTEM_STATUS: usize = 11;
-const HISTORY: usize = 12;
-const SETTINGS: usize = 13;
+const _ICLOUD: usize = 9;
+const EXPLORE_STORAGE: usize = 10;
+const _LARGE_FILES: usize = 11;
+const SYSTEM_STATUS: usize = 12;
+const HISTORY: usize = 13;
+const SETTINGS: usize = 14;
 
 #[test]
 fn cleanup_rows_show_how_full_the_disk_is() {
@@ -2063,6 +2065,105 @@ fn snapshot_compress_outcome() {
     assert!(screen.contains("1 item failed to compress:"), "{screen}");
     assert!(!screen.contains("permanently."), "{screen}");
     assert_snapshot!("select_compress_outcome_120x32", screen);
+}
+
+const ICLOUD_DRIVE: &str = "/Users/test/Library/Mobile Documents/com~apple~CloudDocs";
+
+fn icloud_list() -> CategoryScan {
+    let drive = |name: &str, bytes: u64, selected: bool| {
+        ScanItem::new(
+            PathBuf::from(format!("{ICLOUD_DRIVE}/{name}")),
+            bytes,
+            selected,
+            false,
+        )
+    };
+    CategoryScan {
+        notes: Vec::new(),
+        id: icloud::SCAN_ID.to_string(),
+        title: icloud::TITLE.to_string(),
+        groups: vec![
+            ToolGroup {
+                tool: icloud::DRIVE_GROUP.to_string(),
+                items: vec![
+                    drive("Archive", 3_200_000_000, true),
+                    drive("Photos 2019", 1_400_000_000, true),
+                    drive("Taxes", 220_000_000, false),
+                ],
+            },
+            ToolGroup {
+                tool: icloud::APPS_GROUP.to_string(),
+                items: vec![ScanItem::new(
+                    PathBuf::from("/Users/test/Library/Mobile Documents/iCloud~com~example~Notes"),
+                    40_700_000,
+                    false,
+                    false,
+                )],
+            },
+        ],
+    }
+}
+
+#[test]
+fn snapshot_icloud_list() {
+    let state = SelectState::with_preserved_selection(icloud_list());
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Optimize"), "{screen}");
+    assert!(screen.contains("iCloud Drive"), "{screen}");
+    assert!(!screen.contains("Clean caches"), "{screen}");
+    assert_snapshot!("select_icloud_120x32", screen);
+}
+
+#[test]
+fn snapshot_icloud_confirmation() {
+    let mut state = SelectState::with_preserved_selection(icloud_list());
+    state.open_confirmation();
+
+    let screen = select_screen(&state);
+    assert!(
+        screen.contains("Remove local copies of 2 items?"),
+        "{screen}"
+    );
+    assert!(screen.contains("Frees about 4.6 GB"), "{screen}");
+    assert!(screen.contains("stay in iCloud"), "{screen}");
+    for word in ["Trash", "permanently", "delete", "Clean"] {
+        assert!(!screen.contains(word), "{word}: {screen}");
+    }
+    assert_snapshot!("select_icloud_confirm_120x32", screen);
+}
+
+#[test]
+fn snapshot_icloud_outcome() {
+    let mut state = SelectState::new(CategoryScan {
+        notes: Vec::new(),
+        id: icloud::SCAN_ID.to_string(),
+        title: icloud::TITLE.to_string(),
+        groups: Vec::new(),
+    });
+    state.overlay = ModalOverlay::Outcome(RemovalReport {
+        removed_count: 12,
+        freed_bytes: 40_700_000,
+        trashed_bytes: 0,
+        failures: vec![RemovalFailure {
+            path: PathBuf::from(format!("{ICLOUD_DRIVE}/Archive/report.pdf")),
+            error: "busy".to_string(),
+        }],
+        notes: Vec::new(),
+    });
+
+    let screen = select_screen(&state);
+    assert!(screen.contains("Local Copies Removed"), "{screen}");
+    assert!(
+        screen.contains("Removed local copies of 12 files. Freed 40.7 MB."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Could not remove the local copy of 1 file:"),
+        "{screen}"
+    );
+    assert!(!screen.contains("permanently"), "{screen}");
+    assert_snapshot!("select_icloud_outcome_120x32", screen);
 }
 
 #[test]
@@ -3081,7 +3182,7 @@ fn content_lines(output: &str, w: u16, h: u16) -> Vec<String> {
 #[test]
 fn every_menu_row_shows_when_selected() {
     for (w, h) in [(80, 24), (50, 16), (50, 9), (120, 24)] {
-        for row in 0..13 {
+        for row in 0..14 {
             let state = home_state(row);
             let lines = content_lines(&home_screen(&state, w, h), w, h);
             let title = state.items[row].1;
@@ -3142,20 +3243,26 @@ fn a_long_menu_says_how_many_rows_are_hidden() {
             "{lines:#?}"
         );
     };
-    check(80, 24, 0, None, Some("3 more below"));
-    check(80, 24, 13, Some("3 more above"), Some("╰"));
-    check(50, 16, 0, None, Some("9 more below"));
-    check(50, 16, 13, Some("9 more above"), Some("╰"));
-    check(50, 16, 4, None, Some("8 more below"));
-    check(50, 16, 9, Some("6 more above"), Some("2 more below"));
+    check(80, 24, 0, None, Some("4 more below"));
+    check(80, 24, SETTINGS, Some("4 more above"), Some("╰"));
+    check(50, 16, 0, None, Some("10 more below"));
+    check(50, 16, SETTINGS, Some("10 more above"), Some("╰"));
+    check(50, 16, 4, None, Some("9 more below"));
+    check(
+        50,
+        16,
+        EXPLORE_STORAGE,
+        Some("7 more above"),
+        Some("2 more below"),
+    );
     check(120, 24, 0, None, Some("2 more below"));
-    check(120, 24, 13, Some("2 more above"), Some("╰"));
+    check(120, 24, SETTINGS, Some("3 more above"), Some("╰"));
 }
 
 #[test]
 fn a_menu_that_fits_has_no_hint() {
     for (w, h) in [(100, 30), (120, 32)] {
-        for row in 0..13 {
+        for row in 0..14 {
             let output = home_screen(&home_state(row), w, h);
             assert!(
                 !output.contains("more above") && !output.contains("more below"),

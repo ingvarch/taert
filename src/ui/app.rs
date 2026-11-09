@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::backend::CrosstermBackend;
@@ -46,6 +46,7 @@ use crate::core::history::{
 };
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
+use crate::core::icloud;
 use crate::core::large_files;
 use crate::core::layout::Layout;
 use crate::core::path_utils::prettify_path;
@@ -86,6 +87,19 @@ pub enum ScanMessage {
     },
     AppsFound(Vec<InstalledApp>),
     Planned(UninstallPlan),
+}
+
+fn removal_progress(
+    tx: mpsc::Sender<RemovalMessage>,
+    total_count: usize,
+) -> impl Fn(usize, &std::path::Path) {
+    move |index, path| {
+        let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
+            current_index: index + 1,
+            total_count,
+            path: path.to_path_buf(),
+        }));
+    }
 }
 
 pub enum RemovalMessage {
@@ -793,7 +807,10 @@ impl App {
                         break;
                     }
                     ScanMessage::Finished(scan) => {
-                        let state = if scan.id == purger::SCAN_ID || scan.id == docker::SCAN_ID {
+                        let state = if scan.id == purger::SCAN_ID
+                            || scan.id == docker::SCAN_ID
+                            || scan.id == icloud::SCAN_ID
+                        {
                             SelectState::with_preserved_selection(scan)
                         } else {
                             SelectState::new(scan)
@@ -1559,7 +1576,7 @@ impl App {
             }
             Screen::Select(state) => {
                 let enter = match state.scan.id.as_str() {
-                    apps::LIST_ID => "Review",
+                    apps::LIST_ID | icloud::SCAN_ID => "Review",
                     uninstaller::PLAN_ID => "Uninstall",
                     _ => "Review & clean",
                 };
@@ -1728,16 +1745,40 @@ impl App {
                     let report = compressor.compress_selected(
                         &selected_items,
                         &cancelled,
-                        |index, path| {
-                            let _ = tx.send(RemovalMessage::Progress(RemovalProgress {
-                                current_index: index + 1,
-                                total_count,
-                                path: path.to_path_buf(),
-                            }));
-                        },
+                        removal_progress(tx.clone(), total_count),
                         |path, saved| {
                             session.record_item(&ItemOutcome::changed(path.to_path_buf(), saved));
                         },
+                    );
+                    session.finish();
+                    let _ = tx.send(RemovalMessage::Finished(report));
+                });
+
+                self.removal_rx = Some(rx);
+                return;
+            }
+
+            if scan_id == icloud::SCAN_ID {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                if let ModalOverlay::Removing { cancel, .. } = &mut select.overlay {
+                    *cancel = Some(cancelled.clone());
+                }
+                thread::spawn(move || {
+                    let total_count = selected_items.len();
+                    let history = HistoryLog::new(layout.history_path());
+                    let session = history.start_run(
+                        &command_for_scan(icloud::SCAN_ID),
+                        "interactive",
+                        Some(total_count),
+                    );
+                    let report = icloud::evict_selected(
+                        &*host,
+                        &layout,
+                        &ignore,
+                        &selected_items,
+                        &cancelled,
+                        removal_progress(tx.clone(), total_count),
+                        |outcome| session.record_item(outcome),
                     );
                     session.finish();
                     let _ = tx.send(RemovalMessage::Finished(report));
@@ -2028,6 +2069,7 @@ impl App {
             MainMenuChoice::StartupItems => self.open_startup(false),
             MainMenuChoice::SlimApps => self.launch_slim_scan(),
             MainMenuChoice::Compress => self.launch_compress_scan(),
+            MainMenuChoice::ICloud => self.launch_icloud_scan(),
             MainMenuChoice::ExploreStorage => {
                 if let Screen::Workspace(ref mut w) = self.screen {
                     w.open_confirmation(StartConfirmKind::ExploreHome);
@@ -2209,6 +2251,35 @@ impl App {
 
         self.open(Screen::Scanning(
             ProgressState::new("Scanning Universal Apps").top_level(),
+            rx,
+            cancel,
+        ));
+    }
+
+    pub fn launch_icloud_scan(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        let host = self.host.clone();
+        let ignore = self.ignore.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_scan = cancel.clone();
+        let layout = self.layout.clone();
+
+        thread::spawn(move || {
+            let (progress, bridge) = forward_progress(tx.clone());
+            let scan = icloud::scan(
+                &layout,
+                &*host,
+                &ignore,
+                SystemTime::now(),
+                Some(progress),
+                Some(cancel_scan),
+            );
+            let _ = bridge.join();
+            let _ = tx.send(ScanMessage::Finished(scan));
+        });
+
+        self.open(Screen::Scanning(
+            ProgressState::new("Reading iCloud Drive").top_level(),
             rx,
             cancel,
         ));
@@ -2555,7 +2626,34 @@ mod tests {
             unreachable!()
         };
         assert_eq!(state.current_main_choice(), MainMenuChoice::ExploreStorage);
-        assert_eq!(state.items[10].0, MainMenuChoice::LargeFiles);
+        assert_eq!(state.items[11].0, MainMenuChoice::LargeFiles);
+    }
+
+    #[test]
+    fn the_icloud_row_follows_compress_in_optimize() {
+        let state = WorkspaceState::new();
+
+        assert_eq!(state.items[8].0, MainMenuChoice::Compress);
+        assert_eq!(state.items[9].0, MainMenuChoice::ICloud);
+        assert_eq!(state.items[9].1, "iCloud Drive");
+
+        let rows = screen_rows(&new_app(), 120, 40);
+        let row_of = |text: &str| rows.iter().position(|row| row.contains(text)).unwrap();
+        assert!(row_of("Compress") < row_of("iCloud Drive"));
+        assert!(row_of("iCloud Drive") < row_of("Inspect"));
+    }
+
+    #[test]
+    fn no_number_key_opens_icloud() {
+        let mut state = WorkspaceState::new();
+
+        for n in 1..=10 {
+            assert_ne!(state.select_by_number(n), Some(MainMenuChoice::ICloud));
+        }
+        assert_eq!(
+            state.select_by_number(10),
+            Some(MainMenuChoice::ExploreStorage)
+        );
     }
 
     fn select_app(scan: CategoryScan) -> App {
@@ -2849,7 +2947,7 @@ mod tests {
             &[KeyCode::Char('0'), KeyCode::Enter, KeyCode::Esc],
         );
 
-        assert_main_menu(&app, 9);
+        assert_main_menu(&app, 10);
     }
 
     #[test]
@@ -3128,7 +3226,7 @@ mod tests {
         let Screen::Workspace(state) = &mut app.screen else {
             panic!("expected the workspace screen");
         };
-        state.selected_index = 13;
+        state.selected_index = 14;
         app.handle_key(KeyCode::Enter);
         assert!(matches!(app.screen, Screen::Settings(_)));
     }
@@ -3145,7 +3243,7 @@ mod tests {
 
         app.handle_key(KeyCode::End);
 
-        assert_main_menu(&app, 13);
+        assert_main_menu(&app, 14);
         assert!(!screen_text(&app).contains("Protected paths"));
         app.handle_key(KeyCode::Enter);
         assert!(matches!(app.screen, Screen::Settings(_)));
@@ -3205,7 +3303,7 @@ mod tests {
         let Screen::Workspace(state) = &mut app.screen else {
             panic!("expected the workspace screen");
         };
-        state.selected_index = 12;
+        state.selected_index = 13;
         app.handle_key(KeyCode::Enter);
         assert!(matches!(app.screen, Screen::History(_)));
     }
@@ -3288,7 +3386,7 @@ mod tests {
 
         app.handle_key(KeyCode::Esc);
 
-        assert_main_menu(&app, 12);
+        assert_main_menu(&app, 13);
     }
 
     fn recent_commands(app: &App) -> Vec<String> {
@@ -3345,7 +3443,7 @@ mod tests {
         let Screen::Workspace(state) = &mut app.screen else {
             panic!("expected the workspace screen");
         };
-        state.selected_index = 13;
+        state.selected_index = 14;
         let text = wide_screen(&app);
         assert!(
             text.contains("Every week on Mon at 09:00 · next run"),
@@ -5245,7 +5343,7 @@ mod tests {
         assert_eq!(settings(&app).current_row(), SettingsRow::AgeThreshold);
 
         app.handle_key(KeyCode::Char('q'));
-        assert_main_menu(&app, 13);
+        assert_main_menu(&app, 14);
     }
 
     #[test]
@@ -7298,6 +7396,224 @@ mod tests {
             assert_eq!(item.path, bundle.display().to_string());
             assert!(report.freed_bytes > 0);
             assert_eq!(item.bytes, report.freed_bytes);
+        }
+    }
+
+    mod icloud_list {
+        use super::*;
+        use crate::core::apps::testing::sandbox;
+        use crate::core::bytes::format_bytes;
+        use crate::core::host::fake::FakeHost;
+        use crate::core::icloud::testing::{age_tree, kept};
+        use std::path::PathBuf;
+        use tempfile::TempDir;
+
+        struct Fixture {
+            _temp: TempDir,
+            app: App,
+            host: Arc<FakeHost>,
+            old: Vec<PathBuf>,
+            old_bytes: u64,
+        }
+
+        fn row(layout: &Layout, name: &str) -> PathBuf {
+            icloud::root(layout).join(format!("iCloud~com~example~{name}"))
+        }
+
+        fn open_icloud(app: &mut App) {
+            for _ in 0..9 {
+                app.handle_key(KeyCode::Down);
+            }
+            app.handle_key(KeyCode::Enter);
+            while matches!(app.screen, Screen::Scanning(..)) {
+                app.poll_scan();
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// The iCloud list after Enter on its menu row: "Old" has two files unused for
+        /// 60 days, "Recent" one file used 2 days ago.
+        fn opened() -> Fixture {
+            let (temp, layout) = sandbox();
+            let host = Arc::new(FakeHost::default());
+            let old_row = row(&layout, "Old");
+            let old = vec![old_row.join("a.txt"), old_row.join("b.txt")];
+            let old_bytes = old.iter().map(|file| kept(&host, file, 60)).sum();
+            age_tree(&old_row, 60);
+            let recent_row = row(&layout, "Recent");
+            kept(&host, &recent_row.join("c.txt"), 2);
+            age_tree(&recent_row, 2);
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = host.clone();
+            open_icloud(&mut app);
+            Fixture {
+                _temp: temp,
+                app,
+                host,
+                old,
+                old_bytes,
+            }
+        }
+
+        fn words(app: &App) -> String {
+            screen_rows(app, 140, 40)
+                .join(" ")
+                .replace('│', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        #[test]
+        fn enter_on_icloud_reads_icloud_and_keeps_the_preselection() {
+            let fixture = opened();
+
+            let state = select(&fixture.app);
+            assert_eq!(state.scan.id, icloud::SCAN_ID);
+            let selected: Vec<_> = state
+                .scan
+                .selected_items()
+                .into_iter()
+                .map(|item| item.path.clone())
+                .collect();
+            assert_eq!(selected, [row(&fixture.app.layout, "Old")]);
+            assert_eq!(
+                state
+                    .scan
+                    .groups
+                    .iter()
+                    .map(|g| g.items.len())
+                    .sum::<usize>(),
+                2
+            );
+        }
+
+        #[test]
+        fn the_icloud_list_starts_with_enter() {
+            let app = select_app(scan_with_id(icloud::SCAN_ID));
+
+            assert_footer(&app, &["↵"], &["items  d"]);
+            assert_eq!(help_row(&app, "Review"), Some("↵"));
+        }
+
+        #[test]
+        fn the_icloud_question_says_files_stay_in_icloud() {
+            let mut fixture = opened();
+
+            press(&mut fixture.app, &[KeyCode::Enter]);
+
+            let screen = words(&fixture.app);
+            assert!(
+                screen.contains("Remove local copies of 1 item?"),
+                "{screen}"
+            );
+            assert!(screen.contains("Frees about"), "{screen}");
+            assert!(screen.contains("stay in iCloud"), "{screen}");
+            assert!(screen.contains("Remove local copies"), "{screen}");
+            for word in ["Trash", "permanently", "delete", "Clean"] {
+                assert!(!screen.contains(word), "{word}: {screen}");
+            }
+        }
+
+        #[test]
+        fn the_icloud_progress_title_names_the_run() {
+            let mut app = select_app(scan_with_id(icloud::SCAN_ID));
+            let Screen::Select(select) = &mut app.screen else {
+                panic!("expected the select screen");
+            };
+            select.overlay = ModalOverlay::Removing {
+                progress: RemovalProgress {
+                    current_index: 1,
+                    total_count: 2,
+                    path: PathBuf::from("/nowhere/a"),
+                },
+                spinner_idx: 0,
+                cancel: Some(Arc::new(AtomicBool::new(false))),
+            };
+
+            let screen = words(&app);
+
+            assert!(
+                screen.contains("Removing local copies of 2 items…"),
+                "{screen}"
+            );
+            assert!(!screen.contains("Removing 2 items"), "{screen}");
+        }
+
+        #[test]
+        fn an_icloud_run_removes_local_copies_and_logs_history() {
+            let mut fixture = opened();
+
+            press(&mut fixture.app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut fixture.app);
+
+            let mut evicted = fixture.host.evicted();
+            evicted.sort();
+            assert_eq!(evicted, fixture.old);
+            let screen = words(&fixture.app);
+            assert!(screen.contains("Local Copies Removed"), "{screen}");
+            let expected = format!(
+                "Removed local copies of 2 files. Freed {}.",
+                format_bytes(fixture.old_bytes)
+            );
+            assert!(screen.contains(&expected), "{screen}");
+            assert!(screen.contains(icloud::STAY_NOTE), "{screen}");
+            let runs = HistoryLog::new(fixture.app.layout.history_path())
+                .load_runs()
+                .unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].command, "icloud");
+            assert_eq!(runs[0].mode, "interactive");
+        }
+
+        #[test]
+        fn an_icloud_failure_names_the_file_and_the_reason() {
+            let mut fixture = opened();
+            fixture.host.fail_evict(&fixture.old[0], "busy");
+            fixture.host.fail_evict(&fixture.old[1], "busy");
+
+            press(&mut fixture.app, &[KeyCode::Enter, KeyCode::Char('y')]);
+            wait_for_removal(&mut fixture.app);
+
+            let screen = words(&fixture.app);
+            assert!(screen.contains("No local copies were removed"), "{screen}");
+            assert!(
+                screen.contains("Could not remove the local copy of 2 files:"),
+                "{screen}"
+            );
+            assert!(screen.contains("busy"), "{screen}");
+            assert!(screen.contains("a.txt"), "{screen}");
+        }
+
+        #[test]
+        fn an_empty_icloud_list_says_nothing_to_remove() {
+            let (_temp, layout) = sandbox();
+            let mut app = new_app();
+            app.layout = layout;
+            app.host = Arc::new(FakeHost::default());
+            open_icloud(&mut app);
+
+            let screen = words(&app);
+
+            assert!(screen.contains("Nothing to remove"), "{screen}");
+            assert!(
+                screen.contains("iCloud keeps no local copies here that it can download again."),
+                "{screen}"
+            );
+            assert!(!screen.contains("Nothing to clean"), "{screen}");
+            assert!(!screen.contains("caches"), "{screen}");
+        }
+
+        #[test]
+        fn the_icloud_list_names_optimize_in_its_crumbs() {
+            let fixture = opened();
+
+            let screen = words(&fixture.app);
+
+            assert!(screen.contains("Optimize"), "{screen}");
+            assert!(screen.contains("iCloud Drive"), "{screen}");
+            assert!(!screen.contains("Clean caches"), "{screen}");
         }
     }
 

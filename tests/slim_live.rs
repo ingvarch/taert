@@ -13,7 +13,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 use taert::core::apps::InstalledApp;
-use taert::core::host::{Host, MacHost, Output};
+use taert::core::host::{Host, ICloudState, MacHost, Output};
 use taert::core::sizer::DirSizer;
 use taert::core::slim;
 
@@ -53,6 +53,14 @@ impl Host for TempTrashHost {
         fs::create_dir_all(&self.trash).map_err(|e| e.to_string())?;
         let name = path.file_name().ok_or("path has no name")?;
         fs::rename(path, self.trash.join(name)).map_err(|e| e.to_string())
+    }
+
+    fn icloud_state(&self, _path: &Path) -> Result<ICloudState, String> {
+        Ok(ICloudState::default())
+    }
+
+    fn evict(&self, _path: &Path) -> Result<(), String> {
+        Err("slim tests never evict".into())
     }
 
     fn uid(&self) -> u32 {

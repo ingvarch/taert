@@ -73,6 +73,9 @@ pub enum Command {
     /// Remove Intel code from universal apps
     Slim(SlimArgs),
 
+    /// Remove local copies of iCloud Drive files; they stay in iCloud
+    Icloud,
+
     /// Manage protected paths that cannot be scanned or cleaned
     Ignore(IgnoreArgs),
 

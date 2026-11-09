@@ -59,6 +59,7 @@ pub enum MainMenuChoice {
     StartupItems,   // 7
     SlimApps,       // 8
     Compress,       // 9
+    ICloud,         // no number key
     ExploreStorage, // 0
     LargeFiles,     // no number key
     SystemStatus,
@@ -70,9 +71,22 @@ const RECENT_RUNS: usize = 3;
 
 const MENU_SECTIONS: [(&str, &[usize]); 4] = [
     ("Cleanup", &[0, 1, 2, 3, 4]),
-    ("Optimize", &[5, 6, 7, 8]),
-    ("Inspect", &[9, 10, 11]),
-    ("taert", &[12, 13]),
+    ("Optimize", &[5, 6, 7, 8, 9]),
+    ("Inspect", &[10, 11, 12]),
+    ("taert", &[13, 14]),
+];
+
+const QUICK_KEYS: [MainMenuChoice; 10] = [
+    MainMenuChoice::CleanCaches,
+    MainMenuChoice::ProjectCleanup,
+    MainMenuChoice::DockerCleanup,
+    MainMenuChoice::UninstallApps,
+    MainMenuChoice::Homebrew,
+    MainMenuChoice::Doctor,
+    MainMenuChoice::StartupItems,
+    MainMenuChoice::SlimApps,
+    MainMenuChoice::Compress,
+    MainMenuChoice::ExploreStorage,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +231,12 @@ impl WorkspaceState {
                     "Compress",
                     "Free space with transparent APFS compression",
                     "Store files compressed on APFS and unpack on read. Apps and tools keep working with the same bytes. Review candidates and estimated savings before compressing.",
+                ),
+                (
+                    MainMenuChoice::ICloud,
+                    "iCloud Drive",
+                    "Remove local copies of files kept in iCloud",
+                    "List what iCloud Drive and apps keep downloaded on this Mac and remove the local copies you choose. The files stay in iCloud and download again when you open them. Nothing is removed from iCloud.",
                 ),
                 (
                     MainMenuChoice::ExploreStorage,
@@ -434,12 +454,12 @@ impl WorkspaceState {
     }
 
     pub fn select_by_number(&mut self, num: usize) -> Option<MainMenuChoice> {
-        if matches!(self.view, WorkspaceView::MainMenu) && num >= 1 && num <= self.items.len() {
-            self.selected_index = num - 1;
-            Some(self.items[self.selected_index].0)
-        } else {
-            None
+        if !matches!(self.view, WorkspaceView::MainMenu) {
+            return None;
         }
+        let choice = *QUICK_KEYS.get(num.checked_sub(1)?)?;
+        self.selected_index = self.items.iter().position(|item| item.0 == choice)?;
+        Some(choice)
     }
 
     pub fn current_main_choice(&self) -> MainMenuChoice {
@@ -516,6 +536,7 @@ fn menu_icon(choice: MainMenuChoice, theme: &Theme) -> &str {
         MainMenuChoice::StartupItems => theme.g.icon_startup,
         MainMenuChoice::SlimApps => theme.g.icon_uninstall,
         MainMenuChoice::Compress => theme.g.icon_clean,
+        MainMenuChoice::ICloud => theme.g.icon_storage,
         MainMenuChoice::ExploreStorage => theme.g.icon_storage,
         MainMenuChoice::LargeFiles => theme.g.icon_storage,
         MainMenuChoice::SystemStatus => theme.g.icon_status,
