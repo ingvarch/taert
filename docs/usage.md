@@ -14,7 +14,7 @@ taert
 
 ### Workspace Navigation
 
-- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, Explore Storage, Large Files, System Status, History, and Settings. History and Settings sit in a last group titled `taert`. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. Large Files and the rows after it have no digit key. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
+- **Main Menu**: Fast access to Clean Caches, Project Cleanup, Docker Cleanup, Uninstall Apps, Homebrew, Doctor, Startup Items, Slim Apps, Compress, iCloud Drive, Explore Storage, Large Files, System Status, History, and Settings. History and Settings sit in a last group titled `taert`. Keys `1` to `9` and `0` open a row directly: `5` is Homebrew, `6` is Doctor, and `0` is Explore Storage. iCloud Drive has no digit key, and neither do Large Files and the rows after it. In a short window the menu scrolls with the highlighted row, and its first or last line says how many rows are out of view, like `3 more below`.
 - **History**: Lists what taert removed and changed, one row per run, newest first, with the date, the command, the mode (`interactive`, `force`, or `schedule`), and the result, like `taert history`. A Homebrew removal names its formulae, like `brew uninstall fd`. A command too long for the column ends with `…`. In a narrow window the mode column hides first, then the result, so the date and the command stay readable. `↵` opens a run and shows each path with what happened to it and its size; a failed item shows its error under the path. `⎋` returns to the list on the same run. The screen removes nothing. With no runs, it says `No history yet`. With `TAERT_NO_HISTORY=1`, a note says that new runs are not recorded. An unreadable history file shows its error, on the screen and in the pane beside the menu row. On a wide window, the pane beside the History row shows the last three runs, read when the menu opens.
 - **Adaptive Layout**: On wide terminals (≥100 columns), the workspace splits into an action list on the left and the card of the highlighted item beside it. From 130 columns the main menu has three columns: the list, the card of the highlighted row stretched to the height of the list, and a column with CPU, Memory, and Storage cards. From 100 to 129 columns it has two columns, and the CPU, Memory, and Storage cards come under the card of the row, as many as fit. CPU, memory, and storage show for every row. CPU and memory update every second. Under the card of a row, History shows the last three runs, Settings shows its summary, and Explore Storage shows the largest items of your home folder. The main menu, Settings, System Status, Explore Storage, Startup Items, and item selection fill the window. Settings shows its sections on the left and the rows of the highlighted section on the right. Below 100 columns it shows the sections first, and `↵` or `→` opens one section by itself. From 100 columns, lists in Explore Storage, Large Files, and item selection show a size bar that grows with the window. From 155 columns, Explore Storage shows what the highlighted folder holds in a panel beside the list.
 - **Category Cleanup**: Inspect and clean Developer Caches, System Junk, AI Tool Caches (Ollama, LM Studio, Cursor), Orphaned App Files, or Empty Trash. System Junk also lists every other folder in `~/Library/Caches` as App caches, and the caches of Safari, Chrome, Edge, Brave, Firefox, and Arc as Browser caches. Profiles stay untouched, so cookies, history, passwords, and extensions are safe. Folders that other rows already cover, `com.apple.*`, `CloudKit`, and `FamilyCircle` are left out. The Clean Caches screen starts with nothing selected, so you choose the rows. Each browser is one row. Safari and Arc keep two folders, so their row shows one path and `+1 folder`, and the confirmation names the second folder. See [Clean Caches](#clean-caches-taert-clean) for what starts selected on the command line.
@@ -39,7 +39,7 @@ Every screen shows its sections in colored frames. While taert scans or measures
 | `d` / `D` / `Backspace` / `Delete` | All screens that remove | Start the removal: the cleanup lists, Purge, Docker, Large Files, and Homebrew cleanup ask to remove the selection; Uninstall Apps opens the review; the review asks to uninstall; Homebrew asks to uninstall the focused formula; Explore Storage asks to delete; Startup Items asks to remove a broken item's plist; the lists of Settings ask to remove the focused path or name |
 | `u` / `⇧U` | Homebrew | Upgrade the focused package / every package with a new version |
 | `⇧S` / `⇧N` / `⇧T` | Explore Storage / Large Files / Docker / Uninstall Apps / Homebrew | Sort by size / name / date |
-| `↵` (Enter) | Slim / Compress | Open the question for the selection |
+| `↵` (Enter) | Slim / Compress / iCloud Drive | Open the question for the selection |
 | `↵` (Enter) | Question dialogs | Press the highlighted button |
 | `↵` / `→` | Explore Storage | Enter selected folder |
 | `↵` / `→` / `←` / `Space` / `⎋` / `q` | Settings | `→` or `↵` on a section moves to its rows; `↵` or `Space` on a row opens its list of choices, on `Add folder…`, `Add path…`, or `Add name…` opens the add dialog, and on an About row shows the program or file in Finder; `←` or `⎋` moves back to the sections; `q` returns to the screen Settings was opened from |
@@ -655,6 +655,34 @@ Ideal candidates for transparent compression:
 - **Result in the TUI**: After a run the result reads `Compress Complete` and `Saved X by compressing N files.`, or `Nothing was compressed` when no file was compressed. It shows no Trash or removed totals, because a compress deletes no file. Failed items are listed under `N items failed to compress:`, each with the reason under its path.
 - **After updates**: An app or package update writes plain files again. Run `taert compress` again afterwards.
 
+### iCloud Local Copies (`taert icloud`)
+
+Free space by removing the copies of iCloud Drive files that are stored on this Mac. The files stay in iCloud and download again when you open them. taert deletes no file and removes nothing from iCloud: it asks iCloud to remove the local copy.
+
+```bash
+# List the folders that hold local copies, and remove nothing
+taert icloud --dry-run
+
+# Print the list as JSON
+taert icloud --json
+
+# Choose folders in the terminal, then confirm
+taert icloud --plain
+
+# Remove the local copies of the folders that start selected, without asking
+taert icloud --force
+```
+
+Without a flag the command opens the list in the interactive screen, like **iCloud Drive** in the **Optimize** section of the menu.
+
+- **Rows**: One row for each item in iCloud Drive and one for each app folder under `~/Library/Mobile Documents`. Hidden entries, links, and the iCloud trash are not listed. A row with nothing to remove is left out.
+- **What can be removed**: A file whose local copy iCloud can download again: iCloud keeps it, has finished uploading it, reports no conflict, and the file is on this Mac. A file that is only in iCloud, is still uploading, has a conflict, or is on the ignore list stays. Folders are never removed.
+- **What starts selected**: A row whose files and folders were last used 30 days ago or more. Use means the newest modification or access time. A row that taert could not read fully starts unselected. Desktop and Documents follow the same rule as every other row.
+- **Run time checks**: Every selected folder is read again when you confirm, and iCloud is asked about every file again. A file that changed, started uploading, or appeared after the scan is checked by the same rules. The result says how many files stayed on this Mac.
+- **Result**: `Removed local copies of N files. Freed X.` and `They stay in iCloud and download again when you open them.` The size is what the files took on disk before iCloud removed them, so `du` may lag behind for a moment. Failed files are listed with the reason. `--permanent` has no effect on this command.
+- **Permissions**: macOS may ask whether your terminal can access iCloud Drive. If it cannot, the list says that some folders are hidden and suggests Full Disk Access.
+- **Keep Downloaded**: With **Optimize Mac Storage** off, or for an item set to **Keep Downloaded** in Finder, iCloud may download a removed file again.
+
 ### Removal History (`taert history`)
 
 Keep a local record of what taert removed or changed, so you can always answer "what happened to that file?".
@@ -684,6 +712,7 @@ Example history summary:
 
 - **Format & Location**: Stored as line-delimited JSON at `~/.config/taert/history.jsonl` with permissions `0600`. Because `~/.config` is protected by the safety engine, no cleanup can ever touch or delete this file. The history file's folder is locked with an exclusive `flock` while a line is written or while the file is pruned, so concurrent runs keep their lines.
 - **Compress and slim**: Successful compress and slim operations appear in the log with their saved bytes and outcome `changed`.
+- **iCloud**: A `taert icloud` run shows one `changed` line per folder, with the bytes freed, and one `failed` line per file that could not be removed, with its error.
 - **Interrupted runs**: Events are logged as they happen. An interrupted cleanup or process kill leaves a readable trail showing what completed before the interruption.
 - **Bounded size**: Keeps the last 1,000 runs automatically.
 - **Overrides**: `--dry-run` does not open the interactive screen; add `--plain` to see the preview. `--dry-run` writes nothing to the log. Set `TAERT_NO_HISTORY=1` to disable recording completely.
