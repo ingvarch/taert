@@ -97,6 +97,7 @@ taert/
 │   │   ├── docker.rs           # Unused Docker objects and their removal through the daemon API
 │   │   ├── homebrew.rs         # Installed Homebrew formulae and casks, sizes, what uses them, and cleanup through brew
 │   │   ├── host.rs             # System commands and root scripts, behind a trait for tests
+│   │   ├── icloud.rs           # Local copies of iCloud Drive files: rows, 30-day selection, and removal through iCloud
 │   │   ├── iokit.rs            # Read-only IORegistry access for battery, GPU, and disk counters
 │   │   ├── layout.rs           # Where a Mac keeps apps and their files
 │   │   ├── leftovers.rs        # What an app leaves on disk, and how sure that is

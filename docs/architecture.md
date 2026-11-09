@@ -14,6 +14,7 @@ System design, safety guarantees, and storage algorithms. For usage instructions
 | Startup Manager | `crate::core::startup` | Scans, associates, inspects live metrics, and switches launchd/login items |
 | Universal App Slimmer | `crate::core::slim` | Strips Intel x86_64 slices from universal Mach-O binaries preserving code signature and ARM slices |
 | Compression Engine | `crate::core::compress` | Safe transparent APFS compression using Apple libcompression and decmpfs ABI |
+| iCloud Local Copies | `crate::core::icloud` | Lists the folders of iCloud Drive and its apps and asks iCloud to remove the local copy of files it can download again |
 | Admin Helper | `crate::core::admin_helper`, `crate::core::admin` | Compresses or slims one root-owned app bundle in taert run as root |
 | Scanner & Purger | `crate::core::scanner`, `crate::core::purger` | Discovers cache categories and project build artifacts |
 | Homebrew | `crate::core::homebrew` | Lists installed formulae and casks with sizes through read-only `brew info` and `brew outdated` calls, and removes unused dependencies, old versions, and one formula that nothing uses through brew |
@@ -32,7 +33,7 @@ Disk cleanup tools must never compromise system integrity, user credentials, or 
 3. **Symlink Rejection**:
    `Safety::has_symlink_component` verifies that no path or parent component is a symbolic link. Deletion operations refuse to follow symlinks to prevent accidental directory traversal outside the intended target.
 4. **Cloud Storage & APFS Dataless Protection**:
-   `Safety::is_cloud_or_dataless` inspects filesystem metadata for `SF_DATALESS` and checks known sync provider paths (iCloud Drive, OneDrive, Google Drive, Dropbox, Box). Placeholder files with offline data are never evicted or deleted.
+   `Safety::is_cloud_or_dataless` inspects filesystem metadata for `SF_DATALESS` and checks known sync provider paths (iCloud Drive, OneDrive, Google Drive, Dropbox, Box). Placeholder files with offline data are never removed. Only `taert icloud` asks iCloud to remove local copies, through `Safety::can_evict`.
 5. **Path Validation on Deletion**:
    Every file removal re-validates safety rules immediately before `fs::remove_dir_all` or `fs::remove_file` is invoked.
 
@@ -135,7 +136,7 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 - **Permanent removal**: caches and logs (`taert clean`), build artifacts (`taert purge`), Docker objects (`taert docker`), emptying the Trash, root files (`/Library/...`), and items with `contents_only = true` are permanently deleted.
 - **Uninstall plans**: rows of an uninstall plan go by `uninstaller::route`, worked out once per plan and shared by the review, the confirmation, and the run. A cask bundle goes to Homebrew. Receipts, and rows or bundles the user cannot remove, go to root and are removed permanently. Everything else goes to the Trash unless `--permanent` is set.
 - **`--permanent` override**: passing `--permanent` forces permanent deletion across all subcommands, bypassing the Trash.
-- **Reporting**: outcomes and progress report both `trashed_bytes` ("Moved X to the Trash. Empty it to get the space back.") and `freed_bytes` ("Removed Y permanently."). A slim result is the exception: it shows `freed_bytes` as "Saved Y of Intel code." under `Slim Complete`, or `Nothing was slimmed`, and `trashed_bytes` is always 0. A compress result is the other exception: it shows `freed_bytes` as "Saved Y by compressing N files." under `Compress Complete`, or `Nothing was compressed`. The failure header names the kind of run (remove, slim, compress).
+- **Reporting**: outcomes and progress report both `trashed_bytes` ("Moved X to the Trash. Empty it to get the space back.") and `freed_bytes` ("Removed Y permanently."). Slim, compress, and iCloud results are exceptions. A slim result shows `freed_bytes` as "Saved Y of Intel code." under `Slim Complete`, or `Nothing was slimmed`, and `trashed_bytes` is always 0. A compress result shows `freed_bytes` as "Saved Y by compressing N files." under `Compress Complete`, or `Nothing was compressed`. An iCloud result shows `freed_bytes` as "Removed local copies of N files. Freed Y." under `Local Copies Removed`, or `No local copies were removed`. The failure header names the kind of run (remove, slim, compress, or "Could not remove the local copy of N files" for iCloud).
 
 ## Startup and Background Items
 
@@ -250,6 +251,18 @@ Items slated for removal are classified via `cleaner::item_removal_mode`:
 
 7. **Tests in CI**:
    The round-trip tests run in the `check` job of `.github/workflows/ci.yml` on the `macos-latest` runner. A comment on issue #38 records the runner image of the first run that included the tests of the compress fixes. The `macos-26` runner of the `snapshot` job builds a release snapshot and runs no tests. The label `macos-latest` moves to newer macOS versions over time, so read the "Runner Image" lines of the job log for any other run.
+
+## iCloud Local Copies
+
+[`icloud.rs`](../src/core/icloud.rs) lists the folders of `~/Library/Mobile Documents` and asks iCloud to remove the local copy of files it has uploaded. It never deletes a file and never reaches `Cleaner`. `Host::icloud_state` reads the iCloud state of a file and `Host::evict` calls `NSFileManager.evictUbiquitousItemAtURL:error:`, both through `objc2-foundation`.
+
+- **Gate**: `Safety::can_evict` checks, in order: a clean absolute path, a path under `Mobile Documents`, at least two levels below it and not hidden, no link on the way, a regular file without `SF_DATALESS`, the same device and inode as the walk, not ignored, and an iCloud state that allows it (kept by iCloud, downloaded, uploaded, not uploading, no conflicts). An unreadable state refuses.
+- **Folders are never removed**: the walk passes only regular files to the gate, the gate refuses anything else and the folders `Mobile Documents`, each container root, and `com~apple~CloudDocs`, and `MacHost::evict` refuses non-files itself.
+- **Walk at run time**: a run reads every selected row again instead of keeping a file list from the scan. Only the row folder is compared with the scan. The scan and the run share one walk and one rule.
+- **Dataless folders**: a folder with `SF_DATALESS` is not listed, because listing it makes iCloud fetch the names from the network.
+- **Freed size**: taken from `st_blocks * 512` just before the call, because iCloud may finish after the call returns.
+- **Selection**: a row starts selected when the newest of every file's modification and access time and every folder's modification time is 30 days old or more, and nothing was unreadable.
+- **History**: one `changed` line per row with the bytes freed, and one `failed` line per file.
 
 ## Admin Helper
 

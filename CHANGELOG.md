@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **iCloud local copies**: `taert icloud` and iCloud Drive in the Optimize menu list the folders of iCloud Drive and its apps and remove the local copies of files that iCloud has uploaded. The files stay in iCloud and download again when you open them. Folders that nothing used for 30 days start selected, and every file is checked again when you confirm. `--dry-run`, `--json`, `--force`, and `--plain` work as in other commands.
+
 ## [0.11.0] - 2026-11-07
 
 ### Changed
