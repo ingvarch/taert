@@ -34,6 +34,7 @@ use crate::core::compress;
 use crate::core::date_utils::format_age;
 use crate::core::docker::{DockerObject, SCAN_ID};
 use crate::core::homebrew;
+use crate::core::icloud;
 use crate::core::large_files;
 use crate::core::leftovers::UninstallRole;
 use crate::core::path_utils::{middle_truncate, prettify_path};
@@ -166,9 +167,12 @@ impl SelectState {
         Self::with_preserved_selection(scan)
     }
 
-    /// Slim and Compress start with Enter; the other lists start with a removal key.
+    /// Slim, Compress and iCloud start with Enter; the other lists start with a removal key.
     pub fn starts_with_enter(&self) -> bool {
-        matches!(self.scan.id.as_str(), slim::SCAN_ID | compress::SCAN_ID)
+        matches!(
+            self.scan.id.as_str(),
+            slim::SCAN_ID | compress::SCAN_ID | icloud::SCAN_ID
+        )
     }
 
     pub fn action_key<'a>(&self, enter: &'a str) -> &'a str {
@@ -1123,6 +1127,8 @@ pub fn render_select(frame: &mut Frame, state: &SelectState, theme: &Theme) {
         vec!["taert", "Uninstall apps", title]
     } else if id == slim::SCAN_ID {
         vec!["taert", "Optimize", "Slim apps"]
+    } else if id == icloud::SCAN_ID {
+        vec!["taert", "Optimize", "iCloud Drive"]
     } else if id == large_files::SCAN_ID {
         vec!["taert", "Inspect", "Large files"]
     } else if id == homebrew::CLEANUP_ID {
@@ -1417,6 +1423,7 @@ enum RunKind {
     Uninstall,
     Slim,
     Compress,
+    ICloud,
     Upgrade,
 }
 
@@ -1431,6 +1438,8 @@ impl RunKind {
             Self::Slim
         } else if id == compress::SCAN_ID {
             Self::Compress
+        } else if id == icloud::SCAN_ID {
+            Self::ICloud
         } else {
             Self::Remove
         }
@@ -1440,6 +1449,7 @@ impl RunKind {
         match self {
             Self::Slim => "slim",
             Self::Compress => "compress",
+            Self::ICloud => "remove the local copy of",
             Self::Upgrade => "upgrade",
             Self::Remove | Self::Uninstall => "remove",
         }
@@ -1661,6 +1671,14 @@ fn render_nothing_to_show(frame: &mut Frame, area: Rect, state: &SelectState, th
         )
         .glyph_color(theme.p.green)
         .render(frame, area, theme);
+    } else if state.scan.id == icloud::SCAN_ID {
+        EmptyState::new(
+            "✓",
+            "Nothing to remove",
+            "iCloud keeps no local copies here that it can download again.",
+        )
+        .glyph_color(theme.p.green)
+        .render(frame, area, theme);
     } else {
         EmptyState::new("✓", "Nothing to clean", "Your caches are already tidy.")
             .glyph_color(theme.p.green)
@@ -1698,7 +1716,8 @@ fn render_confirmation_dialog(
         .filter(|item| item.role == Some(UninstallRole::Bundle))
         .count();
     let total = format_bytes(state.scan.total_selected_bytes());
-    let (title, msg, action) = match RunKind::of(state) {
+    let kind = RunKind::of(state);
+    let (title, msg, action) = match kind {
         RunKind::Upgrade => return render_upgrade_dialog(frame, state, focus_btn, theme),
         RunKind::Slim => (
             format!("Slim {}?", plural(count, "app", "apps")),
@@ -1712,10 +1731,20 @@ fn render_confirmation_dialog(
             format!("Saves about {total} with APFS compression. The files stay where they are."),
             "Compress",
         ),
+        RunKind::ICloud => (
+            format!("Remove local copies of {}?", plural(count, "item", "items")),
+            format!("Frees about {total} on this Mac."),
+            "Remove local copies",
+        ),
         RunKind::Remove | RunKind::Uninstall => removal_question(state, count, bundles, &total),
     };
 
     let mut message = vec![Line::from(msg)];
+    if kind == RunKind::ICloud {
+        message.push(Line::from(
+            "The files stay in iCloud and download again when you open them.",
+        ));
+    }
     let (path_width, _) = Modal::message_size(frame.area());
     let selected = state.scan.selected_items();
     for folder in selected.into_iter().flat_map(|item| &item.also) {
@@ -1874,6 +1903,10 @@ fn render_removing_dialog(
     let title = match kind {
         RunKind::Slim => format!("Slimming {}…", plural(count, "app", "apps")),
         RunKind::Compress => format!("Compressing {}…", plural(count, "item", "items")),
+        RunKind::ICloud => format!(
+            "Removing local copies of {}…",
+            plural(count, "item", "items")
+        ),
         RunKind::Upgrade => format!("Upgrading {}…", plural(count, "package", "packages")),
         RunKind::Remove | RunKind::Uninstall => {
             format!("Removing {}…", plural(count, "item", "items"))
@@ -1954,6 +1987,8 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
         (RunKind::Slim, false) => "Nothing was slimmed",
         (RunKind::Compress, true) => "Compress Complete",
         (RunKind::Compress, false) => "Nothing was compressed",
+        (RunKind::ICloud, true) => "Local Copies Removed",
+        (RunKind::ICloud, false) => "No local copies were removed",
         (RunKind::Upgrade, true) => "Upgrade Complete",
         (RunKind::Upgrade, false) => "Nothing was upgraded",
         (RunKind::Uninstall, true) => "Uninstall Complete",
@@ -1980,6 +2015,22 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
                 ]));
             }
         }
+        RunKind::ICloud => {
+            if done {
+                message.push(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "Removed local copies of {}. Freed ",
+                            plural(report.removed_count, "file", "files")
+                        ),
+                        theme.body(),
+                    ),
+                    Span::styled(format_bytes(report.freed_bytes), theme.success()),
+                    Span::styled(".", theme.body()),
+                ]));
+                message.push(Line::from(icloud::STAY_NOTE));
+            }
+        }
         RunKind::Upgrade => {
             if done {
                 message.push(Line::from(format!(
@@ -1993,20 +2044,29 @@ fn render_outcome_dialog(frame: &mut Frame, report: &RemovalReport, kind: RunKin
 
     if !report.failures.is_empty() {
         message.push(Line::from(""));
-        message.push(Line::from(Span::styled(
+        let header = if kind == RunKind::ICloud {
+            format!(
+                "Could not {} {}:",
+                kind.verb(),
+                plural(report.failures.len(), "file", "files")
+            )
+        } else {
             format!(
                 "{} failed to {}:",
                 plural(report.failures.len(), "item", "items"),
                 kind.verb()
-            ),
-            theme.danger(),
-        )));
+            )
+        };
+        message.push(Line::from(Span::styled(header, theme.danger())));
         for fail in report.failures.iter().take(MAX_LISTED_FAILURES) {
             message.push(Line::from(Span::styled(
                 format!("  ✕ {}", prettify_path(&fail.path)),
                 theme.callout(),
             )));
-            if matches!(kind, RunKind::Upgrade | RunKind::Slim | RunKind::Compress) {
+            if matches!(
+                kind,
+                RunKind::Upgrade | RunKind::Slim | RunKind::Compress | RunKind::ICloud
+            ) {
                 message.push(Line::from(Span::styled(
                     fail.error.clone(),
                     theme.callout(),

@@ -31,6 +31,9 @@ unicode-width = "0.2"
 bollard = { version = "=0.19.4", default-features = false, features = ["pipe"] }
 tokio = { version = "1", default-features = false, features = ["rt"] }
 trash = { version = "5.2.9", default-features = false }
+# Reads the iCloud state of a file and removes its local copy. `trash` already uses both crates.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL", "NSValue"] }
 
 [dev-dependencies]
 tempfile = "3.17"

@@ -1,0 +1,35 @@
+---
+source: tests/ui_snapshots.rs
+expression: screen
+---
+ taert › Optimize › iCloud Drive                                                                0 of 0 selected  ·  0 B
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+                             ╭────────────────────────────────────────────────────────────╮
+                             │ Local Copies Removed                                       │
+                             │                                                            │
+                             │ Removed local copies of 12 files. Freed 40.7 MB.           │
+                             │ They stay in iCloud and download again when you open       │
+                             │ them.                                                      │
+                             │                                                            │
+                             │ Could not remove the local copy of 1 file:                 │
+                             │ ✕ /Users/test/Library/Mobile                               │
+                             │ Documents/com~apple~CloudDocs/Archive/report.pdf           │
+                             │ busy                                                       │
+                             │                                                            │
+                             │                                                            │
+                             │                                                      Done  │
+                             │                             ⇥ Switch   ↵ Choose   ⎋ Cancel │
+                             ╰────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

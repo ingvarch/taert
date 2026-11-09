@@ -550,3 +550,49 @@ fn purge_force_leaves_a_folder_found_by_a_custom_name() {
     assert!(project.join("out/file").exists());
     assert!(!project.join("node_modules").exists());
 }
+
+#[test]
+fn the_help_lists_the_icloud_command() {
+    let home = tempfile::tempdir().unwrap();
+    taert(&home)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Remove local copies of iCloud Drive files; they stay in iCloud",
+        ));
+}
+
+#[test]
+fn icloud_json_on_an_empty_home_prints_an_empty_scan() {
+    let home = tempfile::tempdir().unwrap();
+    let output = taert(&home).args(["icloud", "--json"]).output().unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["id"], "icloud");
+    assert!(json["groups"].as_array().unwrap().is_empty());
+    assert!(!json["notes"].as_array().unwrap().is_empty());
+    assert!(!home.path().join(".config/taert/history.jsonl").exists());
+}
+
+#[test]
+fn icloud_dry_run_leaves_a_fake_icloud_folder_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home
+        .path()
+        .join("Library/Mobile Documents/com~apple~CloudDocs/a.txt");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "hello").unwrap();
+
+    taert(&home)
+        .args(["icloud", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Dry run completed. No local copies were removed.",
+        ));
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    assert!(!home.path().join(".config/taert/history.jsonl").exists());
+}

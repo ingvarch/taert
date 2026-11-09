@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::time::SystemTime;
 
 use clap::{CommandFactory, Parser};
 
@@ -22,9 +24,10 @@ use crate::core::cleaner::{RemovalMode, RemovalReport, item_removal_mode};
 use crate::core::date_utils::format_rfc3339;
 use crate::core::docker::DockerClient;
 use crate::core::doctor;
-use crate::core::history::{HistoryLog, ItemOutcome, brew_uninstall_command};
+use crate::core::history::{HistoryLog, ItemOutcome, brew_uninstall_command, command_for_scan};
 use crate::core::homebrew;
 use crate::core::host::{Host, MacHost};
+use crate::core::icloud;
 use crate::core::large_files;
 use crate::core::layout::Layout;
 use crate::core::path_utils::{expand_tilde, prettify_path};
@@ -147,6 +150,8 @@ fn main() -> ExitCode {
             crate::core::safety::SYSTEM_OWNER,
             console,
         ),
+
+        Some(Command::Icloud) => handle_icloud(&cli, use_plain, &ignore, &context, console),
 
         Some(Command::Analyze(ref args)) => handle_analyze(
             args.path.clone(),
@@ -1909,6 +1914,97 @@ fn slim_one(
     crate::core::slim::slim_logged(session, context.host, context.layout, app, needs_admin)
 }
 
+fn handle_icloud(
+    cli: &Cli,
+    use_plain: bool,
+    ignore: &IgnoreStore,
+    context: &ScanContext,
+    console: &mut Console,
+) -> ExitCode {
+    let ScanContext { layout, host, .. } = *context;
+    if !use_plain && !cli.json && !cli.dry_run && !cli.force {
+        let mut app = ui::app::App::new(ignore.clone(), saved_config(layout));
+        app.launch_icloud_scan();
+        return run_tui(&mut app, cli, console);
+    }
+    let mut scan = icloud::scan(layout, host, ignore, SystemTime::now(), None, None);
+
+    if cli.json {
+        return match serde_json::to_string_pretty(&scan) {
+            Ok(json) => {
+                let _ = writeln!(console.out, "{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                let _ = writeln!(console.err, "Failed to serialize JSON: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if cli.dry_run || !cli.force {
+        let _ = write!(console.out, "{}", PlainRunner::icloud_scan_text(&scan));
+    }
+    if cli.dry_run {
+        let _ = writeln!(
+            console.out,
+            "\nDry run completed. No local copies were removed."
+        );
+        return ExitCode::SUCCESS;
+    }
+    if !cli.force
+        && let Err(error) = PlainRunner::prompt_selection(&mut scan, console)
+    {
+        let _ = writeln!(console.err, "Selection error: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    if cli.force {
+        let _ = write!(console.out, "{}", PlainRunner::notes_text(&scan.notes));
+    }
+
+    let selected: Vec<ScanItem> = scan.selected_items().into_iter().cloned().collect();
+    if selected.is_empty() {
+        let _ = writeln!(console.out, "\nNothing selected.");
+        return ExitCode::SUCCESS;
+    }
+    if !cli.force {
+        let question = format!(
+            "\nRemove local copies of {} ({})? They stay in iCloud.",
+            ui::components::text::plural(selected.len(), "item", "items"),
+            format_bytes(scan.total_selected_bytes())
+        );
+        if !confirmed(console, &question) {
+            return ExitCode::SUCCESS;
+        }
+    }
+
+    let mode = if cli.force { "force" } else { "interactive" };
+    let history = HistoryLog::new(layout.history_path());
+    let session = history.start_run(
+        &command_for_scan(icloud::SCAN_ID),
+        mode,
+        Some(selected.len()),
+    );
+    let report = icloud::evict_selected(
+        host,
+        layout,
+        ignore,
+        &selected,
+        &AtomicBool::new(false),
+        |_, _| {},
+        |outcome| session.record_item(outcome),
+    );
+    session.finish();
+
+    let _ = write!(console.out, "{}", PlainRunner::icloud_report_text(&report));
+    if report.failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn pick_apps_to_slim(
     cli: &Cli,
     use_plain: bool,
@@ -2113,8 +2209,9 @@ mod tests {
 
     #[test]
     fn flags_stay_accepted_where_commands_use_them() {
-        let commands: [&[&str]; 9] = [
+        let commands: [&[&str]; 10] = [
             &["clean", "--dry-run"],
+            &["icloud", "--dry-run"],
             &["clean", "junk", "--json"],
             &["startup", "disable", "com.acme.agent", "--dry-run"],
             &["brew", "uninstall", "fd", "--json"],
@@ -2127,6 +2224,11 @@ mod tests {
         for command in commands {
             assert_eq!(unsupported_flag(&parse(command)), None, "{command:?}");
         }
+    }
+
+    #[test]
+    fn icloud_is_a_command() {
+        assert!(matches!(parse(&["icloud"]).command, Some(Command::Icloud)));
     }
 
     fn succeeded(code: ExitCode) -> bool {
@@ -2269,6 +2371,326 @@ mod tests {
         host.reply("/usr/bin/ditto", "");
         fake_ditto(&host, &app);
         (host, app)
+    }
+
+    fn icloud(args: &[&str], typed: &str, host: &FakeHost, layout: &Layout) -> Ran {
+        icloud_in(true, args, typed, host, layout)
+    }
+
+    fn icloud_in(
+        use_plain: bool,
+        args: &[&str],
+        typed: &str,
+        host: &FakeHost,
+        layout: &Layout,
+    ) -> Ran {
+        let cli = parse(args);
+        let context = ScanContext {
+            layout,
+            host,
+            admin: crate::core::admin::test_session(),
+        };
+        run(typed, |console| {
+            handle_icloud(&cli, use_plain, &IgnoreStore::default(), &context, console)
+        })
+    }
+
+    /// An iCloud Drive with an old folder of two uploaded files and, when asked, a folder
+    /// used two days ago. Returns the two old files and the old folder.
+    fn icloud_drive(
+        host: &FakeHost,
+        layout: &Layout,
+        with_recent: bool,
+    ) -> (Vec<std::path::PathBuf>, std::path::PathBuf) {
+        use crate::core::icloud::testing::{age_tree, kept};
+        let drive = crate::core::icloud::root(layout).join("com~apple~CloudDocs");
+        let old = drive.join("Archive");
+        let files = vec![old.join("a.pdf"), old.join("b.pdf")];
+        for file in &files {
+            kept(host, file, 60);
+        }
+        age_tree(&old, 60);
+        if with_recent {
+            let recent = drive.join("Recent");
+            kept(host, &recent.join("c.pdf"), 2);
+            age_tree(&recent, 2);
+        }
+        (files, old)
+    }
+
+    fn sorted(mut paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn icloud_json_prints_the_scan_and_removes_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud", "--json"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        let json: serde_json::Value = serde_json::from_str(&ran.out).unwrap();
+        assert_eq!(json["id"], "icloud");
+        let items: Vec<_> = json["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["items"].as_array().unwrap())
+            .collect();
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert!(Path::new(item["path"].as_str().unwrap()).starts_with(&layout.home));
+        }
+        assert!(host.evicted().is_empty());
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn icloud_dry_run_lists_rows_and_removes_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let (_, old) = icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud", "--dry-run"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains(crate::core::icloud::TITLE), "{}", ran.out);
+        assert!(ran.out.contains("[iCloud Drive]"), "{}", ran.out);
+        assert!(ran.out.contains("[x]"), "{}", ran.out);
+        assert!(ran.out.contains(&old.display().to_string()), "{}", ran.out);
+        assert!(ran.out.contains("stay in iCloud"), "{}", ran.out);
+        assert!(
+            ran.out
+                .contains("Dry run completed. No local copies were removed."),
+            "{}",
+            ran.out
+        );
+        assert!(!ran.out.contains("(Trash)") && !ran.out.contains("(Permanent)"));
+        assert!(host.evicted().is_empty());
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn icloud_in_a_terminal_with_json_dry_run_or_force_skips_the_screen() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        icloud_drive(&host, &layout, true);
+
+        for (flag, line) in [
+            ("--json", "\"id\": \"icloud\""),
+            (
+                "--dry-run",
+                "Dry run completed. No local copies were removed.",
+            ),
+            ("--force", "Removed local copies of"),
+        ] {
+            let ran = icloud_in(false, &["icloud", flag], "", &host, &layout);
+
+            assert!(ran.ok, "{flag}: {}", ran.err);
+            assert!(ran.out.contains(line), "{flag}: {}", ran.out);
+        }
+    }
+
+    #[test]
+    fn icloud_dry_run_with_force_still_lists_rows_and_removes_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let (_, old) = icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud", "--dry-run", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains(&old.display().to_string()), "{}", ran.out);
+        assert!(
+            ran.out
+                .contains("Dry run completed. No local copies were removed."),
+            "{}",
+            ran.out
+        );
+        assert!(host.evicted().is_empty());
+    }
+
+    #[test]
+    fn icloud_force_on_an_empty_home_prints_the_scan_notes() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+
+        let ran = icloud(&["icloud", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(
+            ran.out.contains(crate::core::icloud::MISSING_NOTE),
+            "{}",
+            ran.out
+        );
+        assert!(ran.out.contains("Nothing selected."), "{}", ran.out);
+    }
+
+    #[test]
+    fn icloud_force_removes_only_rows_that_start_selected() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let (files, old) = icloud_drive(&host, &layout, true);
+        let scan = crate::core::icloud::scan(
+            &layout,
+            &host,
+            &IgnoreStore::default(),
+            SystemTime::now(),
+            None,
+            None,
+        );
+        for item in scan.groups.iter().flat_map(|group| &group.items) {
+            assert!(item.path.starts_with(&layout.home));
+        }
+
+        let ran = icloud(&["icloud", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(sorted(host.evicted()), files);
+        assert!(
+            ran.out.contains("Removed local copies of 2 files. Freed "),
+            "{}",
+            ran.out
+        );
+        assert!(ran.out.contains(crate::core::icloud::STAY_NOTE));
+        let runs = runs_in(&layout);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "icloud");
+        assert_eq!(runs[0].mode, "force");
+        assert_eq!(runs[0].items.len(), 1);
+        assert_eq!(runs[0].items[0].path, old.to_string_lossy());
+        assert_eq!(
+            runs[0].items[0].outcome,
+            crate::core::history::OutcomeKind::Changed
+        );
+    }
+
+    #[test]
+    fn icloud_force_with_nothing_selected_changes_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let recent = crate::core::icloud::root(&layout).join("com~apple~CloudDocs/Recent");
+        crate::core::icloud::testing::kept(&host, &recent.join("c.pdf"), 2);
+        crate::core::icloud::testing::age_tree(&recent, 2);
+
+        let ran = icloud(&["icloud", "--force"], "", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Nothing selected."), "{}", ran.out);
+        assert!(host.evicted().is_empty());
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn icloud_plain_asks_before_removing_local_copies() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud"], "\nn\n", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(
+            ran.out.contains("Remove local copies of 1 item ("),
+            "{}",
+            ran.out
+        );
+        assert!(
+            ran.out.contains("They stay in iCloud. [y/N]"),
+            "{}",
+            ran.out
+        );
+        assert!(ran.out.contains("Operation cancelled."), "{}", ran.out);
+        assert!(host.evicted().is_empty());
+        assert!(!layout.history_path().exists());
+    }
+
+    #[test]
+    fn icloud_plain_removes_local_copies_after_yes() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let (files, _) = icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud"], "\ny\n", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert_eq!(sorted(host.evicted()), files);
+        assert_eq!(runs_in(&layout)[0].mode, "interactive");
+    }
+
+    #[test]
+    fn icloud_plain_none_removes_nothing() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        icloud_drive(&host, &layout, true);
+
+        let ran = icloud(&["icloud"], "none\n", &host, &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(ran.out.contains("Nothing selected."), "{}", ran.out);
+        assert!(!ran.out.contains("[y/N]"));
+        assert!(host.evicted().is_empty());
+    }
+
+    #[test]
+    fn icloud_reports_failures_and_exits_with_failure() {
+        let (_temp, layout) = sandbox();
+        let host = FakeHost::default();
+        let (files, _) = icloud_drive(&host, &layout, false);
+        host.fail_evict(&files[0], "busy");
+
+        let ran = icloud(&["icloud", "--force"], "", &host, &layout);
+
+        assert!(!ran.ok);
+        assert!(ran.out.contains(&files[0].display().to_string()));
+        assert!(ran.out.contains("busy"), "{}", ran.out);
+    }
+
+    #[test]
+    fn icloud_without_icloud_says_so() {
+        let (_temp, layout) = sandbox();
+
+        let ran = icloud(&["icloud", "--dry-run"], "", &FakeHost::default(), &layout);
+
+        assert!(ran.ok, "{}", ran.err);
+        assert!(
+            ran.out.contains(crate::core::icloud::MISSING_NOTE),
+            "{}",
+            ran.out
+        );
+    }
+
+    #[test]
+    fn icloud_never_talks_about_deleting() {
+        let words = ["delete", "Delete", "Clean", "Trash", "ermanent"];
+        for (args, typed) in [
+            (&["icloud", "--dry-run"][..], ""),
+            (&["icloud", "--force"][..], ""),
+            (&["icloud"][..], "\ny\n"),
+        ] {
+            let (_temp, layout) = sandbox();
+            let host = FakeHost::default();
+            icloud_drive(&host, &layout, true);
+
+            let ran = icloud(args, typed, &host, &layout);
+
+            assert!(ran.out.contains("iCloud"), "{args:?} printed {}", ran.out);
+            for word in words {
+                assert!(
+                    !ran.out.contains(word),
+                    "{args:?} printed {word}: {}",
+                    ran.out
+                );
+                assert!(
+                    !ran.err.contains(word),
+                    "{args:?} printed {word}: {}",
+                    ran.err
+                );
+            }
+        }
     }
 
     fn doctor_report(args: &[&str], host: &FakeHost, layout: &Layout) -> Ran {

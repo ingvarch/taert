@@ -4,16 +4,16 @@ expression: "home_screen(&state, w, h)"
 ---
  taert                                                                                    118.6 GB available · 24% free
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   2 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
-   │   ▦ Docker cleanup           › │  │ Choose the folders Project cleanup scans, when scheduled cleanup runs,      │
-   │   ⌦ Uninstall apps           › │  │ which paths taert never touches, and how it looks. Check permissions and    │
-   │   ◆ Homebrew                 › │  │ find taert's files.                                                         │
-   ╰────────────────────────────────╯  │                                                                             │
-   ╭─ Optimize ─────────────────────╮  │ ↵ Open                                                                      │
-   │   ✚ Doctor                   › │  ╰─────────────────────────────────────────────────────────────────────────────╯
-   │   ▲ Startup items            › │
-   │   ⌦ Slim apps                › │  ╭─ CPU ────────────────────────────────────────── 61°C · Load 8.43 6.50 5.86 ─╮
-   │   ✧ Compress                 › │  │ Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────────────────────────  48.8% │
+   3 more above                        ╭─ ⌥  Settings ───────────────────────────────────────────────────────────────╮
+   │   ⌦ Uninstall apps           › │  │ Choose the folders Project cleanup scans, when scheduled cleanup runs,      │
+   │   ◆ Homebrew                 › │  │ which paths taert never touches, and how it looks. Check permissions and    │
+   ╰────────────────────────────────╯  │ find taert's files.                                                         │
+   ╭─ Optimize ─────────────────────╮  │                                                                             │
+   │   ✚ Doctor                   › │  │ ↵ Open                                                                      │
+   │   ▲ Startup items            › │  ╰─────────────────────────────────────────────────────────────────────────────╯
+   │   ⌦ Slim apps                › │
+   │   ✧ Compress                 › │  ╭─ CPU ────────────────────────────────────────── 61°C · Load 8.43 6.50 5.86 ─╮
+   │   ◔ iCloud Drive             › │  │ Usage   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────────────────────────  48.8% │
    ╰────────────────────────────────╯  │ GPU     ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────────  31.0% │
    ╭─ Inspect ──────────────────────╮  │ History                                                                     │
    │   ◔ Explore storage          › │  │ ▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅      ▁▁▂▃▄▄▅       │

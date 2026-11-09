@@ -1834,6 +1834,8 @@ dependencies = [
  "insta",
  "jwalk",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "plist",
  "predicates",
  "ratatui",

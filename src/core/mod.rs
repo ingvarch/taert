@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod history;
 pub mod homebrew;
 pub mod host;
+pub mod icloud;
 pub mod iokit;
 pub mod large_files;
 pub mod layout;

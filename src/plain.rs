@@ -37,37 +37,89 @@ impl PlainRunner {
             return text;
         }
 
-        let mut index = 1;
-        for group in &scan.groups {
-            text.push_str(&format!("\n[{}]\n", group.tool));
-            for item in &group.items {
-                let status_mark = if item.selected { "[x]" } else { "[ ]" };
-                text.push_str(&format!(
-                    "  {:3}. {} {:>9}  {} {}\n",
-                    index,
-                    status_mark,
-                    format_bytes(item.size_bytes),
-                    item.path.display(),
-                    mode(item).label()
-                ));
-                for folder in &item.also {
-                    text.push_str(&format!(
-                        "{:22}{} {}\n",
-                        "",
-                        folder.path.display(),
-                        mode(folder).label()
-                    ));
-                }
-                index += 1;
-            }
-        }
-
+        text.push_str(&Self::rows_text(scan, |item| {
+            format!(" {}", mode(item).label())
+        }));
         text.push_str(&format!(
             "\nTotal found: {}  |  Selected by default: {}\n",
             format_bytes(scan.total_all_bytes()),
             format_bytes(scan.total_selected_bytes())
         ));
         text.push_str(&Self::notes_text(&scan.notes));
+        text
+    }
+
+    /// The numbered rows of each group. `suffix` is added after every path.
+    fn rows_text(scan: &CategoryScan, suffix: impl Fn(&ScanItem) -> String) -> String {
+        let mut text = String::new();
+        let mut index = 1;
+        for group in &scan.groups {
+            text.push_str(&format!("\n[{}]\n", group.tool));
+            for item in &group.items {
+                let status_mark = if item.selected { "[x]" } else { "[ ]" };
+                text.push_str(&format!(
+                    "  {:3}. {} {:>9}  {}{}\n",
+                    index,
+                    status_mark,
+                    format_bytes(item.size_bytes),
+                    item.path.display(),
+                    suffix(item)
+                ));
+                for folder in &item.also {
+                    text.push_str(&format!(
+                        "{:22}{}{}\n",
+                        "",
+                        folder.path.display(),
+                        suffix(folder)
+                    ));
+                }
+                index += 1;
+            }
+        }
+        text
+    }
+
+    /// Lists the rows whose local copies can be removed.
+    pub fn icloud_scan_text(scan: &CategoryScan) -> String {
+        let mut text = format!("\n=== {} ===\n", scan.title);
+        if scan.groups.is_empty() {
+            text.push_str("No local copies found.\n");
+            text.push_str(&Self::notes_text(&scan.notes));
+            return text;
+        }
+
+        text.push_str(&Self::rows_text(scan, |_| String::new()));
+        text.push_str(&format!(
+            "\nLocal copies: {}  |  Selected by default: {}\n",
+            format_bytes(scan.total_all_bytes()),
+            format_bytes(scan.total_selected_bytes())
+        ));
+        text.push_str(
+            "The files stay in iCloud. A removed local copy downloads again when you open the file.\n",
+        );
+        text.push_str(&Self::notes_text(&scan.notes));
+        text
+    }
+
+    pub fn icloud_report_text(report: &RemovalReport) -> String {
+        let mut text = if report.removed_count > 0 {
+            format!(
+                "Removed local copies of {}. Freed {}.\n{}\n",
+                crate::ui::components::text::plural(report.removed_count, "file", "files"),
+                format_bytes(report.freed_bytes),
+                crate::core::icloud::STAY_NOTE
+            )
+        } else {
+            "No local copies were removed.\n".to_string()
+        };
+        for failure in &report.failures {
+            text.push_str(&format!(
+                "Could not remove the local copy of {}: {}\n",
+                failure.path.display(),
+                failure.error
+            ));
+        }
+        text.push_str(&Self::notes_text(&report.notes));
         text
     }
 
@@ -432,6 +484,101 @@ mod tests {
 
         assert!(text.contains("Locked by a flag or an ACL: 2"), "{text}");
         assert!(text.contains("Open for writing: 1"), "{text}");
+    }
+
+    fn icloud_scan(rows: Vec<ScanItem>) -> CategoryScan {
+        CategoryScan {
+            id: "icloud".to_string(),
+            title: "iCloud Local Copies".to_string(),
+            groups: vec![ToolGroup {
+                tool: "iCloud Drive".to_string(),
+                items: rows,
+            }],
+            notes: vec!["Some note.".to_string()],
+        }
+    }
+
+    #[test]
+    fn icloud_scan_text_has_no_removal_labels() {
+        let rows = vec![
+            ScanItem::new(PathBuf::from("/drive/Archive"), 3000, true, false),
+            ScanItem::new(PathBuf::from("/drive/Recent"), 1000, false, false),
+        ];
+
+        let text = PlainRunner::icloud_scan_text(&icloud_scan(rows));
+
+        assert!(text.contains("=== iCloud Local Copies ==="), "{text}");
+        assert!(text.contains("[iCloud Drive]"), "{text}");
+        assert!(text.contains("[x]") && text.contains("[ ]"), "{text}");
+        assert!(text.contains("/drive/Archive"), "{text}");
+        assert!(text.contains("Local copies: 4.0 KB"), "{text}");
+        assert!(text.contains("Selected by default: 3.0 KB"), "{text}");
+        assert!(text.contains("The files stay in iCloud."), "{text}");
+        assert!(text.contains("Note: Some note."), "{text}");
+        for word in ["(Trash)", "(Permanent)"] {
+            assert!(!text.contains(word), "{text}");
+        }
+    }
+
+    #[test]
+    fn icloud_scan_text_without_rows_says_so() {
+        let mut scan = icloud_scan(Vec::new());
+        scan.groups.clear();
+
+        let text = PlainRunner::icloud_scan_text(&scan);
+
+        assert!(text.contains("No local copies found."), "{text}");
+        assert!(text.contains("Note: Some note."), "{text}");
+    }
+
+    #[test]
+    fn icloud_report_text_says_files_stay_in_icloud() {
+        let done = RemovalReport {
+            removed_count: 2,
+            freed_bytes: 40_700_000,
+            notes: vec!["Left 1 file on this Mac.".to_string()],
+            ..RemovalReport::default()
+        };
+        let text = PlainRunner::icloud_report_text(&done);
+        assert!(
+            text.contains("Removed local copies of 2 files. Freed 40.7 MB."),
+            "{text}"
+        );
+        assert!(
+            text.contains("They stay in iCloud and download again when you open them."),
+            "{text}"
+        );
+        assert!(text.contains("Note: Left 1 file on this Mac."), "{text}");
+
+        let one = RemovalReport {
+            removed_count: 1,
+            freed_bytes: 1000,
+            ..RemovalReport::default()
+        };
+        assert!(
+            PlainRunner::icloud_report_text(&one).contains("Removed local copies of 1 file."),
+            "one file"
+        );
+
+        let nothing = PlainRunner::icloud_report_text(&RemovalReport::default());
+        assert!(
+            nothing.contains("No local copies were removed."),
+            "{nothing}"
+        );
+        assert!(!nothing.contains("Removed local copies of"), "{nothing}");
+
+        let failed = RemovalReport {
+            failures: vec![crate::core::cleaner::RemovalFailure {
+                path: PathBuf::from("/drive/a.pdf"),
+                error: "busy".to_string(),
+            }],
+            ..RemovalReport::default()
+        };
+        let text = PlainRunner::icloud_report_text(&failed);
+        assert!(
+            text.contains("Could not remove the local copy of /drive/a.pdf: busy"),
+            "{text}"
+        );
     }
 
     fn scan_with_note() -> CategoryScan {
